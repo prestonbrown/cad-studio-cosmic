@@ -1,0 +1,47 @@
+{
+  "name": "fixture-box",
+  "description": "M0 golden fixture: two-part box",
+  "units": "mm",
+  "bounding_box": {
+    "x": 60.0,
+    "y": 60.0,
+    "z": 26.0
+  },
+  "volume_mm3": 44800.0,
+  "surface_area_mm2": 13920.0,
+  "parameters": {
+    "WALL": 2.0,
+    "HEIGHT": 8.0,
+    "LID_H": 10.0
+  },
+  "iteration": 1,
+  "warnings": [
+    "fixture warning"
+  ],
+  "parts": [
+    {
+      "name": "base",
+      "quantity": 1,
+      "color": "#1f77b4"
+    },
+    {
+      "name": "lid",
+      "quantity": 1,
+      "color": "#d62728"
+    }
+  ],
+  "drawings": [
+    {
+      "file": "schematic.svg",
+      "title": "Assembly"
+    },
+    {
+      "file": "schematic-2.svg",
+      "title": "Lid"
+    }
+  ],
+  "bed": [
+    220.0,
+    220.0
+  ]
+}

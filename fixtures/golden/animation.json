@@ -1,0 +1,82 @@
+{
+  "title": "lid lift",
+  "frames": [
+    {
+      "t": 0.0,
+      "label": "closed",
+      "parts": {
+        "lid": {
+          "translate": [
+            0,
+            0,
+            0
+          ],
+          "rotate": [
+            0,
+            0,
+            0,
+            1
+          ]
+        }
+      },
+      "values": {
+        "Lift (mm)": 0.0
+      },
+      "collisions": []
+    },
+    {
+      "t": 1.0,
+      "label": "open",
+      "parts": {
+        "lid": {
+          "translate": [
+            0,
+            0,
+            10.0
+          ],
+          "rotate": [
+            0,
+            0,
+            0,
+            1
+          ]
+        }
+      },
+      "values": {
+        "Lift (mm)": 10.0
+      },
+      "collisions": [
+        {
+          "parts": [
+            "base",
+            "lid"
+          ],
+          "volume": 0.5
+        }
+      ]
+    },
+    {
+      "t": 2.0,
+      "label": "open",
+      "parts": {
+        "lid": {
+          "translate": [
+            0,
+            0,
+            10.0
+          ],
+          "rotate": [
+            0,
+            0,
+            0,
+            1
+          ]
+        }
+      },
+      "values": {
+        "Lift (mm)": 10.0
+      },
+      "collisions": []
+    }
+  ]
+}
