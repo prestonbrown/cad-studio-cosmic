@@ -46,7 +46,7 @@ Input classes / failure modes M0 must pin down, with the owning task's test:
 - Consumes: nothing (first task).
 - Produces: workspace building green on thelio; git remotes `thelio` (Mac) and `origin` (thelio clone); crates `engine` (lib), `viewer` (lib), `app` (bin `cad-studio`); `just {build,test,run,render-spike}` recipes.
 
-- [ ] **Step 1: Create workspace files**
+- [x] **Step 1: Create workspace files**
 
 `Cargo.toml`:
 
@@ -206,7 +206,7 @@ headless:
     cargo test -p viewer --test render_headless
 ```
 
-- [ ] **Step 2: Create thelio remotes and working clone**
+- [x] **Step 2: Create thelio remotes and working clone**
 
 ```bash
 git branch -M main
@@ -216,7 +216,7 @@ git push -u thelio main
 ssh thelio 'bash -lc "git clone ~/Code/cad-studio-cosmic.git ~/Code/cad-studio-cosmic && git -C ~/Code/cad-studio-cosmic remote rename origin upstream"'
 ```
 
-- [ ] **Step 3: Reference clones on thelio (source of truth for trait signatures)**
+- [x] **Step 3: Reference clones on thelio (source of truth for trait signatures)**
 
 ```bash
 ssh thelio 'bash -lc "mkdir -p ~/Code/_ref && git clone https://github.com/pop-os/libcosmic.git ~/Code/_ref/libcosmic && git -C ~/Code/_ref/libcosmic checkout dbc62f2d899cdbfbe43d170689ddc0290db663f4 && git -C ~/Code/_ref/libcosmic submodule update --init && git clone --depth 1 https://github.com/pop-os/cosmic-app-template ~/Code/_ref/cosmic-app-template"'
@@ -225,7 +225,7 @@ ssh thelio 'bash -lc "git -C ~/Code/_ref/libcosmic submodule status"'   # record
 
 The submodule status line gives the exact iced rev libcosmic vendors — later tasks read real signatures from `~/Code/_ref/libcosmic/iced/`.
 
-- [ ] **Step 4: Toolchain packages on thelio (needs Preston's sudo once)**
+- [x] **Step 4: Toolchain packages on thelio (needs Preston's sudo once)**
 
 ```bash
 ssh thelio 'bash -lc "dpkg -s build-essential pkg-config libfontconfig1-dev >/dev/null 2>&1 && echo TOOLCHAIN-PKGS-OK || echo MISSING"'
@@ -233,7 +233,7 @@ ssh thelio 'bash -lc "dpkg -s build-essential pkg-config libfontconfig1-dev >/de
 
 If MISSING: `ssh -t thelio 'sudo apt install -y build-essential pkg-config libfontconfig1-dev'` (Preston types the password — ask them to run `! ssh -t thelio 'sudo apt install -y build-essential pkg-config libfontconfig1-dev'`).
 
-- [ ] **Step 5: First build on thelio (announce first — heavy)**
+- [x] **Step 5: First build on thelio (announce first — heavy)**
 
 `ListAgents`; message any busy overlapping session; then:
 
@@ -256,7 +256,7 @@ Expected: green build (first build pulls ~700 crates; several minutes even on 32
 
 using the appropriate `[patch.'https://github.com/pop-os/iced']` mappings for `iced`, `iced_core`, `iced_wgpu`, `iced_winit`, `iced_tiny_skia`, `iced_futures`, `iced_runtime`, `iced_style`, `iced_widget` pointing at `git = "https://github.com/pop-os/iced.git", rev = "<recorded rev>"`. Record in the commit message whether the patch was needed.
 
-- [ ] **Step 6: Smoke-run the window (Preston verifies)**
+- [x] **Step 6: Smoke-run the window (Preston verifies)**
 
 Preston, from a terminal inside the COSMIC session on thelio:
 
@@ -266,7 +266,7 @@ cd ~/Code/cad-studio-cosmic && cargo run -p app
 
 Expected: a "CAD Studio — M0 bootstrap" window with a cosmic header bar. (No automated check possible without a display session; this is a human gate. If Preston is unavailable, defer this step and proceed — the headless harness in Task 7 is the automated gate.)
 
-- [ ] **Step 7: Commit any build fixes, push**
+- [x] **Step 7: Commit any build fixes, push**
 
 ```bash
 git push thelio main
@@ -284,7 +284,7 @@ git push thelio main
 - Consumes: nothing.
 - Produces: `fixtures/golden/*` — every later parser/renderer test parses these exact files; the venv at `~/.local/share/cad-studio/venv` (the app's future env path, so this doubles as an env-creation dry run).
 
-- [ ] **Step 1: Write the generator**
+- [x] **Step 1: Write the generator**
 
 `fixtures/generator/model.py` (best-effort against current build123d; the acceptance is the OUTPUTS — if the installed API differs, fix per `python -c "import build123d; help(build123d.Mesher)"` etc. and note deviations in the commit message):
 
@@ -386,7 +386,7 @@ animation = {
 print("fixtures written to", OUT)
 ```
 
-- [ ] **Step 2: Create the venv and run (thelio)**
+- [x] **Step 2: Create the venv and run (thelio)**
 
 ```bash
 ssh thelio 'bash -lc "uv venv --python 3.12 ~/.local/share/cad-studio/venv && uv pip install --python ~/.local/share/cad-studio/venv/bin/python build123d matplotlib numpy"'
@@ -395,7 +395,7 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && ~/.local/share/cad-studio/v
 
 Expected: `fixtures written to ...`. Iterate on API errors until it runs (upstream's system prompt documents the same APIs — `Mesher().add_shape([...])`, `export_3mf`, `part.label`, `part.color`).
 
-- [ ] **Step 3: Verify outputs (thelio)**
+- [x] **Step 3: Verify outputs (thelio)**
 
 Write `fixtures/generator/check.py`:
 
@@ -445,7 +445,7 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic/fixtures/golden && unzip -l mo
 
 Expected: `3D/3dmodel.model` present; XML contains two `<object>` elements with `name="base"`/`name="lid"` (or unnamed objects — record which, Task 5 needs to know).
 
-- [ ] **Step 4: Commit fixtures (from Mac after pulling, or directly on thelio clone — pick one tree, keep it consistent)**
+- [x] **Step 4: Commit fixtures (from Mac after pulling, or directly on thelio clone — pick one tree, keep it consistent)**
 
 ```bash
 git add fixtures/generator/model.py fixtures/generator/check.py fixtures/golden/model.3mf fixtures/golden/model.stl fixtures/golden/model.step fixtures/golden/plate.3mf fixtures/golden/schematic.svg fixtures/golden/schematic-2.svg fixtures/golden/schematic.pdf fixtures/golden/schematic.png fixtures/golden/manifest.json fixtures/golden/animation.json
@@ -466,7 +466,7 @@ git push thelio main
 - Consumes: upstream repo at `/tmp/cad-studio-src` (or re-clone).
 - Produces: `app/i18n/<lang>/main.ftl` with every upstream UI key; M8 activates them via libcosmic's `fl!`. Source language of record becomes `en`.
 
-- [ ] **Step 1: Vendor the inputs**
+- [x] **Step 1: Vendor the inputs**
 
 ```bash
 mkdir -p fixtures/upstream
@@ -475,7 +475,7 @@ cp /tmp/cad-studio-src/CADStudio/Resources/CADSystemPrompt.md fixtures/upstream/
 # if /tmp is gone: git clone --depth 1 https://github.com/filippofinke/cad-studio /tmp/cad-studio-src
 ```
 
-- [ ] **Step 2: Write the extractor**
+- [x] **Step 2: Write the extractor**
 
 `scripts/extract_xcstrings.py`:
 
@@ -534,7 +534,7 @@ if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2])
 ```
 
-- [ ] **Step 3: Run and verify**
+- [x] **Step 3: Run and verify**
 
 ```bash
 python3 scripts/extract_xcstrings.py fixtures/upstream/Localizable.xcstrings app/i18n
@@ -550,7 +550,7 @@ grep -c ' = ' app/i18n/en/main.ftl && grep -c ' = ' app/i18n/it/main.ftl
 
 Expected: en and it counts equal. (Placeholder syntax `%lld`/`%@` inside values is expected — fluent refinement happens at M8 activation; note the count of values containing `%` in the task report: `grep -c '%' app/i18n/en/main.ftl`.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add fixtures/upstream/Localizable.xcstrings fixtures/upstream/CADSystemPrompt.md scripts/extract_xcstrings.py app/i18n/en/main.ftl app/i18n/it/main.ftl app/i18n/de/main.ftl app/i18n/fr/main.ftl
@@ -570,7 +570,7 @@ git push thelio main
 - Consumes: `fixtures/golden/schematic.svg`, `fixtures/golden/schematic-2.svg`, `fixtures/golden/schematic.png`.
 - Produces: proof (spec §10 M0) that resvg renders matplotlib SVG with full content; if it fails, the fallback decision (higher-DPI PNG display) escalates to Preston before M4.
 
-- [ ] **Step 1: Add dev-deps**
+- [x] **Step 1: Add dev-deps**
 
 ```bash
 cargo add -p viewer --dev resvg@0.45 image
@@ -578,7 +578,7 @@ cargo add -p viewer --dev resvg@0.45 image
 
 (resvg 0.45 = the version the iced fork pins; keep them aligned.)
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `viewer/tests/svg_check.rs`:
 
@@ -635,7 +635,7 @@ fn second_page_svg_parses() {
 }
 ```
 
-- [ ] **Step 3: Run on thelio, verify it fails first (if assertions are wrong) then passes**
+- [x] **Step 3: Run on thelio, verify it fails first (if assertions are wrong) then passes**
 
 ```bash
 git push thelio main
@@ -644,7 +644,7 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test
 
 Expected: 2 passed. If the ratio band fails, inspect (render both to files and compare ink visually via Preston) BEFORE loosening the band — a real resvg gap changes the M4 plan.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add viewer/Cargo.toml viewer/Cargo.lock viewer/tests/svg_check.rs
@@ -665,7 +665,7 @@ git push thelio main
 - Consumes: `fixtures/golden/model.3mf`.
 - Produces: decision recorded in the ADR + seed code for M1's `engine::parsing::threemf` (function names below are what M1 keeps): `is_binary_stl(len: u64, n_tri: u32) -> bool`, `parse_objects(xml: &str) -> Vec<RawPart>`, `resolve_parts(xml: &str) -> Vec<RawPart>`, `RawPart { name: String, positions: Vec<[f32; 3]>, colors: Vec<[u8; 3]> }`.
 
-- [ ] **Step 1: Handmade edge-case fixtures**
+- [x] **Step 1: Handmade edge-case fixtures**
 
 `fixtures/handmade/ascii.stl` (single triangle; defeats the binary size check because `size != 84 + 50*n` for any n):
 
@@ -717,7 +717,7 @@ EOF
 
 (The component's transform translates the cube by +10 in x — the spike must apply it.)
 
-- [ ] **Step 2: STL predicate test (TDD)**
+- [x] **Step 2: STL predicate test (TDD)**
 
 `engine/tests/threemf_spike.rs`, first just the predicate:
 
@@ -747,7 +747,7 @@ fn stl_binary_detection() {
 
 Run on thelio; expect PASS (predicate is trivial — this test exists to pin the contract, upstream-contract.md §3).
 
-- [ ] **Step 3: threemf crate evaluation**
+- [x] **Step 3: threemf crate evaluation**
 
 ```bash
 cargo add -p engine --dev threemf@0.8
@@ -756,7 +756,7 @@ ssh thelio 'bash -lc "ls ~/.cargo/registry/src/*/threemf-0.8*/src 2>/dev/null ||
 
 Read the crate's lib.rs/public API and write into the ADR, with quoted evidence, whether it exposes: (a) build `<item>` transforms, (b) `<component>` recursion, (c) `basematerials`/`colorgroup` colors, (d) per-triangle `pid`/`p1`, (e) `unit` attribute. Then, in `engine/tests/threemf_spike.rs`, write whatever parsing the crate allows for `fixtures/golden/model.3mf` and record what comes out (object count, per-object triangle counts, colors — print with `--nocapture`).
 
-- [ ] **Step 4: Custom parser test (TDD — this is the likely production path)**
+- [x] **Step 4: Custom parser test (TDD — this is the likely production path)**
 
 `cargo add -p engine --dev zip quick-xml`. `engine/tests/parse3mf.rs`:
 
@@ -1017,7 +1017,7 @@ fn resolve_parts(xml: &str) -> Vec<RawPart> {
 
 Run on thelio: `cargo test -p engine`. Expect the three tests above to pass.
 
-- [ ] **Step 5: Write the ADR**
+- [x] **Step 5: Write the ADR**
 
 `docs/research/3mf-decision.md`:
 
@@ -1039,7 +1039,7 @@ Criteria (spec §4.2): build-item transforms, component recursion, color groups
 (1-3 sentences of why)
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add engine/Cargo.toml Cargo.lock engine/tests/threemf_spike.rs engine/tests/parse3mf.rs fixtures/handmade/component.3mf fixtures/handmade/ascii.stl docs/research/3mf-decision.md
@@ -1059,7 +1059,7 @@ git push thelio main
 - Consumes: `fixtures/golden/model.stl` (binary STL; parse inline), wgpu 28.
 - Produces: `viewer::render::{SpikeScene, MeshPipeline}` — M3 productizes into the real renderer; the iced dependency direction (`viewer` depends on iced, NOT libcosmic) and the `Primitive::render()` pattern established here carry forward. Cross-check every iced trait signature against `~/Code/_ref/libcosmic/iced/` (wgpu/src/primitive.rs, examples/custom_shader/) BEFORE writing code — the shapes below are from research and may drift; where they drift, the reference clone wins and the executor notes the delta in the commit.
 
-- [ ] **Step 1: Wire deps**
+- [x] **Step 1: Wire deps**
 
 In workspace `Cargo.toml` add the iced dependency pointing at the SAME rev libcosmic's submodule pins (recorded in Task 1 Step 3). If Task 1 needed `[patch]`, iced comes from the same patch; else:
 
@@ -1069,7 +1069,7 @@ iced = { git = "https://github.com/pop-os/iced.git", rev = "<submodule rev from 
 
 `cargo add -p viewer glam --features bytemuck` (workspace bytemuck already present).
 
-- [ ] **Step 2: Write mesh.wgsl**
+- [x] **Step 2: Write mesh.wgsl**
 
 `viewer/src/render/mesh.wgsl`:
 
@@ -1121,7 +1121,7 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
 
 (The screen-space normal is spike shorthand — M3 uploads real normals from the mesh. If `dpdx/dpdy` behave badly with discard, fall back to `vec3(0., 1., 0.)` + unlit flat color; the spike's gate is geometry + camera + pass structure, not shading quality.)
 
-- [ ] **Step 3: Write the renderer core**
+- [x] **Step 3: Write the renderer core**
 
 `viewer/src/render/mod.rs` — mesh pipeline + own depth pass, no iced types in this file (pure wgpu, so the headless test in Task 7 can reuse it):
 
@@ -1361,7 +1361,7 @@ fn default_view_proj(mesh: &TriMesh) -> [[f32; 4]; 4] {
 
 (API drift note: wgpu 28 render-pass/pipeline descriptors as above per wgpu 28 docs; if the fork pins a different wgpu patch with changed fields, follow `~/Code/_ref/libcosmic/iced/wgpu/Cargo.toml`'s wgpu version and its docs.)
 
-- [ ] **Step 4: Write the windowed example**
+- [x] **Step 4: Write the windowed example**
 
 `viewer/examples/spike_window.rs` — an iced (not libcosmic — keep the spike dependency-minimal) application whose view is `mouse_area(shader(ProgramImpl))`, with the shader `Primitive` delegating to `MeshPipeline::render` via `Primitive::render()`. **Read `~/Code/_ref/libcosmic/iced/examples/custom_shader/scene.rs` first** and mirror its structure exactly (its `Primitive`/`Pipeline` impl, `draw(bounds, cursor)`, `update`/`resize` hooks); the only deltas: our `MeshPipeline` instead of cubes, our own `Depth24PlusStencil8` instead of its depth format, and `LoadOp::Load` on color. The acceptance is visual (next step) — structure follows the reference, not this plan's guesses.
 
@@ -1372,7 +1372,7 @@ Where the reference's `Primitive` impl goes (name it `SpikePrimitive`), the `ren
 self.mesh.render(device, encoder, target);
 ```
 
-- [ ] **Step 5: Build + Preston visual gate**
+- [x] **Step 5: Build + Preston visual gate**
 
 ```bash
 git push thelio main
@@ -1383,7 +1383,7 @@ Then Preston, from a COSMIC-session terminal on thelio: `cd ~/Code/cad-studio-co
 
 Expected: a window showing the two fixture boxes (blue+red fused-looking pair, neutral color) from the iso angle; drag orbits (wire mouse_area → yaw/pitch deltas into `Camera`), scroll zooms (0.9^steps per upstream §5). No window = fail; wrong pass structure (e.g. iced content clobbered) shows as a black/garbage window = fail.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock viewer/Cargo.toml viewer/src/render/mod.rs viewer/src/render/mesh.wgsl viewer/examples/spike_window.rs
@@ -1402,7 +1402,7 @@ git push thelio main
 - Consumes: `viewer::render::{MeshPipeline, load_fixture_stl, Camera}` (Task 6).
 - Produces: the automated render gate every later viewer task uses; `render_to_pixels(mesh, width, height, camera) -> Vec<u8>` helper.
 
-- [ ] **Step 1: Write the tests (failing — harness doesn't exist yet)**
+- [x] **Step 1: Write the tests (failing — harness doesn't exist yet)**
 
 `viewer/tests/render_headless.rs`:
 
@@ -1499,7 +1499,7 @@ fn viewport_resize_reallocates_depth_and_renders() {
 
 (`cargo add -p viewer --dev tokio` first. If `MeshPipeline::new`'s signature changed in Task 6 during reference-clone reconciliation, update the call — Task 6's commit message records the final signature.)
 
-- [ ] **Step 2: Run on thelio**
+- [x] **Step 2: Run on thelio**
 
 ```bash
 git push thelio main
@@ -1508,7 +1508,7 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test
 
 Expected: 2 passed. If no adapter is found over ssh, try `ssh thelio 'bash -lc "... WGPU_BACKEND=vulkan cargo test ..."'` and check `ls /usr/share/vulkan/icd.d/`; if the ICD needs a session env, run tests from Preston's tmux on thelio — record whatever was needed in the commit message (it becomes the canonical test invocation).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add viewer/Cargo.toml viewer/Cargo.lock viewer/tests/render_headless.rs
@@ -1528,7 +1528,7 @@ git push thelio main
 - Consumes: Task 7 harness — extend `render_once` to `render_once(device, queue, mesh, w, h, camera: viewer::render::Camera)` and update Task 7's call sites to pass `viewer::render::default_camera(&mesh)` (exported from Task 6's module).
 - Produces: `MeshPipeline` renders a red cap quad where stencil ≠ 0 when `section_enable = 1.0`; M6 productizes with axis/position controls.
 
-- [ ] **Step 1: cap.wgsl**
+- [x] **Step 1: cap.wgsl**
 
 `viewer/src/render/cap.wgsl`:
 
@@ -1558,11 +1558,11 @@ fn fs_cap() -> @location(0) vec4<f32> {
 
 Cap pipeline: same bind group layout; depth `CompareFunction::LessEqual`, `depth_write_enabled: false`; stencil front/back `compare: NotEqual, reference 0` (read-only); `cull_mode: None`.
 
-- [ ] **Step 2: Extend render() to draw the cap when section_enable > 0.5**
+- [x] **Step 2: Extend render() to draw the cap when section_enable > 0.5**
 
 Add `pub fn set_camera(&self, queue: &wgpu::Queue, camera: &Camera)` to `MeshPipeline` (writes the uniform buffer) so the harness/tests can override the default. Compute the world-space cap quad from the mesh aabb: on the section axis, at `section_pos`, spanning the aabb's other two axes ±10%. Upload as a 4-vertex triangle-strip buffer at pipeline build; draw it in the same pass after the mesh (stencil from the mesh's inc/dec is already in the attachment).
 
-- [ ] **Step 3: Headless proof test (write first, watch it fail, then implement)**
+- [x] **Step 3: Headless proof test (write first, watch it fail, then implement)**
 
 Append to `viewer/tests/render_headless.rs`:
 
@@ -1593,11 +1593,11 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
 
 Run → expect FAIL (no cap yet) → implement Steps 1–2 → expect PASS on thelio.
 
-- [ ] **Step 4: Preston visual gate**
+- [x] **Step 4: Preston visual gate**
 
 `cargo run -p viewer --example spike_window` with section hard-enabled (add a checkbox or key toggle): red cut face visible on the sliced model, no ghosting across frames.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add viewer/src/render/mod.rs viewer/src/render/cap.wgsl viewer/tests/render_headless.rs
@@ -1616,11 +1616,11 @@ git push thelio main
 - Consumes: Tasks 6–8 (`MeshPipeline`, harness).
 - Produces: the M3 MSAA decision data: does own-count + resolve work in our pass structure? Pattern per spec §5/6413f86: pass renders to an owned MSAA color texture, resolves to an intermediate, then a second pass draws the intermediate onto the iced target (alpha blend, Load) — iced's own content underneath is preserved.
 
-- [ ] **Step 1: Extend render path for msaa > 1**
+- [x] **Step 1: Extend render path for msaa > 1**
 
 When `msaa > 1`: create owned color texture (sample_count 4, RENDER_ATTACHMENT), depth at count 4; pass color attachment = msaa view with `resolve_target: Some(&intermediate)`; intermediate is a single-sample RENDER_ATTACHMENT|TEXTURE_BINDING texture; then a second render pass draws a fullscreen textured quad (new tiny `blit.wgsl`) onto `target` with `LoadOp::Load` + standard alpha blending. In the headless harness the "target" is the readback texture — same code path.
 
-- [ ] **Step 2: Headless proof (write first)**
+- [x] **Step 2: Headless proof (write first)**
 
 ```rust
 #[test]
@@ -1653,11 +1653,11 @@ fn msaa_smooths_a_diagonal_edge() {
 
 Run → FAIL (msaa path not implemented) → implement Step 1 → PASS on thelio.
 
-- [ ] **Step 3: Preston visual gate + decision note**
+- [x] **Step 3: Preston visual gate + decision note**
 
 Visual: aliasing visibly reduced vs the 1× toggle. Append the M3 decision to `docs/research/3mf-decision.md`'s sibling `docs/research/msaa-decision.md` (2–6 lines: chosen count, perf feel, whether blit pattern is kept — it is unless something failed).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add viewer/src/render/mod.rs viewer/src/render/blit.wgsl viewer/tests/render_headless.rs docs/research/msaa-decision.md
@@ -1676,7 +1676,7 @@ git push thelio main
 - Consumes: Tasks 1–9.
 - Produces: M0 exit criteria met and documented; the M1 plan gets written next against the tree as it now stands.
 
-- [ ] **Step 1: README dev-loop section**
+- [x] **Step 1: README dev-loop section**
 
 Append to `README.md`:
 
@@ -1696,7 +1696,7 @@ viewer spike). Headless render tests: `just headless`. Fixtures: generated once 
 do not regenerate casually; they are committed goldens.
 ```
 
-- [ ] **Step 2: Full suite green on thelio**
+- [x] **Step 2: Full suite green on thelio**
 
 ```bash
 ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --workspace 2>&1 | tail -15"'
@@ -1704,11 +1704,11 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --wo
 
 Expected: all tests pass (svg_check, threemf_spike, parse3mf, render_headless ×4, app builds).
 
-- [ ] **Step 3: M0 checklist against spec §10**
+- [x] **Step 3: M0 checklist against spec §10**
 
 Verify each spec M0 bullet has evidence: workspace+template (T1), thelio remotes (T1), toolchain (T1 build), fixtures (T2), resvg check (T4), 3MF spike+ADR (T5), extractor (T3), shader `Primitive::render()` proof incl. stencil + MSAA (T6/T8/T9). Record any gap as a new task — do not close M0 with a gap.
 
-- [ ] **Step 4: Commit + push + report**
+- [x] **Step 4: Commit + push + report**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-10-11-m0-bootstrap.md
