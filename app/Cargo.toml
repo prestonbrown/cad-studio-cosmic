@@ -1,0 +1,13 @@
+[package]
+name = "app"
+description = "CAD Studio for COSMIC"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cad-studio"
+path = "src/main.rs"
+
+[dependencies]
+libcosmic.workspace = true

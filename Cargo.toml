@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["engine", "viewer", "app"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4", features = ["wgpu"] }
+wgpu = "28"
+bytemuck = { version = "1", features = ["derive"] }

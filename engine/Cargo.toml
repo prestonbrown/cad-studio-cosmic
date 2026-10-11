@@ -1,0 +1,6 @@
+[package]
+name = "engine"
+description = "CAD Studio domain engine: agent sessions, project store, parsing, watching"
+edition.workspace = true
+version.workspace = true
+license.workspace = true

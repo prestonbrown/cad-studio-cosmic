@@ -1,0 +1,10 @@
+[package]
+name = "viewer"
+description = "CAD Studio 3D viewer: camera math, tools, wgpu renderer (iced adapter only)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
