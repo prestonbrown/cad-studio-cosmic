@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-from build123d import Box, Color, Mesher, Pos, Rot, export_3mf, export_step, export_stl
+from build123d import Box, Color, Mesher, Pos, Rot, export_step, export_stl
 
 OUT = Path(__file__).resolve().parent.parent / "golden"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -31,14 +31,13 @@ lid.color = Color((0.84, 0.15, 0.16))
 
 mesher = Mesher()
 mesher.add_shape([base, lid])
-export_3mf(mesher, OUT / "model.3mf")
+mesher.write(OUT / "model.3mf")
 export_stl(base + lid, OUT / "model.stl")
 export_step([base, lid], OUT / "model.step")
 
 plate = Mesher()
 plate.add_shape([base, Pos(0, 45, LID_H / 2) * Rot(0, 0, 0) * Box(40, 40, LID_H)])
-plate.shapes[0].label = "base"  # keep labels/colors if the API exposes them; drop if not
-export_3mf(plate, OUT / "plate.3mf")
+plate.write(OUT / "plate.3mf")
 
 # --- drawing (fixture quality: shapes + dims, not full ISO) ---
 def page(ax, title, w, d, h):
