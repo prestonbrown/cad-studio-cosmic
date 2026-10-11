@@ -130,6 +130,23 @@ fn render_frame(
         .collect()
 }
 
+/// `render_frame` with the pipeline built at `msaa` samples per pixel
+/// (`MeshPipeline::with_msaa`): a fresh pipeline per call, so frames at
+/// different sample counts are independent.
+fn render_frame_msaa(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mesh: &TriMesh,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+    msaa: u32,
+) -> Vec<u8> {
+    let mut pipeline =
+        MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, msaa);
+    render_frame(device, queue, &mut pipeline, mesh, camera, w, h)
+}
+
 /// The app background, measured: render a frame with an empty mesh (the
 /// pipeline's nothing-prepared path draws nothing) and take a corner pixel.
 /// The 0.1/0.1/0.12 clear lands in the Rgba8UnormSrgb target sRGB-encoded —
@@ -257,4 +274,98 @@ fn viewport_resize_reallocates_depth_and_renders() {
         (1.2..1.9).contains(&growth),
         "1024x768 vs 800x600 ink ratio {growth:.2} should track area ratio ~1.64 (Review Focus 4)"
     );
+}
+
+/// Luminance band isolating anti-aliased edge pixels. Readback is
+/// sRGB-encoded (task-8 measurements): background (89,89,97) lum 91; mesh
+/// faces (98,104,111) lum 104, (103,109,116) lum 109, (86,91,97) lum 91.
+/// The dark face sits at background luminance, so the band tracks the
+/// high-contrast silhouette against the two lit faces: 4x resolve+blit
+/// coverage blends land strictly between lum 91 and 104. Band 93..=103
+/// excludes every pure color with >=2 lum headroom and keeps the ~1/4..3/4
+/// coverage blends; at 1x (no AA) it counts ~0 pixels.
+fn intermediate_edge_pixels(px: &[u8]) -> usize {
+    px.chunks(4)
+        .filter(|c| {
+            let lum = (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3;
+            (93..=103).contains(&lum)
+        })
+        .count()
+}
+
+/// 4x MSAA smooths the box silhouettes: the default iso camera puts
+/// high-contrast diagonal edges mid-screen, and resolving 4 samples per
+/// pixel yields coverage-blend pixels along them where 1x snaps each pixel
+/// to pure background or pure face color. Also proves the section-cap
+/// pipeline runs at count 4 inside the same multisample pass — wgpu
+/// validation rejects a pipeline whose multisample state mismatches the
+/// attachment, so drawing it at all is the check — and that per-frame
+/// depth/stencil clears hold through the resolve+blit path.
+#[test]
+fn msaa_smooths_a_diagonal_edge() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let mesh = load_fixture_stl(&fixture("model.stl"));
+    let camera = default_camera(&mesh);
+    let px1 = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, 1);
+    let px4 = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, 4);
+    let (e1, e4) = (intermediate_edge_pixels(&px1), intermediate_edge_pixels(&px4));
+    assert!(
+        e4 as f64 > e1 as f64 * 1.5,
+        "4x MSAA should produce >=1.5x the intermediate-valued edge pixels: {e4} vs {e1}"
+    );
+    assert!(e4 > 3_000, "4x blend count {e4} should be substantial");
+    // one pipeline across two frames at 4x: uncleared stencil/depth would
+    // leak into the second frame through the resolve path too
+    let mut p4 =
+        MeshPipeline::with_msaa(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
+    let a = render_frame(&device, &queue, &mut p4, &mesh, &camera, 800, 600);
+    let b = render_frame(&device, &queue, &mut p4, &mesh, &camera, 800, 600);
+    assert_eq!(a, b, "4x frames must be identical on one pipeline");
+    // cap at 4x, mid-base cut (task-8 geometry: base box z in [-4,4])
+    let mut cam = camera;
+    cam.section_enable = 1.0;
+    cam.section_axis = 2;
+    cam.section_pos = 0.0;
+    let cut = render_frame_msaa(&device, &queue, &mesh, &cam, 800, 600, 4);
+    assert!(
+        cap_red_pixels(&cut) > 2_000,
+        "section cap must render through the 4x path: {} red px",
+        cap_red_pixels(&cut)
+    );
+}
+
+/// Temporary calibration probe: distinct-color histograms at 1x and 4x plus
+/// candidate-band counts, for deriving `intermediate_edge_pixels`'s band.
+#[test]
+fn probe_msaa_histogram() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let mesh = load_fixture_stl(&fixture("model.stl"));
+    let camera = default_camera(&mesh);
+    for msaa in [1u32, 4] {
+        let px = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, msaa);
+        let mut hist: std::collections::HashMap<[u8; 3], usize> = Default::default();
+        for c in px.chunks(4) {
+            *hist.entry([c[0], c[1], c[2]]).or_default() += 1;
+        }
+        let mut rows: Vec<_> = hist.into_iter().collect();
+        rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        println!("== msaa {msaa}: {} distinct colors ==", rows.len());
+        for (rgb, n) in rows.iter().take(14) {
+            println!("  ({:3},{:3},{:3}) x {:7}", rgb[0], rgb[1], rgb[2], n);
+        }
+        for lo in [91u32, 92, 93, 94] {
+            for hi in [102u32, 103, 104] {
+                let count = px
+                    .chunks(4)
+                    .filter(|c| {
+                        let lum = (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3;
+                        (lo..=hi).contains(&lum)
+                    })
+                    .count();
+                println!("  lum {lo}..={hi}: {count}");
+            }
+        }
+    }
 }

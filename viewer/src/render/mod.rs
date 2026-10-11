@@ -403,6 +403,21 @@ impl MeshPipeline {
         }
     }
 
+    /// `new` at a multisample count: `render` draws into an owned
+    /// sample-`count` color texture and resolves into an intermediate, then
+    /// blits that over the destination with premultiplied alpha — content
+    /// already in the destination survives, same contract as the count-1
+    /// path. Count 1 (`new`) stays the default. The msaa render path is not
+    /// implemented yet: a count > 1 currently renders single-sample.
+    pub fn with_msaa(
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        _sample_count: u32,
+    ) -> Self {
+        Self::new(device, _queue, target_format)
+    }
+
     fn make_depth(device: &wgpu::Device, size: (u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
         let t = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("viewer depth+stencil"),
