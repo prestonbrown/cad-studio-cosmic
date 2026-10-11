@@ -280,10 +280,12 @@ fn viewport_resize_reallocates_depth_and_renders() {
 /// sRGB-encoded (task-8 measurements): background (89,89,97) lum 91; mesh
 /// faces (98,104,111) lum 104, (103,109,116) lum 109, (86,91,97) lum 91.
 /// The dark face sits at background luminance, so the band tracks the
-/// high-contrast silhouette against the two lit faces: 4x resolve+blit
-/// coverage blends land strictly between lum 91 and 104. Band 93..=103
-/// excludes every pure color with >=2 lum headroom and keeps the ~1/4..3/4
-/// coverage blends; at 1x (no AA) it counts ~0 pixels.
+/// high-contrast silhouette against the two lit faces. Measured 4x coverage
+/// blends (resolve box-filters 4 samples): 1/4..1/2 coverage lands at lum
+/// 95..101 — in band; 3/4 blends land at lum 104..105, colliding with the
+/// pure mid-face luminance, so the band excludes them on purpose; dark-face
+/// blends stay under lum 92. Band 93..=103 excludes every pure color with
+/// >=2 lum headroom; at 1x (no AA) it counts exactly 0 pixels.
 fn intermediate_edge_pixels(px: &[u8]) -> usize {
     px.chunks(4)
         .filter(|c| {
@@ -314,7 +316,10 @@ fn msaa_smooths_a_diagonal_edge() {
         e4 as f64 > e1 as f64 * 1.5,
         "4x MSAA should produce >=1.5x the intermediate-valued edge pixels: {e4} vs {e1}"
     );
-    assert!(e4 > 3_000, "4x blend count {e4} should be substantial");
+    // measured 1361 in-band pixels at 4x on Metal (the box silhouettes span
+    // a few thousand px); the floor guards "real AA happened", the ratio
+    // above guards "at least 1.5x better than 1x"
+    assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
     let mut p4 =

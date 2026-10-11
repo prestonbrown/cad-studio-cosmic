@@ -6,7 +6,12 @@
 //! with the viewport. Pure wgpu — no iced types — so the headless test can
 //! reuse this module as-is; the iced adapter lives in [`crate::render::scene`].
 //!
-//! msaa is fixed at 1 here; the MSAA task passes 4 and owns the resolve path.
+//! msaa: `MeshPipeline::new` stays single-sample (the default, byte-identical
+//! frames); `MeshPipeline::with_msaa` (count 4) renders into an owned
+//! multisample color + depth attachment, resolves into an intermediate
+//! single-sample texture, and blits that over the target with premultiplied
+//! alpha — iced's content underneath survives, same Load-and-composite
+//! contract as the single-sample path.
 //!
 //! Cross-sections: the mesh pass writes winding parity into the stencil
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
@@ -162,6 +167,24 @@ pub fn orbit_camera(mesh: &TriMesh, yaw: f32, pitch: f32, zoom: f32) -> Camera {
     }
 }
 
+/// Blit stage for the msaa > 1 path: a fullscreen-textured-quad pipeline
+/// that composites the resolved intermediate over the destination.
+struct Blit {
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    layout: wgpu::BindGroupLayout,
+}
+
+/// Owned multisample targets, recreated in [`MeshPipeline::prepare`] only on
+/// size change (never per frame). `color` is the sample-`count` attachment
+/// the mesh pass renders into; `resolve` is the single-sample intermediate
+/// the pass resolves into and the blit samples.
+struct MsaaTargets {
+    color: wgpu::TextureView,
+    resolve: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     cap_pipeline: wgpu::RenderPipeline,
@@ -176,6 +199,15 @@ pub struct MeshPipeline {
     cap_buf: wgpu::Buffer,
     draw_cap: bool,
     size: (u32, u32),
+    /// 1 for [`MeshPipeline::new`]; both pipelines carry this sample count
+    /// and every owned attachment matches it.
+    sample_count: u32,
+    format: wgpu::TextureFormat,
+    /// Present iff `sample_count > 1`.
+    blit: Option<Blit>,
+    /// Owned msaa color/resolve textures; `None` at count 1 and until the
+    /// first `prepare` at count > 1.
+    msaa: Option<MsaaTargets>,
 }
 
 impl MeshPipeline {
@@ -183,6 +215,28 @@ impl MeshPipeline {
         device: &wgpu::Device,
         _queue: &wgpu::Queue, // camera/mesh data arrives per frame in `prepare`
         target_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::new_at_samples(device, target_format, 1)
+    }
+
+    /// `new` at a multisample count (4 is the tested default): pipelines,
+    /// depth/stencil, and the owned color attachment all run at
+    /// `sample_count`; `render` resolves into an intermediate and blits it
+    /// over the destination with premultiplied alpha, preserving content
+    /// already there. Count 1 ([`MeshPipeline::new`]) stays the app default.
+    pub fn with_msaa(
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        Self::new_at_samples(device, target_format, sample_count)
+    }
+
+    fn new_at_samples(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh.wgsl"),
@@ -302,7 +356,7 @@ impl MeshPipeline {
                 bias: Default::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: 1,
+                count: sample_count,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -372,7 +426,7 @@ impl MeshPipeline {
                 bias: Default::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: 1,
+                count: sample_count,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -386,7 +440,8 @@ impl MeshPipeline {
             contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        let (depth_tex, depth) = Self::make_depth(device, (1, 1));
+        let blit = (sample_count > 1).then(|| Self::make_blit(device, target_format));
+        let (depth_tex, depth) = Self::make_depth(device, (1, 1), sample_count);
         Self {
             pipeline,
             cap_pipeline,
@@ -400,25 +455,150 @@ impl MeshPipeline {
             cap_buf,
             draw_cap: false,
             size: (1, 1),
+            sample_count,
+            format: target_format,
+            blit,
+            msaa: None,
         }
     }
 
-    /// `new` at a multisample count: `render` draws into an owned
-    /// sample-`count` color texture and resolves into an intermediate, then
-    /// blits that over the destination with premultiplied alpha — content
-    /// already in the destination survives, same contract as the count-1
-    /// path. Count 1 (`new`) stays the default. The msaa render path is not
-    /// implemented yet: a count > 1 currently renders single-sample.
-    pub fn with_msaa(
-        device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        target_format: wgpu::TextureFormat,
-        _sample_count: u32,
-    ) -> Self {
-        Self::new(device, _queue, target_format)
+    /// Blit pipeline for the msaa path: fullscreen triangle sampling the
+    /// resolved intermediate, drawn over the destination (`LoadOp::Load` +
+    /// premultiplied alpha, single-sample).
+    fn make_blit(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Blit {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("blit bindings layout"),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+            label: None,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("msaa blit"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_blit"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_blit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        // nearest: a 1:1 copy — the blit must not blur the resolve output
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        Blit {
+            pipeline,
+            sampler,
+            layout,
+        }
     }
 
-    fn make_depth(device: &wgpu::Device, size: (u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
+    fn make_msaa_targets(
+        device: &wgpu::Device,
+        blit: &Blit,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        size: (u32, u32),
+    ) -> MsaaTargets {
+        let extent = wgpu::Extent3d {
+            width: size.0.max(1),
+            height: size.1.max(1),
+            depth_or_array_layers: 1,
+        };
+        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewer msaa color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let resolve_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewer msaa resolve"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let color = color_tex.create_view(&Default::default());
+        let resolve = resolve_tex.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &blit.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&blit.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&resolve),
+                },
+            ],
+            label: Some("blit bindings"),
+        });
+        MsaaTargets {
+            color,
+            resolve,
+            bind_group,
+        }
+    }
+
+    fn make_depth(
+        device: &wgpu::Device,
+        size: (u32, u32),
+        sample_count: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let t = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("viewer depth+stencil"),
             size: wgpu::Extent3d {
@@ -427,7 +607,7 @@ impl MeshPipeline {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth24PlusStencil8,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -448,9 +628,18 @@ impl MeshPipeline {
         mesh: &TriMesh,
     ) {
         if self.size != size {
-            let (t, v) = Self::make_depth(device, size);
+            let (t, v) = Self::make_depth(device, size, self.sample_count);
             self.depth_tex = t;
             self.depth = v;
+            if let Some(blit) = &self.blit {
+                self.msaa = Some(Self::make_msaa_targets(
+                    device,
+                    blit,
+                    self.format,
+                    self.sample_count,
+                    size,
+                ));
+            }
             self.size = size;
         }
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(camera));
@@ -479,6 +668,14 @@ impl MeshPipeline {
     /// surface view) inside a viewer-owned pass. Color attachment:
     /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
     /// cleared. `viewport` is `[x, y, width, height]` in physical pixels.
+    ///
+    /// At `sample_count > 1` the mesh pass instead renders into the owned
+    /// multisample attachment (cleared transparent — coverage lives in
+    /// alpha) and resolves into the intermediate; a second pass then blits
+    /// the intermediate over `target` with premultiplied alpha, keeping
+    /// iced's content underneath. The msaa path maps the intermediate 1:1,
+    /// so it expects `viewport` to match the size last given to `prepare`
+    /// (true for the headless harness; the spike app keeps count 1).
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -488,40 +685,113 @@ impl MeshPipeline {
         let Some(vertex_buf) = &self.vertex_buf else {
             return; // nothing prepared yet
         };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("viewer mesh pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
+        let set_vp = |pass: &mut wgpu::RenderPass| {
+            pass.set_viewport(
+                viewport[0],
+                viewport[1],
+                viewport[2].max(1.0),
+                viewport[3].max(1.0),
+                0.0,
+                1.0,
+            );
+        };
+        if let Some(msaa) = &self.msaa {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewer mesh pass (msaa)"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &msaa.color,
+                    depth_slice: None,
+                    resolve_target: Some(&msaa.resolve),
+                    ops: wgpu::Operations {
+                        // transparent, not the app background: the blit pass
+                        // composites over the real target, which still holds it
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        // only the resolve output is needed; the multisample
+                        // data itself can be discarded after the resolve
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                 }),
-                stencil_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0),
-                    store: wgpu::StoreOp::Store,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            set_vp(&mut pass);
+            self.draw_scene(&mut pass, vertex_buf);
+            drop(pass);
+            // Composite the resolved frame over whatever is already in
+            // `target` — the same Load-and-composite contract as the
+            // single-sample path, just through an intermediate.
+            let blit = self
+                .blit
+                .as_ref()
+                .expect("msaa targets exist only alongside a blit pipeline");
+            let mut blit_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewer msaa blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            set_vp(&mut blit_pass);
+            blit_pass.set_pipeline(&blit.pipeline);
+            blit_pass.set_bind_group(0, &msaa.bind_group, &[]);
+            blit_pass.draw(0..3, 0..1);
+        } else {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewer mesh pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                 }),
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_viewport(
-            viewport[0],
-            viewport[1],
-            viewport[2].max(1.0),
-            viewport[3].max(1.0),
-            0.0,
-            1.0,
-        );
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            set_vp(&mut pass);
+            self.draw_scene(&mut pass, vertex_buf);
+        }
+    }
+
+    /// Mesh draw — and, when the camera sections, the cap quad right after —
+    /// into the pass's color attachment (msaa or single-sample alike: the cap
+    /// inherits the pass attachment and its pipeline matches its sample count).
+    fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>, vertex_buf: &wgpu::Buffer) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
