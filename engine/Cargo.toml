@@ -4,3 +4,8 @@ description = "CAD Studio domain engine: agent sessions, project store, parsing,
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[dev-dependencies]
+quick-xml = "0.41.0"
+threemf = "0.8"
+zip = "8.6.0"
