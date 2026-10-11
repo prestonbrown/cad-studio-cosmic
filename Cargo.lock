@@ -2065,6 +2065,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
 
 [[package]]
+name = "glam"
+version = "0.33.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "glow"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2347,7 +2356,7 @@ dependencies = [
  "bytes",
  "cosmic-client-toolkit",
  "dnd",
- "glam",
+ "glam 0.25.0",
  "iced_accessibility",
  "lilt",
  "log",
@@ -2476,7 +2485,7 @@ dependencies = [
  "cosmic-client-toolkit",
  "cryoglyph",
  "futures",
- "glam",
+ "glam 0.25.0",
  "guillotiere",
  "iced_debug",
  "iced_graphics",
@@ -5691,6 +5700,8 @@ name = "viewer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.12",
+ "iced",
  "image",
  "resvg",
  "wgpu",

@@ -9,5 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4", features = ["wgpu"] }
+# iced is vendored inside the libcosmic repository (workspace-excluded path dep),
+# so it is pinned through the same git source and rev as libcosmic — the same
+# crate instance app sees through libcosmic, keeping viewer's iced types
+# identity-compatible. A pop-os/iced.git pin at rev a31e6c6 (the submodule
+# commit dbc62f2 vendors) would resolve to a second, separate iced instance.
+iced = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4", features = ["advanced", "wgpu", "winit"] }
 wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.33", features = ["bytemuck"] }
