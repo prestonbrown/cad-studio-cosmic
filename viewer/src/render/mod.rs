@@ -695,6 +695,19 @@ impl MeshPipeline {
                 1.0,
             );
         };
+        // one depth/stencil state for both paths: cleared every frame, so
+        // winding parity never leaks across frames
+        let depth_stencil = wgpu::RenderPassDepthStencilAttachment {
+            view: &self.depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(0),
+                store: wgpu::StoreOp::Store,
+            }),
+        };
         if let Some(msaa) = &self.msaa {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewer mesh pass (msaa)"),
@@ -711,17 +724,7 @@ impl MeshPipeline {
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }),
+                depth_stencil_attachment: Some(depth_stencil),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -768,17 +771,7 @@ impl MeshPipeline {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }),
+                depth_stencil_attachment: Some(depth_stencil),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
