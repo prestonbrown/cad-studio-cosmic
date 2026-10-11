@@ -7,6 +7,11 @@
 //! reuse this module as-is; the iced adapter lives in [`crate::render::scene`].
 //!
 //! msaa is fixed at 1 here; the MSAA task passes 4 and owns the resolve path.
+//!
+//! Cross-sections: the mesh pass writes winding parity into the stencil
+//! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
+//! fragments excluded), and a red cap quad drawn right after fills exactly
+//! the cut face (stencil != 0) when `Camera::section_enable` is set.
 
 pub mod scene;
 
@@ -41,6 +46,40 @@ pub struct TriMesh {
     pub vertices: Vec<Vertex>, // one per corner (unindexed, per-face)
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CapVertex {
+    pos: [f32; 3],
+}
+
+/// World-space quad on the section plane: the mesh aabb cross-section at
+/// `camera.section_pos`, grown 10% on the two off-axis directions so the cap
+/// always covers the cut face (the stencil test clips it back to the solid).
+/// A 4-vertex triangle strip.
+fn cap_quad(mesh: &TriMesh, camera: &Camera) -> [CapVertex; 4] {
+    // match the mesh shader: axis 0 -> x, 2 -> z, anything else -> y
+    let axis = match camera.section_axis {
+        0 | 1 | 2 => camera.section_axis as usize,
+        _ => 1,
+    };
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let at = |pu: f32, pv: f32| {
+        let mut p = [0.0f32; 3];
+        p[axis] = camera.section_pos;
+        p[u] = pu;
+        p[v] = pv;
+        CapVertex { pos: p }
+    };
+    let mut edge = |a: usize| {
+        let center = (mesh.aabb_min[a] + mesh.aabb_max[a]) / 2.0;
+        let half = (mesh.aabb_max[a] - mesh.aabb_min[a]) / 2.0 * 1.1;
+        (center - half, center + half)
+    };
+    let (u0, u1) = edge(u);
+    let (v0, v1) = edge(v);
+    [at(u0, v0), at(u1, v0), at(u0, v1), at(u1, v1)]
 }
 
 /// Binary STL. `bytes` must be well-formed (call [`load_fixture_stl`], which
@@ -125,6 +164,7 @@ pub fn orbit_camera(mesh: &TriMesh, yaw: f32, pitch: f32, zoom: f32) -> Camera {
 
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
+    cap_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     /// Depth24PlusStencil8, viewer-owned; resized in [`MeshPipeline::prepare`].
     pub depth: wgpu::TextureView,
@@ -133,6 +173,8 @@ pub struct MeshPipeline {
     vertex_buf: Option<wgpu::Buffer>,
     vertex_capacity: u64,
     pub vertex_count: u32,
+    cap_buf: wgpu::Buffer,
+    draw_cap: bool,
     size: (u32, u32),
 }
 
@@ -195,13 +237,14 @@ impl MeshPipeline {
                 shader_location: 2,
             },
         ];
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+            label: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mesh"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                bind_group_layouts: &[&layout],
-                immediate_size: 0,
-                label: None,
-            })),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -223,25 +266,35 @@ impl MeshPipeline {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+                // No culling: back faces must rasterize or their decrement
+                // never happens and the winding parity below breaks.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24PlusStencil8,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                // Winding parity for the section cap: every rasterized
+                // fragment flips the stencil (front +1, back -1), including
+                // depth-occluded ones, so after the pass stencil != 0 exactly
+                // where a ray from the camera ends inside the sectioned
+                // solid — the cut face the cap quad fills. Wrap (not Clamp)
+                // keeps 0-1 = 255 in the parity; fragments discarded by the
+                // section plane never reach the stencil op, which is what
+                // clips the count at the cut.
                 stencil: wgpu::StencilState {
                     front: wgpu::StencilFaceState {
                         compare: wgpu::CompareFunction::Always,
                         fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::IncrementClamp,
+                        depth_fail_op: wgpu::StencilOperation::IncrementWrap,
+                        pass_op: wgpu::StencilOperation::IncrementWrap,
                     },
                     back: wgpu::StencilFaceState {
                         compare: wgpu::CompareFunction::Always,
                         fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::DecrementClamp,
+                        depth_fail_op: wgpu::StencilOperation::DecrementWrap,
+                        pass_op: wgpu::StencilOperation::DecrementWrap,
                     },
                     read_mask: 0xFF,
                     write_mask: 0xFF,
@@ -256,9 +309,87 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
+        // The cap quad fills the cut face where the mesh pass left winding
+        // parity. Its stencil test is read-only (all ops Keep) so the mesh's
+        // inc/dec stays in the attachment; depth is read-only too (the quad
+        // must not occlude anything drawn after it), and it wins LessEqual
+        // only where the surviving mesh lies beyond the section plane.
+        let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cap.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("cap.wgsl").into()),
+        });
+        let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("section cap"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &cap_shader,
+                entry_point: Some("vs_cap"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<CapVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &cap_shader,
+                entry_point: Some("fs_cap"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::NotEqual,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::NotEqual,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    read_mask: 0xFF,
+                    write_mask: 0xFF,
+                },
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        // 4-vertex strip, zeroed at build; `prepare` writes the real quad
+        // from the current mesh aabb + camera section params each frame
+        let cap_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("section cap quad"),
+            contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
         let (depth_tex, depth) = Self::make_depth(device, (1, 1));
         Self {
             pipeline,
+            cap_pipeline,
             bind_group,
             depth,
             depth_tex,
@@ -266,6 +397,8 @@ impl MeshPipeline {
             vertex_buf: None,
             vertex_capacity: 0,
             vertex_count: 0,
+            cap_buf,
+            draw_cap: false,
             size: (1, 1),
         }
     }
@@ -320,12 +453,17 @@ impl MeshPipeline {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&mesh.vertices));
         }
         self.vertex_count = mesh.vertices.len() as u32;
+        self.draw_cap = camera.section_enable > 0.5;
+        if self.draw_cap {
+            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(mesh, camera)));
+        }
     }
 
-    /// Renders the mesh into `target` (the iced surface view) inside a
-    /// viewer-owned pass. Color attachment: `LoadOp::Load` (iced content
-    /// underneath stays); depth and stencil: cleared. `viewport` is
-    /// `[x, y, width, height]` in physical pixels.
+    /// Renders the mesh — and, when the camera sections (`section_enable` >
+    /// 0.5), the red cap quad over the cut face — into `target` (the iced
+    /// surface view) inside a viewer-owned pass. Color attachment:
+    /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
+    /// cleared. `viewport` is `[x, y, width, height]` in physical pixels.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -373,6 +511,16 @@ impl MeshPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+        if self.draw_cap {
+            // Same pass, after the mesh: the stencil attachment already holds
+            // the parity the mesh's inc/dec left, so the quad only survives
+            // where the cut opened the solid.
+            pass.set_pipeline(&self.cap_pipeline);
+            pass.set_stencil_reference(0);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.cap_buf.slice(..));
+            pass.draw(0..4, 0..1);
+        }
     }
 }
 

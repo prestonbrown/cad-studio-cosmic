@@ -191,13 +191,14 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 
 /// Pixels in the section-cap red band. The target is Rgba8UnormSrgb, so
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
-/// (0.92, 0.15, 0.10) comes back near (246, 108, 89) — a linear-g band like
-/// g<90 misfires. Band calibrated against a measured histogram (cap vs mesh
-/// faces vs background); see the task-8 report.
+/// (0.92, 0.15, 0.10) reads back as (246, 108, 89) — the brief's linear-g
+/// `g < 90` band misfires on exactly that. Calibrated from a measured
+/// histogram: cap (246,108,89); mesh faces (98,104,111), (103,109,116),
+/// (86,91,97); background (89,89,97). r > 180 alone separates the cap from
+/// every measured mesh/background value with >70 of headroom; the g/b caps
+/// also exclude any future bright-but-not-red surface.
 fn cap_red_pixels(px: &[u8]) -> usize {
-    px.chunks(4)
-        .filter(|c| c[0] > 180 && c[1] < 90 && c[2] < 90) // brief's provisional band, pre-calibration
-        .count()
+    px.chunks(4).filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120).count()
 }
 
 /// Section cap: cutting the Z-up fixture along Z must draw the red cap face
