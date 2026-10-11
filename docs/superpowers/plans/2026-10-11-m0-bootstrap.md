@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- Builds/tests run on thelio only: `ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && <cmd>"'` (non-interactive ssh misses `~/.local/bin`).
+- Builds/tests run on thelio only: `ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && <cmd>"'` (non-interactive ssh misses `~/.local/bin`).
 - libcosmic pinned to `rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4"`. wgpu must be `28` (major-exact match with the iced fork).
 - The viewer renders via `Primitive::render()` (NOT `draw()`): viewer-owned render pass, own `Depth24PlusStencil8` texture (resized with viewport, stencil cleared per frame). MSAA: own sample count + resolve target (iced's pass MSAA does not apply). Both per commit 6413f86.
 - engine crate: no GUI dependencies (no libcosmic, no iced) — ever.
@@ -210,17 +210,17 @@ headless:
 
 ```bash
 git branch -M main
-ssh thelio 'zsh -lc "git init --bare ~/Code/cad-studio-cosmic.git"'
+ssh thelio 'bash -lc "git init --bare ~/Code/cad-studio-cosmic.git"'
 git remote add thelio thelio:Code/cad-studio-cosmic.git
 git push -u thelio main
-ssh thelio 'zsh -lc "git clone ~/Code/cad-studio-cosmic.git ~/Code/cad-studio-cosmic && git -C ~/Code/cad-studio-cosmic remote rename origin upstream"'
+ssh thelio 'bash -lc "git clone ~/Code/cad-studio-cosmic.git ~/Code/cad-studio-cosmic && git -C ~/Code/cad-studio-cosmic remote rename origin upstream"'
 ```
 
 - [ ] **Step 3: Reference clones on thelio (source of truth for trait signatures)**
 
 ```bash
-ssh thelio 'zsh -lc "mkdir -p ~/Code/_ref && git clone https://github.com/pop-os/libcosmic.git ~/Code/_ref/libcosmic && git -C ~/Code/_ref/libcosmic checkout dbc62f2d899cdbfbe43d170689ddc0290db663f4 && git -C ~/Code/_ref/libcosmic submodule update --init && git clone --depth 1 https://github.com/pop-os/cosmic-app-template ~/Code/_ref/cosmic-app-template"'
-ssh thelio 'zsh -lc "git -C ~/Code/_ref/libcosmic submodule status"'   # record the iced rev in the task report
+ssh thelio 'bash -lc "mkdir -p ~/Code/_ref && git clone https://github.com/pop-os/libcosmic.git ~/Code/_ref/libcosmic && git -C ~/Code/_ref/libcosmic checkout dbc62f2d899cdbfbe43d170689ddc0290db663f4 && git -C ~/Code/_ref/libcosmic submodule update --init && git clone --depth 1 https://github.com/pop-os/cosmic-app-template ~/Code/_ref/cosmic-app-template"'
+ssh thelio 'bash -lc "git -C ~/Code/_ref/libcosmic submodule status"'   # record the iced rev in the task report
 ```
 
 The submodule status line gives the exact iced rev libcosmic vendors — later tasks read real signatures from `~/Code/_ref/libcosmic/iced/`.
@@ -228,7 +228,7 @@ The submodule status line gives the exact iced rev libcosmic vendors — later t
 - [ ] **Step 4: Toolchain packages on thelio (needs Preston's sudo once)**
 
 ```bash
-ssh thelio 'zsh -lc "dpkg -s build-essential pkg-config libfontconfig1-dev >/dev/null 2>&1 && echo TOOLCHAIN-PKGS-OK || echo MISSING"'
+ssh thelio 'bash -lc "dpkg -s build-essential pkg-config libfontconfig1-dev >/dev/null 2>&1 && echo TOOLCHAIN-PKGS-OK || echo MISSING"'
 ```
 
 If MISSING: `ssh -t thelio 'sudo apt install -y build-essential pkg-config libfontconfig1-dev'` (Preston types the password — ask them to run `! ssh -t thelio 'sudo apt install -y build-essential pkg-config libfontconfig1-dev'`).
@@ -241,7 +241,7 @@ If MISSING: `ssh -t thelio 'sudo apt install -y build-essential pkg-config libfo
 git add Cargo.toml engine/Cargo.toml engine/src/lib.rs viewer/Cargo.toml viewer/src/lib.rs app/Cargo.toml app/src/main.rs .gitignore justfile
 git commit -m "build: workspace scaffold (engine/viewer/app) pinned to libcosmic dbc62f2"
 git push thelio main
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && git pull -q && cargo build --workspace 2>&1 | tail -5"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull -q && cargo build --workspace 2>&1 | tail -5"'
 git add Cargo.lock && git commit -m "build: lockfile from first thelio build" && git push thelio main
 ```
 
@@ -389,8 +389,8 @@ print("fixtures written to", OUT)
 - [ ] **Step 2: Create the venv and run (thelio)**
 
 ```bash
-ssh thelio 'zsh -lc "uv venv --python 3.12 ~/.local/share/cad-studio/venv && uv pip install --python ~/.local/share/cad-studio/venv/bin/python build123d matplotlib numpy"'
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && ~/.local/share/cad-studio/venv/bin/python fixtures/generator/model.py"'
+ssh thelio 'bash -lc "uv venv --python 3.12 ~/.local/share/cad-studio/venv && uv pip install --python ~/.local/share/cad-studio/venv/bin/python build123d matplotlib numpy"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && ~/.local/share/cad-studio/venv/bin/python fixtures/generator/model.py"'
 ```
 
 Expected: `fixtures written to ...`. Iterate on API errors until it runs (upstream's system prompt documents the same APIs — `Mesher().add_shape([...])`, `export_3mf`, `part.label`, `part.color`).
@@ -434,13 +434,13 @@ if n_objects < 2:
 Run:
 
 ```bash
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && ~/.local/share/cad-studio/venv/bin/python fixtures/generator/check.py && unzip -p fixtures/golden/model.3mf 3D/3dmodel.model | head -c 2000"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && ~/.local/share/cad-studio/venv/bin/python fixtures/generator/check.py && unzip -p fixtures/golden/model.3mf 3D/3dmodel.model | head -c 2000"'
 ```
 
 Expected: `manifest+animation OK; 3MF objects: 2` and XML showing object names/attributes (record whether `name=` labels survived export — Task 5 needs to know; if names are missing, note it in the commit message and rely on `component.3mf` for the named case).
 
 ```bash
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic/fixtures/golden && unzip -l model.3mf && unzip -p model.3mf 3D/3dmodel.model | head -c 2000"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic/fixtures/golden && unzip -l model.3mf && unzip -p model.3mf 3D/3dmodel.model | head -c 2000"'
 ```
 
 Expected: `3D/3dmodel.model` present; XML contains two `<object>` elements with `name="base"`/`name="lid"` (or unnamed objects — record which, Task 5 needs to know).
@@ -639,7 +639,7 @@ fn second_page_svg_parses() {
 
 ```bash
 git push thelio main
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test svg_check"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test svg_check"'
 ```
 
 Expected: 2 passed. If the ratio band fails, inspect (render both to files and compare ink visually via Preston) BEFORE loosening the band — a real resvg gap changes the M4 plan.
@@ -751,7 +751,7 @@ Run on thelio; expect PASS (predicate is trivial — this test exists to pin the
 
 ```bash
 cargo add -p engine --dev threemf@0.8
-ssh thelio 'zsh -lc "ls ~/.cargo/registry/src/*/threemf-0.8*/src 2>/dev/null || (cd ~/Code/cad-studio-cosmic && cargo fetch && ls ~/.cargo/registry/src/*/threemf-0.8*/src)"'
+ssh thelio 'bash -lc "ls ~/.cargo/registry/src/*/threemf-0.8*/src 2>/dev/null || (cd ~/Code/cad-studio-cosmic && cargo fetch && ls ~/.cargo/registry/src/*/threemf-0.8*/src)"'
 ```
 
 Read the crate's lib.rs/public API and write into the ADR, with quoted evidence, whether it exposes: (a) build `<item>` transforms, (b) `<component>` recursion, (c) `basematerials`/`colorgroup` colors, (d) per-triangle `pid`/`p1`, (e) `unit` attribute. Then, in `engine/tests/threemf_spike.rs`, write whatever parsing the crate allows for `fixtures/golden/model.3mf` and record what comes out (object count, per-object triangle counts, colors — print with `--nocapture`).
@@ -1376,7 +1376,7 @@ self.mesh.render(device, encoder, target);
 
 ```bash
 git push thelio main
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && cargo build -p viewer --example spike_window 2>&1 | tail -3"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo build -p viewer --example spike_window 2>&1 | tail -3"'
 ```
 
 Then Preston, from a COSMIC-session terminal on thelio: `cd ~/Code/cad-studio-cosmic && cargo run -p viewer --example spike_window`.
@@ -1503,10 +1503,10 @@ fn viewport_resize_reallocates_depth_and_renders() {
 
 ```bash
 git push thelio main
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test render_headless -- --nocapture"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo test -p viewer --test render_headless -- --nocapture"'
 ```
 
-Expected: 2 passed. If no adapter is found over ssh, try `ssh thelio 'zsh -lc "... WGPU_BACKEND=vulkan cargo test ..."'` and check `ls /usr/share/vulkan/icd.d/`; if the ICD needs a session env, run tests from Preston's tmux on thelio — record whatever was needed in the commit message (it becomes the canonical test invocation).
+Expected: 2 passed. If no adapter is found over ssh, try `ssh thelio 'bash -lc "... WGPU_BACKEND=vulkan cargo test ..."'` and check `ls /usr/share/vulkan/icd.d/`; if the ICD needs a session env, run tests from Preston's tmux on thelio — record whatever was needed in the commit message (it becomes the canonical test invocation).
 
 - [ ] **Step 3: Commit**
 
@@ -1687,7 +1687,7 @@ Builds and tests run on a Linux machine (thelio); the repo builds nowhere else b
 
 ```bash
 git push thelio main
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --workspace"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --workspace"'
 ```
 
 GUI: from a terminal inside the COSMIC session: `just run` (or `just render-spike` for the
@@ -1699,7 +1699,7 @@ do not regenerate casually; they are committed goldens.
 - [ ] **Step 2: Full suite green on thelio**
 
 ```bash
-ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --workspace 2>&1 | tail -15"'
+ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --workspace 2>&1 | tail -15"'
 ```
 
 Expected: all tests pass (svg_check, threemf_spike, parse3mf, render_headless ×4, app builds).
