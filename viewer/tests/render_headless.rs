@@ -339,38 +339,3 @@ fn msaa_smooths_a_diagonal_edge() {
         cap_red_pixels(&cut)
     );
 }
-
-/// Temporary calibration probe: distinct-color histograms at 1x and 4x plus
-/// candidate-band counts, for deriving `intermediate_edge_pixels`'s band.
-#[test]
-fn probe_msaa_histogram() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
-    let camera = default_camera(&mesh);
-    for msaa in [1u32, 4] {
-        let px = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, msaa);
-        let mut hist: std::collections::HashMap<[u8; 3], usize> = Default::default();
-        for c in px.chunks(4) {
-            *hist.entry([c[0], c[1], c[2]]).or_default() += 1;
-        }
-        let mut rows: Vec<_> = hist.into_iter().collect();
-        rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-        println!("== msaa {msaa}: {} distinct colors ==", rows.len());
-        for (rgb, n) in rows.iter().take(14) {
-            println!("  ({:3},{:3},{:3}) x {:7}", rgb[0], rgb[1], rgb[2], n);
-        }
-        for lo in [91u32, 92, 93, 94] {
-            for hi in [102u32, 103, 104] {
-                let count = px
-                    .chunks(4)
-                    .filter(|c| {
-                        let lum = (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3;
-                        (lo..=hi).contains(&lum)
-                    })
-                    .count();
-                println!("  lum {lo}..={hi}: {count}");
-            }
-        }
-    }
-}
