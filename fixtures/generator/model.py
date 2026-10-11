@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-from build123d import Box, Color, Mesher, Pos, Rot, export_step, export_stl
+from build123d import Box, Color, Compound, Mesher, Pos, Rot, export_step, export_stl
 
 OUT = Path(__file__).resolve().parent.parent / "golden"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -33,7 +33,7 @@ mesher = Mesher()
 mesher.add_shape([base, lid])
 mesher.write(OUT / "model.3mf")
 export_stl(base + lid, OUT / "model.stl")
-export_step([base, lid], OUT / "model.step")
+export_step(Compound(children=[base, lid]), OUT / "model.step")
 
 plate = Mesher()
 plate.add_shape([base, Pos(0, 45, LID_H / 2) * Rot(0, 0, 0) * Box(40, 40, LID_H)])
