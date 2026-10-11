@@ -106,8 +106,9 @@ fn threemf_reads_golden_model() {
 #[test]
 fn threemf_transform_probe() {
     // Same cube as fixtures/handmade/component.3mf, but spec-conforming:
-    // <components> wrapper present, 12-number transforms (row-major 3x4,
-    // translation in the 4th column), a colorgroup-style basematerials block.
+    // <components> wrapper present, 12-number transforms (3MF spec order:
+    // 4 rows x 3, translation in the last row), a colorgroup-style
+    // basematerials block.
     let model_xml = concat!(
         r#"<?xml version="1.0" encoding="UTF-8"?>"#,
         r#"<model unit="inch" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">"#,
@@ -117,9 +118,9 @@ fn threemf_transform_probe() {
         r#"<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="1" y="1" z="0"/>"#,
         r#"</vertices><triangles><triangle v1="0" v2="1" v3="2" pid="1" p1="0"/></triangles></mesh></object>"#,
         r#"<object id="3" name="assembly"><components>"#,
-        r#"<component objectid="2" transform="1 0 0 10  0 1 0 0  0 0 1 0"/>"#,
+        r#"<component objectid="2" transform="1 0 0 0 1 0 0 0 1 10 0 0"/>"#,
         r#"</components></object></resources>"#,
-        r#"<build><item objectid="3" transform="1 0 0 5  0 1 0 0  0 0 1 0"/></build></model>"#,
+        r#"<build><item objectid="3" transform="1 0 0 0 1 0 0 0 1 5 0 0"/></build></model>"#,
     );
     let mut buf = std::io::Cursor::new(Vec::new());
     {
@@ -142,7 +143,7 @@ fn threemf_transform_probe() {
     println!("component transform: {:?}", comp.transform);
     assert_eq!(
         comp.transform,
-        Some([1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+        Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 10.0, 0.0, 0.0]),
         "12-number transform attribute parses into [f64; 12]"
     );
     let item = &model.build.item[0];
@@ -150,7 +151,7 @@ fn threemf_transform_probe() {
     assert_eq!(item.objectid, 3);
     assert_eq!(
         item.transform,
-        Some([1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0])
     );
     println!("probe basematerials: {:?}", model.resources.basematerials);
     assert!(model.resources.basematerials.is_none());

@@ -20,7 +20,8 @@ fn fixture(rel: &str) -> std::path::PathBuf {
 }
 
 /// Parses 3D/3dmodel.model XML into per-object mesh data. Objects with a mesh are
-/// terminals; objects with components resolve recursively applying 3x4 transforms.
+/// terminals; objects with components resolve recursively applying 3MF spec-order
+/// transforms.
 pub fn parse_objects(xml: &str) -> Vec<RawPart> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -48,7 +49,7 @@ pub fn parse_objects(xml: &str) -> Vec<RawPart> {
                         // object-level component: record (target objectid, transform); resolution below
                         let mut oid = 0usize;
                         let mut xf = [0.0f32; 12];
-                        xf[0] = 1.0; xf[5] = 1.0; xf[10] = 1.0; // identity default (row-major 3x4)
+                        xf[0] = 1.0; xf[4] = 1.0; xf[8] = 1.0; // identity default (3MF spec order: 4 rows x 3)
                         for a in e.attributes().flatten() {
                             match a.key.local_name().as_ref() {
                                 b"objectid" => oid = String::from_utf8_lossy(&a.value).parse().unwrap_or(0),
@@ -149,14 +150,17 @@ fn component_transform_is_applied() {
 }
 
 /// Spike-level build resolution: build item → object → (mesh | first component),
-/// applying the row-major 3x4 transform (p' = M·[p,1]). Single-level component
+/// applying transforms in 3MF spec token order: 4 rows x 3, row-vector
+/// application (p' = p·M, translation in the last row). Single-level component
 /// nesting — M1 generalizes (recursion, depth cap 16, full pid/p1 colors per
 /// upstream-contract §3). Vertex positions only; triangle indexing not needed
 /// for the bbox guarantee this test pins.
 fn resolve_parts(xml: &str) -> Vec<RawPart> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
-    const IDENT: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    // 3MF spec token order: 4 rows x 3 (m00 m01 m02 m10 m11 m12 m20 m21 m22
+    // m30 m31 m32); identity puts ones on the row-leading tokens 0/4/8.
+    const IDENT: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
     let parse_xf = |s: Option<String>| -> [f32; 12] {
         match s {
             Some(s) => s
@@ -221,11 +225,13 @@ fn resolve_parts(xml: &str) -> Vec<RawPart> {
         }
     }
     flush(&mut meshes, cur_id, &cur_name, cur_pos, cur_mesh);
+    // 3MF spec token order: 4 rows x 3, row-vector application (p' = p·M) —
+    // x' = x·m0 + y·m3 + z·m6 + m9; m9/m10/m11 are the translation.
     let apply = |p: [f32; 3], m: &[f32; 12]| -> [f32; 3] {
         [
-            m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
-            m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
-            m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+            p[0] * m[0] + p[1] * m[3] + p[2] * m[6] + m[9],
+            p[0] * m[1] + p[1] * m[4] + p[2] * m[7] + m[10],
+            p[0] * m[2] + p[1] * m[5] + p[2] * m[8] + m[11],
         ]
     };
     let mut out = Vec::new();

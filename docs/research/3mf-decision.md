@@ -14,7 +14,8 @@ survives deserialization, "applied" means the crate does the work for us:
 - **(a) build `<item>` transforms — data yes, applied no.**
   `Item { objectid: usize, transform: Option<[f64; 12]>, .. }` (model/mod.rs).
   Our probe (`threemf_transform_probe`) round-tripped
-  `transform="1 0 0 5  0 1 0 0  0 0 1 0"` to `Some([1,0,0,5,0,1,0,0,0,0,1,0])`.
+  `transform="1 0 0 0 1 0 0 0 1 5 0 0"` to `Some([1,0,0,0,1,0,0,0,1,5,0,0])`
+  (3MF spec token order).
   No code anywhere applies the matrix — `read()` returns the raw `Model`.
 
 - **(b) `<component>` recursion — data yes, recursion no.**
@@ -55,15 +56,24 @@ golden file (one `Model`, 4 objects, names `base`/`lid`, 12 triangles each,
 build items `[(1, no transform), (4, no transform)]`, unit millimeter) — the
 container/XML layer is fine; it is the semantics above that are missing.
 
+Fixture/convention notes for M1: the handmade fixture omits the spec-required
+`<components>` wrapper element around `<component>` (the golden 3MF has it), so
+M1's parser must accept both shapes. Transforms everywhere use the 3MF spec
+token order — 12 tokens m00..m32, 4 rows × 3, row-vector application,
+translation at tokens 9/10/11 — which the handmade fixture and the spike's
+`apply()` now both encode; M1's parser must keep that order (build123d-produced
+goldens with transforms carry the same spec order).
+
 ## Custom parser estimate
 
 Measured from the spike (`engine/tests/parse3mf.rs`, quick-xml 0.41 + zip 8.6,
 transcribed code compiling as-is):
 
 - `parse_objects` — 98 LoC (objects, names, mesh vertices placeholder level)
-- `resolve_parts` — 102 LoC (build item → object → first component, 3×4
-  transform application with correct +10 mm x-translation on the handmade
-  fixture; component-then-build order)
+- `resolve_parts` — 102 LoC (build item → object → first component, transform
+  application in 3MF spec token order — 4 rows × 3, row-vector p' = p·M,
+  translation at tokens 9/10/11; the handmade fixture and the spike's `apply()`
+  both encode it (+10 mm x-translation); component-then-build order)
 - Shared scaffolding (`RawPart`, zip `3D/3dmodel.model` extraction, fixture
   helper) — ~25 LoC
 
@@ -78,7 +88,8 @@ transcribed code compiling as-is):
    → first descendant component name → `part N+1`), no-build-items fallback
    (one part per object id, sorted).
 5. `unit` → mm-per-unit scaling.
-6. General 3×4 matrix composition (spike applies sequentially, translate-safe).
+6. General matrix composition (spike applies component-then-build sequentially,
+   already p·C·B in spec row-vector order; M1 composes N levels).
 7. Errors instead of `unwrap()` panics on malformed input.
 
 ## Decision: custom

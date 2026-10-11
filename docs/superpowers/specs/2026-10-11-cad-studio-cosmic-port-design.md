@@ -96,9 +96,9 @@ cad-studio-cosmic/
   exactly so device/queue types match).
 - libcosmic `wgpu` feature enabled explicitly. tiny-skia fallback keeps the UI
   alive on GL-less machines; the 3D pane is gated off there (never on thelio).
-- Dev loop: edit on Mac → `git push thelio` → `ssh thelio 'zsh -lc "cd ~/Code/cad-studio-cosmic && cargo test"'`.
+- Dev loop: edit on Mac → `git push thelio` → `ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && cargo test"'`.
   GUI runs from Preston's COSMIC session. Non-interactive ssh shells on thelio
-  miss `~/.local/bin`; always `zsh -lc`.
+  miss `~/.local/bin`; always `bash -lc`.
 - CPU-heavy work (mesh parse/clip/raster) runs on std threads/rayon, never on the
   cosmic executor (single-worker tokio) — only async I/O lives in tasks.
 

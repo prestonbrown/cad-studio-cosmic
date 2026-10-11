@@ -14,7 +14,7 @@ with Anthropic.
 
 ## Developing
 
-Builds and tests run on a Linux machine (thelio); the repo builds nowhere else by design.
+Builds and tests are gated on the Linux machine (thelio), the canonical build/test environment — the suite also builds and passes on macOS, which is fine for compile iteration but is not the gate.
 
 ```bash
 git push thelio main
