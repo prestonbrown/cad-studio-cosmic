@@ -33,7 +33,7 @@ impl Application for CadStudio {
         Task::none()
     }
 
-    fn view(&self) -> Element<Message> {
+    fn view(&self) -> Element<'_, Message> {
         cosmic::widget::column::with_capacity(2)
             .push(cosmic::widget::header_bar().title("CAD Studio"))
             .push(text("CAD Studio for COSMIC — M0 bootstrap"))
