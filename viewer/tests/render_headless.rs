@@ -239,39 +239,6 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     );
 }
 
-/// TEMPORARY probe (removed before landing): distinct-color histogram of the
-/// section frames, to calibrate `cap_red_pixels` from measured sRGB values.
-#[test]
-fn probe_section_histogram() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&mesh);
-    cam.section_axis = 2;
-    let span = mesh.aabb_max[2] - mesh.aabb_min[2];
-    for &(label, enable, frac) in &[
-        ("section-off", 0.0f32, 0.0f32),
-        ("base-cut z=0", 1.0, 4.0 / 26.0),
-        ("gap-cut z=9", 1.0, 0.5),
-        ("lid-cut z=17", 1.0, 21.0 / 26.0),
-    ] {
-        cam.section_enable = enable;
-        cam.section_pos = mesh.aabb_min[2] + span * frac;
-        let px = render_frame(&device, &queue, &mut pipeline, &mesh, &cam, 800, 600);
-        let mut counts = std::collections::HashMap::<[u8; 3], usize>::new();
-        for c in px.chunks(4) {
-            *counts.entry([c[0], c[1], c[2]]).or_default() += 1;
-        }
-        let mut top: Vec<_> = counts.into_iter().collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("== {label} ==");
-        for (rgb, n) in top.iter().take(8) {
-            println!("  ({:3},{:3},{:3}) x {}", rgb[0], rgb[1], rgb[2], n);
-        }
-    }
-}
-
 #[test]
 fn viewport_resize_reallocates_depth_and_renders() {
     let rt = tokio::runtime::Runtime::new().unwrap();
