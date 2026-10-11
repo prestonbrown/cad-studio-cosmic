@@ -12,10 +12,12 @@ fn render_ink_fraction(svg: &std::path::Path, width: u32) -> (u32, u32, f64) {
     let height = ((width as f32) * size.height() / size.width()).max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).unwrap();
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    // A fresh pixmap is (0,0,0,0) and matplotlib SVGs paint no page background,
+    // so transparent pixels are paper and must not count as ink.
     let ink = pixmap
         .pixels()
         .iter()
-        .filter(|p| p.red() < 240 || p.green() < 240 || p.blue() < 240)
+        .filter(|p| p.alpha() > 0 && (p.red() < 240 || p.green() < 240 || p.blue() < 240))
         .count();
     (width, height, ink as f64 / (width as f64 * height as f64))
 }
@@ -32,7 +34,7 @@ fn png_ink_fraction(png: &std::path::Path, width: u32) -> f64 {
 fn matplotlib_svg_renders_with_comparable_ink() {
     let svg = fixture("schematic.svg");
     let png = fixture("schematic.png");
-    let (w, h, svg_ink) = render_ink_fraction(&svg, 1600);
+    let (_w, h, svg_ink) = render_ink_fraction(&svg, 1600);
     assert!(h > 400, "page height {h} suspiciously small");
     assert!(svg_ink > 0.0005, "almost no ink rendered: {svg_ink}");
     let png_ink = png_ink_fraction(&png, 1600);
