@@ -72,7 +72,7 @@ fn cap_quad(mesh: &TriMesh, camera: &Camera) -> [CapVertex; 4] {
         p[v] = pv;
         CapVertex { pos: p }
     };
-    let mut edge = |a: usize| {
+    let edge = |a: usize| {
         let center = (mesh.aabb_min[a] + mesh.aabb_max[a]) / 2.0;
         let half = (mesh.aabb_max[a] - mesh.aabb_min[a]) / 2.0 * 1.1;
         (center - half, center + half)
