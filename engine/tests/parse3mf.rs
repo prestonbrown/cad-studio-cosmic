@@ -69,7 +69,7 @@ pub fn parse_objects(xml: &str) -> Vec<RawPart> {
                 let name = e.local_name();
                 match name.as_ref() {
                     b"vertex" => {
-                        if let Some(p) = cur.as_mut() {
+                        if let Some(_p) = cur.as_mut() {
                             let mut xyz = [0.0f32; 3];
                             for a in e.attributes().flatten() {
                                 match a.key.local_name().as_ref() {
