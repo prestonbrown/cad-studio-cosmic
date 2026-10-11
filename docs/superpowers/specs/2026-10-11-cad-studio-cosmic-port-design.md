@@ -139,8 +139,10 @@ Modules mirror the upstream contract; public surface is
   GPU discard+stencil section).
 - `playback.rs` — MotionPlayer state-at-time, collision flags.
 - `renderer.rs` — iced `shader::Program`/`Primitive`/`Pipeline` adapter on wgpu
-  28, modeled on iced's `custom_shader` example; plus a surfaceless headless
-  path for tests.
+  28, modeled on iced's `custom_shader` example; implements
+  `Primitive::render()` (not `draw()` — iced's pass has no depth/stencil
+  attachment, so the viewer runs its own pass with its own depth+stencil
+  textures); plus a surfaceless headless path for tests.
 
 ### 4.4 app crate (libcosmic)
 
@@ -178,10 +180,18 @@ Modules mirror the upstream contract; public surface is
 - Section/cut plane: WGSL per-pixel `discard` against the plane equation; red
   cut face via stencil cross-section (inc/dec front/back faces in the clip
   region, one unlit red plane quad where stencil ≠ 0). No per-frame CPU
-  clipping. Sutherland–Hodgman retained only as fallback.
+  clipping. Sutherland–Hodgman retained only as fallback. Stencil requires the
+  `Primitive::render()` path — iced's compositor pass carries no depth/stencil
+  attachment, so the viewer owns a `Depth24PlusStencil8` texture (resized with
+  the viewport, stencil cleared each frame); `Primitive::draw()` cannot be used
+  (see libcosmic-landscape.md §2a amendments).
 - Wireframe: WebGPU has no polygon line-fill; edge index buffers built once per
   mesh (off-thread), drawn as GPU line-lists.
 - Animation playback: per-part transform uniforms per frame; no vertex rewrites.
+- MSAA: iced's own-pass multisample settings do not apply to a custom
+  `render()` pass; the mesh pass owns its multisample count + resolve target
+  (owned MSAA texture → resolve → blit, or the frame view as
+  `resolve_target`). Decision at M3; M0 spike proves the resolve path.
 - SVG schematic: resvg rasterizes per page/zoom-level on a background thread,
   cached; panning is a GPU texture translate; re-raster debounced.
 - Measure picking: CPU ray-cast per click (event-driven hit test, off-thread),
@@ -269,12 +279,16 @@ Each milestone ends with the full test suite green on thelio.
 - **M0 Bootstrap** — workspace + template; thelio remotes; toolchain check
   (libfontconfig1-dev etc.); generate fixtures with real build123d; resvg
   vs matplotlib SVG check; 3MF spike (threemf vs custom); xcstrings→ftl
-  extractor; shader-widget mesh-render proof on thelio GPU.
+  extractor; shader-widget mesh-render proof on thelio GPU via the
+  `Primitive::render()` path — stencil-attachment proof (own
+  `Depth24PlusStencil8` pass, stencil inc/dec + red quad) and an MSAA
+  resolve-target spike.
 - **M1 Engine core** — project store, parsers, manifest, watcher, settings (+tests).
 - **M2 Agent lifecycle** — claude runner, session machine, streaming, summaries;
   fake-agent e2e green.
 - **M3 Viewer basics** — mesh + orbit/zoom/pan + grid + colors + wireframe;
-  headless render tests.
+  headless render tests; MSAA decision (own multisample + resolve target for
+  the custom `render()` pass).
 - **M4 App shell** — windows, panes, chat, schematic. **Vertical slice: prompt →
   (fake or real) agent → outputs appear → model renders.**
 - **M5 Python + params + versions** — env setup, sliders rebuild, snapshot/restore.

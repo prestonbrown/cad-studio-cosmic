@@ -102,6 +102,39 @@ display + background process streaming. All claims cite primary sources.
   not iced ones) — you write the renderer; `custom_shader` is the reference.
 - Perf: full GPU pipeline you control — 100k–1M triangles is trivial for a modern
   GPU; mesh upload happens in `prepare` on your schedule.
+- **Source-verified amendments (2026-10-11, pop-os/iced fork master — the tree
+  libcosmic vendors):**
+  1. iced's compositor main render pass creates **no depth/stencil attachment**
+     (`depth_stencil_attachment: None` at every `begin_render_pass` site,
+     https://github.com/pop-os/iced/blob/master/wgpu/src/lib.rs) — a pipeline
+     with stencil state bound to that pass fails validation. Custom primitives
+     must not rely on iced's pass for depth/stencil.
+  2. Therefore implement **`Primitive::render()`**, not `draw()`. The
+     `Primitive::draw()` default returns false
+     (https://github.com/pop-os/iced/blob/master/wgpu/src/primitive.rs); iced
+     then calls `Primitive::render(pipeline, encoder, target_view, clip_bounds)`
+     **outside its own pass** — the primitive runs its own render pass with its
+     own depth (+ stencil) texture. The bundled `custom_shader` example does
+     exactly this: own `Depth32Float` texture, own pass with `LoadOp::Load`
+     color, depth cleared per frame, texture resized on viewport change
+     (https://github.com/pop-os/iced/blob/master/examples/custom_shader/src/scene/pipeline.rs).
+  3. `Depth24PlusStencil8` is in wgpu's guaranteed render-attachment format
+     set, so the stencil cross-section technique (inc/dec front/back faces,
+     unlit red quad where stencil ≠ 0) is safe on thelio: a
+     depth24plus-stencil8 texture owned by the viewer pipeline, resized with
+     the viewport, stencil cleared each frame.
+  4. Ordering: within an iced layer, custom primitives are stage 3 of 5 (quads
+     1, triangles 2, PRIMITIVES 3, images 4, text 5)
+     (https://github.com/pop-os/iced/blob/master/wgpu/src/layer.rs — `start()`
+     / `end()` staging). Later stages and layers composite on top, so iced
+     overlay widgets above the 3D pane keep working. Note: render()-path
+     primitives execute after iced's pass ends, drawing over earlier stages of
+     that layer — fine for the 3D pane.
+  5. **MSAA gap**: iced's own-pass MSAA settings do **not** apply to a custom
+     `render()` pass. The mesh pass needs its own multisample count + resolve
+     target (render to an owned MSAA texture, resolve into an offscreen then
+     blit; or attach the frame view as `resolve_target`) — without it, CAD
+     silhouette edges alias/shimmer. Decision scheduled at M3; spike at M0.
 
 ### (b) Software rasterization to a canvas/image widget — viable fallback only
 
