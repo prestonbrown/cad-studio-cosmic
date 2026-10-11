@@ -5704,6 +5704,7 @@ dependencies = [
  "iced",
  "image",
  "resvg",
+ "tokio",
  "wgpu",
 ]
 
