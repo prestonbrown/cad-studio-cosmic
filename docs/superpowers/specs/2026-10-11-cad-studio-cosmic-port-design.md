@@ -152,17 +152,26 @@ Modules mirror the upstream contract; public surface is
 - Project window: `PaneGrid` with chat / 3D / schematic panes; drag-resize and
   rearrange; 4 upstream presets; LayoutNode JSON persisted in project.json;
   upstream min thicknesses.
-- Chat pane: markdown via pulldown-cmark; streaming rows; tool activity rows
-  (live partial-JSON preview throttled 0.15 s, final state); thinking rows;
+- Chat pane: inline-only markdown via pulldown-cmark (upstream AttributedString
+  parity — no block elements; fenced code renders as monospace paragraphs);
+  streaming rows; tool activity rows
+  (live partial-JSON preview throttled 0.15 s, final state); thinking rows
+  (block-boundary "reasoned for N s" timing + "~N tokens"; the engine emits
+  the boundaries — thinking TEXT is never displayed, this CLI's thinking
+  content is signature-only);
   system rows with actions (ask-agent-to-fix, open-terminal); attachments via
   xdg-portal file chooser, drag-drop, clipboard image paste (→ PNG temp);
   queued sends (1 s auto-run after success), pause on failure.
 - 3D pane: viewer + overlays — parts list (show/hide/link), floating parameter
   sliders, motion controls (play/pause/scrub/speed/loop, phase label, values,
   collisions), measure badge, section controls, explode slider, layout switch,
-  view presets; status bar (units, bbox, volume, warnings, 12-swatch legend).
-- Schematic pane: resvg SVG widget; native zoom/pan/fit (port of the JS
-  bridge); page tabs from manifest drawings; PNG thumbnail use.
+  view presets; status bar (M4 ships minimal: units + output warnings; full
+  parity incl. bbox/volume/12-swatch legend is re-derived from the vendored
+  Viewer3D Swift at M6).
+- Schematic pane: the §5 raster/cache mechanism (resvg rasterize per
+  page/zoom-level on a background thread, cached, image-handle display,
+  debounced re-raster); zoom/pan/fit math is the JS-bridge port; page tabs
+  from manifest drawings; PNG thumbnail use.
 - Settings + first-run setup sheet (printer type/model/units), agent-missing
   sheet, Python-setup sheet; cosmic-config persistence.
 - i18n: fluent, `en` source; extractor script converts the 336 xcstrings keys
@@ -290,7 +299,25 @@ Each milestone ends with the full test suite green on thelio.
   headless render tests; MSAA decision (own multisample + resolve target for
   the custom `render()` pass).
 - **M4 App shell** — windows, panes, chat, schematic. **Vertical slice: prompt →
-  (fake or real) agent → outputs appear → model renders.**
+  (fake or real) agent → outputs appear → model renders.** Scope binding
+  (2026-10-12, spec-drift review): IN = welcome + project windows (multi-window),
+  PaneGrid with upstream layout parity + persistence, chat pane complete
+  (streaming/tool/system rows incl. thinking-row block boundaries, send queue
+  with 1 s auto-run + pause-on-failure, inline-only markdown), schematic pane
+  via the §5 raster/cache mechanism, viewer embed + ALL parity input wiring
+  incl. pan (M3 delivers formulas only), viewer adapter productization rename
+  (Spike\*→Model\*), first-run setup + agent-missing sheets, xdg-portal
+  directory chooser for new/open project, MSAA 4× app-side opt-in, project
+  scaffolding before `watch_directory` starts, i18n `fl!()` wired from day one
+  (en corpus; it/de/fr activation + corpus repair M8), engine `EngineEvent`
+  extended with thinking block start/stop boundaries. OUT (with owner):
+  parameter sliders + Python env (M5); parts list / measure / section /
+  explode overlays + full status-bar parity re-derived from the vendored
+  Viewer3D Swift (M6); motion controls (M7); attachments UI, ZIP export,
+  packaging (M8). Settings have ONE writer: the engine's
+  `~/.config/cad-studio/settings.json` (`settings_path()`); cosmic-config
+  holds app-UI state only (recents, first-run flag). The M4 section of
+  `docs/research/carry-forwards.md` is normative input to the M4 plan.
 - **M5 Python + params + versions** — env setup, sliders rebuild, snapshot/restore.
 - **M6 Viewer tools** — measure, section (GPU), explode/plate/bed, parts overlay, compare.
 - **M7 Animation playback.**
