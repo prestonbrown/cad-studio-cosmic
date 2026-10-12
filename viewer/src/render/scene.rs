@@ -8,16 +8,23 @@
 use std::sync::Arc;
 
 use iced::widget::shader::{self, Viewport};
-use iced::{mouse, Rectangle};
+use iced::{Rectangle, mouse};
 
-use super::{Camera, MeshPipeline, PartScene, camera};
+use super::{Camera, GridMesh, MeshPipeline, Options, PartScene, camera, grid};
 
 /// Interactive spike scene: fixed part scene, orbit camera state.
 /// Framing (target + base distance) comes from [`camera::frame`] at
 /// construction — aspect-free, against the pinned scene aabb — and `zoom`
 /// scales that distance (scroll applies 0.9^steps, upstream-contract §5).
+/// The overlay ([`grid::geometry`]) is built once alongside: it depends
+/// only on the scene aabb, never on the camera.
 pub struct SpikeScene {
     pub scene: Arc<PartScene>,
+    pub grid: Arc<GridMesh>,
+    /// Grid visibility (upstream `showsGrid`, default on — facts #38).
+    pub show_grid: bool,
+    /// Wireframe mode (upstream `showsWireframe` — facts #44).
+    pub wireframe: bool,
     pub yaw: f32,
     /// keep within ±[`camera::MAX_PITCH`]: the orbit formula uses Y as up
     pub pitch: f32,
@@ -32,8 +39,12 @@ impl SpikeScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
+        let grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
         Self {
             scene,
+            grid,
+            show_grid: true,
+            wireframe: false,
             yaw,
             pitch,
             zoom: 1.0,
@@ -72,7 +83,11 @@ impl<Message> shader::Program<Message> for SpikeScene {
         };
         SpikePrimitive {
             scene: self.scene.clone(),
+            grid: self.show_grid.then(|| self.grid.clone()),
             camera: self.camera(aspect),
+            options: Options {
+                wireframe: self.wireframe,
+            },
         }
     }
 }
@@ -80,7 +95,9 @@ impl<Message> shader::Program<Message> for SpikeScene {
 #[derive(Debug)]
 pub struct SpikePrimitive {
     scene: Arc<PartScene>,
+    grid: Option<Arc<GridMesh>>,
     camera: Camera,
+    options: Options,
 }
 
 impl shader::Primitive for SpikePrimitive {
@@ -101,6 +118,8 @@ impl shader::Primitive for SpikePrimitive {
             (size.width, size.height),
             &self.camera,
             &self.scene,
+            self.grid.as_deref(),
+            &self.options,
         );
     }
 
@@ -128,11 +147,7 @@ impl shader::Primitive for SpikePrimitive {
 }
 
 impl shader::Pipeline for MeshPipeline {
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         MeshPipeline::new(device, queue, format)
     }
 }

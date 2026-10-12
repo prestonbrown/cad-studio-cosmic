@@ -25,12 +25,21 @@
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
 //! fragments excluded), and a red cap quad drawn right after fills exactly
 //! the cut face (stencil != 0) when `Camera::section_enable` is set.
+//!
+//! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
+//! part pass to the 1px hairline edge list — same material, LineList
+//! topology; the section cap sits out (upstream disables the interior
+//! shell in wireframe, facts #45). The grid/bed/tripod overlay
+//! ([`grid::geometry`]) draws last, unlit and alpha-blended: depth-tested
+//! so the model occludes it, but never writing depth.
 
 pub mod gpu;
+pub mod grid;
 pub mod parts;
 pub mod scene;
 
-pub use parts::{GpuPart, PartScene, NEUTRAL, srgb_to_linear};
+pub use grid::{GridMesh, GridVertex};
+pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear};
 pub use scene::{SpikePrimitive, SpikeScene};
 
 use wgpu::util::DeviceExt;
@@ -53,6 +62,17 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+}
+
+/// Frame-level render mode (upstream ModelViewerState's toggles).
+/// `wireframe` swaps the part pass from filled triangles to the 1px
+/// hairline edge list — same material and opacity as fill, only the
+/// topology changes (facts #44: upstream is the same material with
+/// `triangleFillMode = .lines`; wgpu/WebGPU fixes line width at 1, so no
+/// tint and no wide lines).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    pub wireframe: bool,
 }
 
 /// Per-part model transform (group 1): identity while parts render where
@@ -113,13 +133,7 @@ impl Camera {
     /// The orbit camera at `(distance, yaw, pitch)` around `target` for a
     /// `aspect`-wide viewport, sectioning off — the uniform form of
     /// [`camera::orbit`].
-    pub fn orbiting(
-        distance: f32,
-        yaw: f32,
-        pitch: f32,
-        target: [f32; 3],
-        aspect: f32,
-    ) -> Camera {
+    pub fn orbiting(distance: f32, yaw: f32, pitch: f32, target: [f32; 3], aspect: f32) -> Camera {
         Camera {
             view_proj: camera::orbit(distance, yaw, pitch, target, aspect),
             section_axis: 1,
@@ -320,13 +334,30 @@ struct ResidentPart {
     content_hash: u64,
     vertex_buf: wgpu::Buffer,
     vertex_count: u32,
+    /// The wireframe line list as a u32 index buffer into `vertex_buf`
+    /// (2 indices per edge) and its index count.
+    edge_buf: wgpu::Buffer,
+    edge_count: u32,
     /// Group 1 for this part's draws: the model transform.
     model_bg: wgpu::BindGroup,
+}
+
+/// The overlay's GPU residency — the same content-identity contract as
+/// [`ResidentPart`], over the [`GridMesh`] staged by [`grid::geometry`].
+struct ResidentGrid {
+    content_hash: u64,
+    vertex_buf: wgpu::Buffer,
+    vertex_count: u32,
 }
 
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     cap_pipeline: wgpu::RenderPipeline,
+    /// Wireframe hairlines (facts #44): the mesh shader at LineList
+    /// topology, drawn instead of `pipeline` when `wireframe` is set.
+    line_pipeline: wgpu::RenderPipeline,
+    /// Unlit grid/bed/tripod overlay (facts #34/#37).
+    grid_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     model_layout: wgpu::BindGroupLayout,
     /// Depth24PlusStencil8, viewer-owned; resized in
@@ -335,6 +366,8 @@ pub struct MeshPipeline {
     depth_tex: wgpu::Texture,
     uniform_buf: wgpu::Buffer,
     residents: Vec<ResidentPart>,
+    /// The resident overlay, when the last prepared frame carried one.
+    grid: Option<ResidentGrid>,
     cap_buf: wgpu::Buffer,
     draw_cap: bool,
     size: (u32, u32),
@@ -347,6 +380,8 @@ pub struct MeshPipeline {
     /// Owned msaa color/resolve textures; `None` at count 1 and until the
     /// first `prepare_parts` at count > 1.
     msaa: Option<MsaaTargets>,
+    /// The frame mode last prepared (facts #44).
+    wireframe: bool,
     /// Vertex uploads since creation — one per part residency; camera and
     /// cap uniforms write per frame and never count. Read only by the
     /// `*_count_for_tests` accessors.
@@ -618,6 +653,151 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
+        // Wireframe hairlines (facts #44): the SAME mesh shader, material,
+        // and opacity as fill — only the topology (LineList; wgpu/WebGPU
+        // fix line width at 1, so no wide lines and no tint) and culling
+        // change. Depth-tested like the fill so hidden edges stay hidden.
+        // Stencil ops all Keep: winding parity is a filled-rasterization
+        // trick, and the cap it feeds is disabled in wireframe anyway.
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wireframe lines"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 36,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &vlayout,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    read_mask: 0xFF,
+                    write_mask: 0xFF,
+                },
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        // Grid / bed / tripod overlay (facts #34/#37): unlit vertex colors,
+        // alpha-blended, no culling. Depth-tested so the model occludes
+        // the overlay, but NO depth write — an overlay must not occlude.
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("grid.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
+        });
+        let grid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+            label: None,
+        });
+        let grid_vlayout = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 12,
+                shader_location: 1,
+            },
+        ];
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grid overlay"),
+            layout: Some(&grid_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs_grid"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GridVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &grid_vlayout,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs_grid"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    read_mask: 0xFF,
+                    write_mask: 0xFF,
+                },
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
         // 4-vertex strip, zeroed at build; `prepare_parts` writes the real
         // quad from the current scene aabb + camera section params each frame
         let cap_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -630,12 +810,15 @@ impl MeshPipeline {
         Self {
             pipeline,
             cap_pipeline,
+            line_pipeline,
+            grid_pipeline,
             bind_group,
             model_layout,
             depth,
             depth_tex,
             uniform_buf,
             residents: Vec::new(),
+            grid: None,
             cap_buf,
             draw_cap: false,
             size: (1, 1),
@@ -643,6 +826,7 @@ impl MeshPipeline {
             format: target_format,
             blit,
             msaa: None,
+            wireframe: false,
             upload_count: 0,
             alloc_count: 0,
         }
@@ -808,7 +992,9 @@ impl MeshPipeline {
     /// vertices are (re)written only when its content identity differs
     /// from what is resident, so an unchanged scene costs zero mesh
     /// uploads however the camera moves. Part transforms are identity
-    /// and written once per residency.
+    /// and written once per residency. `grid` (when `Some`) is the
+    /// overlay [`grid::geometry`] built — its residency follows the same
+    /// content-identity contract; `options` picks the frame's mode.
     pub fn prepare_parts(
         &mut self,
         device: &wgpu::Device,
@@ -816,6 +1002,8 @@ impl MeshPipeline {
         size: (u32, u32),
         camera: &Camera,
         scene: &PartScene,
+        grid: Option<&GridMesh>,
+        options: &Options,
     ) {
         if self.size != size {
             let (t, v) = Self::make_depth(device, size, self.sample_count);
@@ -856,6 +1044,16 @@ impl MeshPipeline {
             });
             self.alloc_count += 1;
             self.upload_count += 1;
+            // the edge list rides the same residency: it derives from the
+            // staged vertices, so the hash that triggered this rebuild
+            // covers it too
+            let edge_indices: Vec<u32> = part.edges.iter().flat_map(|&[a, b]| [a, b]).collect();
+            let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("part {label} edges")),
+                contents: bytemuck::cast_slice(&edge_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let edge_count = edge_indices.len() as u32;
             let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("part {label} model")),
                 contents: bytemuck::bytes_of(&Model::IDENTITY),
@@ -873,6 +1071,8 @@ impl MeshPipeline {
                 content_hash: part.content_hash,
                 vertex_buf,
                 vertex_count: part.vertices.len() as u32,
+                edge_buf,
+                edge_count,
                 model_bg,
             };
             if i < self.residents.len() {
@@ -881,9 +1081,39 @@ impl MeshPipeline {
                 self.residents.push(resident);
             }
         }
-        self.draw_cap = camera.section_enable > 0.5;
+        // The cap is this port's cut-face stand-in, and upstream disables
+        // the interior shell in wireframe (facts #45); line rasterization
+        // breaks winding parity anyway
+        self.draw_cap = camera.section_enable > 0.5 && !options.wireframe;
         if self.draw_cap {
-            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(scene, camera)));
+            queue.write_buffer(
+                &self.cap_buf,
+                0,
+                bytemuck::cast_slice(&cap_quad(scene, camera)),
+            );
+        }
+        self.wireframe = options.wireframe;
+        // Overlay residency — the same content-identity contract as the
+        // parts: an unchanged grid costs zero overlay bytes however the
+        // camera moves; `None` drops it (the app's grid toggle)
+        if let Some(g) = grid {
+            if !self
+                .grid
+                .as_ref()
+                .is_some_and(|r| r.content_hash == g.content_hash)
+            {
+                self.grid = Some(ResidentGrid {
+                    content_hash: g.content_hash,
+                    vertex_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("grid overlay vertices"),
+                        contents: bytemuck::cast_slice(&g.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+                    vertex_count: g.vertices.len() as u32,
+                });
+            }
+        } else {
+            self.grid = None;
         }
     }
 
@@ -901,8 +1131,16 @@ impl MeshPipeline {
         self.alloc_count
     }
 
-    /// Renders the parts — and, when the camera sections (`section_enable` >
-    /// 0.5), the red cap quad over the cut face — into `target` (the iced
+    /// Vertices the wireframe line pass would draw this frame — every
+    /// resident edge contributes its 2 corner indices (test visibility).
+    #[cfg(test)]
+    pub(crate) fn line_vertex_count_for_tests(&self) -> u32 {
+        self.residents.iter().map(|r| r.edge_count).sum()
+    }
+
+    /// Renders the parts (filled, or the wireframe hairlines when the last
+    /// prepared `Options` set it) — the red cap quad when the camera
+    /// sections, then the grid overlay last — into `target` (the iced
     /// surface view) inside a viewer-owned pass. Color attachment:
     /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
     /// cleared. `viewport` is `[x, y, width, height]` in physical pixels.
@@ -921,7 +1159,7 @@ impl MeshPipeline {
         target: &wgpu::TextureView,
         viewport: [f32; 4],
     ) {
-        if self.residents.is_empty() {
+        if self.residents.is_empty() && self.grid.is_none() {
             return; // nothing prepared yet
         }
         let set_vp = |pass: &mut wgpu::RenderPass| {
@@ -1021,17 +1259,29 @@ impl MeshPipeline {
     }
 
     /// Part draws — one bind group + vertex buffer + draw per resident
-    /// part — and, when the camera sections, the cap quad right after —
-    /// into the pass's color attachment (msaa or single-sample alike: the
-    /// cap inherits the pass attachment and its pipeline matches its
+    /// part, filled triangles or the wireframe hairline list — then, when
+    /// the camera sections, the cap quad, and last the grid overlay —
+    /// into the pass's color attachment (msaa or single-sample alike:
+    /// everything here inherits the pass attachment and matches its
     /// sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        for resident in &self.residents {
-            pass.set_bind_group(1, &resident.model_bg, &[]);
-            pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-            pass.draw(0..resident.vertex_count, 0..1);
+        if self.wireframe {
+            // facts #44: same material and opacity as fill, hairline list
+            pass.set_pipeline(&self.line_pipeline);
+            for resident in &self.residents {
+                pass.set_bind_group(1, &resident.model_bg, &[]);
+                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+            }
+        } else {
+            pass.set_pipeline(&self.pipeline);
+            for resident in &self.residents {
+                pass.set_bind_group(1, &resident.model_bg, &[]);
+                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+                pass.draw(0..resident.vertex_count, 0..1);
+            }
         }
         if self.draw_cap {
             // Same pass, after the mesh: the stencil attachment already holds
@@ -1042,6 +1292,14 @@ impl MeshPipeline {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.cap_buf.slice(..));
             pass.draw(0..4, 0..1);
+        }
+        if let Some(grid) = &self.grid {
+            // overlay last: depth-tested against the parts, never writing
+            // depth, so it never occludes what follows
+            pass.set_pipeline(&self.grid_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, grid.vertex_buf.slice(..));
+            pass.draw(0..grid.vertex_count, 0..1);
         }
     }
 }
@@ -1054,7 +1312,9 @@ mod tests {
     use engine::parsing::threemf::parse_3mf;
 
     fn fixture(rel: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden").join(rel)
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/golden")
+            .join(rel)
     }
 
     fn golden_stl_parts() -> Vec<engine::parsing::Part> {
@@ -1181,10 +1441,7 @@ mod tests {
             (std::f32::consts::FRAC_PI_4, 0.6)
         );
         assert_eq!(camera::Preset::Front.yaw_pitch(), (0.0, 0.0));
-        assert_eq!(
-            camera::Preset::Top.yaw_pitch(),
-            (0.0, camera::MAX_PITCH)
-        );
+        assert_eq!(camera::Preset::Top.yaw_pitch(), (0.0, camera::MAX_PITCH));
         assert_eq!(
             camera::Preset::Right.yaw_pitch(),
             (std::f32::consts::FRAC_PI_2, 0.0)
@@ -1251,7 +1508,15 @@ mod tests {
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         let camera = default_camera(&scene, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene,
+            None,
+            &Options::default(),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1260,7 +1525,15 @@ mod tests {
         // second frame, same scene, MOVED camera: mesh bytes must not move
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
-        pipeline.prepare_parts(device, queue, (800, 600), &moved, &scene);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &moved,
+            &scene,
+            None,
+            &Options::default(),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1,
@@ -1280,7 +1553,15 @@ mod tests {
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene1,
+            None,
+            &Options::default(),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1293,7 +1574,15 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene2,
+            None,
+            &Options::default(),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1309,7 +1598,15 @@ mod tests {
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene1,
+            None,
+            &Options::default(),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1321,7 +1618,15 @@ mod tests {
         let n = parts[0].positions.len();
         parts[0].positions[n / 2][0] -= 5.0;
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene2,
+            None,
+            &Options::default(),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1345,12 +1650,28 @@ mod tests {
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene1,
+            None,
+            &Options::default(),
+        );
         let u1 = pipeline.upload_count_for_tests();
         // facts #43's light-mode neutral: same geometry, only the paint
         // changes — a skipped upload would serve the dark-mode colors
         let scene2 = PartScene::from_parts(&parts, [0.55, 0.64, 0.75]);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene2,
+            None,
+            &Options::default(),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1390,7 +1711,11 @@ mod tests {
         assert_eq!(parts[1].triangle_colors, vec![Some([214, 38, 41]); 12]);
         let scene = PartScene::from_parts(&parts, NEUTRAL);
         let linear = |c: [u8; 3]| {
-            [parts::srgb_to_linear(c[0]), parts::srgb_to_linear(c[1]), parts::srgb_to_linear(c[2])]
+            [
+                parts::srgb_to_linear(c[0]),
+                parts::srgb_to_linear(c[1]),
+                parts::srgb_to_linear(c[2]),
+            ]
         };
         let (blue, red) = (linear([31, 120, 181]), linear([214, 38, 41]));
         assert!(blue[0] < 0.02 && blue[2] > 0.45, "dark-R blue: {blue:?}");
@@ -1415,7 +1740,11 @@ mod tests {
         };
         let scene = PartScene::from_parts(std::slice::from_ref(&mixed), NEUTRAL);
         for v in &scene.parts[0].vertices[0..3] {
-            assert_eq!(v.color, [1.0, 0.0, 0.0], "Some([255,0,0]) is exact linear red");
+            assert_eq!(
+                v.color,
+                [1.0, 0.0, 0.0],
+                "Some([255,0,0]) is exact linear red"
+            );
         }
         for v in &scene.parts[0].vertices[3..6] {
             assert_eq!(v.color, NEUTRAL, "None paints the neutral");
@@ -1487,7 +1816,15 @@ mod tests {
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene1,
+            None,
+            &Options::default(),
+        );
         let u1 = pipeline.upload_count_for_tests();
         // grow past MODEL x=30: union widens, the pin's x-center shifts
         for corner in [[40.0, 0.0, 16.0], [41.0, 0.0, 16.0], [40.0, 1.0, 16.0]] {
@@ -1495,11 +1832,97 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene2,
+            None,
+            &Options::default(),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 2,
             "a moved pin re-renders every part at the new offset"
+        );
+    }
+
+    /// A 10mm axis-aligned cube as 6 quads -> 12 triangles, corners drawn
+    /// from a shared 8-entry table so identical positions repeat across
+    /// faces exactly like real unindexed engine parts.
+    fn cube_part() -> engine::parsing::Part {
+        let c = |x: f32, y: f32, z: f32| [10.0 * x, 10.0 * y, 10.0 * z];
+        let v = [
+            c(0.0, 0.0, 0.0),
+            c(1.0, 0.0, 0.0),
+            c(1.0, 1.0, 0.0),
+            c(0.0, 1.0, 0.0),
+            c(0.0, 0.0, 1.0),
+            c(1.0, 0.0, 1.0),
+            c(1.0, 1.0, 1.0),
+            c(0.0, 1.0, 1.0),
+        ];
+        let faces = [
+            (0usize, 3, 2, 1),
+            (4, 5, 6, 7),
+            (0, 1, 5, 4),
+            (1, 2, 6, 5),
+            (2, 3, 7, 6),
+            (3, 0, 4, 7),
+        ];
+        let mut positions = Vec::new();
+        for &(a, b, c2, d) in &faces {
+            positions.extend_from_slice(&[v[a], v[b], v[c2], v[a], v[c2], v[d]]);
+        }
+        engine::parsing::Part {
+            name: "cube".into(),
+            positions,
+            triangle_colors: vec![None; 12],
+        }
+    }
+
+    /// Wireframe edges (facts #44): upstream's `.lines` fill mode
+    /// rasterizes every triangle edge, so a cube triangulated as 6 quads
+    /// shows its 12 polygon edges PLUS the 6 face diagonals = 18; dedup
+    /// collapses only the shared edges the unindexed soup repeats
+    /// (36 per-triangle corner pairs). The line pass draws that list, one
+    /// hairline per edge: 18 edges x 2 endpoints = 36 vertices.
+    #[test]
+    fn wireframe_edge_count() {
+        let scene = PartScene::from_parts(std::slice::from_ref(&cube_part()), NEUTRAL);
+        assert_eq!(
+            scene.parts[0].vertices.len(),
+            36,
+            "fixture truth: 12 triangles x 3 corners"
+        );
+        assert_eq!(
+            scene.parts[0].edges.len(),
+            18,
+            "12 polygon edges + 6 face diagonals, deduped"
+        );
+        for &[a, b] in &scene.parts[0].edges {
+            assert!(
+                a != b && a < 36 && b < 36,
+                "edge indices address staged corners"
+            );
+        }
+        let (device, queue) = gpu::device_queue();
+        let camera = default_camera(&scene, 1.0);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (64, 64),
+            &camera,
+            &scene,
+            None,
+            &Options { wireframe: true },
+        );
+        assert_eq!(
+            pipeline.line_vertex_count_for_tests(),
+            36,
+            "the line pass draws 18 edges x 2 endpoints"
         );
     }
 }
