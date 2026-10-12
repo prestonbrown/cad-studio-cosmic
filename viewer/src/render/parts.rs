@@ -10,8 +10,11 @@
 //!
 //! Per-triangle colors stage here too: `TriangleColor::Some` is u8 sRGB
 //! and crosses [`srgb_to_linear`] exactly once, at build; `None` paints
-//! the neutral. Both land in the staged vertex bytes, so the upload-once
-//! content identity below covers color changes and neutral changes alike.
+//! the neutral. Face normals stage with them — one per triangle on all 3
+//! corners, flat shading, computed from the remapped corners by
+//! [`face_normal`]. All of it lands in the staged vertex bytes, so the
+//! upload-once content identity below covers color, neutral, and normal
+//! changes alike.
 //!
 //! Each part carries a full-content hash over its staged vertices, so the
 //! pipeline's upload-once check (`MeshPipeline::prepare_parts`) rewrites a
@@ -97,6 +100,25 @@ fn remap(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
 }
 
+/// Flat-shading face normal of a scene-space triangle, upstream's
+/// addTriangle rule (TriangleMesh.swift:21-23): normalize(cross(b−a, c−a)),
+/// falling back to (0,0,1) for a zero-area triangle. A degenerate triangle
+/// rasterizes nothing, so the fallback only keeps the attribute finite.
+fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let (a, b, c) = (
+        glam::Vec3::from_array(a),
+        glam::Vec3::from_array(b),
+        glam::Vec3::from_array(c),
+    );
+    let cross = (b - a).cross(c - a);
+    let len = cross.length();
+    if len > 0.0 {
+        (cross / len).to_array()
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
 impl PartScene {
     /// Stage engine parts for rendering: remap to scene space, paint each
     /// triangle's color (sRGB -> linear, or the neutral), pin the floor,
@@ -113,20 +135,23 @@ impl PartScene {
             );
             // one color per triangle onto its 3 corners: `Some` is u8 sRGB
             // (3MF displaycolor) and crosses the exact EOTF here, at scene
-            // build — the shader never sees an encoded value. mesh.wgsl
-            // derives normals in screen space and never reads the normal
-            // attribute today.
+            // build — the shader never sees an encoded value. The face
+            // normal stages alongside it, one per triangle shared by all 3
+            // corners (flat shading, upstream's per-face addTriangle
+            // normals): computed from the REMAPPED corners, and the floor
+            // pin below only translates — cross(b−a, c−a) sees differences
+            // alone — so these are the pinned triangles' normals exactly.
             let vertices = part
                 .positions
                 .chunks_exact(3)
                 .zip(&part.triangle_colors)
                 .flat_map(|(corners, &color)| {
                     let color = stage_color(color, neutral);
-                    corners.iter().map(move |&p| Vertex {
-                        pos: remap(p),
-                        normal: [0.0; 3],
-                        color,
-                    })
+                    let corners = [remap(corners[0]), remap(corners[1]), remap(corners[2])];
+                    let normal = face_normal(corners[0], corners[1], corners[2]);
+                    corners
+                        .into_iter()
+                        .map(move |pos| Vertex { pos, normal, color })
                 })
                 .collect::<Vec<_>>();
             let mut mn = [f32::MAX; 3];
