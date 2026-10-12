@@ -77,7 +77,7 @@
 **Tests:** `shaded_faces_differ` (a cube: key-light-facing vs away-facing regions differ in readback luminance by ≥2× — derived from the 0.26/0.09/0.15 coefficients; compute the band in the test from those constants); `normals_match_cross_product` (pure: per-triangle normal == normalize(cross(b−a, c−a))).
 
 **Steps:** tests → RED → implement → GREEN → commit `feat(viewer): per-corner face normals + parity two-light shading`.
-**Recalibration budget:** real normals + lights change every face luminance — the MSAA test's 93..=103 band (render_headless.rs) will likely need re-measurement with its headroom re-documented.
+**Recalibration budget:** real normals + lights change every face luminance — T3 already REPLACED the old 93..=103 luminance band with a chroma-distance metric (0 @1x / >0 @4x); Task 4 re-measures THE CHROMA METRIC's values with two-light shading and re-documents its headroom (do not resurrect the dead band).
 
 ### Task 5: Wireframe edges + grid + bed
 
