@@ -17,11 +17,13 @@
 //!   an empty `unconfirmed` appends. `Started` drops dangling streaming state
 //!   (upstream resets `streamingID`/`unconfirmedTextIDs`/`hasText` per run).
 //! - Tool rows: input always accumulates; title/preview recompute under the
-//!   0.15 s throttle ([`should_emit_preview`]); `ToolFinished` recomputes both
-//!   over the FULL accumulated input before setting output/state — the engine
-//!   emits no tool content-block-stop, so this is the only home for the title
-//!   finalize over the tail that landed inside one throttle window. The
-//!   preview is kept (M4 review ruling); only fail-open clears it.
+//!   0.15 s throttle ([`should_emit_preview`]); `ToolFinished` recomputes the
+//!   title over the FULL accumulated input before setting output/state and
+//!   clearing the preview — the engine emits no tool content-block-stop, so
+//!   this is the only home for the title finalize over the tail that landed
+//!   inside one throttle window, and the preview clear matches upstream's
+//!   block stop (`updateTool(preview: nil)`): a completed row persists
+//!   preview-less.
 //! - Thinking rows are block-boundary timed through the `apply_at` seam.
 //!
 //! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
@@ -293,9 +295,11 @@ impl ChatState {
 
     /// Upstream `completeTool` (ChatViewModel.swift:81-85) preceded by the
     /// title finalize the engine has no event for (the tool's
-    /// content-block-stop, AgentSession.swift:171-173): both recompute over
-    /// the ACCUMULATED input, then output/state land. The preview stays —
-    /// only fail-open clears it. A tool whose input never streamed (a row the
+    /// content-block-stop, AgentSession.swift:171-173): the title recomputes
+    /// over the ACCUMULATED input, then output/state land and the preview
+    /// CLEARS — upstream's block stop passes `preview: nil`, so the persisted
+    /// end state of a completed row is preview-less (controller ruling on
+    /// chat.json §3 parity). A tool whose input never streamed (a row the
     /// engine opened at an assistant snapshot, title already `summarize`d
     /// over the full input) keeps that title: upstream's finalize only runs
     /// for stream-announced tools (`liveTools[index]`), and recomputing over
@@ -308,16 +312,14 @@ impl ChatState {
             .as_ref()
             .is_some_and(|tool| !tool.input.is_empty());
         if streamed {
-            let (title, preview) = match self.messages[at].tool.as_ref() {
-                Some(tool) => (live_title(&tool.name, &tool.input), live_preview(&tool.input)),
+            let title = match self.messages[at].tool.as_ref() {
+                Some(tool) => live_title(&tool.name, &tool.input),
                 None => return,
             };
             self.messages[at].text = title;
-            if let Some(tool) = self.messages[at].tool.as_mut() {
-                tool.preview = preview;
-            }
         }
         let Some(tool) = self.messages[at].tool.as_mut() else { return };
+        tool.preview = None;
         tool.output = Some(output.to_string());
         tool.state = if failed { ToolState::Failed } else { ToolState::Succeeded };
     }
@@ -581,7 +583,8 @@ mod tests {
 
     /// Full tool row lifecycle: open, throttled live updates, completion with
     /// the title finalized over the FULL input even when the tail landed
-    /// inside one throttle window, preview and name kept, state set.
+    /// inside one throttle window, the preview cleared at completion (the
+    /// persisted end state is preview-less), name kept, state set.
     #[test]
     fn tool_lifecycle_full() {
         let t0 = Instant::now();
@@ -615,11 +618,12 @@ mod tests {
 
         // completion recomputes over the ACCUMULATED input: the line count
         // now reflects both fragments, the unterminated-string ellipsis is
-        // gone, and the preview/output/state land after it
+        // gone, the preview CLEARS (upstream's block stop nils it before the
+        // result lands), and output/state land after the title
         state.apply_at(&tool_finished("t1", "wrote it", false), t0 + Duration::from_millis(20));
         assert_eq!(state.messages[0].text, "Writing the model · 2 lines");
         let tool = state.messages[0].tool.as_ref().unwrap();
-        assert_eq!(tool.preview.as_deref(), Some("alpha\nbeta"), "preview kept");
+        assert_eq!(tool.preview, None, "completion clears the preview");
         assert_eq!(tool.output.as_deref(), Some("wrote it"));
         assert_eq!(tool.state, ToolState::Succeeded);
         assert_eq!(tool.name, "Write", "name kept on completion");

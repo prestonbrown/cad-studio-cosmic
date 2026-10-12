@@ -101,12 +101,13 @@ async fn tool_use_turn_builds_the_full_transcript() {
     assert_eq!(rows[0].0, Role::Thinking);
     assert!(thought_for_seconds(rows[0].1) >= 1, "{}", rows[0].1);
 
-    // the Write row: title finalized over the full streamed input, preview
-    // kept, output and success recorded, name preserved
+    // the Write row: title finalized over the full streamed input, the live
+    // preview gone at completion (block-stop parity), output and success
+    // recorded, name preserved
     let write = state.messages[1].tool.as_ref().unwrap();
     assert_eq!(state.messages[1].text, "Preparing a helper file · 2 lines");
     assert_eq!(write.name, "Write");
-    assert_eq!(write.preview.as_deref(), Some("hi"));
+    assert_eq!(write.preview, None);
     assert!(write.output.as_ref().unwrap().contains("File created successfully"));
     assert_eq!(write.state, engine::project::store::ToolState::Succeeded);
 
