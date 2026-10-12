@@ -5,9 +5,20 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[lib]
+name = "app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cad-studio"
 path = "src/main.rs"
 
 [dependencies]
 libcosmic.workspace = true
+engine = { path = "../engine" }
+uuid.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true

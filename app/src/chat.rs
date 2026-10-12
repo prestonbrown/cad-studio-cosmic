@@ -1,0 +1,920 @@
+//! Chat transcript reducer: translates the engine's [`EngineEvent`] stream
+//! into persisted [`ChatMessage`] rows — the port of upstream's
+//! AgentSession.swift row lifecycle plus ChatViewModel.swift's row helpers.
+//! Pure: no cosmic/iced types, no I/O; [`ChatState::apply_at`] takes the
+//! current [`Instant`] as a seam so tests drive a fake clock (thinking-row
+//! durations, the 0.15 s preview throttle) and the bridge passes wall time.
+//!
+//! Semantics transcribed from the Swift (AgentSession.swift line numbers in
+//! each handler):
+//! - `TextStreaming` payloads are ACCUMULATED SNAPSHOTS of the current text
+//!   block — the row text is SET, never appended. The engine resets its
+//!   accumulation at every `content_block_start` but emits no event for a
+//!   plain text block, so a new block is detected by the open row's text no
+//!   longer being a prefix of the snapshot; each opened row joins `unconfirmed`
+//!   at creation.
+//! - `TextConfirmed` rewrites the FIRST unconfirmed row in place (FIFO); only
+//!   an empty `unconfirmed` appends. `Started` drops dangling streaming state
+//!   (upstream resets `streamingID`/`unconfirmedTextIDs`/`hasText` per run).
+//! - Tool rows: input always accumulates; title/preview recompute under the
+//!   0.15 s throttle ([`should_emit_preview`]); `ToolFinished` recomputes both
+//!   over the FULL accumulated input before setting output/state — the engine
+//!   emits no tool content-block-stop, so this is the only home for the title
+//!   finalize over the tail that landed inside one throttle window. The
+//!   preview is kept (M4 review ruling); only fail-open clears it.
+//! - Thinking rows are block-boundary timed through the `apply_at` seam.
+//!
+//! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
+//! constant names its key (the engine crate's established pattern for pure
+//! modules — `fl!()` needs cosmic's runtime, which purity excludes).
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use engine::agent::session::{EngineEvent, TurnOutcome};
+use engine::agent::tool_summary::{live_preview, live_title};
+use engine::project::store::{Action, ChatMessage, Role, ToolActivity, ToolState};
+
+/// The sign-in command shown in the auth-failure row (AgentLocator.swift:25;
+/// the engine's display name "Claude Code" comes from AgentLocator.swift:12).
+const LOGIN_COMMAND: &str = "claude";
+
+/// `sta-ragionando`
+const THINKING_PLACEHOLDER: &str = "Claude Code is thinking…";
+/// `sta-ragionando-circa-token` — the catalog has no engine name, just the
+/// middle-dot form.
+const THINKING_TOKENS: &str = "Thinking · about {tokens} tokens";
+/// `ha-ragionato-per-lld-s`
+const THOUGHT_FOR: &str = "Thought for {seconds} s";
+/// `interrotto`
+const INTERRUPTED: &str = "Stopped";
+/// `non-autenticato-apri-il-terminale-ed-esegui-per-effettuare-l-accesso`
+/// (the en catalog's apostrophe is ASCII).
+const AUTH_ROW: &str = "Claude Code isn't signed in. Open Terminal and run `{command}` to sign in.";
+/// `ha-terminato-con-un-errore-codice-d`. Upstream's `%d` is Swift's
+/// non-optional exit status; the engine's `Option` has no code for signal
+/// deaths and never-spawned turns, which render code-less rather than
+/// inventing a number.
+const ERROR_ROW: &str = "Claude Code ended with an error (code {code}).";
+const ERROR_ROW_NO_CODE: &str = "Claude Code ended with an error.";
+
+/// Upstream's live-preview throttle window (AgentSession.swift:179).
+const PREVIEW_THROTTLE: Duration = Duration::from_millis(150);
+
+/// The live chat transcript plus the per-turn pointers upstream keeps split
+/// across AgentSession and ChatViewModel. Rows are [`ChatMessage`]s exactly as
+/// persisted; the id fields address rows by their [`Uuid`].
+#[derive(Debug, Clone)]
+pub struct ChatState {
+    /// The transcript, in order — what `save_chat` persists and the chat pane
+    /// renders (upstream `ChatViewModel.messages`).
+    pub messages: Vec<ChatMessage>,
+    /// The open thinking row (upstream `chat.activeThinkingID`).
+    pub active_thinking_id: Option<Uuid>,
+    /// The open streaming text row (upstream `streamingID`).
+    pub streaming_id: Option<Uuid>,
+    /// When the open thinking row opened (upstream `thinkingStart`) — read
+    /// through the `apply_at` seam, never wall time.
+    pub thinking_started_at: Option<Instant>,
+    /// Streaming rows not yet confirmed, FIFO (upstream `unconfirmedTextIDs`).
+    pub unconfirmed: Vec<Uuid>,
+    /// An assistant text block was confirmed this turn (upstream `hasText`);
+    /// reset by [`EngineEvent::Started`].
+    pub turn_had_confirmed_text: bool,
+    /// The input bar's draft (upstream `ChatViewModel.draft`).
+    pub draft: String,
+    /// The draft's attachment references (upstream `draftAttachments`).
+    pub draft_attachments: Vec<String>,
+    /// Per tool id, when its title/preview were last recomputed (upstream
+    /// `LiveTool.updatedAt`); absent = never emitted.
+    tool_last_emit: HashMap<String, Instant>,
+}
+
+impl ChatState {
+    /// A state over a loaded transcript (callers do
+    /// `load_chat(root).unwrap_or_default()` — upstream's `(try? …) ?? []`).
+    /// Loaded rows are all closed: no streaming, thinking, or unconfirmed
+    /// row reopens, whatever state a crash left them in.
+    pub fn new(persisted: Vec<ChatMessage>) -> Self {
+        Self {
+            messages: persisted,
+            active_thinking_id: None,
+            streaming_id: None,
+            thinking_started_at: None,
+            unconfirmed: Vec::new(),
+            turn_had_confirmed_text: false,
+            draft: String::new(),
+            draft_attachments: Vec::new(),
+            tool_last_emit: HashMap::new(),
+        }
+    }
+
+    /// Translate one engine event at wall time `now`.
+    pub fn apply_at(&mut self, event: &EngineEvent, now: Instant) {
+        match event {
+            EngineEvent::Started { .. } => self.begin_turn(),
+            EngineEvent::ThinkingStarted => self.thinking_started(now),
+            EngineEvent::Thinking { estimated_tokens } => self.thinking_tokens(*estimated_tokens),
+            EngineEvent::ThinkingFinished => self.thinking_finished(now),
+            EngineEvent::TextStreaming { text } => self.text_streaming(text),
+            EngineEvent::TextConfirmed { text } => self.text_confirmed(text),
+            EngineEvent::ToolStarted { id, name, title } => self.tool_started(id, name, title),
+            EngineEvent::ToolInput { id, partial } => self.tool_input(id, partial, now),
+            EngineEvent::ToolFinished { id, output, is_error } => {
+                self.complete_tool(id, output, *is_error);
+            }
+            EngineEvent::System { text } => {
+                self.append_row(Role::System, text.clone());
+            }
+            EngineEvent::TurnFinished(outcome) => self.turn_finished(outcome),
+        }
+    }
+
+    /// [`ChatState::apply_at`] on the wall clock — the production seam.
+    pub fn apply(&mut self, event: &EngineEvent) {
+        self.apply_at(event, Instant::now());
+    }
+
+    /// Running tool rows become failed with their preview cleared — upstream
+    /// `failRunningTools` (ChatViewModel.swift:87-92), run at every turn end.
+    pub fn fail_running_tools(&mut self) {
+        for row in &mut self.messages {
+            if let Some(tool) = row.tool.as_mut() {
+                if tool.state == ToolState::Running {
+                    tool.state = ToolState::Failed;
+                    tool.preview = None;
+                }
+            }
+        }
+    }
+
+    /// The input bar can send when the draft has non-whitespace text or an
+    /// attachment is staged (upstream `canSend`).
+    pub fn can_send(&self) -> bool {
+        !self.draft.trim().is_empty() || !self.draft_attachments.is_empty()
+    }
+
+    /// Take the draft for a send: trimmed text plus staged attachments,
+    /// clearing both. `None` when there is nothing to send (upstream
+    /// `takeDraft`).
+    pub fn take_draft(&mut self) -> Option<(String, Vec<String>)> {
+        let text = self.draft.trim().to_string();
+        if text.is_empty() && self.draft_attachments.is_empty() {
+            return None;
+        }
+        let attachments = std::mem::take(&mut self.draft_attachments);
+        self.draft.clear();
+        Some((text, attachments))
+    }
+
+    /// Append a row, returning its id (upstream `ChatViewModel.append`).
+    pub fn append(&mut self, message: ChatMessage) -> Uuid {
+        let id = message.id;
+        self.messages.push(message);
+        id
+    }
+
+    /// Upstream `run()`'s per-turn resets (AgentSession.swift:33-38): the
+    /// dangling streaming row is dropped from the pointers (its partial text
+    /// stays in the transcript), the unconfirmed queue with it.
+    fn begin_turn(&mut self) {
+        self.streaming_id = None;
+        self.unconfirmed.clear();
+        self.turn_had_confirmed_text = false;
+        self.tool_last_emit.clear();
+    }
+
+    /// Upstream `startBlock`'s thinking case (AgentSession.swift:149-153).
+    fn thinking_started(&mut self, now: Instant) {
+        let id = self.append_row(Role::Thinking, THINKING_PLACEHOLDER);
+        self.active_thinking_id = Some(id);
+        self.thinking_started_at = Some(now);
+    }
+
+    /// Upstream `updateThinking` (AgentSession.swift:188-191).
+    fn thinking_tokens(&mut self, estimated_tokens: i64) {
+        if let Some(id) = self.active_thinking_id {
+            self.set_text(id, THINKING_TOKENS.replace("{tokens}", &estimated_tokens.to_string()));
+        }
+    }
+
+    /// Upstream `stopBlock`'s thinking case (AgentSession.swift:165-170):
+    /// `max(1, round(interval))`, the row id and start both cleared.
+    fn thinking_finished(&mut self, now: Instant) {
+        let Some(id) = self.active_thinking_id.take() else { return };
+        let seconds = match self.thinking_started_at.take() {
+            Some(start) => (now - start).as_secs_f64().round().max(1.0) as i64,
+            None => 1,
+        };
+        self.set_text(id, THOUGHT_FOR.replace("{seconds}", &seconds.to_string()));
+    }
+
+    /// Set the open streaming row's text to the snapshot, opening a row for a
+    /// new block when the open row's text is not a prefix of it. Opened rows
+    /// join `unconfirmed` at creation (AgentSession.swift:225-235 — upstream
+    /// appends the empty row there; the engine's payload is the accumulated
+    /// snapshot, so the row opens holding it).
+    fn text_streaming(&mut self, text: &str) {
+        let open = self.streaming_id.filter(|&id| {
+            self.messages
+                .iter()
+                .rev()
+                .any(|row| row.id == id && text.starts_with(row.text.as_str()))
+        });
+        match open {
+            Some(id) => self.set_text(id, text),
+            None => {
+                let id = self.append_row(Role::Assistant, text);
+                self.unconfirmed.push(id);
+                self.streaming_id = Some(id);
+            }
+        }
+    }
+
+    /// Upstream's assistant text block (AgentSession.swift:239-245): FIFO
+    /// rewrite of the first unconfirmed row, appending only when none queued.
+    fn text_confirmed(&mut self, text: &str) {
+        self.turn_had_confirmed_text = true;
+        match self.unconfirmed.first().copied() {
+            Some(id) => {
+                self.unconfirmed.remove(0);
+                self.set_text(id, text);
+            }
+            None => {
+                self.append_row(Role::Assistant, text);
+            }
+        }
+    }
+
+    /// Upstream `startBlock`'s toolUse case (AgentSession.swift:154-158).
+    fn tool_started(&mut self, id: &str, name: &str, title: &str) {
+        self.messages.push(ChatMessage {
+            id: Uuid::new_v4(),
+            role: Role::Tool,
+            text: title.to_string(),
+            date: OffsetDateTime::now_utc(),
+            tool: Some(ToolActivity {
+                tool_use_id: id.to_string(),
+                name: name.to_string(),
+                input: String::new(),
+                output: None,
+                preview: None,
+                state: ToolState::Running,
+            }),
+            detail: None,
+            action: None,
+            attachments: Vec::new(),
+        });
+    }
+
+    /// Upstream `appendToolInput` (AgentSession.swift:176-186): the input
+    /// always accumulates; the title/preview recompute only past the
+    /// throttle window.
+    fn tool_input(&mut self, id: &str, partial: &str, now: Instant) {
+        let Some(at) = self.last_tool_row(id) else { return };
+        let Some(tool) = self.messages[at].tool.as_mut() else { return };
+        tool.input.push_str(partial);
+        if !should_emit_preview(self.tool_last_emit.get(id).copied(), now) {
+            return;
+        }
+        self.tool_last_emit.insert(id.to_string(), now);
+        let (title, preview) = match self.messages[at].tool.as_ref() {
+            Some(tool) => (live_title(&tool.name, &tool.input), live_preview(&tool.input)),
+            None => return,
+        };
+        self.messages[at].text = title;
+        if let Some(tool) = self.messages[at].tool.as_mut() {
+            tool.preview = preview;
+        }
+    }
+
+    /// Upstream `completeTool` (ChatViewModel.swift:81-85) preceded by the
+    /// title finalize the engine has no event for (the tool's
+    /// content-block-stop, AgentSession.swift:171-173): both recompute over
+    /// the ACCUMULATED input, then output/state land. The preview stays —
+    /// only fail-open clears it. A tool whose input never streamed (a row the
+    /// engine opened at an assistant snapshot, title already `summarize`d
+    /// over the full input) keeps that title: upstream's finalize only runs
+    /// for stream-announced tools (`liveTools[index]`), and recomputing over
+    /// an empty accumulation would clobber it with the generic fallback.
+    fn complete_tool(&mut self, id: &str, output: &str, failed: bool) {
+        let Some(at) = self.last_tool_row(id) else { return };
+        self.tool_last_emit.remove(id);
+        let streamed = self.messages[at]
+            .tool
+            .as_ref()
+            .is_some_and(|tool| !tool.input.is_empty());
+        if streamed {
+            let (title, preview) = match self.messages[at].tool.as_ref() {
+                Some(tool) => (live_title(&tool.name, &tool.input), live_preview(&tool.input)),
+                None => return,
+            };
+            self.messages[at].text = title;
+            if let Some(tool) = self.messages[at].tool.as_mut() {
+                tool.preview = preview;
+            }
+        }
+        let Some(tool) = self.messages[at].tool.as_mut() else { return };
+        tool.output = Some(output.to_string());
+        tool.state = if failed { ToolState::Failed } else { ToolState::Succeeded };
+    }
+
+    /// Upstream `finish`/`reportFailure` (AgentSession.swift:264-303).
+    fn turn_finished(&mut self, outcome: &TurnOutcome) {
+        self.fail_running_tools();
+        self.active_thinking_id = None;
+        match outcome {
+            TurnOutcome::Success { text, .. } => {
+                if !self.turn_had_confirmed_text && !text.is_empty() {
+                    self.append_row(Role::Assistant, text.clone());
+                }
+            }
+            TurnOutcome::Failed { error, auth, exit_code } => {
+                let text = if *auth {
+                    AUTH_ROW.replace("{command}", LOGIN_COMMAND)
+                } else {
+                    match exit_code {
+                        Some(code) => ERROR_ROW.replace("{code}", &code.to_string()),
+                        None => ERROR_ROW_NO_CODE.to_string(),
+                    }
+                };
+                let id = Uuid::new_v4();
+                self.messages.push(ChatMessage {
+                    id,
+                    role: Role::System,
+                    text,
+                    date: OffsetDateTime::now_utc(),
+                    tool: None,
+                    // upstream's auth row keeps the detail unconditionally;
+                    // the error row only when non-empty
+                    detail: if *auth || !error.is_empty() { Some(error.clone()) } else { None },
+                    action: auth.then_some(Action::OpenTerminal),
+                    attachments: Vec::new(),
+                });
+            }
+            // upstream's interrupted summary row; Busy/MissingSession never
+            // reach the app (the engine's dance absorbs them)
+            TurnOutcome::Cancelled => {
+                self.append_row(Role::Summary, INTERRUPTED);
+            }
+            TurnOutcome::Busy | TurnOutcome::MissingSession => {}
+        }
+    }
+
+    /// Index of the LAST row carrying `id`'s tool activity (upstream looks
+    /// rows up by `messages.lastIndex`).
+    fn last_tool_row(&self, id: &str) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|row| row.tool.as_ref().is_some_and(|tool| tool.tool_use_id == id))
+    }
+
+    /// Upstream `setText` (ChatViewModel.swift:59-62): a missing id is a
+    /// no-op, never an error.
+    fn set_text(&mut self, id: Uuid, text: impl Into<String>) {
+        if let Some(row) = self.messages.iter_mut().rev().find(|row| row.id == id) {
+            row.text = text.into();
+        }
+    }
+
+    fn append_row(&mut self, role: Role, text: impl Into<String>) -> Uuid {
+        let id = Uuid::new_v4();
+        self.messages.push(ChatMessage {
+            id,
+            role,
+            text: text.into(),
+            date: OffsetDateTime::now_utc(),
+            tool: None,
+            detail: None,
+            action: None,
+            attachments: Vec::new(),
+        });
+        id
+    }
+}
+
+/// Upstream's 0.15 s live-preview throttle (AgentSession.swift:179): a
+/// recompute fires only when the last one is older than the window — strictly
+/// older, as upstream's `>` comparisons. `None` means never emitted (upstream
+/// seeds `LiveTool.updatedAt` with `Date.distantPast`).
+pub fn should_emit_preview(last_emit: Option<Instant>, now: Instant) -> bool {
+    match last_emit {
+        Some(last) => now - last > PREVIEW_THROTTLE,
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn started() -> EngineEvent {
+        EngineEvent::Started { session_id: None }
+    }
+
+    fn ts(text: &str) -> EngineEvent {
+        EngineEvent::TextStreaming { text: text.into() }
+    }
+
+    fn tc(text: &str) -> EngineEvent {
+        EngineEvent::TextConfirmed { text: text.into() }
+    }
+
+    fn tool_started(id: &str, name: &str) -> EngineEvent {
+        EngineEvent::ToolStarted { id: id.into(), name: name.into(), title: live_title(name, "") }
+    }
+
+    fn tool_input(id: &str, partial: &str) -> EngineEvent {
+        EngineEvent::ToolInput { id: id.into(), partial: partial.into() }
+    }
+
+    fn tool_finished(id: &str, output: &str, is_error: bool) -> EngineEvent {
+        EngineEvent::ToolFinished { id: id.into(), output: output.into(), is_error }
+    }
+
+    fn success(text: &str) -> EngineEvent {
+        EngineEvent::TurnFinished(TurnOutcome::Success { session_id: None, text: text.into() })
+    }
+
+    fn failed(error: &str, auth: bool, exit_code: Option<i32>) -> EngineEvent {
+        EngineEvent::TurnFinished(TurnOutcome::Failed {
+            error: error.into(),
+            auth,
+            exit_code,
+        })
+    }
+
+    fn row_text(state: &ChatState) -> Vec<&str> {
+        state.messages.iter().map(|m| m.text.as_str()).collect()
+    }
+
+    // ─── streaming snapshots ────────────────────────────────────────────────
+
+    /// TextStreaming payloads are accumulated snapshots: the row text is SET,
+    /// so "He" then "Hello" leaves one row reading "Hello" — appending would
+    /// read "HeHello".
+    #[test]
+    fn snapshot_streaming_sets_not_appends() {
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), Instant::now());
+        state.apply_at(&ts("He"), Instant::now());
+        state.apply_at(&ts("Hello"), Instant::now());
+        assert_eq!(row_text(&state), ["Hello"], "{:?}", state.messages);
+        assert_eq!(state.unconfirmed.len(), 1, "the open row is unconfirmed");
+        assert_eq!(state.streaming_id, Some(state.messages[0].id));
+
+        // single block + confirm: exactly ONE row survives, holding the
+        // confirmed text in place
+        state.apply_at(&tc("Hello!"), Instant::now());
+        assert_eq!(row_text(&state), ["Hello!"]);
+        assert!(state.unconfirmed.is_empty());
+        assert!(state.turn_had_confirmed_text);
+
+        // two streamed blocks: a second row opens when the open row's text is
+        // not a prefix of the snapshot, and the confirm lands on the FIRST
+        // row, in place (same id), not on a new append
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), Instant::now());
+        state.apply_at(&ts("He"), Instant::now());
+        state.apply_at(&ts("Hello"), Instant::now());
+        state.apply_at(&ts("A new block"), Instant::now());
+        assert_eq!(row_text(&state), ["Hello", "A new block"]);
+        assert_eq!(state.unconfirmed.len(), 2);
+        let first_streamed = state.messages[0].id;
+        state.apply_at(&tc("Hello, revised"), Instant::now());
+        state.apply_at(&tc("A new block"), Instant::now());
+        assert_eq!(row_text(&state), ["Hello, revised", "A new block"]);
+        assert_eq!(state.messages[0].id, first_streamed, "confirmed in place");
+        assert!(state.unconfirmed.is_empty());
+    }
+
+    /// Confirm with an empty unconfirmed queue appends (text that never
+    /// streamed).
+    #[test]
+    fn confirmed_without_streaming_appends() {
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), Instant::now());
+        state.apply_at(&tc("only confirmed"), Instant::now());
+        assert_eq!(row_text(&state), ["only confirmed"]);
+        assert_eq!(state.messages[0].role, Role::Assistant);
+    }
+
+    /// A new turn's Started drops the dangling streaming row from the
+    /// pointers: its partial text stays as a row, and a later confirm cannot
+    /// reach it (upstream resets `unconfirmedTextIDs` per run,
+    /// AgentSession.swift:34).
+    #[test]
+    fn started_drops_dangling_streaming_row() {
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), Instant::now());
+        state.apply_at(&ts("partial answ"), Instant::now());
+        let partial_id = state.messages[0].id;
+
+        state.apply_at(&started(), Instant::now());
+        assert_eq!(state.streaming_id, None);
+        assert!(state.unconfirmed.is_empty());
+        assert!(!state.turn_had_confirmed_text, "hasText resets per run");
+
+        state.apply_at(&tc("the full answer"), Instant::now());
+        assert_eq!(row_text(&state), ["partial answ", "the full answer"]);
+        assert_ne!(state.messages[1].id, partial_id);
+    }
+
+    // ─── thinking rows ──────────────────────────────────────────────────────
+
+    /// The thinking row's three text forms and the ≥1 s duration rule.
+    #[test]
+    fn thinking_row_lifecycle() {
+        let t0 = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), t0);
+        state.apply_at(&EngineEvent::ThinkingStarted, t0);
+        assert_eq!(row_text(&state), [THINKING_PLACEHOLDER]);
+        assert_eq!(state.messages[0].role, Role::Thinking);
+        let thinking_id = state.messages[0].id;
+        assert_eq!(state.active_thinking_id, Some(thinking_id));
+        assert_eq!(state.thinking_started_at, Some(t0));
+
+        state.apply_at(&EngineEvent::Thinking { estimated_tokens: 50 }, t0);
+        assert_eq!(row_text(&state), ["Thinking · about 50 tokens"]);
+
+        // 2.3 s of open interval rounds to 2
+        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(2300));
+        assert_eq!(row_text(&state), ["Thought for 2 s"]);
+        assert_eq!(state.active_thinking_id, None);
+        assert_eq!(state.thinking_started_at, None);
+
+        // sub-second intervals clamp up to 1 s (upstream max(1, …))
+        let t0 = Instant::now();
+        state.apply_at(&EngineEvent::ThinkingStarted, t0);
+        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(200));
+        assert_eq!(state.messages.last().unwrap().text, "Thought for 1 s");
+        state.apply_at(&EngineEvent::ThinkingStarted, t0);
+        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(600));
+        assert_eq!(state.messages.last().unwrap().text, "Thought for 1 s");
+    }
+
+    /// Token estimates and stops without an open row are no-ops (upstream
+    /// guards both on `activeThinkingID`; pong-style turns carry
+    /// `system/thinking_tokens` with no thinking block at all).
+    #[test]
+    fn thinking_events_without_open_row_are_noops() {
+        let now = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), now);
+        state.apply_at(&EngineEvent::Thinking { estimated_tokens: 50 }, now);
+        state.apply_at(&EngineEvent::ThinkingFinished, now);
+        assert!(state.messages.is_empty());
+
+        // a stop left dangling by the turn end does not resurrect the row
+        state.apply_at(&EngineEvent::ThinkingStarted, now);
+        state.apply_at(&success("done"), now);
+        state.apply_at(&EngineEvent::ThinkingFinished, now);
+        assert_eq!(state.active_thinking_id, None);
+        assert_eq!(row_text(&state), [THINKING_PLACEHOLDER, "done"]);
+    }
+
+    // ─── tool rows ──────────────────────────────────────────────────────────
+
+    /// Full tool row lifecycle: open, throttled live updates, completion with
+    /// the title finalized over the FULL input even when the tail landed
+    /// inside one throttle window, preview and name kept, state set.
+    #[test]
+    fn tool_lifecycle_full() {
+        let t0 = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), t0);
+        state.apply_at(&tool_started("t1", "Write"), t0);
+        let row = &state.messages[0];
+        assert_eq!(row.role, Role::Tool);
+        assert_eq!(row.text, "Writing a file", "title from the engine event");
+        let tool = row.tool.as_ref().unwrap();
+        assert_eq!(tool.name, "Write");
+        assert_eq!(tool.tool_use_id, "t1");
+        assert_eq!(tool.state, ToolState::Running);
+        assert_eq!(tool.input, "");
+        assert_eq!(tool.preview, None);
+        assert_eq!(tool.output, None);
+
+        // first delta emits immediately (never emitted before)
+        state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"alpha"#), t0);
+        let tool = state.messages[0].tool.as_ref().unwrap();
+        assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
+        assert_eq!(tool.input, r#"{"file_path":"model.py","content":"alpha"#);
+        assert_eq!(tool.preview.as_deref(), Some("alpha"));
+
+        // the tail lands 10 ms later — INSIDE the 0.15 s window, so no
+        // recompute even though the input keeps accumulating
+        state.apply_at(&tool_input("t1", r#"\nbeta"}"#), t0 + Duration::from_millis(10));
+        assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
+        assert_eq!(state.messages[0].tool.as_ref().unwrap().input,
+            r#"{"file_path":"model.py","content":"alpha\nbeta"}"#);
+
+        // completion recomputes over the ACCUMULATED input: the line count
+        // now reflects both fragments, the unterminated-string ellipsis is
+        // gone, and the preview/output/state land after it
+        state.apply_at(&tool_finished("t1", "wrote it", false), t0 + Duration::from_millis(20));
+        assert_eq!(state.messages[0].text, "Writing the model · 2 lines");
+        let tool = state.messages[0].tool.as_ref().unwrap();
+        assert_eq!(tool.preview.as_deref(), Some("alpha\nbeta"), "preview kept");
+        assert_eq!(tool.output.as_deref(), Some("wrote it"));
+        assert_eq!(tool.state, ToolState::Succeeded);
+        assert_eq!(tool.name, "Write", "name kept on completion");
+
+        // an errored tool lands failed
+        state.apply_at(&tool_started("t2", "Bash"), t0);
+        state.apply_at(&tool_finished("t2", "Traceback", true), t0);
+        assert_eq!(state.messages[1].tool.as_ref().unwrap().state, ToolState::Failed);
+
+        // input for an unknown row is dropped
+        state.apply_at(&tool_input("ghost", "{}"), t0);
+        assert_eq!(state.messages.len(), 2);
+    }
+
+    /// A delta inside the window does not recompute; once the window has
+    /// passed, the next delta recomputes over everything accumulated.
+    #[test]
+    fn tool_input_recomputes_after_window() {
+        let t0 = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&tool_started("t1", "Write"), t0);
+        state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"a"#), t0);
+        assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
+        // 10 ms later, inside the window: the input accumulates but the title
+        // stays at the first fragment's form
+        state.apply_at(&tool_input("t1", r#"\nb"#), t0 + Duration::from_millis(10));
+        assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
+        // 151 ms after the emit, past the window: the recompute sees both
+        // fragments plus its own
+        state.apply_at(&tool_input("t1", r#"\nc"}"#), t0 + PREVIEW_THROTTLE + Duration::from_millis(1));
+        assert_eq!(state.messages[0].text, "Writing the model · 3 lines");
+        assert_eq!(state.messages[0].tool.as_ref().unwrap().preview.as_deref(), Some("a\nb\nc"));
+    }
+
+    /// Exactly the boundary: strictly older emits, equal does not (upstream's
+    /// strict `>`).
+    #[test]
+    fn preview_throttle_boundary() {
+        let t0 = Instant::now();
+        assert!(should_emit_preview(None, t0));
+        assert!(!should_emit_preview(Some(t0), t0));
+        assert!(!should_emit_preview(Some(t0), t0 + PREVIEW_THROTTLE));
+        assert!(should_emit_preview(Some(t0), t0 + PREVIEW_THROTTLE + Duration::from_nanos(1)));
+    }
+
+    /// A tool the engine opened at an assistant snapshot (no streamed input)
+    /// already carries the `summarize` title computed over the block's full
+    /// input; completion must keep it, not fall back over an empty
+    /// accumulation (upstream's finalize only runs for stream-announced
+    /// tools).
+    #[test]
+    fn tool_finished_keeps_engine_title_without_streamed_input() {
+        let t0 = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&started(), t0);
+        state.apply_at(
+            &EngineEvent::ToolStarted {
+                id: "snap".into(),
+                name: "Bash".into(),
+                title: "Analyzing the model".into(),
+            },
+            t0,
+        );
+        state.apply_at(&tool_finished("snap", "Traceback", true), t0);
+        assert_eq!(state.messages[0].text, "Analyzing the model");
+        let tool = state.messages[0].tool.as_ref().unwrap();
+        assert_eq!(tool.state, ToolState::Failed);
+        assert_eq!(tool.output.as_deref(), Some("Traceback"));
+        assert_eq!(tool.preview, None);
+    }
+
+    // ─── turn ends ──────────────────────────────────────────────────────────
+
+    /// Every turn end fails open tool rows (state failed, preview cleared)
+    /// and clears the thinking pointer, whatever the outcome.
+    #[test]
+    fn fail_open_at_turn_end() {
+        for outcome in [
+            success("done"),
+            failed("boom", false, Some(1)),
+            EngineEvent::TurnFinished(TurnOutcome::Cancelled),
+        ] {
+            let t0 = Instant::now();
+            let mut state = ChatState::new(Vec::new());
+            state.apply_at(&started(), t0);
+            state.apply_at(&tool_started("t1", "Write"), t0);
+            state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"x"#), t0);
+            state.apply_at(&EngineEvent::ThinkingStarted, t0);
+            state.apply_at(&outcome, t0);
+            let tool = state.messages[0].tool.as_ref().unwrap();
+            assert_eq!(tool.state, ToolState::Failed, "{:?}", state.messages);
+            assert_eq!(tool.preview, None, "fail-open clears the preview");
+            assert_eq!(state.active_thinking_id, None);
+        }
+    }
+
+    /// A successful turn without confirmed text appends the outcome text as
+    /// the assistant row (the engine already applied upstream's hasText rule;
+    /// the app appends only when no confirmed row arrived) — including on a
+    /// LATER turn after an earlier one had text, because Started resets the
+    /// flag.
+    #[test]
+    fn success_no_text_appends_turn_text() {
+        let t0 = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+
+        // turn 1: streamed + confirmed, so the outcome text must NOT append
+        state.apply_at(&started(), t0);
+        state.apply_at(&ts("Hi"), t0);
+        state.apply_at(&tc("Hi there"), t0);
+        state.apply_at(&success("Hi there"), t0);
+        assert_eq!(row_text(&state), ["Hi there"], "no duplicate of the outcome text");
+
+        // turn 2: no text at all — the fallback still fires
+        state.apply_at(&started(), t0);
+        state.apply_at(&success("the result text"), t0);
+        assert_eq!(row_text(&state), ["Hi there", "the result text"]);
+        assert_eq!(state.messages[1].role, Role::Assistant);
+
+        // empty outcome text appends nothing
+        state.apply_at(&started(), t0);
+        state.apply_at(&success(""), t0);
+        assert_eq!(state.messages.len(), 2);
+    }
+
+    /// The auth failure row carries the login command text and the
+    /// open-terminal action, and both survive the chat.json round-trip.
+    #[test]
+    fn auth_row_persists_open_terminal_action() {
+        let now = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&failed("api error status 401", true, Some(1)), now);
+        assert_eq!(row_text(&state),
+            ["Claude Code isn't signed in. Open Terminal and run `claude` to sign in."]);
+        let row = &state.messages[0];
+        assert_eq!(row.role, Role::System);
+        assert_eq!(row.action, Some(Action::OpenTerminal));
+        assert_eq!(row.detail.as_deref(), Some("api error status 401"));
+
+        let root = std::env::temp_dir().join(format!("cad-chat-auth-{}", Uuid::new_v4()));
+        engine::project::store::save_chat(&root, &state.messages).unwrap();
+        let reloaded = engine::project::store::load_chat(&root).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].action, Some(Action::OpenTerminal));
+        assert_eq!(reloaded[0].text, state.messages[0].text);
+        assert_eq!(reloaded[0].detail, state.messages[0].detail);
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".cadstudio/chat.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw[0]["action"], "openTerminal");
+    }
+
+    /// The non-auth failure row carries the child's exit code; a code-less
+    /// failure (signal, never spawned) renders without inventing one.
+    #[test]
+    fn non_auth_failure_row_carries_exit_code() {
+        let now = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&failed("the agent fell over", false, Some(3)), now);
+        assert_eq!(row_text(&state), ["Claude Code ended with an error (code 3)."]);
+        let row = &state.messages[0];
+        assert_eq!(row.role, Role::System);
+        assert_eq!(row.action, None);
+        assert_eq!(row.detail.as_deref(), Some("the agent fell over"));
+
+        state.apply_at(&failed("signal death", false, None), now);
+        assert_eq!(state.messages[1].text, "Claude Code ended with an error.");
+        assert_eq!(state.messages[1].detail.as_deref(), Some("signal death"));
+
+        // empty details carry no detail field (upstream's isEmpty-nil)
+        state.apply_at(&failed("", false, Some(1)), now);
+        assert_eq!(state.messages[2].detail, None);
+    }
+
+    /// A cancelled turn appends the summary row; Busy/MissingSession (which
+    /// the engine never emits) still fail open without a row.
+    #[test]
+    fn cancelled_appends_summary_row() {
+        let now = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&EngineEvent::TurnFinished(TurnOutcome::Cancelled), now);
+        assert_eq!(row_text(&state), [INTERRUPTED]);
+        assert_eq!(state.messages[0].role, Role::Summary);
+
+        state.apply_at(&EngineEvent::TurnFinished(TurnOutcome::Busy), now);
+        state.apply_at(&EngineEvent::TurnFinished(TurnOutcome::MissingSession), now);
+        assert_eq!(state.messages.len(), 1);
+    }
+
+    /// System events append verbatim system rows.
+    #[test]
+    fn system_event_appends_row() {
+        let mut state = ChatState::new(Vec::new());
+        state.apply_at(&EngineEvent::System { text: "context reset".into() }, Instant::now());
+        assert_eq!(row_text(&state), ["context reset"]);
+        assert_eq!(state.messages[0].role, Role::System);
+        assert_eq!(state.messages[0].action, None);
+    }
+
+    // ─── persisted-open + draft ─────────────────────────────────────────────
+
+    /// An absent or corrupt chat.json opens an empty transcript — the
+    /// call-site pattern `load_chat(root).unwrap_or_default()`.
+    #[test]
+    fn corrupt_chat_json_opens_empty() {
+        let root = std::env::temp_dir().join(format!("cad-chat-corrupt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".cadstudio")).unwrap();
+        std::fs::write(root.join(".cadstudio/chat.json"), "{ not json").unwrap();
+        let loaded = engine::project::store::load_chat(&root).unwrap_or_default();
+        let state = ChatState::new(loaded);
+        assert!(state.messages.is_empty());
+
+        let absent = std::env::temp_dir().join(format!("cad-chat-absent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&absent).unwrap();
+        let mut state = ChatState::new(engine::project::store::load_chat(&absent).unwrap_or_default());
+        assert!(state.messages.is_empty());
+
+        // and a re-save over the corrupt file rewrites it valid
+        state.apply_at(&tc("fresh"), Instant::now());
+        engine::project::store::save_chat(&absent, &state.messages).unwrap();
+        assert_eq!(engine::project::store::load_chat(&absent).unwrap().len(), 1);
+    }
+
+    /// A persisted transcript loads as-is with no open pointers, even one
+    /// whose last tool row a crash left running.
+    #[test]
+    fn persisted_rows_load_closed() {
+        let persisted = vec![ChatMessage {
+            id: Uuid::new_v4(),
+            role: Role::Tool,
+            text: "Working on the project".into(),
+            date: OffsetDateTime::now_utc(),
+            tool: Some(ToolActivity {
+                tool_use_id: "old".into(),
+                name: "Bash".into(),
+                input: String::new(),
+                output: None,
+                preview: None,
+                state: ToolState::Running,
+            }),
+            detail: None,
+            action: None,
+            attachments: Vec::new(),
+        }];
+        let state = ChatState::new(persisted);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.streaming_id, None);
+        assert!(state.unconfirmed.is_empty());
+        assert_eq!(state.active_thinking_id, None);
+        assert!(!state.turn_had_confirmed_text);
+    }
+
+    /// canSend/takeDraft, ChatViewModel verbatim: whitespace-only drafts
+    /// cannot send, trimming happens on take, attachments alone can send.
+    #[test]
+    fn can_send_and_take_draft() {
+        let mut state = ChatState::new(Vec::new());
+        assert!(!state.can_send());
+        assert_eq!(state.take_draft(), None);
+
+        state.draft = "   \n  ".into();
+        assert!(!state.can_send());
+        assert_eq!(state.take_draft(), None);
+
+        state.draft = "  make a bracket  ".into();
+        assert!(state.can_send());
+        assert_eq!(state.take_draft(), Some(("make a bracket".into(), Vec::new())));
+        assert_eq!(state.draft, "");
+        assert!(!state.can_send());
+
+        state.draft_attachments = vec!["references/bracket.png".into()];
+        assert!(state.can_send());
+        assert_eq!(
+            state.take_draft(),
+            Some(("".into(), vec!["references/bracket.png".into()]))
+        );
+        assert!(state.draft_attachments.is_empty());
+    }
+
+    /// append returns the row's id and appends in order.
+    #[test]
+    fn append_returns_id() {
+        let mut state = ChatState::new(Vec::new());
+        let id = state.append(ChatMessage {
+            id: Uuid::new_v4(),
+            role: Role::User,
+            text: "hello".into(),
+            date: OffsetDateTime::now_utc(),
+            tool: None,
+            detail: None,
+            action: None,
+            attachments: Vec::new(),
+        });
+        assert_eq!(state.messages[0].id, id);
+        assert_eq!(state.messages[0].role, Role::User);
+    }
+}

@@ -187,7 +187,12 @@ dependencies = [
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "engine",
  "libcosmic",
+ "serde_json",
+ "time",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
