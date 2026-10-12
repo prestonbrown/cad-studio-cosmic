@@ -79,12 +79,24 @@ pub struct Vertex {
 /// [`MeshPipeline::prepare_parts`] — iced's Storage owns one pipeline per
 /// type and cannot hand out replacements, so the app's toggle mutates in
 /// place.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
     pub wireframe: bool,
     /// Samples per pixel (1 or 4); a change from what is resident
     /// triggers the in-place rebuild.
     pub msaa: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        // msaa must default to the single-sample count, not u32::default():
+        // 0 would differ from a fresh pipeline's resident 1 and drive the
+        // rebuild into an invalid 0-sample attachment
+        Options {
+            wireframe: false,
+            msaa: 1,
+        }
+    }
 }
 
 /// Per-part model transform (group 1): identity while parts render where
