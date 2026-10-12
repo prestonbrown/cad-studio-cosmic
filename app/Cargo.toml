@@ -11,3 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 libcosmic.workspace = true
+engine = { path = "../engine" }
+# resvg matches the iced fork's own pin (0.45) so the tree carries one copy;
+# image (png) decodes the schematic.png fallback raster.
+resvg = "0.45"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
