@@ -232,6 +232,55 @@ pub mod camera {
     }
 }
 
+/// Two-light parity shading (facts §1, ModelViewer.swift:344-353):
+/// upstream adds two directional lights — key intensity 2600 looking at
+/// the origin from (60,120,90), fill 900 from (-90,40,-60), both SCENE
+/// space, i.e. post-remap — and their PBR output is approximated in-shader
+/// as `intensity/10⁴ · max(dot(n, dir), 0)` over the vertex normal plus a
+/// 0.15 ambient, clamped to [0, 1.2]. The constants live here, once:
+/// [`MeshPipeline`] substitutes them into mesh.wgsl at creation, so the
+/// shader and the headless shading tests run the same numbers.
+pub mod lights {
+    /// Key light position, scene space (ModelViewer.swift:346-348).
+    pub const KEY_POS: [f32; 3] = [60.0, 120.0, 90.0];
+    /// Key light intensity (ModelViewer.swift:347).
+    pub const KEY_INTENSITY: f32 = 2600.0;
+    /// Fill light position, scene space (ModelViewer.swift:350-352).
+    pub const FILL_POS: [f32; 3] = [-90.0, 40.0, -60.0];
+    /// Fill light intensity (ModelViewer.swift:351).
+    pub const FILL_INTENSITY: f32 = 900.0;
+    /// Flat ambient term.
+    pub const AMBIENT: f32 = 0.15;
+    /// Clamp ceiling on the summed light (the recorded approximation).
+    pub const LIT_MAX: f32 = 1.2;
+    /// Directional intensity to diffuse coefficient: 2600 -> 0.26,
+    /// 900 -> 0.09 — the in-shader stand-in for RealityKit's
+    /// directional-light output.
+    const INTENSITY_SCALE: f32 = 1.0 / 10_000.0;
+
+    /// The key light's diffuse coefficient (2600 -> 0.26).
+    pub fn key_coeff() -> f32 {
+        KEY_INTENSITY * INTENSITY_SCALE
+    }
+
+    /// The fill light's diffuse coefficient (900 -> 0.09).
+    pub fn fill_coeff() -> f32 {
+        FILL_INTENSITY * INTENSITY_SCALE
+    }
+
+    /// The light mesh.wgsl applies to a scene-space normal — the Rust twin
+    /// of the substituted WGSL block, so tests derive expected face
+    /// luminances from the constants the shader actually runs. A unit
+    /// normal is the intended input; a zero vector degrades to ambient.
+    pub fn lit(normal: [f32; 3]) -> f32 {
+        let n = glam::Vec3::from_array(normal).normalize_or_zero();
+        let key = glam::Vec3::from_array(KEY_POS).normalize();
+        let fill = glam::Vec3::from_array(FILL_POS).normalize();
+        (key_coeff() * n.dot(key).max(0.0) + fill_coeff() * n.dot(fill).max(0.0) + AMBIENT)
+            .clamp(0.0, LIT_MAX)
+    }
+}
+
 /// The camera for `preset` framing `scene` (upstream's preset-change
 /// reframe, ModelViewer.swift:322-337).
 pub fn preset_camera(scene: &PartScene, preset: camera::Preset, aspect: f32) -> Camera {
@@ -308,6 +357,22 @@ pub struct MeshPipeline {
     alloc_count: u32,
 }
 
+/// mesh.wgsl with the lighting constants substituted from [`lights`] —
+/// the one definition the shader and the shading tests share. The @NAME@
+/// markers are not valid WGSL, so a missed substitution breaks shader
+/// compilation instead of silently rendering numbers the tests do not
+/// assert against.
+fn mesh_wgsl_source() -> String {
+    let vec3 = |p: [f32; 3]| format!("vec3<f32>({}, {}, {})", p[0], p[1], p[2]);
+    include_str!("mesh.wgsl")
+        .replace("@KEY_POS@", &vec3(lights::KEY_POS))
+        .replace("@KEY_COEFF@", &lights::key_coeff().to_string())
+        .replace("@FILL_POS@", &vec3(lights::FILL_POS))
+        .replace("@FILL_COEFF@", &lights::fill_coeff().to_string())
+        .replace("@AMBIENT@", &lights::AMBIENT.to_string())
+        .replace("@LIT_MAX@", &lights::LIT_MAX.to_string())
+}
+
 impl MeshPipeline {
     pub fn new(
         device: &wgpu::Device,
@@ -338,7 +403,7 @@ impl MeshPipeline {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source().into()),
         });
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
@@ -1376,6 +1441,59 @@ mod tests {
         }
         for v in &scene.parts[0].vertices[3..6] {
             assert_eq!(v.color, NEUTRAL, "None paints the neutral");
+        }
+    }
+
+    /// Task 4: every staged triangle is flat-shaded with its own face
+    /// normal — all 3 corners carry normalize(cross(b−a, c−a)) of the
+    /// STAGED (remapped, floor-pinned) positions, recomputed here
+    /// independently of the staging code. A zero-area triangle falls back
+    /// to (0,0,1) (upstream TriangleMesh.swift:21-23). The 1e-4 tolerance
+    /// is float headroom only: a wrong normal (wrong corner order, MODEL
+    /// instead of scene space, unnormalized) is O(1) off.
+    #[test]
+    fn normals_match_cross_product() {
+        let scenes = [
+            PartScene::from_parts(&golden_3mf_parts(), NEUTRAL),
+            PartScene::from_parts(&golden_stl_parts(), NEUTRAL),
+        ];
+        for scene in &scenes {
+            for part in &scene.parts {
+                for tri in part.vertices.chunks_exact(3) {
+                    let (a, b, c) = (
+                        glam::Vec3::from_array(tri[0].pos),
+                        glam::Vec3::from_array(tri[1].pos),
+                        glam::Vec3::from_array(tri[2].pos),
+                    );
+                    let cross = (b - a).cross(c - a);
+                    let len = cross.length();
+                    assert!(len > 0.0, "fixture triangles are non-degenerate");
+                    let n = (cross / len).to_array();
+                    for v in tri {
+                        for axis in 0..3 {
+                            assert!(
+                                (v.normal[axis] - n[axis]).abs() < 1e-4,
+                                "corner normal {:?} != face normal {n:?}",
+                                v.normal
+                            );
+                        }
+                        let l = v.normal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        assert!((l - 1.0).abs() < 1e-4, "unit length, got {l}");
+                    }
+                }
+            }
+        }
+        // degenerate: a zero-area triangle stages the (0,0,1) fallback on
+        // all 3 corners — the brief's literal constant, matching upstream's
+        // addTriangle fallback shape (unobservable: nothing rasterizes)
+        let part = engine::parsing::Part {
+            name: "degenerate".into(),
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
+        for v in &scene.parts[0].vertices {
+            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
         }
     }
 

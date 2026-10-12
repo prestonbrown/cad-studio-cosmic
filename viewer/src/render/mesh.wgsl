@@ -13,6 +13,21 @@ struct Model {
 };
 @group(1) @binding(0) var<uniform> model: Model;
 
+// Two-light parity shading (facts §1, ModelViewer.swift:344-353): upstream
+// lights are directional — key 2600 from (60,120,90), fill 900 from
+// (-90,40,-60), both SCENE space — approximated in-shader as
+// intensity/10⁴ diffuse coefficients over the vertex normal plus ambient,
+// clamped. The @NAME@ markers are substituted from the Rust-side `lights`
+// module at pipeline creation: one definition shared by the shader and the
+// headless shading tests (a surviving marker is invalid WGSL and fails
+// compilation loudly).
+const KEY_POS: vec3<f32> = @KEY_POS@;
+const KEY_COEFF: f32 = @KEY_COEFF@;
+const FILL_POS: vec3<f32> = @FILL_POS@;
+const FILL_COEFF: f32 = @FILL_COEFF@;
+const AMBIENT: f32 = @AMBIENT@;
+const LIT_MAX: f32 = @LIT_MAX@;
+
 struct Vin {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -22,6 +37,7 @@ struct Vout {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) world: vec3<f32>,
+    @location(2) normal: vec3<f32>,
 };
 
 @vertex
@@ -31,6 +47,9 @@ fn vs_main(in: Vin) -> Vout {
     out.clip = camera.view_proj * world;
     out.color = in.color;
     out.world = world.xyz;
+    // w = 0 rotates the normal without translating it — correct for the
+    // rigid part transforms explode/playback will send through `model`
+    out.normal = (model.transform * vec4<f32>(in.normal, 0.0)).xyz;
     return out;
 }
 
@@ -42,11 +61,11 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
         if (camera.section_axis == 2u) { v = in.world.z; }
         if (v > camera.section_pos) { discard; }
     }
-    // upstream lights (upstream-contract §5): key 2600 @ (60,120,90), fill 900 @ (-90,40,-60)
-    let l1 = normalize(vec3<f32>(60.0, 120.0, 90.0));
-    let l2 = normalize(vec3<f32>(-90.0, 40.0, -60.0));
-    // spike: screen-space normal (dpdx/dpdy); M3 uploads real mesh normals
-    let n = normalize(cross(dpdx(in.world), dpdy(in.world)));
-    let lit = 0.26 * max(dot(n, l1), 0.0) + 0.09 * max(dot(n, l2), 0.0) + 0.15;
-    return vec4<f32>(in.color * clamp(lit, 0.0, 1.2), 1.0);
+    // staged normals are unit and `model` is identity today; normalize is
+    // insurance for scaled future transforms
+    let n = normalize(in.normal);
+    let lit = KEY_COEFF * max(dot(n, normalize(KEY_POS)), 0.0)
+            + FILL_COEFF * max(dot(n, normalize(FILL_POS)), 0.0)
+            + AMBIENT;
+    return vec4<f32>(in.color * clamp(lit, 0.0, LIT_MAX), 1.0);
 }

@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
+use viewer::render::camera;
+use viewer::render::lights;
 use viewer::render::{
     Camera, MeshPipeline, PartScene, NEUTRAL, default_camera, srgb_to_linear,
 };
@@ -253,12 +255,14 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
 /// (0.92, 0.15, 0.10) reads back as (246, 108, 89) — the brief's linear-g
 /// `g < 90` band misfires on exactly that. Calibrated from a measured
-/// histogram (T3, per-part colors): cap (246,108,89); blue base faces
-/// (6,47,74), (9,54,85), (10,57,90); red lid faces (89,10,11), (102,13,14),
-/// (107,13,15); background (89,89,97). The reddest mesh face tops out at
-/// r=107, so r > 180 separates the cap from every measured mesh/background
-/// value with >70 of headroom; the g/b caps also exclude any future
-/// bright-but-not-red surface.
+/// histogram (T4, per-part colors under two-light shading): cap
+/// (246,108,89) — the cap shader is unlit, so it alone is
+/// shading-invariant; blue base faces (11,61,95), (13,67,103), (16,75,115);
+/// red lid faces (113,15,16), (123,17,19), (137,21,23); background
+/// (89,89,97). The reddest lit face tops out at r=137, so r > 180
+/// separates the cap from every measured mesh/background value with >40 of
+/// headroom; b < 120 clears the brightest blue face's 115 by 5; the g cap
+/// excludes any future bright-but-not-red surface.
 fn cap_red_pixels(px: &[u8]) -> usize {
     px.chunks(4).filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120).count()
 }
@@ -384,15 +388,20 @@ fn aspect_from_viewport() {
 
 /// Coverage-blend pixels of the 4x resolve (the msaa test): pixels whose
 /// chromaticity sits more than 0.05 from EVERY pure chroma of the frame —
-/// the two part colors and the background. Chroma, not luminance: per-part
-/// colors (T3) put the pure face luminances at 36..52 beside the 91
-/// background while measured blend luminances span 39..85 — no luminance
-/// band separates them anymore. Chroma is lighting-invariant (the per-face
-/// `lit` scalar divides out), so every pure pixel lands within 0.010 of
-/// its part's chroma and a silhouette-edge blend — resolve box-filters the
-/// covered samples — lands strictly between endpoint chromas. Measured on
-/// Metal: exactly 0 in-band pixels at 1x (unblended, single-sample), 1153
-/// at 4x; the 0.05 cut is 5x the measured pure-pixel noise (0.010).
+/// the two part colors and the background. Chroma, not luminance: with
+/// two-light shading (T4 re-measure) the six pure faces span readback
+/// values (11,61,95)..(16,75,115) for the blue base and
+/// (113,15,16)..(137,21,23) for the red lid beside the (89,89,97)
+/// background — pure faces bracket the background on every channel, so no
+/// luminance band separates blends from pures. Chroma is
+/// lighting-invariant (the per-face `lit` scalar divides out), so every
+/// pure pixel lands within 0.0074 of its part's chroma and a
+/// silhouette-edge blend — resolve box-filters the covered samples — lands
+/// strictly between endpoint chromas. Measured on Metal: exactly 0
+/// in-band pixels at 1x (unblended, single-sample), 1153 at 4x — the same
+/// count T3 measured, the blended edge set being geometric while shading
+/// moved only the luminances; the 0.05 cut is ~7x the measured pure-pixel
+/// noise.
 fn blend_pixels(px: &[u8], bg: [u8; 4], blue: [f32; 3], red: [f32; 3]) -> usize {
     let bgc = chroma(decode_linear(&bg));
     px.chunks(4)
@@ -431,10 +440,11 @@ fn msaa_smooths_a_diagonal_edge() {
     // at 1x the pipeline writes unblended single-sample fragments, so every
     // pixel IS a pure chroma — anything else is a blend/state leak
     assert_eq!(e1, 0, "1x frame must contain only pure-chroma pixels");
-    // measured 1153 blend pixels at 4x on Metal (T3 re-measure: the
-    // luminance-band predecessor read 1199 at T2; per-part colors killed
-    // that band — pure faces now span the old blend range — and the chroma
-    // metric replaces it); the floor guards "real AA happened"
+    // measured 1153 blend pixels at 4x on Metal — unchanged by two-light
+    // shading (T4 re-measure: the blended edge set is geometric; T3's
+    // luminance-band predecessor read 1199 at T2 until per-part colors
+    // killed that band and the chroma metric replaced it); the floor
+    // guards "real AA happened"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
@@ -479,10 +489,11 @@ fn two_parts_two_colors() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let (blue, red) = fixture_chromas();
-    // Measured on Metal: a 1x frame has exactly 6 distinct ink values —
-    // three blue faces and three red faces, each within 0.010 of its
-    // part's chroma (u8 quantization noise), the nearest WRONG color 1.4
-    // away. TOL 0.05 holds 5x noise headroom and 28x wrong-color margin.
+    // Measured on Metal (T4, two-light shading): a 1x frame has exactly 6
+    // distinct ink values — three blue faces and three red faces, each
+    // within 0.0074 of its part's chroma (u8 quantization noise), the
+    // nearest WRONG color 1.42 away. TOL 0.05 holds ~7x noise headroom and
+    // 28x wrong-color margin.
     const TOL: f32 = 0.05;
     let mut classified = 0usize;
     let (mut min_row, mut max_row) = (usize::MAX, 0usize);
@@ -565,10 +576,11 @@ fn neutral_when_uncolored() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let neutral = chroma(NEUTRAL);
-    // Measured on Metal: max chroma distance over all 31834 ink pixels is
-    // 0.0078 (u8 quantization on the lit-neutral faces); TOL 0.05 is 6x
-    // that. A per-triangle default color or sRGB passthrough lands 0.1+
-    // away and fails.
+    // Measured on Metal (T4, two-light shading): max chroma distance over
+    // all 98560 ink pixels is 0.0115 (u8 quantization on the lit-neutral
+    // faces — ambient-only faces are dark and quantize coarser); TOL 0.05
+    // is >4x that. A per-triangle default color or sRGB passthrough lands
+    // 0.1+ away and fails.
     const TOL: f32 = 0.05;
     let near = px
         .chunks(4)
@@ -578,6 +590,134 @@ fn neutral_when_uncolored() {
     assert!(
         near as f64 >= 0.99 * n_ink as f64,
         "only {near}/{n_ink} ink pixels sit on the neutral chromaticity"
+    );
+}
+
+/// Two triangles of a planar quad, both winding the same way (so one face
+/// normal).
+fn quad(positions: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) {
+    positions.extend_from_slice(&[a, b, c, a, c, d]);
+}
+
+/// A white cube rotated 45° about MODEL Z (corners on the axes), so the
+/// remap lands its side-face normals at scene azimuths 315°/45°/135°/225°.
+/// The rotation is the point: with an axis-aligned cube no single camera
+/// sees two faces the shading constants separate by 2x — the top face is
+/// the brightest at 0.26·0.7428+0.09·0.3468+0.15 ≈ 0.374, and the dimmest
+/// side face any above-horizon camera can see alongside it lights to
+/// 0.1968, a 1.90x ratio. Viewed from scene yaw 3π/4, the 315°-normal
+/// side faces the camera dead-on and sits >90° from BOTH light directions
+/// — ambient only, lit = 0.15 — while the top face takes
+/// key+fill+ambient; every other side is exactly edge-on. White
+/// (`Some([255,255,255])` is exact linear (1,1,1)) makes readback
+/// luminance equal the light `lights::lit` computes, with no albedo to
+/// divide out.
+fn white_diamond_cube() -> engine::parsing::Part {
+    let h = 20.0;
+    let ring = |z: f32| [[h, 0.0, z], [0.0, h, z], [-h, 0.0, z], [0.0, -h, z]];
+    let (bot, top) = (ring(-h), ring(h));
+    let mut positions = Vec::new();
+    quad(&mut positions, bot[0], bot[1], bot[2], bot[3]); // floor
+    quad(&mut positions, top[0], top[1], top[2], top[3]); // ceiling
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        quad(&mut positions, bot[i], bot[j], top[j], top[i]); // sides
+    }
+    engine::parsing::Part {
+        name: "cube".into(),
+        positions,
+        triangle_colors: vec![Some([255, 255, 255]); 12],
+    }
+}
+
+/// Real normals + the two-light model reach pixels (Task 4): key-facing vs
+/// away-facing regions of a white cube differ in readback luminance by
+/// >=2x, and each region sits in the band derived from the shading
+/// constants — `lights::lit` of the face's scene normal, quantized through
+/// the target's u8 sRGB storage by nearest decoded byte. No measured
+/// constants anywhere: the bands come from the 0.26/0.09/0.15 coefficients
+/// and the cube's geometry.
+#[test]
+fn shaded_faces_differ() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
+    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+    // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
+    let camera = Camera::orbiting(
+        distance,
+        3.0 * std::f32::consts::FRAC_PI_4,
+        0.6,
+        target,
+        800.0 / 600.0,
+    );
+    // expected decoded luminance of a white face with scene normal n: the
+    // linear lit, carried through the target's u8 sRGB quantization
+    // (nearest byte by the same EOTF the readback decodes with) — computed,
+    // not measured
+    let expected = |n: [f32; 3]| {
+        let lit = lights::lit(n);
+        let mut best = 0u8;
+        let mut best_d = f32::MAX;
+        for b in 0u8..=255 {
+            let d = (srgb_to_linear(b) - lit).abs();
+            if d < best_d {
+                best_d = d;
+                best = b;
+            }
+        }
+        srgb_to_linear(best)
+    };
+    let e_top = expected([0.0, 1.0, 0.0]);
+    let e_front = expected([
+        std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        -std::f32::consts::FRAC_1_SQRT_2,
+    ]);
+    assert!(
+        e_top >= 2.0 * e_front,
+        "geometry must give the constants a >=2x pair: {e_top} vs {e_front}"
+    );
+    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    // flat white faces render unblended at 1x, so every region pixel carries
+    // the region's exact value; the 0.01 band absorbs +-1 byte of storage
+    // rounding (Metal rounds to nearest, other backends may differ) and the
+    // 1% unclassified allowance absorbs edge-on slivers
+    let (mut n_top, mut n_front, mut n_ink) = (0usize, 0usize, 0usize);
+    let (mut sum_top, mut sum_front) = (0f64, 0f64);
+    for c in px.chunks(4) {
+        if !is_ink(c, bg) {
+            continue;
+        }
+        n_ink += 1;
+        let l = decode_linear(c)[0] as f64; // white: any channel is luminance
+        if (l - e_top as f64).abs() <= 0.01 {
+            n_top += 1;
+            sum_top += l;
+        } else if (l - e_front as f64).abs() <= 0.01 {
+            n_front += 1;
+            sum_front += l;
+        }
+    }
+    assert!(
+        n_ink > 5_000,
+        "cube must cover a healthy area: {n_ink} ink px"
+    );
+    assert!(
+        n_top > 2_000 && n_front > 2_000,
+        "both regions must be sizable: top {n_top}, front {n_front} of {n_ink}"
+    );
+    assert!(
+        n_top + n_front >= 99 * n_ink / 100,
+        "only the two lit regions should render: {n_top}+{n_front} of {n_ink}"
+    );
+    let (mean_top, mean_front) = (sum_top / n_top as f64, sum_front / n_front as f64);
+    assert!(
+        mean_top >= 2.0 * mean_front,
+        "readback luminance {mean_top:.4} vs {mean_front:.4} = {:.3}x, must be >=2x",
+        mean_top / mean_front
     );
 }
 
