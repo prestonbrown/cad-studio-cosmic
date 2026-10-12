@@ -161,3 +161,19 @@ fn pdf_demanded_when_fewer_pages_than_drawing_pages() {
         "{missing:?}"
     );
 }
+
+#[test]
+fn unreadable_pdf_counts_as_zero_pages() {
+    // upstream `PDFDocument(url:)?.pageCount ?? 0`: a missing schematic.pdf
+    // reads as 0 pages, so the merged-pdf note fires alongside the bare-name
+    // note from the expected-outputs list
+    let root = complete_project();
+    std::fs::remove_file(root.join("schematic.pdf")).unwrap();
+    let man = manifest_at(&root);
+    let missing = missing_requirements(&ctx(&root, 2, Some("P1S"), &man));
+    assert!(
+        missing.iter().any(|s| s.contains("schematic.pdf with all drawing pages")),
+        "{missing:?}"
+    );
+    assert!(missing.contains(&"schematic.pdf".to_string()), "{missing:?}");
+}
