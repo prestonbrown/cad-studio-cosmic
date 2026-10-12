@@ -1,6 +1,7 @@
 //! Mesh/part parsing shared by STL and 3MF (contract §3).
 
 pub mod stl;
+pub mod threemf;
 
 /// Uncolored triangles render in the app's neutral color; engine only says
 /// "no color", the viewer picks RGB (contract §3).

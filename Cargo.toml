@@ -26,3 +26,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 notify = "8"
 lopdf = "0.34"
 thiserror = "2"
+quick-xml = "0.41.0"
+zip = "8.6.0"

@@ -13,8 +13,5 @@ time.workspace = true
 uuid.workspace = true
 notify.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-quick-xml = "0.41.0"
-threemf = "0.8"
-zip = "8.6.0"
+quick-xml.workspace = true
+zip.workspace = true
