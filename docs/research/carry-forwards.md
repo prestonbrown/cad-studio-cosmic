@@ -74,3 +74,4 @@ From M1's reviews, for later milestones:
 
 - Visual gates honestly unclosed by M0: Preston's eyeball verdict on
   shots/ PNGs still pending; window smoke-run of the scaffold app deferred.
+- M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.
