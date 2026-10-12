@@ -1,5 +1,6 @@
-//! Agent session support: executable discovery and the spawn environment
-//! ([`locator`]). Stream decoding and the session driver arrive with the
-//! later M2 tasks.
+//! Agent-side modules: executable discovery and spawn environment
+//! ([`locator`]), tool-use summaries ([`tool_summary`]). Stream decoding,
+//! the claude runner and the session driver arrive with the later M2 tasks.
 
 pub mod locator;
+pub mod tool_summary;
