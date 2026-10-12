@@ -1,8 +1,10 @@
 //! Agent-side modules: executable discovery and spawn environment
-//! ([`locator`]), tool-use summaries ([`tool_summary`]), and stream-event
-//! decoding for agent JSONL output ([`stream_event`]). The claude runner and
-//! the session driver arrive with the later M2 tasks.
+//! ([`locator`]), tool-use summaries ([`tool_summary`]), stream-event decoding
+//! for agent JSONL output ([`stream_event`]), and the claude runner's argv and
+//! prompt assembly ([`claude`]). The session driver arrives with the last M2
+//! task.
 
+pub mod claude;
 pub mod locator;
 pub mod stream_event;
 pub mod tool_summary;
