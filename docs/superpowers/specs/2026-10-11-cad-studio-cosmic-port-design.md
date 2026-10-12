@@ -67,8 +67,11 @@ Behaviors that must match upstream exactly:
   direct re-run of `model.py` (no agent).
 - Output watching: `output/` only, 300 ms debounce, per-file mod-time dedup, the
   exact file→reload-kind mapping.
-- Version snapshots: what is copied, when (expected outputs all present ∧ model.py
-  changed), restore semantics incl. session_id swap.
+- Version snapshots: what is copied, when (recorded after an agent-turn success
+  with all expected outputs present, or after a successful manual/slider build —
+  in both cases only when model.py differs from the current version's copy;
+  upstream gates outputs on the turn path only), restore semantics incl.
+  session_id swap.
 - On-disk formats unchanged: `project.json`, `chat.json`, `versions/<n>/`,
   `manifest.json`, `animation.json`, LayoutNode JSON. A project folder must be
   portable between the macOS app and the port.
@@ -113,8 +116,11 @@ Modules mirror the upstream contract; public surface is
   (Linux PATH discovery: `$SHELL -lc` parse + candidates `~/.local/bin`,
   `~/.cargo/bin`, `~/.npm-global/bin`, `/usr/local/bin`, `/usr/bin` + custom
   override; validated with `--version`).
-- `python/` — `env.rs` (venv create/verify/progress milestones), `model.rs`
-  (run model.py, stream output, last-line error, interrupt).
+- `python/` — `env.rs` (venv create/verify/progress milestones; the verified
+  package-versions line lives in a process-global cell mirroring upstream's
+  `PythonEnvironment.shared` — the session prompt's python line reads it, and
+  empty/unverified renders the exact fallback "build123d, matplotlib, numpy"),
+  `model.rs` (run model.py, stream output, last-line error, interrupt).
 - `project/` — store (project.json, chat.json, recents), `versions.rs`
   (snapshot/restore), `manifest.rs`, `outputs.rs` (expected outputs + missing
   list; PDF page count via lopdf), `parameters.rs` (regex rewrite).
@@ -319,6 +325,11 @@ Each milestone ends with the full test suite green on thelio.
   holds app-UI state only (recents, first-run flag). The M4 section of
   `docs/research/carry-forwards.md` is normative input to the M4 plan.
 - **M5 Python + params + versions** — env setup, sliders rebuild, snapshot/restore.
+  Scope binding (2026-10-12, plan-review adjudications): M5 owns the compare
+  PICKER, `comparison_parameters`, and the struck-through previous values (they
+  live in ParametersOverlay.swift); M6 owns only the orange ghost-mesh render.
+  Manual/slider builds and slider commits are M5 (incl. the Compila ⌘B command
+  M4 reserved); the version menu/restore/summary rows are M5.
 - **M6 Viewer tools** — measure, section (GPU), explode/plate/bed, parts overlay, compare.
 - **M7 Animation playback.**
 - **M8 Parity tail** — codex runner, attachments (picker/drag/paste), ZIP export,
