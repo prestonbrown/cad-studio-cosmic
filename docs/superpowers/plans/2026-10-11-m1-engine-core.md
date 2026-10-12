@@ -542,34 +542,79 @@ fn parse_ascii(bytes: &[u8]) -> Result<Part, StlError> {
 
 - [ ] **Step 1: Fixtures** — `fixtures/handmade/make_fixtures.py` exactly as rev 1 (colorgroup with two `p1` overrides on the first two triangles and object `pid="3"` pointing at a colorgroup with NO pindex; units with `unit="centimeter"`; nested with two transform-composing levels). Run `python3 fixtures/handmade/make_fixtures.py` on the Mac; commit artifacts.
 
-- [ ] **Step 2: Failing tests** — `engine/tests/threemf.rs` (rev 1's five tests with these corrections):
+- [ ] **Step 2: Failing tests** — `engine/tests/threemf.rs`:
 
 ```rust
-// golden_two_named_colored_parts: the golden's parts have 12 triangles each —
-assert_eq!(base.triangle_count(), 12);
-assert_eq!(lid.triangle_count(), 12);
-// (build123d's Box meshes are 12-triangle; rev 1's "> 100" was wrong)
+use engine::parsing::threemf::parse_3mf;
+use std::path::PathBuf;
 
-// component_transform_spec_order: unchanged (maxx == 11.0 ± 1e-4)
-// unit_centimeter_scales_x10: unchanged (maxx == 10.0 ± 1e-4)
-// colorgroup_and_per_triangle_p1: unchanged (green/red/None on triangles 0/1/2)
-// nested_components_compose_and_name_falls_through: unchanged
-//   (name "cube", maxx 6.0, maxy 8.0)
-```
+fn fixture(p: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(p)
+}
+fn parse(p: &str) -> Vec<engine::parsing::Part> {
+    parse_3mf(&std::fs::read(fixture(p)).unwrap()).unwrap()
+}
 
-Plus one new test pinning the no-build-items fallback order:
+#[test]
+fn golden_two_named_colored_parts() {
+    let parts = parse("golden/model.3mf");
+    assert_eq!(parts.len(), 2, "one Part per build item");
+    let by_name: std::collections::BTreeMap<&str, &engine::parsing::Part> =
+        parts.iter().map(|p| (p.name.as_str(), p)).collect();
+    let base = by_name.get("base").expect("name survived export");
+    assert_eq!(base.triangle_count(), 12);
+    assert!(base.triangle_colors.iter().all(|c| c.is_some()));
+    assert_eq!(base.triangle_colors[0], Some([0x1F, 0x78, 0xB5]));
+    let lid = by_name.get("lid").unwrap();
+    assert_eq!(lid.triangle_count(), 12);
+    assert_eq!(lid.triangle_colors[0], Some([0xD6, 0x26, 0x29]));
+}
 
-```rust
+#[test]
+fn component_transform_spec_order() {
+    let parts = parse("handmade/component.3mf");
+    assert_eq!(parts.len(), 1);
+    let (_, mx) = parts[0].aabb();
+    assert!((mx[0] - 11.0).abs() < 1e-4, "+10mm x translate at tokens 9-11");
+}
+
+#[test]
+fn unit_centimeter_scales_x10() {
+    let parts = parse("handmade/units.3mf");
+    assert_eq!(parts.len(), 1);
+    let (_, mx) = parts[0].aabb();
+    assert!((mx[0] - 10.0).abs() < 1e-4, "1cm cube -> 10mm");
+}
+
+#[test]
+fn colorgroup_and_per_triangle_p1() {
+    let parts = parse("handmade/colorgroup.3mf");
+    assert_eq!(parts.len(), 1);
+    let p = &parts[0];
+    assert_eq!(p.triangle_colors[0], Some([0, 255, 0]), "p1=0 -> green");
+    assert_eq!(p.triangle_colors[1], Some([255, 0, 0]), "p1=1 -> red");
+    assert_eq!(p.triangle_colors[2], None, "no p1 and object has no pindex -> uncolored");
+}
+
+#[test]
+fn nested_components_compose_and_name_falls_through() {
+    let parts = parse("handmade/nested.3mf");
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "cube", "name from first descendant mesh");
+    let (_, mx) = parts[0].aabb();
+    assert!((mx[0] - 6.0).abs() < 1e-4, "inner +5 x then cube span");
+    assert!((mx[1] - 8.0).abs() < 1e-4, "outer +7 y then cube span");
+}
+
 #[test]
 fn no_build_items_sorts_object_ids_as_strings() {
-    // objects 10 and 2, no <build>: parts come back "10" before "2"
-    let xml = br#"<?xml version="1.0"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources></resources></model>"#;
-    // craft via make_fixtures.py addition: two tiny objects with ids 2 and 10,
-    # // named "b" and "a", no build section — assert parts[0].name == the object-10 part
+    let parts = parse("handmade/nosort.3mf");
+    assert_eq!(parts.len(), 2, "one per object id");
+    assert_eq!(parts[0].name, "ten", "id '10' sorts before id '2' as STRINGS");
 }
 ```
 
-(Concretely: extend `make_fixtures.py` with `nosort.3mf` — objects id=10 name="ten", id=2 name="two", each the CUBE, no `<build>` — and assert `parse_3mf` returns the id-10 part FIRST: `assert_eq!(parts[0].name, "ten")`.)
+(`nosort.3mf`: objects id=10 name="ten" and id=2 name="two", each the CUBE, no `<build>` section — add to make_fixtures.py.)
 
 - [ ] **Step 3: FAIL; Step 4: Implement** `engine/src/parsing/threemf.rs` by porting `engine/tests/parse3mf.rs` @ bf77ad6 (read it first — its `apply()` is the spec-order reference) and extending per contract §3 + upstream quirks: two-phase collect-then-resolve; recursion cap 16 (error past); string-sorted fallback; per-corner positions through v1/v2/v3 indices; `basematerials` AND `colorgroup` tables (`displaycolor`/`color`, `#RRGGBB`/`#RRGGBBAA`, alpha dropped); triangle pid/p1 → object pid/pindex → None; unit scale micron 0.001 / centimeter 10 / inch 25.4 / foot 304.8 / meter 1000 / default 1; transforms composed child-first-then-parent (row-vector); name chain skipping empty names; `<component>` accepted with or without a `<components>` wrapper.
 
@@ -607,9 +652,26 @@ Semantics corrected against `fixtures/upstream-source/MotionStudy.swift`:
 - "At most 4 values" is the agent's writing constraint — the parser does NOT enforce it.
 - `value_names()`: union of `values` keys, first-seen frame order, then sorted (upstream valueNames).
 
-- [ ] **Step 1: Failing tests** — `engine/tests/animation.rs` (rev 1's suite with these corrections):
+- [ ] **Step 1: Failing tests** — `engine/tests/animation.rs` (complete suite):
 
 ```rust
+use engine::parsing::animation::MotionStudy;
+use std::path::PathBuf;
+
+fn golden() -> std::path::PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden/animation.json")
+}
+
+#[test]
+fn golden_parses_sorted_with_three_frames() {
+    let s = MotionStudy::parse(&std::fs::read(golden()).unwrap()).unwrap();
+    assert_eq!(s.title.as_deref(), Some("lid lift"));
+    assert_eq!(s.frames.len(), 3);
+    assert!(s.frames.windows(2).all(|w| w[0].t <= w[1].t), "sorted on load");
+    assert_eq!(s.duration(), 2.0);
+    assert_eq!(s.value_names(), vec!["Lift (mm)"]);
+}
+
 #[test]
 fn malformed_entries_default_to_identity() {
     let s = MotionStudy::parse(br#"{"frames":[
@@ -623,6 +685,39 @@ fn malformed_entries_default_to_identity() {
     let a1 = &s.frames[1].parts["a"];
     let r = a1.rotate; // [0,2,0,2] -> normalized [0, √2/2, 0, √2/2]
     assert!((r.y - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "NON-UNIT input normalized (length was 2√2)");
+    assert!((r.w - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+}
+
+#[test]
+fn interpolation_lerps_translates_and_slerps_rotations() {
+    let s = MotionStudy::parse(br#"{"frames":[
+        {"t": 0.0, "parts": {"lid": {"translate": [0.0, 0.0, 0.0]}},
+         "values": {"Lift (mm)": 0.0}, "collisions": []},
+        {"t": 2.0, "parts": {"lid": {"translate": [0.0, 0.0, 10.0]}},
+         "values": {"Lift (mm)": 10.0},
+         "collisions": [{"parts": ["base", "lid"], "volume": 0.5}]}
+    ]}"#).unwrap();
+    let mid = s.state_at(1.0);
+    assert_eq!(mid.parts["lid"].translate, [0.0, 0.0, 5.0]);
+    assert!((mid.values["Lift (mm)"] - 5.0).abs() < 1e-9);
+    // collisions come from the nearest frame (t=1.0 is equidistant -> the later one)
+    assert_eq!(mid.collisions.len(), 1);
+    assert_eq!(mid.collisions[0].parts, vec!["base".to_string(), "lid".to_string()]);
+    let before = s.state_at(-1.0);
+    assert_eq!(before.parts["lid"].translate, [0.0, 0.0, 0.0]);
+    let after = s.state_at(9.0);
+    assert_eq!(after.parts["lid"].translate, [0.0, 0.0, 10.0]);
+}
+
+#[test]
+fn slerp_quaternions_halfway() {
+    let s = MotionStudy::parse(br#"{"frames":[
+        {"t": 0.0, "parts": {"p": {"rotate": [0.0, 0.0, 0.0, 1.0]}}},
+        {"t": 1.0, "parts": {"p": {"rotate": [0.0, 0.0, 1.0, 0.0]}}}
+    ]}"#).unwrap();
+    let mid = s.state_at(0.5);
+    let r = mid.parts["p"].rotate;
+    assert!((r.z - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
     assert!((r.w - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
 }
 
@@ -649,9 +744,13 @@ fn part_missing_from_one_frame_holds_its_pose() {
     assert_eq!(mid.parts["cam"].translate, [1.0, 0.0, 0.0], "part only in the later frame holds that pose across the span");
     assert_eq!(mid.parts["lid"].translate, [0.0, 0.0, 5.0]);
 }
-```
 
-(Plus rev 1's unchanged tests: `golden_parses_sorted_with_three_frames`, `interpolation_lerps_translates_and_slerps_rotations` — with the collision-nearest-frame tie→later rule — `slerp_quaternions_halfway`, `single_frame_study_is_inert`.)
+#[test]
+fn single_frame_study_is_inert() {
+    let s = MotionStudy::parse(br#"{"frames":[{"t": 0.0}]}"#).unwrap();
+    assert!(!s.is_active());
+}
+```
 
 - [ ] **Step 2: FAIL; Step 3: Implement** per the corrected semantics above (hand-written `Deserialize` for `Pose` for the arity rules; `StudyState { parts: HashMap<String, Pose>, values: BTreeMap<String, f64>, label: Option<String>, collisions: Vec<Collision> }`).
 
@@ -867,9 +966,19 @@ pub mod iso8601_utc {
 - ToolActivity's field is `toolUseID` (property name — needs `#[serde(rename = "toolUseID")]` since camelCase rename yields `toolUseId`).
 - LayoutNode JSON: `{"pane":"chat"|"model3D"|"schematic"}` / `{"split":{"axis":"row"|"column","first":…,"second":…,"fraction":…}}` — `PaneKind::Model3D` serializes as `"model3D"` (mind the casing; hand-write the serde if the derive fights it).
 
-- [ ] **Step 1: Failing tests** — `engine/tests/project.rs` (rev 1's suite with corrected shapes):
+- [ ] **Step 1: Failing tests** — `engine/tests/project.rs` (complete suite):
 
 ```rust
+use engine::project::layout::{Axis, LayoutNode, PaneKind};
+use engine::project::*;
+use std::path::PathBuf;
+
+fn tmp() -> PathBuf {
+    let d = std::env::temp_dir().join(format!("cad-proj-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 #[test]
 fn metadata_roundtrips_upstream_shape() {
     let t = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
@@ -898,11 +1007,81 @@ fn metadata_roundtrips_upstream_shape() {
     assert!(!json.contains('.'), "whole-second dates, no fractional seconds: {json}");
     assert!(json.contains('Z'), "UTC");
     let back: ProjectMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.session_id.as_deref(), Some("abc-123"));
     assert_eq!(back.layout, m.layout);
 }
-```
 
-(Plus rev 1's tests with these deltas: `chat_roundtrips_all_roles_and_tools` asserts `json.contains("\"toolUseID\"")`; `saves_are_atomic_no_tmp_residue`, `project_name_validation_rules`, `recents_dedupe_evict_and_filter_missing` unchanged; loads go through `.cadstudio/project.json` + `.cadstudio/chat.json` paths.)
+#[test]
+fn chat_roundtrips_all_roles_and_tools() {
+    let t = time::OffsetDateTime::from_unix_timestamp(1_700_000_500).unwrap();
+    let msgs = vec![
+        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::User, text: "make a box".into(),
+                      date: t, tool: None, detail: None, action: None,
+                      attachments: vec!["references/1-sketch.png".into()] },
+        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::Tool, text: String::new(), date: t,
+                      tool: Some(ToolActivity { tool_use_id: "tu_1".into(), name: "Bash".into(),
+                          input: "python model.py".into(), output: Some("ok".into()),
+                          preview: Some("Compiles the model".into()), state: ToolState::Succeeded }),
+                      detail: None, action: None, attachments: vec![] },
+        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::System, text: "build failed".into(),
+                      date: t, tool: None, detail: Some("Traceback…".into()),
+                      action: Some(Action::AskClaudeToFix), attachments: vec![] },
+    ];
+    let json = serde_json::to_string(&msgs).unwrap();
+    assert!(json.contains("\"toolUseID\""), "property-name casing");
+    let back: Vec<ChatMessage> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.len(), 3);
+    assert_eq!(back[1].tool.as_ref().unwrap().tool_use_id, "tu_1");
+    assert_eq!(back[2].action, Some(Action::AskClaudeToFix));
+    assert_eq!(back[0].attachments.len(), 1);
+}
+
+#[test]
+fn saves_are_atomic_no_tmp_residue() {
+    let d = tmp();
+    let mut m = ProjectMetadata::new("0.1.0");
+    m.session_id = Some("s1".into());
+    save_metadata(&d, &m).unwrap();
+    assert!(d.join(".cadstudio/project.json").exists());
+    save_chat(&d, &[]).unwrap();
+    assert!(d.join(".cadstudio/chat.json").exists());
+    let mut residue = 0;
+    for e in std::fs::read_dir(d.join(".cadstudio")).unwrap() {
+        if e.unwrap().file_name().to_string_lossy().ends_with(".tmp") { residue += 1; }
+    }
+    assert_eq!(residue, 0);
+    let m2 = load_metadata(&d).unwrap();
+    assert_eq!(m2.session_id.as_deref(), Some("s1"));
+}
+
+#[test]
+fn project_name_validation_rules() {
+    assert!(validate_project_name("Gearbox v2").is_ok());
+    assert!(validate_project_name("").is_err());
+    assert!(validate_project_name(".hidden").is_err(), "no leading dot");
+    assert!(validate_project_name("a/b").is_err());
+    assert!(validate_project_name("a:b").is_err());
+    assert!(validate_project_name("plain-name 123").is_ok());
+}
+
+#[test]
+fn recents_dedupe_evict_and_filter_missing() {
+    let d = tmp();
+    let mut r = RecentProjects::default();
+    for i in 0..14 {
+        let p = d.join(format!("p{i}"));
+        std::fs::create_dir_all(&p).unwrap();
+        r.add(p.clone());
+    }
+    assert_eq!(r.0.len(), 12, "max 12");
+    r.add(d.join("p5"));
+    assert_eq!(r.0.len(), 12);
+    assert_eq!(r.0[0], d.join("p5").canonicalize().unwrap());
+    std::fs::remove_dir_all(d.join("p0")).unwrap();
+    let filtered = r.filter_existing();
+    assert!(!filtered.0.contains(&d.join("p0").canonicalize().unwrap()));
+}
+```
 
 - [ ] **Step 2: FAIL; Step 3: Implement** `store.rs` + `layout.rs` per the shapes above (atomic temp+rename saves; `RecentProjects` add/dedupe-by-canonicalized/max-12/filter-existing; `validate_project_name`: non-empty, no leading ".", no "/" or ":").
 - **Step 4: PASS; Step 5: Commit** `feat(engine): project store — snake_case metadata, whole-second UTC dates, toolUseID, atomic saves, recents`.
@@ -918,7 +1097,88 @@ fn metadata_roundtrips_upstream_shape() {
 **Interfaces:**
 - Produces: `#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] pub enum ReloadKind { Manifest, Plate, Motion, Mesh, Schematic }`; `watch_directory(dir: &Path, debounce: Duration) -> notify::Result<(WatchHandle, Receiver<ReloadKind>)>`. **The inotify watch is registered synchronously before the function returns** (events for writes made immediately after are never missed). Mapping per contract §3 (manifest.json/plate.3mf/animation.json/model.3mf|model.stl/schematic*.svg|png). Non-recursive, output/ only. `WatchHandle` stops on Drop.
 
-- [ ] **Step 1: Failing tests** — rev 1's four tests unchanged (`maps_files_to_reload_kinds`, `storm_collapses_to_one_reload_per_file`, `second_write_after_quiet_emits_again`, `untouched_files_never_reload`) at `FAST = 30ms`.
+- [ ] **Step 1: Failing tests** — `engine/tests/watch.rs`:
+
+```rust
+use engine::watch::{watch_directory, ReloadKind};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
+
+fn tmp_output() -> PathBuf {
+    let d = std::env::temp_dir().join(format!("cad-watch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+fn write(path: &std::path::Path, bytes: &[u8]) {
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(bytes).unwrap();
+}
+
+const FAST: Duration = Duration::from_millis(30);
+
+#[test]
+fn maps_files_to_reload_kinds() {
+    let d = tmp_output();
+    let (_h, rx) = watch_directory(&d, FAST).unwrap();
+    write(&d.join("manifest.json"), b"{}");
+    write(&d.join("plate.3mf"), b"x");
+    write(&d.join("animation.json"), b"{}");
+    write(&d.join("model.3mf"), b"x");
+    write(&d.join("model.stl"), b"x");
+    write(&d.join("schematic.svg"), b"x");
+    write(&d.join("schematic-2.svg"), b"x");
+    write(&d.join("schematic.png"), b"x");
+    write(&d.join("references-dont-care.txt"), b"x");
+    std::thread::sleep(Duration::from_millis(200));
+    let mut kinds = std::collections::BTreeSet::new();
+    while let Ok(k) = rx.try_recv() { kinds.insert(k); }
+    assert!(kinds.contains(&ReloadKind::Manifest));
+    assert!(kinds.contains(&ReloadKind::Plate));
+    assert!(kinds.contains(&ReloadKind::Motion));
+    assert!(kinds.contains(&ReloadKind::Mesh));
+    assert!(kinds.contains(&ReloadKind::Schematic));
+}
+
+#[test]
+fn storm_collapses_to_one_reload_per_file() {
+    let d = tmp_output();
+    let (_h, rx) = watch_directory(&d, FAST).unwrap();
+    for _ in 0..25 {
+        write(&d.join("model.3mf"), b"storm");
+        write(&d.join("manifest.json"), b"{}");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let mut mesh = 0;
+    while let Ok(k) = rx.try_recv() { if k == ReloadKind::Mesh { mesh += 1; } }
+    assert_eq!(mesh, 1, "trailing-edge debounce + mod-time dedup collapse the storm");
+}
+
+#[test]
+fn second_write_after_quiet_emits_again() {
+    let d = tmp_output();
+    let (_h, rx) = watch_directory(&d, FAST).unwrap();
+    write(&d.join("model.3mf"), b"one");
+    std::thread::sleep(Duration::from_millis(150));
+    write(&d.join("model.3mf"), b"two");
+    std::thread::sleep(Duration::from_millis(150));
+    let mut mesh = 0;
+    while let Ok(k) = rx.try_recv() { if k == ReloadKind::Mesh { mesh += 1; } }
+    assert_eq!(mesh, 2);
+}
+
+#[test]
+fn untouched_files_never_reload() {
+    let d = tmp_output();
+    write(&d.join("model.3mf"), b"initial");
+    let (_h, rx) = watch_directory(&d, FAST).unwrap();
+    write(&d.join("manifest.json"), b"{}");
+    std::thread::sleep(Duration::from_millis(200));
+    while let Ok(k) = rx.try_recv() {
+        assert_ne!(k, ReloadKind::Mesh, "model.3mf never changed after watch start");
+    }
+}
+```
 - [ ] **Step 2: FAIL; Step 3: Implement** with **trailing-edge debounce pinned**: the collector resets a per-path timer on every event and emits only after `debounce` of quiet — so N writes inside one window collapse to exactly one reload (this is what makes the storm test deterministic rather than flaky on a loaded box). Mod-time dedup map starts empty (pre-existing files emit nothing without events); a path re-emits when its mod-time moves again after a quiet period.
 - [ ] **Step 4: PASS; Step 5: Commit** `feat(engine): output watcher — trailing-edge debounce, mod-time dedup, kind mapping`.
 
