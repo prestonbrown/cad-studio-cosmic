@@ -14,8 +14,18 @@
 //! camera moves. Camera and section-cap uniforms legitimately write per
 //! frame.
 //!
-//! msaa: `MeshPipeline::new` stays single-sample (the default, byte-identical
-//! frames); `MeshPipeline::with_msaa` (count 4) renders into an owned
+//! The camera is split the same way: [`camera`] holds the ModelViewer.swift
+//! parity math — orbit/zoom/pan formulas, diagonal/2 framing with the floor
+//! pin, view presets, pitch and zoom clamps — as pure functions (the
+//! adapter owns the yaw/pitch/distance/target state and calls in), and
+//! [`lights`] the two-light shading constants the mesh shader substitutes
+//! and the headless tests twin.
+//!
+//! msaa is the settled spec §5 decision (iced's own-pass multisample
+//! settings do not apply to a custom `render()` pass, so the mesh pass owns
+//! its count and resolve target): `MeshPipeline::new` stays single-sample
+//! (the default, byte-identical frames); `MeshPipeline::with_msaa`
+//! (count 4) renders into an owned
 //! multisample color + depth attachment, resolves into an intermediate
 //! single-sample texture, and blits that over the target with premultiplied
 //! alpha — iced's content underneath survives, same Load-and-composite
