@@ -101,20 +101,25 @@ From M2's agent-lifecycle work (task 9 wrap):
 
 ## M3 (viewer productization)
 
-- Upload-once: replace per-frame `TriMesh` clone + full vertex re-upload
+Source of record: `.superpowers/sdd/m3-viewer-facts.md` — it moves to
+`docs/research/` at M3 close (after whole-branch review), not before.
+
+- ~~Upload-once: replace per-frame `TriMesh` clone + full vertex re-upload
   (scene.rs `draw()`, mod.rs prepare) with `Arc<TriMesh>` identity or a dirty
-  flag. GPU-first policy requires it.
-- Derive camera aspect from viewport (16:9 is hardcoded in `default_view_proj`
-  spike shorthand).
-- Orientation-sensitive blit test (a UV flip in blit.wgsl currently passes all
-  MSAA tests — correct today, untested).
-- Wire `with_msaa` into the windowed example Storage (enables the 1×/4× visual
-  toggle Preston asked about; headless proof already stands).
-- Real normals upload replaces the dpdx/dpdy screen-space spike shorthand.
+  flag. GPU-first policy requires it.~~ (landed M3)
+- ~~Derive camera aspect from viewport (16:9 is hardcoded in `default_view_proj`
+  spike shorthand).~~ (landed M3)
+- ~~Orientation-sensitive blit test (a UV flip in blit.wgsl currently passes all
+  MSAA tests — correct today, untested).~~ (landed M3)
+- ~~Wire `with_msaa` into the windowed example Storage (enables the 1×/4× visual
+  toggle Preston asked about; headless proof already stands).~~ (landed M3)
+- ~~Real normals upload replaces the dpdx/dpdy screen-space spike shorthand.~~
+  (landed M3)
 - cull None doubles fragment work (stencil parity needs both faces) — revisit
   if profiling cares.
 - Bounded poll timeout in headless harness if CI-style flakes appear.
-- image dev-dep: `default-features = false, features = ["png"]` at next touch.
+- ~~image dev-dep: `default-features = false, features = ["png"]` at next
+  touch.~~ (landed M3)
 - Dependency law: iced must pin via `git = "pop-os/libcosmic.git"` (the vendored
   fork inside libcosmic's repo), never pop-os/iced.git — a second iced instance
   breaks type identity (Cargo.toml comment records this).
@@ -123,6 +128,12 @@ From M2's agent-lifecycle work (task 9 wrap):
 
 - Winding parity assumes consistently-wound closed meshes; real STL imports
   with flipped facets will produce stray caps/holes — winding robustness needed.
+- No test pins the tripod corner's z placement (from M3's overlay work: the
+  grid tests assert vertex counts and the line/bed blocks, not where the
+  corner sits).
+- msaa 4× composited over the alpha-blended grid is untested through the
+  resolve path — the 4× tests render the mesh alone, so a grid-alpha
+  regression there fails visually only (from M3).
 
 ## M8 (parity tail)
 

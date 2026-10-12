@@ -17,6 +17,12 @@
 //! (both absolute, facts #34/#37); the tripod rises from y=0 at the
 //! footprint corner.
 //!
+//! The bed outline is M6 scope pulled in early: the geometry primitive
+//! lives here with the grid, while its plate-view integration — feeding
+//! the real bed rectangle from project state instead of the `bed:
+//! Option<[f64; 2]>` argument the adapter currently passes as `None` —
+//! is M6's to wire.
+//!
 //! Colors are LINEAR rgb + straight alpha in [`GridVertex`] — the same
 //! recorded assumption as [`crate::render::parts::NEUTRAL`]. The bed
 //! accent is the fixed surfaceless test stand-in for upstream's
