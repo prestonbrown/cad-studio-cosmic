@@ -5,23 +5,36 @@ The M1+ plans must absorb their sections; strike lines as landed.
 
 ## M1 (engine core)
 
-- 3MF parser rewrite from the spike: copy `apply()`/token conventions from
+- ~~3MF parser rewrite from the spike: copy `apply()`/token conventions from
   `engine/tests/parse3mf.rs` at bf77ad6 (spec order: 12 tokens, 4 rows × 3,
   row-vector, translation at tokens 9/10/11) — NOT from the M0 plan doc, whose
-  code listing is historical and pre-correction.
-- Parser must tolerate a missing `<components>` wrapper (handmade fixture omits
-  it; golden has it) and keep spec token order throughout.
-- Do not cargo-cult the spike's dead code: `parse_objects`' unused
+  code listing is historical and pre-correction.~~ (landed M1)
+- ~~Parser must tolerate a missing `<components>` wrapper (handmade fixture omits
+  it; golden has it) and keep spec token order throughout.~~ (landed M1)
+- ~~Do not cargo-cult the spike's dead code: `parse_objects`' unused
   `depth_in_object`/`components` collection, and the under-asserting golden
-  name test (assert names or drop "with_names").
-- Drop the `threemf` dev-dep from engine once the custom parser lands.
+  name test (assert names or drop "with_names").~~ (landed M1)
+- ~~Drop the `threemf` dev-dep from engine once the custom parser lands.~~ (landed M1)
 - Golden facts for tests: 3MF has 4 objects (named meshes id 1 "base" / id 4
   "lid", build items point directly at them, 2 inert component wrappers);
   basematerials #1F78B5FF/#D62629FF; never assert manifest↔3MF color equality
   (1/255 drift); plate.3mf base spans z −4..4 (do not assume parts rest at z=0).
-- Upstream-contract.md:102's "3×4, row-major rows → matrix columns" phrasing is
+- ~~Upstream-contract.md:102's "3×4, row-major rows → matrix columns" phrasing is
   the ambiguous Swift-derived line that caused the original convention bug —
-  the 3MF spec layout above is authoritative for the port.
+  the 3MF spec layout above is authoritative for the port.~~ (landed M1 —
+  consumed by Task 4's spec-order work)
+
+From M1's reviews, for later milestones:
+
+- M4: mesh reload prefers 3MF, falls back to STL with parts `[]` — consumer-side,
+  per upstream parseMesh.
+- M4: project-folder scaffolding (`output/`, `.cadstudio/logs`, default
+  `project.json`) must exist BEFORE `watch_directory` starts (it errors on a
+  missing dir) — upstream ProjectStore.prepare/create, deliberately deferred
+  from M1.
+- M4: watcher wiring passes ~300 ms debounce (upstream 0.3 s).
+- M8: `AppleLanguages` setting intentionally omitted in M1 (language override
+  lands with i18n).
 
 ## M3 (viewer productization)
 
