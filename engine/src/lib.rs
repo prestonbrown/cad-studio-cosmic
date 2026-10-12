@@ -3,3 +3,4 @@
 pub mod parsing;
 pub mod project;
 pub mod settings;
+pub mod watch;
