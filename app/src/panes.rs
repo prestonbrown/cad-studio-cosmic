@@ -36,7 +36,10 @@ pub fn stored_layout(settings: &Settings) -> LayoutNode {
 /// thickness (PaneSplitViewController.swift:71-76). `width`/`height` are the
 /// PaneGrid's pixel size and `spacing` its divider thickness. A region too
 /// small to satisfy both minimums returns the split's current ratio unchanged,
-/// refusing the drag.
+/// refusing the drag. iced's PaneGrid enforces only a single global
+///  and  stores the raw event ratio, so this clamp
+/// is the only enforcement of the per-split minimums: a resize handler must
+/// pass every drag ratio through this before calling .
 pub fn clamp_resize(
     state: &State<PaneKind>,
     split: &Split,
