@@ -38,6 +38,16 @@ From M1's reviews, for later milestones:
 
 ## M4 (app shell)
 
+From the M3 whole-branch review (2026-10-12):
+
+- Pinch/magnify zoom (trackpad gesture) is in the viewer facts' M3 input
+  list (#116) but never got an implementation, owner, or carry-forward:
+  M4 Task 5's `camera_input` OWNS it alongside the parity input wiring
+  (zoom clamp [0.1r, 200r] applies).
+- The "re-frame on size change > 50 % diagonal" behavior slid from M3 T2
+  to M4 (the M4 plan's Task 5 owns it explicitly) — noted here so the
+  deferral is visible where deferrals live, matching its siblings.
+
 From M2's agent-lifecycle work (task 9 wrap):
 
 - EngineEvent is the chat-row source: tool rows are keyed by the
