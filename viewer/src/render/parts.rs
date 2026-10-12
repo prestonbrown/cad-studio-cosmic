@@ -73,6 +73,10 @@ pub struct GpuPart {
     /// dedup, so a quad-faced cube stages its 12 polygon edges plus the 6
     /// face diagonals = 18.
     pub edges: Vec<[u32; 2]>,
+    /// The part's model transform (group 1) — identity from `from_parts`;
+    /// explode offsets and playback poses go through this same slot
+    /// without re-staging vertices.
+    pub transform: [[f32; 4]; 4],
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
     /// Full-content identity over the STAGED vertices: a moved corner, a
@@ -203,6 +207,7 @@ impl PartScene {
                 name: part.name.clone(),
                 vertices,
                 edges: Vec::new(), // set after the pin below
+                transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 aabb_min: mn,
                 aabb_max: mx,
                 content_hash: 0, // set after the pin below

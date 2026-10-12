@@ -765,7 +765,10 @@ fn wireframe_renders_lines_not_faces() {
         800,
         600,
         None,
-        &Options { wireframe: true },
+        &Options {
+            wireframe: true,
+            ..Options::default()
+        },
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
@@ -894,3 +897,291 @@ fn bed_rectangle_present() {
         "accent bbox mid y {bed_y:.0} must sit at the model's floor, below mid {ink_y:.0}"
     );
 }
+
+// --- blit orientation: CPU-rasterized ground truth (pure; no GPU) ---
+
+/// The golden model with its lid translated through the per-part transform
+/// slot (the group-1 model binding the mesh shader already multiplies in —
+/// identity until now). Two offset boxes make an L: asymmetric left-right
+/// AND top-bottom on screen, so a horizontal mirror, a vertical flip, or a
+/// 180° all move ink the CPU grid did not expect.
+fn l_shaped_scene() -> PartScene {
+    let bytes = std::fs::read(fixture("model.3mf"))
+        .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
+    let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[1].name, "lid");
+    let mut scene = PartScene::from_parts(&parts, NEUTRAL);
+    // MODEL +x by 60: the lid (x in [-20, 20]) moves to [40, 60], clear of
+    // the base's footprint (x in [-30, 30]) — an overhang to screen-right
+    // at the iso yaw, still inside the framing headroom
+    scene.parts[1].transform =
+        glam::Mat4::from_translation(glam::Vec3::new(60.0, 0.0, 0.0)).to_cols_array_2d();
+    scene
+}
+
+/// Project a scene-space point through `vp` to pixel coordinates, row 0 at
+/// the top — NDC y-up flipped to texture rows top-down, the same mapping
+/// the GPU's viewport transform and the readback share (so agreement
+/// between this and the readback is the orientation check itself).
+/// `None` behind the near plane.
+fn project_px(vp: [[f32; 4]; 4], p: [f32; 3], w: f32, h: f32) -> Option<(f32, f32)> {
+    let clip = glam::Mat4::from_cols_array_2d(&vp) * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+    if clip.w <= f32::EPSILON {
+        return None;
+    }
+    let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
+    Some(((nx * 0.5 + 0.5) * w, (0.5 - ny * 0.5) * h))
+}
+
+/// Does triangle `t` overlap the axis-aligned rect [x0, x1] x [y0, y1]?
+/// SAT over the rect's two axes and the triangle's three edge normals —
+/// exact area overlap, so the grid marks a cell even when only a corner
+/// of the triangle reaches into it.
+fn tri_overlaps_rect(t: [(f32, f32); 3], x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+    for i in 0..3 {
+        let (a, b) = (t[i], t[(i + 1) % 3]);
+        let (nx, ny) = (-(b.1 - a.1), b.0 - a.0);
+        let len = (nx * nx + ny * ny).sqrt();
+        if len == 0.0 {
+            continue; // degenerate edge projects to a point
+        }
+        let (nx, ny) = (nx / len, ny / len);
+        let rect_r = hw * nx.abs() + hh * ny.abs();
+        let rect_c = cx * nx + cy * ny;
+        let (mut mn, mut mx) = (f32::MAX, f32::MIN);
+        for p in t {
+            let d = p.0 * nx + p.1 * ny;
+            mn = mn.min(d);
+            mx = mx.max(d);
+        }
+        if mx < rect_c - rect_r || mn > rect_c + rect_r {
+            return false;
+        }
+    }
+    !(t.iter().all(|p| p.0 < x0)
+        || t.iter().all(|p| p.0 > x1)
+        || t.iter().all(|p| p.1 < y0)
+        || t.iter().all(|p| p.1 > y1))
+}
+
+/// Coarse occupancy grid of `scene` under `vp`: cell (x, y) is set when any
+/// staged triangle — carried through its part's transform, exactly as the
+/// mesh shader's group-1 multiply does — overlaps the cell's pixel rect.
+/// Returns the grid width and the row-major cells. Pure CPU geometry: the
+/// same triangles the GPU rasterizes, projected by the same view_proj, so
+/// agreement between this grid and the readback cannot be a
+/// re-implementation accident.
+fn occupancy_grid(
+    scene: &PartScene,
+    vp: [[f32; 4]; 4],
+    w: u32,
+    h: u32,
+    cell: u32,
+) -> (usize, Vec<bool>) {
+    let (gw, gh) = ((w / cell) as usize, (h / cell) as usize);
+    let mut grid = vec![false; gw * gh];
+    for part in &scene.parts {
+        let model = glam::Mat4::from_cols_array_2d(&part.transform);
+        for tri in part.vertices.chunks_exact(3) {
+            let projected: Option<Vec<(f32, f32)>> = tri
+                .iter()
+                .map(|v| {
+                    let world = model * glam::Vec4::new(v.pos[0], v.pos[1], v.pos[2], 1.0);
+                    project_px(vp, [world.x, world.y, world.z], w as f32, h as f32)
+                })
+                .collect();
+            // a triangle crossing the near plane has no sane 2D projection;
+            // the fixture camera keeps everything in front
+            let Some(pts) = projected else { continue };
+            let t = [pts[0], pts[1], pts[2]];
+            let xs = [t[0].0, t[1].0, t[2].0];
+            let ys = [t[0].1, t[1].1, t[2].1];
+            let c0x = (xs.iter().cloned().fold(f32::MAX, f32::min) / cell as f32).floor() as i32;
+            let c1x = (xs.iter().cloned().fold(f32::MIN, f32::max) / cell as f32).floor() as i32;
+            let c0y = (ys.iter().cloned().fold(f32::MAX, f32::min) / cell as f32).floor() as i32;
+            let c1y = (ys.iter().cloned().fold(f32::MIN, f32::max) / cell as f32).floor() as i32;
+            for cy in c0y.max(0)..=c1y.min(gh as i32 - 1) {
+                for cx in c0x.max(0)..=c1x.min(gw as i32 - 1) {
+                    let (x0, y0) = (cx as f32 * cell as f32, cy as f32 * cell as f32);
+                    if tri_overlaps_rect(t, x0, y0, x0 + cell as f32, y0 + cell as f32) {
+                        grid[cy as usize * gw + cx as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    (gw, grid)
+}
+
+/// The occupancy floor the orientation assertions share: the grid must
+/// describe a real render, not a sliver.
+fn occupied_cells(grid: &[bool]) -> usize {
+    grid.iter().filter(|c| **c).count()
+}
+
+/// The fixture must actually discriminate orientations: the CPU grid of the
+/// L agrees with itself, but a horizontal mirror, a vertical flip, or a
+/// 180° rotation must each fall well below the 85% agreement bar
+/// `orientation_pattern_matches_projection` enforces — otherwise that test
+/// passes vacuously and a flipped blit ships. Pure CPU: runs without a GPU.
+#[test]
+fn orientation_grid_discriminates_mirrors() {
+    let scene = l_shaped_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    const CELL: u32 = 25;
+    let (gw, grid) = occupancy_grid(&scene, camera.view_proj, 800, 600, CELL);
+    let (gh, n) = (grid.len() / gw, occupied_cells(&grid));
+    assert!(
+        n >= gw * gh / 8,
+        "minimum-occupancy floor: {n} of {} cells — the grid must describe a real render",
+        gw * gh
+    );
+    let hflip: Vec<bool> = grid
+        .chunks(gw)
+        .flat_map(|row| row.iter().rev())
+        .copied()
+        .collect();
+    let vflip: Vec<bool> = grid.chunks(gw).rev().flatten().copied().collect();
+    let rot180: Vec<bool> = grid.iter().rev().copied().collect();
+    for (name, m) in [("horizontal", hflip), ("vertical", vflip), ("180°", rot180)] {
+        let agree = grid.iter().zip(&m).filter(|(a, b)| **a && **b).count();
+        assert!(
+            (agree as f64) < 0.80 * n as f64,
+            "{name} mirror agrees {agree}/{n} — the L fixture stopped discriminating flips"
+        );
+    }
+}
+
+/// The M0-deferred orientation obligation: the readback's occupied-cell
+/// pattern must match a CPU rasterization of the SAME triangles through
+/// the SAME view_proj — a flipped projection, viewport, or readback row
+/// order lands the L where the CPU grid says nothing is. Agreement is
+/// measured over OCCUPIED cells (raw cell agreement is dominated by empty
+/// cells and passes vacuously), with a minimum-occupancy floor and an
+/// extra-ink bound so a render that invents coverage cannot sneak through
+/// the occupied-side denominator. Checked at 1x and through the 4x
+/// resolve+blit path — a UV flip in the blit would mirror only the
+/// composited frame, so the 1x leg alone cannot catch it.
+#[test]
+fn orientation_pattern_matches_projection() {
+    let (device, queue) = gpu::device_queue();
+    let scene = l_shaped_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
+    assert!(
+        ink_pixels(&px, bg) > 5_000,
+        "the L must cover a healthy area: {}",
+        ink_pixels(&px, bg)
+    );
+    const CELL: u32 = 25;
+    let (gw, cpu) = occupancy_grid(&scene, camera.view_proj, 800, 600, CELL);
+    let gh = cpu.len() / gw;
+    let n = occupied_cells(&cpu);
+    assert!(
+        n >= gw * gh / 8,
+        "minimum-occupancy floor: the CPU grid must describe a real render ({n} cells)"
+    );
+    let assert_grid_agrees = |px: &[u8], label: &str| {
+        let mut gpu = vec![false; cpu.len()];
+        for (i, c) in px.chunks(4).enumerate() {
+            if is_ink(c, bg) {
+                let (x, y) = (i % 800, i / 800);
+                gpu[y / CELL as usize * gw + x / CELL as usize] = true;
+            }
+        }
+        let agree = cpu.iter().zip(&gpu).filter(|(c, g)| **c && **g).count();
+        assert!(
+            agree as f64 >= 0.85 * n as f64,
+            "{label}: only {agree}/{n} CPU-occupied cells are ink in the readback — an orientation flip somewhere in the render path"
+        );
+        let gpu_n = occupied_cells(&gpu);
+        assert!(
+            gpu_n as f64 <= 1.25 * n as f64,
+            "{label}: readback invents coverage: {gpu_n} GPU cells vs {n} CPU cells"
+        );
+    };
+    assert_grid_agrees(&px, "1x");
+    // and through the resolve+blit path, where a UV flip in the blit would
+    // mirror the composited frame — the M0 obligation's actual subject
+    let px4 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 4);
+    assert!(
+        ink_pixels(&px4, bg) > 5_000,
+        "the L must cover a healthy area at 4x: {}",
+        ink_pixels(&px4, bg)
+    );
+    assert_grid_agrees(&px4, "4x blit");
+}
+
+/// The example's msaa toggle is an internal rebuild: ONE MeshPipeline
+/// flipped 1 -> 4 -> 1 through `Options::msaa` must behave like pipelines
+/// built at those counts — the 4x frame shows coverage-blend pixels (the
+/// resolve+blit path really ran), and the flipped-back 1x frame is
+/// byte-identical to the pre-toggle baseline (the rebuild left no msaa
+/// state behind).
+#[test]
+fn msaa_toggle_rebuilds_in_place() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let (blue, red) = fixture_chromas();
+    let mut bg_pipe = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut bg_pipe, &camera, 800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let one = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        &Options::default(),
+    );
+    let four = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        &Options {
+            msaa: 4,
+            ..Options::default()
+        },
+    );
+    let back = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        &Options::default(),
+    );
+    assert_eq!(blend_pixels(&one, bg, blue, red), 0, "1x has no blends");
+    assert!(
+        blend_pixels(&four, bg, blue, red) > 600,
+        "the rebuilt 4x path must resolve+blit: {}",
+        blend_pixels(&four, bg, blue, red)
+    );
+    assert!(
+        ink_pixels(&four, bg) > 5_000,
+        "the 4x rebuild must still render the model: {}",
+        ink_pixels(&four, bg)
+    );
+    assert_eq!(
+        one, back,
+        "flipping back to 1x must restore the single-sample frame exactly"
+    );
+}
+
