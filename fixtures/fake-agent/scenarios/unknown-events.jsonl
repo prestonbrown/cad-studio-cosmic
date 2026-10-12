@@ -1,0 +1,3 @@
+{"type":"future_event","payload":{"speculative":true},"session_id":"00000000-0000-0000-0000-00000000a006"}
+{"type":"system","subtype":"future_subtype","session_id":"00000000-0000-0000-0000-00000000a006"}
+{"type":"result","subtype":"success","is_error":false,"result":"skipped the unknowns","session_id":"00000000-0000-0000-0000-00000000a006"}

@@ -15,6 +15,32 @@ fn write(path: &std::path::Path, bytes: &[u8]) {
 
 const FAST: Duration = Duration::from_millis(30);
 
+fn drain_until(rx: &std::sync::mpsc::Receiver<ReloadKind>, want: ReloadKind, deadline_ms: u64) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(deadline_ms) {
+        while let Ok(k) = rx.try_recv() { seen.insert(k); }
+        if seen.contains(&want) { return true; }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+/// Same bounded poll for a whole set of wanted kinds; returns everything seen
+/// so each kind can be asserted by name. A per-kind `drain_until` sequence
+/// would not work here: each call consumes the channel, so a sibling kind
+/// drained by an earlier call is gone when its own turn comes.
+fn drain_until_all(rx: &std::sync::mpsc::Receiver<ReloadKind>, wants: &[ReloadKind], deadline_ms: u64) -> std::collections::BTreeSet<ReloadKind> {
+    let mut seen = std::collections::BTreeSet::new();
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(deadline_ms) {
+        while let Ok(k) = rx.try_recv() { seen.insert(k); }
+        if wants.iter().all(|w| seen.contains(w)) { return seen; }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    seen
+}
+
 #[test]
 fn maps_files_to_reload_kinds() {
     let d = tmp_output();
@@ -28,14 +54,11 @@ fn maps_files_to_reload_kinds() {
     write(&d.join("schematic-2.svg"), b"x");
     write(&d.join("schematic.png"), b"x");
     write(&d.join("references-dont-care.txt"), b"x");
-    std::thread::sleep(Duration::from_millis(200));
-    let mut kinds = std::collections::BTreeSet::new();
-    while let Ok(k) = rx.try_recv() { kinds.insert(k); }
-    assert!(kinds.contains(&ReloadKind::Manifest));
-    assert!(kinds.contains(&ReloadKind::Plate));
-    assert!(kinds.contains(&ReloadKind::Motion));
-    assert!(kinds.contains(&ReloadKind::Mesh));
-    assert!(kinds.contains(&ReloadKind::Schematic));
+    let wants = [ReloadKind::Manifest, ReloadKind::Plate, ReloadKind::Motion, ReloadKind::Mesh, ReloadKind::Schematic];
+    let kinds = drain_until_all(&rx, &wants, 2000);
+    for want in wants {
+        assert!(kinds.contains(&want), "missing reload kind {want:?}");
+    }
 }
 
 #[test]
@@ -46,10 +69,8 @@ fn storm_collapses_to_one_reload_per_file() {
         write(&d.join("model.3mf"), b"storm");
         write(&d.join("manifest.json"), b"{}");
     }
-    std::thread::sleep(Duration::from_millis(300));
-    let mut mesh = 0;
-    while let Ok(k) = rx.try_recv() { if k == ReloadKind::Mesh { mesh += 1; } }
-    assert_eq!(mesh, 1, "trailing-edge debounce + mod-time dedup collapse the storm");
+    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "the storm's single Mesh reload never arrived");
+    assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "trailing-edge debounce + mod-time dedup collapse the storm");
 }
 
 #[test]
@@ -57,12 +78,10 @@ fn second_write_after_quiet_emits_again() {
     let d = tmp_output();
     let (_h, rx) = watch_directory(&d, FAST).unwrap();
     write(&d.join("model.3mf"), b"one");
-    std::thread::sleep(Duration::from_millis(150));
+    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "first write never reloaded");
     write(&d.join("model.3mf"), b"two");
-    std::thread::sleep(Duration::from_millis(150));
-    let mut mesh = 0;
-    while let Ok(k) = rx.try_recv() { if k == ReloadKind::Mesh { mesh += 1; } }
-    assert_eq!(mesh, 2);
+    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "second write after quiet never reloaded");
+    assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "a third Mesh reload arrived for two writes");
 }
 
 #[test]
