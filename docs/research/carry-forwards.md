@@ -55,11 +55,49 @@ From M2's agent-lifecycle work (task 9 wrap):
   failure whose chat row carries the `openTerminal` action hint
   (upstream's auth system message instructs running `claude` / `codex
   login` in a terminal; upstream-contract.md:41).
-- The auth classifier's `"401"` needle can substring-match token counts
-  or other numbers in the joined details on nonzero exits (usage
-  objects, durations) — upstream-inherited (AgentSession.swift:321,
-  documented in T8's report); expect a false auth flag to surface here
-  first.
+- The auth classifier's `"401"` needle: the port appends
+  `api error status {status}` to `TurnOutcome::Failed`'s details, so a 401
+  status classifies deterministically — strictly better than upstream's
+  substring luck. The needle still substring-matches token counts or other
+  numbers in the joined details on nonzero exits (usage objects, durations)
+  — upstream-inherited (AgentSession.swift:321, documented in T8's report);
+  word-boundary it when M4 touches it, with a test.
+- A `user` line with MULTIPLE tool_result blocks decodes only the FIRST
+  (probe-shaped; upstream reads every block). A second would leave a tool
+  row open — M4 fails still-open rows at TurnFinished per upstream's
+  failRunningTools; if it ever observes that, extend the decode.
+- Thinking blocks without an open streaming row must be dropped app-side:
+  the engine only emits `TextStreaming`/`TextConfirmed`, never a thinking
+  row (thinking surfaces through `system/thinking_tokens`).
+- An assistant content block this build cannot map degrades to
+  `StreamEvent::Unknown("assistant")` — skipped like any unknown, so a
+  newer agent's block type never breaks the stream decode.
+
+## M5 (python environment)
+
+- `session.rs`'s `PYTHON_UNVERIFIED` display text must adopt upstream's
+  exact fallback: `"build123d, matplotlib, numpy"` when the verified
+  package list is empty (AgentSession.swift:206,
+  `PythonEnvironment.shared.versions.isEmpty ? "build123d, matplotlib, numpy"`)
+  — not the current "python interpreter not verified yet" wording.
+- Intentional classifier divergences to PRESERVE when porting
+  ModelBuilder-side summaries (all supersets of upstream, each with a
+  port-side test):
+  - `live_preview` also previews MultiEdit: it scans `content` OR
+    `new_string`, where upstream's `livePreview` keys off the tool name
+    (Write → `content`, Edit → `new_string`, MultiEdit → none).
+  - `read_title` matches `references/` as a path SEGMENT
+    (`starts_with("references/") || contains("/references/")`); upstream
+    is prefix-only (`hasPrefix("references/")`).
+  - `short_command` with an empty root strips ANY leading `cd … &&`
+    (upstream requires the cd target to be the project root), so a
+    foreign-cd command classifies one class up from upstream.
+- `EngineCommand::Shutdown`'s `reap_orphans` empties the registry
+  unconditionally: a just-cancelled child of THIS process is not signalled
+  (only ppid-1 entries are) but its listing is cleared, so if the app dies
+  before the child does, a later launch's reap no longer knows the pid —
+  consider excluding still-live children from the clearing pass when M5
+  touches process teardown.
 
 ## M3 (viewer productization)
 
