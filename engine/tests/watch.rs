@@ -88,6 +88,10 @@ fn second_write_after_quiet_emits_again() {
 fn untouched_files_never_reload() {
     let d = tmp_output();
     write(&d.join("model.3mf"), b"initial");
+    // the stale-check suppresses writes up to 10ms before registration (the
+    // fs-clock skew margin); on macOS FSEvents a pre-write this close can
+    // land inside that band and pass the test vacuously
+    std::thread::sleep(Duration::from_millis(15));
     let (_h, rx) = watch_directory(&d, FAST).unwrap();
     write(&d.join("manifest.json"), b"{}");
     std::thread::sleep(Duration::from_millis(200));
