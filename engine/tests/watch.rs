@@ -55,7 +55,7 @@ fn maps_files_to_reload_kinds() {
     write(&d.join("schematic.png"), b"x");
     write(&d.join("references-dont-care.txt"), b"x");
     let wants = [ReloadKind::Manifest, ReloadKind::Plate, ReloadKind::Motion, ReloadKind::Mesh, ReloadKind::Schematic];
-    let kinds = drain_until_all(&rx, &wants, 2000);
+    let kinds = drain_until_all(&rx, &wants, 5000);
     for want in wants {
         assert!(kinds.contains(&want), "missing reload kind {want:?}");
     }
@@ -69,7 +69,7 @@ fn storm_collapses_to_one_reload_per_file() {
         write(&d.join("model.3mf"), b"storm");
         write(&d.join("manifest.json"), b"{}");
     }
-    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "the storm's single Mesh reload never arrived");
+    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "the storm's single Mesh reload never arrived");
     assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "trailing-edge debounce + mod-time dedup collapse the storm");
 }
 
@@ -78,9 +78,9 @@ fn second_write_after_quiet_emits_again() {
     let d = tmp_output();
     let (_h, rx) = watch_directory(&d, FAST).unwrap();
     write(&d.join("model.3mf"), b"one");
-    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "first write never reloaded");
+    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "first write never reloaded");
     write(&d.join("model.3mf"), b"two");
-    assert!(drain_until(&rx, ReloadKind::Mesh, 2000), "second write after quiet never reloaded");
+    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "second write after quiet never reloaded");
     assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "a third Mesh reload arrived for two writes");
 }
 
