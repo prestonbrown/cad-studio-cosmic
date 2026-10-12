@@ -101,7 +101,7 @@ const BUSY_FRESH_MESSAGE: &str = "The previous session is still in use by anothe
 
 /// The system row announcing the stored session is gone and the turn
 /// restarted fresh (AgentSession.swift:91; English catalog value).
-const MISSING_SESSION_MESSAGE: &str = "The previous session wasn't found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
+const MISSING_SESSION_MESSAGE: &str = "The previous session wasn’t found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
 
 /// One event of a running turn, in arrival order. Rows are identified by ids
 /// the app keeps; see the module docs for the translation semantics.

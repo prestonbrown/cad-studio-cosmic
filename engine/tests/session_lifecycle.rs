@@ -34,7 +34,7 @@ const BUSY_SID: &str = "11111111-2222-3333-4444-555555555555";
 /// literals are the Italian source strings).
 const BUSY_FRESH_MESSAGE: &str = "The previous session is still in use by another process: the conversation context started over, but the existing model.py is still the basis for the work.";
 /// AgentSession.swift:89-91's system row.
-const MISSING_MESSAGE: &str = "The previous session wasn't found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
+const MISSING_MESSAGE: &str = "The previous session wasn’t found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
 
 fn fixture_fake(p: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
