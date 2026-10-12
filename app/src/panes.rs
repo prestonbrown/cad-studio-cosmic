@@ -37,9 +37,9 @@ pub fn stored_layout(settings: &Settings) -> LayoutNode {
 /// PaneGrid's pixel size and `spacing` its divider thickness. A region too
 /// small to satisfy both minimums returns the split's current ratio unchanged,
 /// refusing the drag. iced's PaneGrid enforces only a single global
-///  and  stores the raw event ratio, so this clamp
+/// `min_size` and `State::resize` stores the raw event ratio, so this clamp
 /// is the only enforcement of the per-split minimums: a resize handler must
-/// pass every drag ratio through this before calling .
+/// pass every drag ratio through this before calling `State::resize`.
 pub fn clamp_resize(
     state: &State<PaneKind>,
     split: &Split,
