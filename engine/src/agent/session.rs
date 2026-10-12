@@ -35,13 +35,23 @@
 //! handle was cancelled ends [`TurnOutcome::Cancelled`] whatever exit code
 //! the child reports (upstream `wasInterrupted` is `Task.isCancelled`).
 //!
-//! The busy/missing/auth retry dance around single turns is the next M2 task;
-//! this module only exposes the case-insensitive classifiers it will need.
+//! The lifecycle dance around single turns is [`Session::send`]
+//! (AgentSession.swift:30-102): the argv resumes (with `--fork-session`)
+//! only while a session id is stored, and only a RESUMED, uncancelled
+//! attempt that errored or produced no result line is classified — over the
+//! combined result text + stdout + stderr, case-insensitively. A busy
+//! collision waits the retry delay and retries once with resume; a second
+//! collision (or a missing session, immediately) clears the stored id,
+//! explains itself through a [`EngineEvent::System`] row, and restarts
+//! fresh. Auth failures and everything else end the turn where it stands
+//! (no retry); a cancel during the retry wait ends the dance with no
+//! further spawn.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use time::macros::format_description;
 use time::OffsetDateTime;
@@ -80,6 +90,19 @@ const PYTHON_UNVERIFIED: &str = "python interpreter not verified yet";
 const LOG_TIMESTAMP: &[time::format_description::FormatItem] =
     format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
 
+/// How long a busy collision is left to clear before the resume retry
+/// (AgentSession.swift:75's 5 s; injectable for tests).
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// The system row announcing a busy collision escalated to a fresh context
+/// (AgentSession.swift:81; English catalog value — the Swift literal is the
+/// Italian source string).
+const BUSY_FRESH_MESSAGE: &str = "The previous session is still in use by another process: the conversation context started over, but the existing model.py is still the basis for the work.";
+
+/// The system row announcing the stored session is gone and the turn
+/// restarted fresh (AgentSession.swift:91; English catalog value).
+const MISSING_SESSION_MESSAGE: &str = "The previous session wasn't found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
+
 /// One event of a running turn, in arrival order. Rows are identified by ids
 /// the app keeps; see the module docs for the translation semantics.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +122,10 @@ pub enum EngineEvent {
     ToolInput { id: String, partial: String },
     /// A `user` tool result closed the row.
     ToolFinished { id: String, output: String, is_error: bool },
+    /// A system chat row the lifecycle dance emits between attempts
+    /// (upstream `role: .system`): the busy and missing-session fallback
+    /// explanations. Nothing else in the engine produces one.
+    System { text: String },
     /// The process ended; no further events follow.
     TurnFinished(TurnOutcome),
 }
@@ -108,10 +135,14 @@ pub enum EngineEvent {
 pub enum TurnOutcome {
     Success { session_id: Option<String>, text: String },
     Failed { error: String, auth: bool },
-    /// Both attempts collided with an active writer; the caller decides on a
-    /// fresh turn (classified by the lifecycle dance, not single turns).
+    /// A resume collided with an active writer twice. [`Session::send`]'s
+    /// dance absorbs this itself (retry, then a fresh run), so the engine
+    /// never emits it; it names the classification for a caller that drives
+    /// single [`Session::run_turn`]s and orchestrates its own retry.
     Busy,
-    /// The stored session is gone; the caller re-runs fresh.
+    /// The stored session is gone. As [`TurnOutcome::Busy`]: the dance
+    /// clears the id and restarts fresh itself, so the engine never emits
+    /// it.
     MissingSession,
     Cancelled,
 }
@@ -144,11 +175,12 @@ impl TurnHandle {
 pub struct Session {
     settings: Settings,
     system_template: String,
+    retry_delay: Duration,
 }
 
 impl Session {
     pub fn new(settings: Settings) -> Self {
-        Self { settings, system_template: String::new() }
+        Self { settings, system_template: String::new(), retry_delay: RETRY_DELAY }
     }
 
     /// Sets the `CADSystemPrompt.md` template substituted into
@@ -160,27 +192,69 @@ impl Session {
         self
     }
 
+    /// Sets the busy-retry wait (production default 5 s) — the test seam for
+    /// the one place the dance deliberately idles.
+    pub fn with_retry_delay(mut self, delay: Duration) -> Self {
+        self.retry_delay = delay;
+        self
+    }
+
+    /// Wire one turn's plumbing (event channel, cancel switch, pid cell) and
+    /// hand the driver task everything it owns.
+    fn launch(&self, root: &Path, req: &TurnRequest) -> (TurnHandle, TurnCtx) {
+        let (events_tx, events) = mpsc::channel(256);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let pid = Arc::new(Mutex::new(None));
+        let ctx = TurnCtx {
+            root: root.to_path_buf(),
+            req: req.clone(),
+            settings: self.settings.clone(),
+            system_template: self.system_template.clone(),
+            retry_delay: self.retry_delay,
+            events: events_tx,
+            cancel: cancel_rx,
+            pid: Arc::clone(&pid),
+        };
+        (TurnHandle { events, cancel: cancel_tx, pid }, ctx)
+    }
+
     /// Runs one turn: spawn, translate, tee, persist, classify. Returns as
     /// soon as the turn is set up — must be called inside a tokio runtime,
     /// and the events arrive on the handle's channel.
     pub fn run_turn(&mut self, root: &Path, req: &TurnRequest) -> TurnHandle {
-        let (events_tx, events) = mpsc::channel(256);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let pid = Arc::new(Mutex::new(None));
-        tokio::spawn(drive(
-            root.to_path_buf(),
-            req.clone(),
-            self.settings.clone(),
-            self.system_template.clone(),
-            events_tx,
-            cancel_rx,
-            Arc::clone(&pid),
-        ));
-        TurnHandle { events, cancel: cancel_tx, pid }
+        let (handle, ctx) = self.launch(root, req);
+        tokio::spawn(single_turn(ctx));
+        handle
+    }
+
+    /// Runs one turn through the full lifecycle dance
+    /// (AgentSession.swift:30-102): resume while a session id is stored,
+    /// classify a resumed-and-errored attempt over its combined
+    /// result+stdout+stderr text, and on busy/missing fall back to a fresh
+    /// run — with the same handle semantics as [`Session::run_turn`]. This
+    /// is the API the app drives.
+    pub fn send(&mut self, root: &Path, req: &TurnRequest) -> TurnHandle {
+        let (handle, ctx) = self.launch(root, req);
+        tokio::spawn(full_dance(ctx));
+        handle
     }
 }
 
-/// Everything the spawned task needs for one turn.
+/// Everything one driver task owns; each attempt of the dance reuses the
+/// plumbing while re-reading the project state it needs.
+struct TurnCtx {
+    root: PathBuf,
+    req: TurnRequest,
+    settings: Settings,
+    system_template: String,
+    retry_delay: Duration,
+    events: mpsc::Sender<EngineEvent>,
+    cancel: watch::Receiver<bool>,
+    pid: Arc<Mutex<Option<u32>>>,
+}
+
+/// The per-attempt translation state plus the metadata base it persists
+/// session ids into.
 struct TurnDriver {
     root: PathBuf,
     metadata: ProjectMetadata,
@@ -204,19 +278,117 @@ struct TurnState {
     stdout_text: String,
 }
 
-async fn drive(
-    root: PathBuf,
-    req: TurnRequest,
-    settings: Settings,
-    system_template: String,
-    events: mpsc::Sender<EngineEvent>,
-    mut cancel_rx: watch::Receiver<bool>,
-    pid_cell: Arc<Mutex<Option<u32>>>,
-) {
+/// One finished attempt: its classified outcome plus the raw text the
+/// dance's busy/missing guards read (upstream classifies over the result
+/// line's text joined with the process's whole output).
+struct Attempt {
+    outcome: TurnOutcome,
+    turn_result: Option<ResultEvent>,
+    stdout: String,
+    stderr: String,
+}
+
+impl Attempt {
+    /// A turn that never produced a stream to classify.
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            outcome: TurnOutcome::Failed { error: error.into(), auth: false },
+            turn_result: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+}
+
+/// [`Session::run_turn`]'s driver: one attempt, then its terminal event.
+async fn single_turn(mut ctx: TurnCtx) {
+    let metadata = stored_metadata(&ctx.root);
+    let resume_sid = metadata.session_id.clone();
+    let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
+    let _ = ctx.events.send(EngineEvent::TurnFinished(attempt.outcome)).await;
+}
+
+/// [`Session::send`]'s driver — the full turn dance
+/// (AgentSession.swift:30-102). Each iteration is one `run()` invocation:
+/// resume while allowed AND stored, classify a resumed, uncancelled,
+/// errored-or-barren attempt, and either continue the dance or emit the
+/// terminal outcome exactly once.
+async fn full_dance(mut ctx: TurnCtx) {
+    let mut attempt_no = 0;
+    let mut allows_resume = true;
+    loop {
+        let metadata = stored_metadata(&ctx.root);
+        let resume_sid = if allows_resume { metadata.session_id } else { None };
+        let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
+
+        // the guards (AgentSession.swift:72/87 + 306/312): only an attempt
+        // that actually resumed, was not cancelled, and errored or produced
+        // no result line is classified — a successful turn's stderr noise is
+        // carried unheard
+        if resume_sid.is_some()
+            && !matches!(attempt.outcome, TurnOutcome::Cancelled)
+            && attempt.turn_result.as_ref().is_none_or(|result| result.is_error)
+        {
+            let combined = combined_text(&attempt);
+            if is_busy_session(&combined) {
+                if attempt_no == 0 {
+                    // leave the collision to clear, then retry once — but a
+                    // cancel during the wait ends the dance with no further
+                    // spawn
+                    let cancelled = tokio::select! {
+                        changed = ctx.cancel.changed() => match changed {
+                            Ok(()) => *ctx.cancel.borrow_and_update(),
+                            // the handle is gone: no cancel can arrive, so
+                            // the wait simply runs out
+                            Err(_) => {
+                                tokio::time::sleep(ctx.retry_delay).await;
+                                false
+                            }
+                        },
+                        _ = tokio::time::sleep(ctx.retry_delay) => false,
+                    };
+                    if cancelled {
+                        let _ = ctx
+                            .events
+                            .send(EngineEvent::TurnFinished(TurnOutcome::Cancelled))
+                            .await;
+                        return;
+                    }
+                    attempt_no = 1;
+                    continue;
+                }
+                clear_session_id(&ctx.root);
+                let _ = ctx
+                    .events
+                    .send(EngineEvent::System { text: BUSY_FRESH_MESSAGE.to_string() })
+                    .await;
+                allows_resume = false;
+                continue;
+            }
+            if is_missing_session(&combined) {
+                clear_session_id(&ctx.root);
+                let _ = ctx
+                    .events
+                    .send(EngineEvent::System { text: MISSING_SESSION_MESSAGE.to_string() })
+                    .await;
+                allows_resume = false;
+                continue;
+            }
+        }
+
+        let _ = ctx.events.send(EngineEvent::TurnFinished(attempt.outcome)).await;
+        return;
+    }
+}
+
+/// One spawned attempt: setup, spawn, translate, tee, persist, classify —
+/// everything a single upstream `run()` does short of emitting a terminal
+/// event. `resume_sid` is the id the argv resumes (None = fresh); the
+/// metadata the attempt persists into is re-read from disk here.
+async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let mut driver = TurnDriver {
-        root: root.clone(),
-        metadata: load_metadata(&root)
-            .unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION"))),
+        root: ctx.root.clone(),
+        metadata: stored_metadata(&ctx.root),
         state: TurnState {
             session_id: None,
             streaming_text: String::new(),
@@ -227,71 +399,57 @@ async fn drive(
             turn_result: None,
             stdout_text: String::new(),
         },
-        events,
+        events: ctx.events.clone(),
     };
 
-    let Some(executable) = resolve_executable(&settings) else {
-        let _ = driver
-            .events
-            .send(EngineEvent::TurnFinished(TurnOutcome::Failed {
-                error: "claude is not installed or was not found. Install it or set its path in settings."
-                    .to_string(),
-                auth: false,
-            }))
-            .await;
-        return;
+    let Some(executable) = resolve_executable(&ctx.settings) else {
+        return Attempt::failed(
+            "claude is not installed or was not found. Install it or set its path in settings.",
+        );
     };
 
     // the missing-output note needs the parts count from the parsed 3MF and
     // a manifest that only counts when it loads
-    let output_dir = root.join("output");
+    let output_dir = ctx.root.join("output");
     let parts_count = std::fs::read(output_dir.join("model.3mf"))
         .ok()
         .and_then(|bytes| parse_3mf(&bytes).ok())
         .map_or(0, |parts| parts.len());
     let manifest = Manifest::load(&output_dir.join("manifest.json")).ok();
     let missing = MissingCtx {
-        project_root: &root,
+        project_root: &ctx.root,
         output_dir: &output_dir,
         parts_count,
-        printer_model: settings.printer_model.as_deref(),
+        printer_model: ctx.settings.printer_model.as_deref(),
         manifest: manifest.as_ref(),
     };
-    let prompt = build_prompt(&req, &root, &missing);
-    let system_prompt = render_system_prompt(&system_template, &prompt_ctx(&root, &settings));
-    let venv_python = root.join(".venv/bin/python");
+    let prompt = build_prompt(&ctx.req, &ctx.root, &missing);
+    let system_prompt =
+        render_system_prompt(&ctx.system_template, &prompt_ctx(&ctx.root, &ctx.settings));
+    let venv_python = ctx.root.join(".venv/bin/python");
     let mut argv = vec![executable.path.to_string_lossy().into_owned()];
     argv.extend(build_args(
         &executable,
         &prompt,
         &system_prompt,
-        &settings,
-        driver.metadata.session_id.as_deref(),
+        &ctx.settings,
+        resume_sid,
         &venv_python,
     ));
     // The login environment is snapshotted per turn: upstream caches it in
     // its long-lived actor, which M4's app can layer on top the same way.
     let env: Vec<(String, String)> = shell_env().into_iter().collect();
 
-    let mut proc = match spawn_streaming(&argv, &root, &env) {
+    let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
-        Err(error) => {
-            let _ = driver
-                .events
-                .send(EngineEvent::TurnFinished(TurnOutcome::Failed {
-                    error: format!("could not start claude: {error}"),
-                    auth: false,
-                }))
-                .await;
-            return;
-        }
+        Err(error) => return Attempt::failed(format!("could not start claude: {error}")),
     };
-    *pid_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc.pid);
+    *ctx.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc.pid);
     // a cancel that arrived before the pid was published still lands
-    if *cancel_rx.borrow() {
+    if *ctx.cancel.borrow() {
         proc.interrupt();
     }
-    let mut log = open_log(&root);
+    let mut log = open_log(&ctx.root);
 
     // One branch per source: a stdout line to translate, or a cancel signal.
     // The cancel arm only flags; proc is touched after the select's futures
@@ -305,14 +463,14 @@ async fn drive(
     loop {
         let step = tokio::select! {
             line = proc.lines.recv() => Step::Line(line),
-            changed = cancel_rx.changed(), if cancel_alive => match changed {
+            changed = ctx.cancel.changed(), if cancel_alive => match changed {
                 Ok(()) => Step::Cancel,
                 Err(_) => Step::CancelChannelClosed,
             },
         };
         match step {
             Step::Cancel => {
-                if *cancel_rx.borrow_and_update() {
+                if *ctx.cancel.borrow_and_update() {
                     proc.interrupt();
                 }
             }
@@ -335,25 +493,42 @@ async fn drive(
     let stderr = stderr_text.await.unwrap_or_default();
     let Ok(status) = exit_status.await else {
         // only reachable when the spawner's reader task itself died
-        let _ = driver
-            .events
-            .send(EngineEvent::TurnFinished(TurnOutcome::Failed {
-                error: "the agent process exited without reporting a status".to_string(),
-                auth: false,
-            }))
-            .await;
-        return;
+        return Attempt::failed("the agent process exited without reporting a status");
     };
-    let interrupted = *cancel_rx.borrow();
-    let final_outcome = if interrupted {
+    let interrupted = *ctx.cancel.borrow();
+    let outcome = if interrupted {
         TurnOutcome::Cancelled
     } else {
         outcome(&driver.state, &stderr, status.success())
     };
-    let _ = driver
-        .events
-        .send(EngineEvent::TurnFinished(final_outcome))
-        .await;
+    Attempt { outcome, turn_result: driver.state.turn_result, stdout: driver.state.stdout_text, stderr }
+}
+
+/// The project's stored metadata, or a fresh document when none loads.
+fn stored_metadata(root: &Path) -> ProjectMetadata {
+    load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION")))
+}
+
+/// Upstream's classification text: the result line's text joined with the
+/// process's whole stdout and stderr (AgentSession.swift:307).
+fn combined_text(attempt: &Attempt) -> String {
+    let mut text = attempt
+        .turn_result
+        .as_ref()
+        .map(|result| result.result.clone())
+        .unwrap_or_default();
+    text.push_str(&attempt.stdout);
+    text.push_str(&attempt.stderr);
+    text
+}
+
+/// Clear the stored session id and persist it (upstream
+/// `project.metadata.sessionID = nil` before a fresh re-run).
+fn clear_session_id(root: &Path) {
+    if let Ok(mut metadata) = load_metadata(root) {
+        metadata.session_id = None;
+        let _ = save_metadata(root, &metadata);
+    }
 }
 
 /// The system-prompt substitutions the session can derive on its own. The
