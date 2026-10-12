@@ -1004,7 +1004,7 @@ fn metadata_roundtrips_upstream_shape() {
     assert!(json.contains("\"pane\":\"model3D\""), "exact casing");
     assert!(json.contains("\"axis\":\"row\""));
     assert!(json.contains("\"fraction\":0.34"));
-    assert!(!json.contains('.'), "whole-second dates, no fractional seconds: {json}");
+    assert_eq!(back.created_at, t, "whole-second round-trip (no fractional-second loss)");
     assert!(json.contains('Z'), "UTC");
     let back: ProjectMetadata = serde_json::from_str(&json).unwrap();
     assert_eq!(back.session_id.as_deref(), Some("abc-123"));
@@ -1077,9 +1077,10 @@ fn recents_dedupe_evict_and_filter_missing() {
     r.add(d.join("p5"));
     assert_eq!(r.0.len(), 12);
     assert_eq!(r.0[0], d.join("p5").canonicalize().unwrap());
+    let deleted = d.join("p0").canonicalize().unwrap();
     std::fs::remove_dir_all(d.join("p0")).unwrap();
     let filtered = r.filter_existing();
-    assert!(!filtered.0.contains(&d.join("p0").canonicalize().unwrap()));
+    assert!(!filtered.0.contains(&deleted));
 }
 ```
 
