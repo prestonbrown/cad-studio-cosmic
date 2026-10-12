@@ -1,5 +1,6 @@
 //! Mesh/part parsing shared by STL and 3MF (contract §3).
 
+pub mod animation;
 pub mod stl;
 pub mod threemf;
 
