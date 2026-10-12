@@ -98,8 +98,13 @@ fn collect(
                     let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
                         continue;
                     };
-                    // Content predates the watch: stale or leaked event.
-                    if mtime <= started_at {
+                    // Content predates the watch: stale or leaked event. The
+                    // filesystem's timestamp clock can trail the realtime
+                    // clock by tens of microseconds, so a write delivered
+                    // right after registration still counts as fresh — only
+                    // content clearly older than the watch start is stale.
+                    const MTIME_SKEW: Duration = Duration::from_millis(10);
+                    if mtime + MTIME_SKEW <= started_at {
                         continue;
                     }
                     // First sight of this file, or its content clock moved.
