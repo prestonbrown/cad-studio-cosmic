@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# The workspace feature set covers the test runtime too (`#[tokio::test]`
+# macros + multi-thread flavor), so integration tests need no separate
+# dev-dependency entry.
+tokio.workspace = true
 serde_json.workspace = true
 directories.workspace = true
 time.workspace = true
