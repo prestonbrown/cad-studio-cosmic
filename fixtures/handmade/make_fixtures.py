@@ -123,8 +123,54 @@ NOSORT = model(
     "  </resources>"
 )
 
+# deep: a chain of `edges` component hops under the build item, cube at the
+# bottom. deep16 sits exactly at the parser's MAX_DEPTH boundary (the walk
+# visits the bottom at depth 16), deep17 one past it (depth 17 -> TooDeep).
+def deep_chain(edges):
+    objects = []
+    for i in range(1, edges + 2):
+        if i == edges + 1:
+            objects.append(f'    <object id="{i}" name="bottom">' + cube_mesh() + "</object>")
+        else:
+            objects.append(
+                f'    <object id="{i}">\n'
+                f'      <component objectid="{i + 1}"/>\n'
+                f"    </object>"
+            )
+    return model(
+        "  <resources>\n" + "\n".join(objects) + "\n  </resources>\n"
+        '  <build><item objectid="1"/></build>'
+    )
+
+
+# cycle: A→B→A never reaches a mesh; the depth cap is what bounds the walk,
+# so parsing must ERROR (TooDeep), not stack-overflow.
+CYCLE = model(
+    "  <resources>\n"
+    '    <object id="1">\n      <component objectid="2"/>\n    </object>\n'
+    '    <object id="2">\n      <component objectid="1"/>\n    </object>\n'
+    "  </resources>\n"
+    '  <build><item objectid="1"/></build>'
+)
+
+# nonames: two build items, each an unnamed wrapper around the same unnamed
+# mesh object — no name anywhere in either chain, so both parts fall back to
+# positional names ("part 1", "part 2").
+NONAMES = model(
+    "  <resources>\n"
+    '    <object id="1"><components><component objectid="3"/></components></object>\n'
+    '    <object id="2"><components><component objectid="3"/></components></object>\n'
+    '    <object id="3">' + cube_mesh() + "</object>\n"
+    "  </resources>\n"
+    '  <build><item objectid="1"/><item objectid="2"/></build>'
+)
+
 if __name__ == "__main__":
     write_3mf("colorgroup.3mf", COLORGROUP)
     write_3mf("units.3mf", UNITS)
     write_3mf("nested.3mf", NESTED)
     write_3mf("nosort.3mf", NOSORT)
+    write_3mf("deep16.3mf", deep_chain(16))
+    write_3mf("deep17.3mf", deep_chain(17))
+    write_3mf("cycle.3mf", CYCLE)
+    write_3mf("nonames.3mf", NONAMES)

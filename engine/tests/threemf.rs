@@ -1,4 +1,4 @@
-use engine::parsing::threemf::parse_3mf;
+use engine::parsing::threemf::{parse_3mf, ThreemfError};
 use std::path::PathBuf;
 
 fn fixture(p: &str) -> PathBuf {
@@ -64,4 +64,34 @@ fn no_build_items_sorts_object_ids_as_strings() {
     let parts = parse("handmade/nosort.3mf");
     assert_eq!(parts.len(), 2, "one per object id");
     assert_eq!(parts[0].name, "ten", "id '10' sorts before id '2' as STRINGS");
+}
+
+#[test]
+fn depth_sixteen_parses_seventeen_errors() {
+    // MAX_DEPTH is the boundary, not an off-by-one guess: 16 component
+    // levels under the build item resolve (the bottom mesh shows up as the
+    // part), one more level is TooDeep.
+    let ok = parse("handmade/deep16.3mf");
+    assert_eq!(ok.len(), 1, "the whole chain resolved into one part");
+    assert_eq!(ok[0].name, "bottom", "the deepest object was reached");
+    let bytes = std::fs::read(fixture("handmade/deep17.3mf")).unwrap();
+    let err = parse_3mf(&bytes).unwrap_err();
+    assert!(matches!(err, ThreemfError::TooDeep), "17 levels -> TooDeep, got {err}");
+}
+
+#[test]
+fn component_cycle_errors_not_stack_overflows() {
+    // A→B→A has no bottom; the depth cap is what bounds that walk, so the
+    // parse returns TooDeep rather than recursing forever.
+    let bytes = std::fs::read(fixture("handmade/cycle.3mf")).unwrap();
+    let err = parse_3mf(&bytes).unwrap_err();
+    assert!(matches!(err, ThreemfError::TooDeep), "cycle -> TooDeep, got {err}");
+}
+
+#[test]
+fn unnamed_chain_gets_positional_part_names() {
+    let parts = parse("handmade/nonames.3mf");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "part 1", "no name anywhere in the chain -> positional");
+    assert_eq!(parts[1].name, "part 2");
 }
