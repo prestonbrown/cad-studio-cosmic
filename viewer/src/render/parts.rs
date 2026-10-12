@@ -68,11 +68,10 @@ pub struct GpuPart {
     /// One vertex per corner (unindexed, per-face).
     pub vertices: Vec<Vertex>,
     /// Unique undirected edges as corner-index pairs into `vertices` —
-    /// the wireframe pass's line list (facts #44). Position-keyed dedup
-    /// over the triangles' corner pairs, then the FLAT pairs drop out: an
-    /// edge shared by two coplanar triangles is a triangulation diagonal,
-    /// not a model edge, so a quad-faced cube stages exactly its 12
-    /// polygon edges.
+    /// the wireframe pass's line list (facts #44): every triangle edge of
+    /// the part, shared ones collapsed to one line by position-keyed
+    /// dedup, so a quad-faced cube stages its 12 polygon edges plus the 6
+    /// face diagonals = 18.
     pub edges: Vec<[u32; 2]>,
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
@@ -108,23 +107,18 @@ fn remap(p: [f32; 3]) -> [f32; 3] {
 }
 
 /// Unique undirected edges of an unindexed triangle soup, as corner-index
-/// pairs (facts #44) — the wireframe pass's line list. Two stages:
-/// position-keyed dedup (engine parts carry one vertex per corner, so a
-/// cube's shared corner appears in up to 4 triangles — 36 per-triangle
-/// pairs for a 12-triangle cube), then feature filtering: a pair whose two
-/// incident triangles are coplanar is a triangulation diagonal, not a
-/// model edge, and drops out. Boundary pairs (one incident triangle) and
-/// non-manifold pairs stay. Upstream's `.lines` fill mode rasterizes every
-/// triangle edge, diagonals included; this port's wireframe shows the
-/// model's polygon edges once each.
+/// pairs (facts #44) — the wireframe pass's line list. Upstream's `.lines`
+/// fill mode rasterizes every triangle edge, so a triangulated face shows
+/// its diagonals too; dedup here collapses only the SHARED edges an
+/// unindexed soup repeats per incident triangle (36 per-triangle pairs for
+/// a 12-triangle cube → its 12 polygon edges + 6 diagonals = 18). Dedup
+/// keys on POSITION bit patterns, not indices, for exactly that reason.
 fn undirected_edges(vertices: &[Vertex]) -> Vec<[u32; 2]> {
     let bits = |p: [f32; 3]| p.map(f32::to_bits);
     // first-appearance order keeps the output deterministic run to run
-    // (HashMap iteration is not); each unique pair collects its incident
-    // face normals alongside a representative index pair
-    let mut slots: Vec<([u32; 2], Vec<[f32; 3]>)> = Vec::new();
-    let mut slot_of: std::collections::HashMap<([u32; 3], [u32; 3]), usize> =
-        std::collections::HashMap::new();
+    // (HashMap iteration is not)
+    let mut seen = std::collections::HashSet::new();
+    let mut edges = Vec::new();
     for (t, tri) in vertices.chunks_exact(3).enumerate() {
         let base = (3 * t) as u32;
         for &(a, b) in &[(0usize, 1), (1, 2), (2, 0)] {
@@ -135,28 +129,12 @@ fn undirected_edges(vertices: &[Vertex]) -> Vec<[u32; 2]> {
             } else {
                 (pb, pa)
             };
-            let pair = [base + a as u32, base + b as u32];
-            match slot_of.get(&key) {
-                Some(&i) => slots[i].1.push(tri[a].normal),
-                None => {
-                    slot_of.insert(key, slots.len());
-                    slots.push((pair, vec![tri[a].normal]));
-                }
+            if seen.insert(key) {
+                edges.push([base + a as u32, base + b as u32]);
             }
         }
     }
-    // FLAT_DOT separates coplanar from bent: computed normals of one
-    // planar quad's two triangles differ by float noise (~1e-7 in the
-    // dot), real model edges bend by degrees
-    const FLAT_DOT: f32 = 1.0 - 1e-6;
-    slots
-        .into_iter()
-        .filter(|(_, normals)| match normals.as_slice() {
-            [n1, n2] => glam::Vec3::from_array(*n1).dot(glam::Vec3::from_array(*n2)) < FLAT_DOT,
-            _ => true, // boundary or non-manifold: draw it
-        })
-        .map(|(pair, _)| pair)
-        .collect()
+    edges
 }
 
 /// Flat-shading face normal of a scene-space triangle, upstream's

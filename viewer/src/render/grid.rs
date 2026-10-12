@@ -209,12 +209,10 @@ pub fn geometry(aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) -> GridMesh {
 
     // Axis tripod (facts #36): RGB boxes at the footprint corner + 15%
     // margin, each axis `max(all-spans·0.3, 5)` long. Swift's corner z is
-    // `|sceneVector(size).z|/2 + margin` — sceneVector(size).z is the
-    // MODEL HEIGHT negated, so the corner sits half the model's HEIGHT
-    // down scene-z, not half its depth: an upstream quirk transcribed
-    // as-is (upstream renders it identically).
+    // `|sceneVector(size).z|/2 + margin` = half the MODEL y extent (a
+    // ground-plane span; MODEL is Z-up) — the scene-z extent, size[2].
     let margin = (footprint * 0.15).max(3.0);
-    let corner = [-size[0] / 2.0 - margin, 0.0, size[1] / 2.0 + margin];
+    let corner = [-size[0] / 2.0 - margin, 0.0, size[2] / 2.0 + margin];
     let axis_length = (size[0].max(size[1]).max(size[2]) * 0.3).max(5.0);
     let thickness = (axis_length / 40.0).max(0.6);
     // Apple systemRed/Green/Blue sRGB triples — the same u8-sRGB→linear

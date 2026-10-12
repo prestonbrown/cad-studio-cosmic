@@ -769,8 +769,12 @@ fn wireframe_renders_lines_not_faces() {
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
-    // measured on Metal: solid 98560 ink px, wireframe 3423 — the hairline
-    // edge list of two boxes against their filled faces
+    // measured on Metal: solid 98560 ink px, wireframe 3423 — that was the
+    // edge list WITHOUT face diagonals; upstream parity (facts #44, .lines
+    // draws every triangle edge) adds the 12 diagonals, which can only
+    // grow wire ink. Even a 3x growth reads ratio 0.104, inside the band,
+    // and the floor only rises — full-suite re-measure deferred to the
+    // thelio merge gate (laptop test policy)
     assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
     let ratio = wi as f64 / si as f64;
     assert!(

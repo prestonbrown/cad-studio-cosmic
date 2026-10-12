@@ -1882,14 +1882,12 @@ mod tests {
         }
     }
 
-    /// Wireframe edges (facts #44): a cube triangulated as 6 quads stages
-    /// exactly its 12 polygon edges — dedup collapses the 36 per-triangle
-    /// corner pairs to 18, and the feature filter drops the 6 flat
-    /// triangulation diagonals — and the line pass draws that list, one
-    /// hairline per edge: 12 edges x 2 endpoints = 24 vertices. Dedup
-    /// without the feature filter keeps 18 and fails the first assert; a
-    /// triangle-per-line pass (upstream's .lines fill mode draws every
-    /// triangle's 3 edges) draws 72 and fails the second.
+    /// Wireframe edges (facts #44): upstream's `.lines` fill mode
+    /// rasterizes every triangle edge, so a cube triangulated as 6 quads
+    /// shows its 12 polygon edges PLUS the 6 face diagonals = 18; dedup
+    /// collapses only the shared edges the unindexed soup repeats
+    /// (36 per-triangle corner pairs). The line pass draws that list, one
+    /// hairline per edge: 18 edges x 2 endpoints = 36 vertices.
     #[test]
     fn wireframe_edge_count() {
         let scene = PartScene::from_parts(std::slice::from_ref(&cube_part()), NEUTRAL);
@@ -1900,8 +1898,8 @@ mod tests {
         );
         assert_eq!(
             scene.parts[0].edges.len(),
-            12,
-            "a cube has exactly 12 undirected edges"
+            18,
+            "12 polygon edges + 6 face diagonals, deduped"
         );
         for &[a, b] in &scene.parts[0].edges {
             assert!(
@@ -1923,8 +1921,8 @@ mod tests {
         );
         assert_eq!(
             pipeline.line_vertex_count_for_tests(),
-            24,
-            "the line pass draws 12 edges x 2 endpoints"
+            36,
+            "the line pass draws 18 edges x 2 endpoints"
         );
     }
 }
