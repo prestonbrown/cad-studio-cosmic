@@ -7,8 +7,11 @@
 
 use std::path::PathBuf;
 
+use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
-use viewer::render::{Camera, MeshPipeline, PartScene, NEUTRAL, default_camera};
+use viewer::render::{
+    Camera, MeshPipeline, PartScene, NEUTRAL, default_camera, srgb_to_linear,
+};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -177,16 +180,48 @@ fn background_reference(
     frame[0..4].try_into().unwrap()
 }
 
+/// Is this pixel ink (differs from the app background by more than 30)?
+fn is_ink(c: &[u8], bg: [u8; 4]) -> bool {
+    (c[0] as i32 - bg[0] as i32).abs()
+        + (c[1] as i32 - bg[1] as i32).abs()
+        + (c[2] as i32 - bg[2] as i32).abs()
+        > 30
+}
+
 /// Pixels that differ from the app background by more than 30 across RGB.
 fn ink_pixels(px: &[u8], bg: [u8; 4]) -> usize {
-    px.chunks(4)
-        .filter(|c| {
-            (c[0] as i32 - bg[0] as i32).abs()
-                + (c[1] as i32 - bg[1] as i32).abs()
-                + (c[2] as i32 - bg[2] as i32).abs()
-                > 30
-        })
-        .count()
+    px.chunks(4).filter(|c| is_ink(c, bg)).count()
+}
+
+/// Linear decode of an sRGB-encoded readback pixel — the same EOTF the
+/// staging applies, run on the stored byte. Readback is sRGB-encoded
+/// (Rgba8UnormSrgb target), so classification happens in linear space.
+fn decode_linear(c: &[u8]) -> [f32; 3] {
+    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])]
+}
+
+/// Chromaticity: the linear color scaled so its max component is 1.
+/// mesh.wgsl multiplies a per-face constant (`lit`) into the vertex color,
+/// and that scalar divides out here — so every face of a part, whatever its
+/// orientation, classifies against the same normalized expected color.
+fn chroma(c: [f32; 3]) -> [f32; 3] {
+    let m = c[0].max(c[1]).max(c[2]).max(1e-6);
+    [c[0] / m, c[1] / m, c[2] / m]
+}
+
+fn chroma_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+/// The golden model's two part chromas — fixture bytes (base #1F78B5,
+/// lid #D62629; model.3mf basematerials) through the same EOTF the staging
+/// applies, normalized so per-face lighting divides out.
+fn fixture_chromas() -> ([f32; 3], [f32; 3]) {
+    (
+        chroma([31, 120, 181].map(srgb_to_linear)),
+        chroma([214, 38, 41].map(srgb_to_linear)),
+    )
 }
 
 #[test]
@@ -218,10 +253,12 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
 /// (0.92, 0.15, 0.10) reads back as (246, 108, 89) — the brief's linear-g
 /// `g < 90` band misfires on exactly that. Calibrated from a measured
-/// histogram: cap (246,108,89); mesh faces (98,104,111), (103,109,116),
-/// (86,91,97); background (89,89,97). r > 180 alone separates the cap from
-/// every measured mesh/background value with >70 of headroom; the g/b caps
-/// also exclude any future bright-but-not-red surface.
+/// histogram (T3, per-part colors): cap (246,108,89); blue base faces
+/// (6,47,74), (9,54,85), (10,57,90); red lid faces (89,10,11), (102,13,14),
+/// (107,13,15); background (89,89,97). The reddest mesh face tops out at
+/// r=107, so r > 180 separates the cap from every measured mesh/background
+/// value with >70 of headroom; the g/b caps also exclude any future
+/// bright-but-not-red surface.
 fn cap_red_pixels(px: &[u8]) -> usize {
     px.chunks(4).filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120).count()
 }
@@ -333,31 +370,35 @@ fn aspect_from_viewport() {
     let narrow = ink_bbox_width(&mut pipeline, 800, 600);
     let wide = ink_bbox_width(&mut pipeline, 1280, 600);
     let ratio = wide as f64 / narrow as f64;
-    // measured on Metal: identical ink counts (31834) and bbox widths
+    // measured on Metal: identical ink counts (98560) and bbox widths
     // (468 px) at both sizes — ratio 1.000; the 5% band only absorbs
-    // driver rounding. Under the 16:9 hardcode this same render measures
-    // 1.606 (verified against this test during T2).
+    // driver rounding. (T3 re-measure: per-part colors made the dark-blue
+    // face ink-visible, lifting the count from the neutral-era 31834; the
+    // bbox width is unchanged.) Under the 16:9 hardcode this same render
+    // measures 1.606 (verified against this test during T2).
     assert!(
         (0.95..=1.05).contains(&ratio),
         "ink bbox width ratio {ratio:.3} must be ~1.0 — viewport aspect must drive the projection (16:9 hardcode reads ~1.6)"
     );
 }
 
-/// Luminance band isolating anti-aliased edge pixels. Readback is
-/// sRGB-encoded (task-8 measurements): background (89,89,97) lum 91; mesh
-/// faces (98,104,111) lum 104, (103,109,116) lum 109, (86,91,97) lum 91.
-/// The dark face sits at background luminance, so the band tracks the
-/// high-contrast silhouette against the two lit faces. Measured 4x coverage
-/// blends (resolve box-filters 4 samples): 1/4..1/2 coverage lands at lum
-/// 95..101 — in band; 3/4 blends land at lum 104..105, colliding with the
-/// pure mid-face luminance, so the band excludes them on purpose; dark-face
-/// blends stay under lum 92. Band 93..=103 excludes every pure color with
-/// >=2 lum headroom; at 1x (no AA) it counts exactly 0 pixels.
-fn intermediate_edge_pixels(px: &[u8]) -> usize {
+/// Coverage-blend pixels of the 4x resolve (the msaa test): pixels whose
+/// chromaticity sits more than 0.05 from EVERY pure chroma of the frame —
+/// the two part colors and the background. Chroma, not luminance: per-part
+/// colors (T3) put the pure face luminances at 36..52 beside the 91
+/// background while measured blend luminances span 39..85 — no luminance
+/// band separates them anymore. Chroma is lighting-invariant (the per-face
+/// `lit` scalar divides out), so every pure pixel lands within 0.010 of
+/// its part's chroma and a silhouette-edge blend — resolve box-filters the
+/// covered samples — lands strictly between endpoint chromas. Measured on
+/// Metal: exactly 0 in-band pixels at 1x (unblended, single-sample), 1153
+/// at 4x; the 0.05 cut is 5x the measured pure-pixel noise (0.010).
+fn blend_pixels(px: &[u8], bg: [u8; 4], blue: [f32; 3], red: [f32; 3]) -> usize {
+    let bgc = chroma(decode_linear(&bg));
     px.chunks(4)
         .filter(|c| {
-            let lum = (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3;
-            (93..=103).contains(&lum)
+            let x = chroma(decode_linear(c));
+            chroma_dist(x, bgc) > 0.05 && chroma_dist(x, blue) > 0.05 && chroma_dist(x, red) > 0.05
         })
         .count()
 }
@@ -376,18 +417,24 @@ fn msaa_smooths_a_diagonal_edge() {
     let (device, queue) = rt.block_on(device());
     let scene = golden_scene();
     let camera = default_camera(&scene, 800.0 / 600.0);
+    // the two part chromas and a measured background — same clear + format
+    // at any sample count
+    let (blue, red) = fixture_chromas();
+    let mut bg_pipe = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(&device, &queue, &mut bg_pipe, &camera, 800, 600);
     let px1 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 1);
     let px4 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 4);
-    let (e1, e4) = (intermediate_edge_pixels(&px1), intermediate_edge_pixels(&px4));
-    assert!(
-        e4 as f64 > e1 as f64 * 1.5,
-        "4x MSAA should produce >=1.5x the intermediate-valued edge pixels: {e4} vs {e1}"
+    let (e1, e4) = (
+        blend_pixels(&px1, bg, blue, red),
+        blend_pixels(&px4, bg, blue, red),
     );
-    // measured 1199 in-band pixels at 4x on Metal with the parity framing
-    // (T2 re-measurement: the diagonal-radius framing pulled the camera to
-    // distance ~170, shrinking the silhouette ~0.68x vs the old 1551); the
-    // floor guards "real AA happened", the ratio above guards "at least
-    // 1.5x better than 1x"
+    // at 1x the pipeline writes unblended single-sample fragments, so every
+    // pixel IS a pure chroma — anything else is a blend/state leak
+    assert_eq!(e1, 0, "1x frame must contain only pure-chroma pixels");
+    // measured 1153 blend pixels at 4x on Metal (T3 re-measure: the
+    // luminance-band predecessor read 1199 at T2; per-part colors killed
+    // that band — pure faces now span the old blend range — and the chroma
+    // metric replaces it); the floor guards "real AA happened"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
@@ -410,3 +457,127 @@ fn msaa_smooths_a_diagonal_edge() {
         cap_red_pixels(&cut)
     );
 }
+
+/// Per-part colors reach pixels (Review Focus 4). The golden model paints
+/// base #1F78B5 and lid #D62629; every ink pixel of a 1x frame (no blends —
+/// the pipeline writes unblended, single-sample) must classify, by
+/// chromaticity-normalized nearest of the two expected linear colors, as
+/// one of them. The SPATIAL anchor catches what nearest-only cannot —
+/// swapped assignments: the lid (red) is the upper box in the fixture's
+/// z-stack (MODEL z 12..22 over base z -4..4; scene y after the remap), so
+/// the upper third of the ink bbox must classify red and the lower third
+/// blue.
+#[test]
+fn two_parts_two_colors() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let n_ink = ink_pixels(&px, bg);
+    assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
+    let (blue, red) = fixture_chromas();
+    // Measured on Metal: a 1x frame has exactly 6 distinct ink values —
+    // three blue faces and three red faces, each within 0.010 of its
+    // part's chroma (u8 quantization noise), the nearest WRONG color 1.4
+    // away. TOL 0.05 holds 5x noise headroom and 28x wrong-color margin.
+    const TOL: f32 = 0.05;
+    let mut classified = 0usize;
+    let (mut min_row, mut max_row) = (usize::MAX, 0usize);
+    for (i, c) in px.chunks(4).enumerate() {
+        if !is_ink(c, bg) {
+            continue;
+        }
+        let row = i / 800;
+        min_row = min_row.min(row);
+        max_row = max_row.max(row);
+        let x = chroma(decode_linear(c));
+        if chroma_dist(x, blue) < TOL || chroma_dist(x, red) < TOL {
+            classified += 1;
+        }
+    }
+    assert!(
+        classified as f64 >= 0.95 * n_ink as f64,
+        "only {classified}/{n_ink} ink pixels classify as base-blue or lid-red"
+    );
+    // spatial anchor: thirds of the ink bbox's row span
+    let span = max_row - min_row + 1;
+    let (mut top_red, mut top_any) = (0usize, 0usize);
+    let (mut bot_blue, mut bot_any) = (0usize, 0usize);
+    for (i, c) in px.chunks(4).enumerate() {
+        if !is_ink(c, bg) {
+            continue;
+        }
+        let row = i / 800;
+        let x = chroma(decode_linear(c));
+        let (d_blue, d_red) = (chroma_dist(x, blue), chroma_dist(x, red));
+        let near = |d: f32| d < TOL;
+        if row - min_row < span / 3 {
+            if near(d_blue) || near(d_red) {
+                top_any += 1;
+                if near(d_red) {
+                    top_red += 1;
+                }
+            }
+        } else if max_row - row < span / 3 {
+            if near(d_blue) || near(d_red) {
+                bot_any += 1;
+                if near(d_blue) {
+                    bot_blue += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        top_any > 500 && top_red * 100 >= top_any * 90,
+        "upper third of the ink bbox must be the red lid: {top_red}/{top_any}"
+    );
+    assert!(
+        bot_any > 500 && bot_blue * 100 >= bot_any * 90,
+        "lower third of the ink bbox must be the blue base: {bot_blue}/{bot_any}"
+    );
+    // measured: 100% on both (28182/28182 red upper, 19862/19862 blue
+    // lower) — the 90% bars leave room for driver raster drift
+}
+
+/// Uncolored geometry paints the neutral: the golden STL carries no colors,
+/// so every ink pixel's chromaticity must sit on the neutral's (the
+/// per-face lighting scalar divides out). Guards the None branch of the
+/// staging against a future default-color or passthrough regression.
+#[test]
+fn neutral_when_uncolored() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let bytes = std::fs::read(fixture("model.stl"))
+        .unwrap_or_else(|e| panic!("read fixture model.stl: {e}"));
+    let parts = vec![parse_stl(&bytes).expect("golden model.stl parses")];
+    assert!(
+        parts[0].triangle_colors.iter().all(|c| c.is_none()),
+        "fixture truth: the STL carries no colors"
+    );
+    let scene = PartScene::from_parts(&parts, NEUTRAL);
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let n_ink = ink_pixels(&px, bg);
+    assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
+    let neutral = chroma(NEUTRAL);
+    // Measured on Metal: max chroma distance over all 31834 ink pixels is
+    // 0.0078 (u8 quantization on the lit-neutral faces); TOL 0.05 is 6x
+    // that. A per-triangle default color or sRGB passthrough lands 0.1+
+    // away and fails.
+    const TOL: f32 = 0.05;
+    let near = px
+        .chunks(4)
+        .filter(|c| is_ink(c, bg))
+        .filter(|c| chroma_dist(chroma(decode_linear(c)), neutral) < TOL)
+        .count();
+    assert!(
+        near as f64 >= 0.99 * n_ink as f64,
+        "only {near}/{n_ink} ink pixels sit on the neutral chromaticity"
+    );
+}
+

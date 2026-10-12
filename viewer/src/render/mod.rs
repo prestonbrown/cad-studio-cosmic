@@ -29,7 +29,7 @@
 pub mod parts;
 pub mod scene;
 
-pub use parts::{GpuPart, PartScene, NEUTRAL};
+pub use parts::{GpuPart, PartScene, NEUTRAL, srgb_to_linear};
 pub use scene::{SpikePrimitive, SpikeScene};
 
 use wgpu::util::DeviceExt;
@@ -1283,6 +1283,100 @@ mod tests {
             "a moved middle vertex must reupload its part (full-content hash)"
         );
         assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
+    }
+
+    /// T1-review carry, resolved: the content hash covers the STAGED vertex
+    /// bytes and `from_parts` paints `neutral` into the color field, so two
+    /// scenes differing only in neutral already differ in staged content —
+    /// no separate hash input is needed. This test is the proof, and the
+    /// pin against a future hash that stops covering color bytes.
+    #[test]
+    fn neutral_change_reuploads() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (device, queue) = rt.block_on(device());
+        // the STL is the all-None fixture: every triangle paints neutral,
+        // so the neutral is load-bearing in the staged bytes
+        let parts = golden_stl_parts();
+        assert!(parts[0].triangle_colors.iter().all(|c| c.is_none()));
+        let scene1 = PartScene::from_parts(&parts, NEUTRAL);
+        let camera = default_camera(&scene1, 4.0 / 3.0);
+        let mut pipeline =
+            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let u1 = pipeline.upload_count_for_tests();
+        // facts #43's light-mode neutral: same geometry, only the paint
+        // changes — a skipped upload would serve the dark-mode colors
+        let scene2 = PartScene::from_parts(&parts, [0.55, 0.64, 0.75]);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1 + 1,
+            "a neutral change must reupload — stale colors otherwise"
+        );
+    }
+
+    /// The sRGB EOTF is the exact IEC piecewise, not a single power: the
+    /// linear segment below 0.04045 and the 2.4 segment above differ enough
+    /// that a 2.2-only conversion is visibly wrong on dark channels.
+    #[test]
+    fn srgb_conversion_table() {
+        let f = parts::srgb_to_linear;
+        assert_eq!(f(0), 0.0);
+        assert!((f(255) - 1.0).abs() < 1e-6);
+        assert!((f(128) - 0.216).abs() < 5e-4, "128 -> {}", f(128));
+        // the dark discriminator — the base part's own blue R channel: a
+        // 2.2 power reads 0.0097 here, 29% low, and fails this assert
+        assert!((f(31) - 0.0137).abs() < 2e-4, "31 -> {}", f(31));
+        // the linear segment: 10/255 = 0.0392 stays below 0.04045, so
+        // /12.92 — a power-only formula reads 0.0008, 3.8x low
+        assert!((f(10) - 0.003035).abs() < 2e-5, "10 -> {}", f(10));
+        // continuity across the segment boundary (10 linear, 11 power)
+        assert!(f(10) < f(11) && f(11) < f(12));
+    }
+
+    /// Per-triangle colors stage per corner: `Some` goes through the sRGB
+    /// EOTF onto all 3 corners, `None` paints the neutral. Pinned against
+    /// the golden fixture's actual bytes so a parse regression cannot pass.
+    #[test]
+    fn colored_triangles_paint_linear_corners() {
+        let parts = golden_3mf_parts();
+        // fixture truth (model.3mf basematerials): base #1F78B5, lid #D62629
+        assert_eq!(parts[0].name, "base");
+        assert_eq!(parts[0].triangle_colors, vec![Some([31, 120, 181]); 12]);
+        assert_eq!(parts[1].name, "lid");
+        assert_eq!(parts[1].triangle_colors, vec![Some([214, 38, 41]); 12]);
+        let scene = PartScene::from_parts(&parts, NEUTRAL);
+        let linear = |c: [u8; 3]| {
+            [parts::srgb_to_linear(c[0]), parts::srgb_to_linear(c[1]), parts::srgb_to_linear(c[2])]
+        };
+        let (blue, red) = (linear([31, 120, 181]), linear([214, 38, 41]));
+        assert!(blue[0] < 0.02 && blue[2] > 0.45, "dark-R blue: {blue:?}");
+        for v in &scene.parts[0].vertices {
+            assert_eq!(v.color, blue, "base corner painted its triangle's color");
+        }
+        for v in &scene.parts[1].vertices {
+            assert_eq!(v.color, red, "lid corner painted its triangle's color");
+        }
+        // mixed part: Some -> linear red exactly; None -> neutral
+        let mixed = engine::parsing::Part {
+            name: "mixed".into(),
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ],
+            triangle_colors: vec![Some([255, 0, 0]), None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&mixed), NEUTRAL);
+        for v in &scene.parts[0].vertices[0..3] {
+            assert_eq!(v.color, [1.0, 0.0, 0.0], "Some([255,0,0]) is exact linear red");
+        }
+        for v in &scene.parts[0].vertices[3..6] {
+            assert_eq!(v.color, NEUTRAL, "None paints the neutral");
+        }
     }
 
     /// The floor pin is baked into the staged vertices, so content identity
