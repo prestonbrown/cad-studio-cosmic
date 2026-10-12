@@ -18,3 +18,11 @@ iced = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbf
 wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+time = { version = "0.3", features = ["serde-well-known", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+notify = "8"
+lopdf = "0.34"
+thiserror = "2"
