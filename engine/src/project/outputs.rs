@@ -28,15 +28,22 @@ pub fn pdf_page_count(path: &Path) -> Result<u32, String> {
 }
 
 pub struct MissingCtx<'a> {
-    /// model.py existence gates everything: no script, no notes (upstream
-    /// returns [] on the first turn of a fresh project).
+    /// The project root, where model.py lives: its existence gates
+    /// everything (upstream returns [] on the first turn of a fresh
+    /// project).
     pub project_root: &'a Path,
+    /// The output directory — everything model.py produces sits under it
+    /// (contract §85); every file check below reads under this path.
+    pub output_dir: &'a Path,
     /// Piece count from the parsed 3MF (upstream `output.parts.count`);
     /// 0 when the model has not been parsed.
     pub parts_count: usize,
     /// The printer configured in settings (upstream `AppSettings.printerModel`).
     pub printer_model: Option<&'a str>,
-    pub manifest: &'a Manifest,
+    /// None when manifest.json is missing or unparseable — the caller
+    /// decides and passes None (upstream `output.manifest` is nil either
+    /// way); a default() manifest must never be substituted here.
+    pub manifest: Option<&'a Manifest>,
 }
 
 /// Upstream `ProjectOutput.discoverDrawingPages`: schematic.svg (when
@@ -73,30 +80,34 @@ pub fn missing_requirements(ctx: &MissingCtx) -> Vec<String> {
     }
     let mut missing: Vec<String> = expected_outputs()
         .into_iter()
-        .filter(|name| !ctx.project_root.join(name).exists())
+        .filter(|name| !ctx.output_dir.join(name).exists())
         .map(str::to_string)
         .collect();
     // the plate is demanded even for single-piece objects
-    if !ctx.project_root.join("plate.3mf").exists() {
+    if !ctx.output_dir.join("plate.3mf").exists() {
         missing.push("plate.3mf (print plate)".to_string());
     }
     // page 2 only: further pages surface through the drawing-page count below
-    if ctx.parts_count > 1 && !ctx.project_root.join("schematic-2.svg").exists() {
+    if ctx.parts_count > 1 && !ctx.output_dir.join("schematic-2.svg").exists() {
         missing.push(
             "one drawing page per piece (schematic-2.svg, …) with the parts list on page 1"
                 .to_string(),
         );
     }
-    let drawing_pages = drawing_pages_on_disk(ctx.project_root);
-    if drawing_pages.len() > 1 && ctx.manifest.drawings.is_empty() {
-        missing.push("`drawings` in manifest.json (page titles)".to_string());
+    let drawing_pages = drawing_pages_on_disk(ctx.output_dir);
+    // both manifest notes sit inside upstream's `if let manifest`
+    if let Some(manifest) = ctx.manifest {
+        if drawing_pages.len() > 1 && manifest.drawings.is_empty() {
+            missing.push("`drawings` in manifest.json (page titles)".to_string());
+        }
+        if manifest.bed.is_none() && ctx.printer_model.is_some() {
+            missing.push("`bed` in manifest.json (bed size of the user's printer)".to_string());
+        }
     }
-    if ctx.manifest.bed.is_none() && ctx.printer_model.is_some() {
-        missing.push("`bed` in manifest.json (bed size of the user's printer)".to_string());
-    }
-    // an unreadable or absent pdf counts as 0 pages (upstream `?? 0`)
+    // an unreadable or absent pdf counts as 0 pages (upstream `?? 0`); this
+    // branch is outside `if let manifest` and fires without one too
     if drawing_pages.len() > 1
-        && (pdf_page_count(&ctx.project_root.join("schematic.pdf")).unwrap_or(0) as usize)
+        && (pdf_page_count(&ctx.output_dir.join("schematic.pdf")).unwrap_or(0) as usize)
             < drawing_pages.len()
     {
         missing.push("schematic.pdf with all drawing pages in one file (PdfPages)".to_string());
