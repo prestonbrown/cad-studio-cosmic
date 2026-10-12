@@ -80,6 +80,12 @@ pub const CACHE_BUDGET: usize = 128 * 1024 * 1024;
 pub const RASTER_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Resolution of the debounce tick subscription while one is pending.
 pub const DEBOUNCE_TICK: Duration = Duration::from_millis(60);
+/// Relay retry cadence when the stream channel is momentarily full.
+pub const RELAY_RETRY_MIN: Duration = Duration::from_millis(1);
+pub const RELAY_RETRY_MAX: Duration = Duration::from_millis(64);
+/// Total time to keep retrying one full-channel message before dropping it
+/// (liveness over completeness; the pane re-requests dropped rasters).
+pub const RELAY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The raster bucket a display scale maps to (raster scale ≥ display scale,
 /// so display always downsamples).
@@ -514,9 +520,17 @@ struct CacheEntry {
 
 /// LRU of raster handles under a byte budget. `get` refreshes recency and
 /// clones the handle (the iced texture id is shared, so no re-upload).
+///
+/// ## Revision contract (for the shell task)
+///
+/// The key carries the pane's content revision, the port's analog of
+/// upstream `ProjectOutput.schematicRevision`: when a page's SVG changes on
+/// disk, the caller MUST bump the revision it passes here (via
+/// [`SchematicPane::set_revision`]) — stale entries then simply never match
+/// and age out through the LRU budget instead of showing old drawings.
 pub struct RasterCache {
-    entries: HashMap<(usize, i32), CacheEntry>,
-    order: VecDeque<(usize, i32)>,
+    entries: HashMap<(usize, u64, i32), CacheEntry>,
+    order: VecDeque<(usize, u64, i32)>,
     budget: usize,
     used: usize,
 }
@@ -532,8 +546,13 @@ impl RasterCache {
     }
 
     /// The handle plus raster/natural sizes, for the display and fit math.
-    pub fn get(&mut self, page: usize, bucket: i32) -> Option<(Handle, (u32, u32), (f64, f64))> {
-        let key = (page, bucket);
+    pub fn get(
+        &mut self,
+        page: usize,
+        revision: u64,
+        bucket: i32,
+    ) -> Option<(Handle, (u32, u32), (f64, f64))> {
+        let key = (page, revision, bucket);
         if !self.entries.contains_key(&key) {
             return None;
         }
@@ -546,8 +565,8 @@ impl RasterCache {
             .map(|entry| (entry.handle.clone(), entry.raster, entry.natural))
     }
 
-    pub fn insert(&mut self, page: usize, bucket: i32, raster: Raster) {
-        let key = (page, bucket);
+    pub fn insert(&mut self, page: usize, revision: u64, bucket: i32, raster: Raster) {
+        let key = (page, revision, bucket);
         let bytes = raster.pixels.len();
         let entry = CacheEntry {
             handle: Handle::from_rgba(raster.width, raster.height, raster.pixels),
@@ -586,8 +605,20 @@ enum PaneEvent {
     Resized(Size),
 }
 
+/// A tiny blank raster for tests.
+#[cfg(test)]
+fn test_raster() -> Raster {
+    Raster {
+        natural: (4.0, 2.0),
+        width: 4,
+        height: 2,
+        pixels: vec![255u8; 4 * 2 * 4],
+    }
+}
+
 struct RasterJob {
     page: usize,
+    revision: u64,
     bucket: i32,
     path: PathBuf,
     raster_scale: f64,
@@ -647,6 +678,7 @@ pub enum Message {
     /// PNG fallback failed).
     RasterArrived {
         page: usize,
+        revision: u64,
         bucket: i32,
         raster: Result<Raster, String>,
     },
@@ -663,6 +695,9 @@ struct Displayed {
 pub struct SchematicPane {
     pub tabs: PageTabs,
     pub viewport: Viewport,
+    /// Content revision analog of upstream `schematicRevision`; see
+    /// [`RasterCache`]'s revision contract.
+    revision: u64,
     scheduler: RasterScheduler,
     cache: RasterCache,
     displayed: Option<Displayed>,
@@ -682,6 +717,7 @@ impl SchematicPane {
         let mut pane = SchematicPane {
             tabs,
             viewport: Viewport::new((900.0, 700.0)),
+            revision: 0,
             scheduler: RasterScheduler::default(),
             cache: RasterCache::new(CACHE_BUDGET),
             displayed: None,
@@ -698,6 +734,22 @@ impl SchematicPane {
         // upstream loads the current page immediately (no debounce on load)
         pane.request_current_page();
         pane
+    }
+
+    /// The shell calls this when the watcher sees a page's content change
+    /// (upstream bumps `schematicRevision` and the web view reloads): the
+    /// current page re-rasters under the new revision; cached rasters of
+    /// older revisions stop matching.
+    pub fn set_revision(&mut self, revision: u64) {
+        if revision == self.revision {
+            return;
+        }
+        self.revision = revision;
+        // upstream reloads the web view when the revision changes: same
+        // flow as a page switch, same page
+        self.scheduler.reset();
+        self.displayed = None;
+        self.request_current_page();
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -754,8 +806,8 @@ impl SchematicPane {
                 self.zoom_changed();
             }
             Message::DebounceTick => self.flush(),
-            Message::RasterArrived { page, bucket, raster } => {
-                self.raster_arrived(page, bucket, raster)
+            Message::RasterArrived { page, revision, bucket, raster } => {
+                self.raster_arrived(page, revision, bucket, raster)
             }
         }
         Task::none()
@@ -763,15 +815,25 @@ impl SchematicPane {
 
     /// Rasters that land for the current page update the viewport's sheet
     /// size (upstream `sheetDidLoad`) and the display when still current.
-    fn raster_arrived(&mut self, page: usize, bucket: i32, raster: Result<Raster, String>) {
-        if self.tabs.current_index() != Some(page) {
+    fn raster_arrived(
+        &mut self,
+        page: usize,
+        revision: u64,
+        bucket: i32,
+        raster: Result<Raster, String>,
+    ) {
+        if self.tabs.current_index() != Some(page) || revision != self.revision {
+            // a stale page or content revision can never be displayed
+            // again; caching it would only eat the budget
             return;
         }
         match raster {
             Ok(raster) => {
-                self.cache.insert(page, bucket, raster);
+                self.cache.insert(page, revision, bucket, raster);
                 self.scheduler.raster_arrived(bucket, self.viewport.scale);
-                if let Some((handle, raster_size, natural)) = self.cache.get(page, bucket) {
+                if let Some((handle, raster_size, natural)) =
+                    self.cache.get(page, revision, bucket)
+                {
                     self.viewport.sheet_loaded(natural);
                     if bucket == bucket_index(self.viewport.scale) {
                         self.displayed = Some(Displayed {
@@ -803,7 +865,7 @@ impl SchematicPane {
             return;
         };
         if let Some(page) = self.tabs.current_index() {
-            if let Some((handle, raster, _natural)) = self.cache.get(page, target) {
+            if let Some((handle, raster, _natural)) = self.cache.get(page, self.revision, target) {
                 self.scheduler.mark_rendered(target);
                 self.displayed = Some(Displayed { handle, raster });
             }
@@ -823,7 +885,7 @@ impl SchematicPane {
             return;
         };
         let bucket = bucket_index(self.viewport.scale);
-        if let Some((handle, raster, natural)) = self.cache.get(page, bucket) {
+        if let Some((handle, raster, natural)) = self.cache.get(page, self.revision, bucket) {
             self.scheduler.mark_rendered(bucket);
             self.viewport.sheet_loaded(natural);
             self.displayed = Some(Displayed { handle, raster });
@@ -847,6 +909,7 @@ impl SchematicPane {
         spawn_raster(
             RasterJob {
                 page,
+                revision: self.revision,
                 bucket,
                 path,
                 raster_scale: raster_scale_for(sheet, bucket),
@@ -1046,16 +1109,34 @@ fn relay_stream(relay: &Arc<RasterRelay>) -> BoxStream<'static, Message> {
                 .name("schematic-events".to_string())
                 .spawn(move || {
                     while let Ok(event) = events.recv() {
-                        let message = match event {
+                        let mut message = match event {
                             PaneEvent::Raster { job, raster } => Message::RasterArrived {
                                 page: job.page,
+                                revision: job.revision,
                                 bucket: job.bucket,
                                 raster,
                             },
                             PaneEvent::Resized(size) => Message::Resized(size),
                         };
-                        if sender.try_send(message).is_err() {
-                            break;
+                        // a full stream channel is transient (the runtime
+                        // drains it); only disconnection or the retry
+                        // budget ends the relay, never a burst
+                        let mut backoff = RELAY_RETRY_MIN;
+                        let started = Instant::now();
+                        loop {
+                            match sender.try_send(message) {
+                                Ok(()) => break,
+                                Err(err) if err.is_disconnected() => return,
+                                Err(err) => {
+                                    if started.elapsed() > RELAY_RETRY_BUDGET {
+                                        // drop this message, keep serving
+                                        break;
+                                    }
+                                    message = err.into_inner();
+                                    thread::sleep(backoff);
+                                    backoff = (backoff * 2).min(RELAY_RETRY_MAX);
+                                }
+                            }
                         }
                     }
                 });
@@ -1068,6 +1149,7 @@ fn relay_stream(relay: &Arc<RasterRelay>) -> BoxStream<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmic::iced::futures::FutureExt;
     use std::io::Cursor;
 
     fn approx(actual: f64, expected: f64) {
@@ -1309,12 +1391,226 @@ mod tests {
             pixels: vec![0u8; n as usize * 4],
         };
         let mut cache = RasterCache::new(1000);
-        cache.insert(0, 0, raster(100));
-        cache.insert(0, 1, raster(100));
-        assert!(cache.get(0, 0).is_some()); // refresh (0, 0)
-        cache.insert(0, 2, raster(100)); // over budget: evicts (0, 1)
-        assert!(cache.get(0, 1).is_none(), "least recently used evicted");
-        assert!(cache.get(0, 0).is_some());
-        assert!(cache.get(0, 2).is_some());
+        cache.insert(0, 0, 0, raster(100));
+        cache.insert(0, 0, 1, raster(100));
+        assert!(cache.get(0, 0, 0).is_some()); // refresh (0, 0)
+        cache.insert(0, 0, 2, raster(100)); // over budget: evicts (0, 1)
+        assert!(cache.get(0, 0, 1).is_none(), "least recently used evicted");
+        assert!(cache.get(0, 0, 0).is_some());
+        assert!(cache.get(0, 0, 2).is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Fix round 1: the relay stream and the pane's message core, driven
+    // headlessly (no widgets, no runtime)
+    // ------------------------------------------------------------------
+
+    /// Pull the next relay message without ever hanging the test thread:
+    /// poll the stream and give up at a wall-clock deadline.
+    fn next_message(stream: &mut BoxStream<'static, Message>, deadline: Instant) -> Option<Message> {
+        while Instant::now() < deadline {
+            if let Some(message) = stream.as_mut().next().now_or_never() {
+                return message;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    /// `update` returns a `Task` the headless core ignores (always none).
+    fn drive(pane: &mut SchematicPane, message: Message) {
+        let _ = pane.update(message);
+    }
+
+    fn test_relay() -> (Sender<PaneEvent>, Arc<RasterRelay>) {
+        let (events, receiver) = mpsc::channel();
+        let relay = Arc::new(RasterRelay {
+            id: 0xDEAD,
+            events: Mutex::new(Some(receiver)),
+        });
+        (events, relay)
+    }
+
+    #[test]
+    fn relay_maps_resize_and_raster_events() {
+        // the round-1 bug this pins: PaneEvent::Resized must surface as
+        // Message::Resized (it used to be swallowed by a FromPane arm)
+        let (events, relay) = test_relay();
+        let mut stream = relay_stream(&relay);
+        events
+            .send(PaneEvent::Resized(Size::new(320.0, 240.0)))
+            .unwrap();
+        events
+            .send(PaneEvent::Raster {
+                job: RasterJob {
+                    page: 1,
+                    revision: 4,
+                    bucket: 2,
+                    path: PathBuf::from("/tmp/missing.svg"),
+                    raster_scale: 1.0,
+                },
+                raster: Ok(test_raster()),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        match next_message(&mut stream, deadline) {
+            Some(Message::Resized(size)) => assert_eq!(size, Size::new(320.0, 240.0)),
+            other => panic!("resize event lost in the relay: {other:?}"),
+        }
+        match next_message(&mut stream, deadline) {
+            Some(Message::RasterArrived { page, revision, bucket, raster }) => {
+                assert_eq!((page, revision, bucket), (1, 4, 2));
+                assert!(raster.is_ok());
+            }
+            other => panic!("raster event lost in the relay: {other:?}"),
+        }
+        drop(events); // disconnected: the relay thread ends on its own
+    }
+
+    #[test]
+    fn relay_survives_a_full_channel() {
+        // a burst larger than the stream channel's 64 slots must not kill
+        // the relay for the session (it used to exit on the first failed
+        // try_send)
+        let (events, relay) = test_relay();
+        let mut stream = relay_stream(&relay);
+        const BURST: u32 = 200;
+        for i in 0..BURST {
+            events
+                .send(PaneEvent::Resized(Size::new(i as f32, 0.0)))
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = 0;
+        let mut last = None;
+        while seen < BURST as usize {
+            match next_message(&mut stream, deadline) {
+                Some(message) => {
+                    seen += 1;
+                    last = Some(message);
+                }
+                None => panic!("relay died after {seen}/{BURST} messages"),
+            }
+        }
+        match last {
+            Some(Message::Resized(size)) => assert_eq!(size.width, (BURST - 1) as f32),
+            other => panic!("wrong mapping: {other:?}"),
+        }
+        drop(events);
+    }
+
+    #[test]
+    fn pane_re_arms_raster_when_load_fit_changes_bucket() {
+        // the round-1 bug this pins: a raster arrives, sheet_loaded's fit
+        // moves the scale into another bucket, and the pane must arm that
+        // bucket's raster instead of staying blank
+        let mut pane =
+            SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
+        // a small viewport makes the post-load fit land far below bucket 0
+        drive(&mut pane, Message::Resized(Size::new(200.0, 200.0)));
+        assert_eq!(pane.viewport.view, (200.0, 200.0));
+
+        let big = Raster {
+            natural: (1000.0, 800.0),
+            width: 1000,
+            height: 800,
+            pixels: vec![255u8; 1000 * 800 * 4],
+        };
+        drive(
+            &mut pane,
+            Message::RasterArrived {
+                page: 0,
+                revision: 0,
+                bucket: 0,
+                raster: Ok(big),
+            },
+        );
+        // the load fit fired (sheetDidLoad -> fit), width-limited
+        approx(pane.viewport.scale, 152.0 / 1000.0);
+        // bucket 0 is not the fit scale's bucket: nothing displayed yet,
+        // but the raster for bucket -2 must be armed
+        assert!(pane.displayed.is_none());
+        assert_eq!(pane.scheduler.target_bucket(), Some(-2));
+        assert!(pane.scheduler.pending());
+
+        // the debounce expires -> the tick emits the job
+        thread::sleep(RASTER_DEBOUNCE + Duration::from_millis(50));
+        drive(&mut pane, Message::DebounceTick);
+        assert!(!pane.scheduler.pending(), "job emitted for the fit bucket");
+
+        // delivering that raster puts it on screen, fit kept
+        let fitted = Raster {
+            natural: (1000.0, 800.0),
+            width: 250,
+            height: 200,
+            pixels: vec![255u8; 250 * 200 * 4],
+        };
+        drive(
+            &mut pane,
+            Message::RasterArrived {
+                page: 0,
+                revision: 0,
+                bucket: -2,
+                raster: Ok(fitted),
+            },
+        );
+        assert!(pane.displayed.is_some());
+        approx(pane.viewport.scale, 152.0 / 1000.0);
+    }
+
+    #[test]
+    fn stale_revision_raster_is_ignored() {
+        // the revision contract: T7 bumps set_revision when a page's SVG
+        // changes on disk; rasters requested under the old revision must
+        // not display
+        let mut pane =
+            SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
+        pane.set_revision(7);
+        assert_eq!(pane.revision, 7);
+
+        // natural-sized so the load fit stays inside bucket 0
+        let page_raster = Raster {
+            natural: (1000.0, 800.0),
+            width: 250,
+            height: 200,
+            pixels: vec![255u8; 250 * 200 * 4],
+        };
+        drive(
+            &mut pane,
+            Message::RasterArrived {
+                page: 0,
+                revision: 6,
+                bucket: 0,
+                raster: Ok(page_raster.clone()),
+            },
+        );
+        assert!(pane.displayed.is_none(), "stale revision displayed");
+        assert!(pane.viewport.sheet.is_none(), "stale revision fitted");
+        assert!(pane.cache.get(0, 6, 0).is_none(), "stale raster not cached");
+
+        drive(
+            &mut pane,
+            Message::RasterArrived {
+                page: 0,
+                revision: 7,
+                bucket: 0,
+                raster: Ok(page_raster),
+            },
+        );
+        assert!(pane.displayed.is_some(), "current revision displays");
+    }
+
+    #[test]
+    fn cache_revision_keys_do_not_collide() {
+        let raster = |n: u32| Raster {
+            natural: (n as f64, 1.0),
+            width: n,
+            height: 1,
+            pixels: vec![0u8; n as usize * 4],
+        };
+        let mut cache = RasterCache::new(10_000);
+        cache.insert(0, 3, 1, raster(10));
+        assert!(cache.get(0, 4, 1).is_none(), "other revision must miss");
+        assert!(cache.get(0, 3, 1).is_some());
     }
 }
