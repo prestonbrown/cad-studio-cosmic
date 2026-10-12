@@ -12,6 +12,7 @@ directories.workspace = true
 time.workspace = true
 uuid.workspace = true
 notify.workspace = true
+lopdf.workspace = true
 thiserror.workspace = true
 glam.workspace = true
 quick-xml.workspace = true
