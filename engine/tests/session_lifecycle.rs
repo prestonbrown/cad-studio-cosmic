@@ -314,7 +314,7 @@ async fn auth_error_no_retry() {
 
     // auth is terminal even though a session id was available to resume
     match finished(&events) {
-        TurnOutcome::Failed { auth, error } => {
+        TurnOutcome::Failed { auth, error, .. } => {
             assert!(auth, "{error}");
             assert!(error.contains("Unauthorized"), "{error}");
         }
@@ -474,8 +474,10 @@ async fn engine_command_drives_the_dance() {
         events,
         vec![
             EngineEvent::Started { session_id: Some(PONG_SID.into()) },
+            EngineEvent::ThinkingStarted,
             EngineEvent::Thinking { estimated_tokens: 50 },
             EngineEvent::Thinking { estimated_tokens: 192 },
+            EngineEvent::ThinkingFinished,
             EngineEvent::TextStreaming { text: "pong".into() },
             EngineEvent::TextConfirmed { text: "pong".into() },
             EngineEvent::TurnFinished(TurnOutcome::Success {

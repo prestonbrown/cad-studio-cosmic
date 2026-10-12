@@ -1,8 +1,8 @@
 //! Project store (upstream ProjectStore.swift + ChatMessage.swift): metadata
 //! and chat persisted under `<project>/.cadstudio/`, saved atomically via
 //! temp-file + rename (same approach as [`crate::settings::Settings::save`]),
-//! plus the recent-projects list and the project-name rules used by the
-//! new-project dialog.
+//! the recent-projects list, the project-name rules used by the new-project
+//! dialog, and [`create_project`]'s new-project scaffolding.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -119,6 +119,8 @@ pub enum ProjectStoreError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    InvalidName(#[from] ProjectNameError),
 }
 
 /// Per-project support directory (upstream ProjectFolder.support) holding
@@ -195,6 +197,24 @@ pub fn validate_project_name(name: &str) -> Result<(), ProjectNameError> {
     } else {
         Ok(())
     }
+}
+
+/// Scaffold a new project (upstream `ProjectStore.create` + `prepare`,
+/// contract §4:126): validate the name, create the root as a LEAF directory
+/// (the parent must already exist and the root must not — a collision
+/// surfaces as the io `AlreadyExists` error), then `output/`,
+/// `.cadstudio/logs/`, and a default `project.json` when none is present.
+/// Returns the project root.
+pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf, ProjectStoreError> {
+    validate_project_name(name)?;
+    let root = parent.join(name);
+    std::fs::create_dir(&root)?;
+    std::fs::create_dir_all(root.join("output"))?;
+    std::fs::create_dir_all(root.join(".cadstudio").join("logs"))?;
+    if !support_dir(&root).join("project.json").exists() {
+        save_metadata(&root, &ProjectMetadata::new(env!("CARGO_PKG_VERSION")))?;
+    }
+    Ok(root)
 }
 
 /// Cap shared with upstream's recents list.

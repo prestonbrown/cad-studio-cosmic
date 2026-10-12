@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/fake","session_id":"00000000-0000-0000-0000-00000000a007","tools":["Read","Write","Edit","Bash"],"mcp_servers":[],"model":"claude-opus-5-5","permissionMode":"acceptEdits","claude_code_version":"2.1.296"}
+{"type":"result","subtype":"success","is_error":true,"result":"the agent fell over","session_id":"00000000-0000-0000-0000-00000000a007"}
+#exit 3

@@ -10,7 +10,11 @@
 //! The surface the app drives that stack through is the
 //! [`EngineCommand`]/[`EngineEvent`] pair: the app sends commands (run a
 //! turn, cancel, shut down) and drains the launched turn's [`EngineEvent`]
-//! stream until its terminal `TurnFinished`. The pairing is also a pacing
+//! stream until its terminal `TurnFinished`. The events carry the
+//! chat-transcript facts upstream builds its rows from — thinking block
+//! boundaries, tool ids with names and titles, and a failing child's exit
+//! code — so the app maps them onto its transcript without re-parsing the
+//! stream. The pairing is also a pacing
 //! contract — the engine polls for a cancel only between event
 //! translations, so an app that stops draining stalls the turn instead of
 //! cancelling it (carried in `docs/research/carry-forwards.md`, M4).
