@@ -1,4 +1,4 @@
-# M2 Agent Lifecycle Implementation Plan
+# M2 Agent Lifecycle Implementation Plan (rev 2 — post independent review, 15 findings applied)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -16,7 +16,9 @@
 - Tests run on thelio via `ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull -q && cargo test -p engine"'`; no network, no venv, no REAL claude invocation in tests — the fake agent covers everything; the real-agent smoke is a separate gated step.
 - Stream serde: NO `deny_unknown_fields` anywhere; every enum has a fallback variant (`#[serde(other)]` or open-set `String`); `result.subtype` and `system.subtype` are open sets; error detection branches on `is_error` (+ `terminal_reason`/`api_error_status`), NEVER on subtype alone.
 - Agent children spawn with **stdin = /dev/null** (`-p` merges stdin into the prompt) and **cwd = project root** (resume needs the original cwd).
-- Upstream strings are verbatim: prompt note texts, classification substring lists (busy/missing/auth), tool-summary titles — from the vendored Swift.
+- Upstream strings are verbatim: prompt note texts, classification substring lists (busy/missing/auth, matched CASE-INSENSITIVELY per AgentSession.swift), tool-summary titles (English values from app/i18n/en/main.ftl — upstream's Swift literals are the Italian source strings) — from the vendored Swift + the M0-extracted English catalog.
+- Restricted-bash allowedTools are **15 separate argv entries** (`--allowedTools` then `Read`, `Write`, … each its own arg — ClaudeRunner.swift:57-64), NOT one comma-joined arg; only the unrestricted form is comma-joined. The venv-python entry is double-quoted iff its path contains a space.
+- RULING (queue): upstream's message queue is M4 chat state (displayed, editable, persisted with chat.json). M2's engine ships `send`/`cancel` ONLY; the auto-run-1s/pause-on-failure policy and its UI live in M4, testable there against the same fake agent. Cancelled turns end the turn (no queue semantics in M2).
 - NEVER `git rm` (plain `rm` + `git add` the path); conventional commits; explicit-path staging.
 - thelio login shell is `bash -lc`.
 
@@ -39,7 +41,7 @@
 - Modify: `engine/tests/watch.rs` (poll loop)
 
 **Interfaces:**
-- Produces: the corpus every later task's tests read; `fixtures/fake-agent/fake_claude.py` harness contract (Task 7/8 consume): invoked as `fake_claude.py <args...>` with env `CAD_FAKE_SCENARIO=<path>` and `CAD_FAKE_ARGV_OUT=<path>`; emits the scenario file's lines to stdout (honoring an optional `_sleep_ms` directive line), writes `{"argv": [...], "cwd": "..."}` to the argv-out path, exit code from `_exit` directive (default 0).
+- Produces: the corpus every later task's tests read; `fixtures/fake-agent/fake_claude.py` — THE AUTHORITATIVE harness contract (Tasks 7/8 reference it without redefining): invoked as `fake_claude.py <args...>`; env `CAD_FAKE_SCENARIO` = scenario file OR directory (directory mode: picks `<dir>/<n>.jsonl` where n = value in `<dir>/counter` + 1, writing counter back — starts at 1); env `CAD_FAKE_ARGV_OUT` = path where it APPENDS one JSON line `{"argv": [...], "cwd": "..."}` PER INVOCATION (never overwrites — spawn counts read line counts); env `CAD_FAKE_STDERR` = optional file copied to stderr after the scenario. Directives inside scenario lines: `#sleep <ms>` pause before the next line; `#exit <code>` final exit code (default 0). All other lines go verbatim to stdout, flushed one by one.
 
 - [ ] **Step 1: Vendor the agent Swift sources** (8 files, same pattern as M1's Task 1 Step 0):
 
@@ -158,74 +160,68 @@ git push thelio main
 **Interfaces:**
 - Produces: `engine::agent::locator::{find_agent(kind: AgentKind, custom_path: Option<&str>) -> Option<AgentPath>, AgentKind::{Claude}, AgentPath { path: PathBuf, version: String }}`. Discovery: custom path (tilde-expanded) → `$SHELL -lc 'echo $PATH'` dirs + fixed candidates → validate with `--version` (exit 0, first line captured). Candidates for claude (Linux): `~/.local/bin/claude`, `~/.cargo/bin/claude`, `~/.npm-global/bin/claude`, `/usr/local/bin/claude`, `/usr/bin/claude`, plus `~/.claude/local/claude` (upstream's first candidate). Consumes nothing from earlier M2 tasks.
 
-- [ ] **Step 1: Failing tests** — `engine/tests/agent_locator.rs`:
+- [ ] **Step 1: Failing tests** — `engine/tests/agent_locator.rs`. NOTE: edition 2024 makes `std::env::set_var` `unsafe` — the discovery logic is therefore built PURE (`expand_tilde(path, home)`, candidate list per fake home) and env-mutating tests are limited to ONE `unsafe` block in ONE serial test:
 
 ```rust
-use engine::agent::locator::{find_agent, AgentKind};
+use engine::agent::locator::{expand_tilde, find_agent, home_candidates, AgentKind};
 
-#[test]
-fn custom_path_wins_and_is_tilde_expanded() {
-    let tmp = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("my-claude");
-    std::fs::write(&bin, "#!/bin/sh\necho '1.0.0 (fake)'\n").unwrap();
-    make_executable(&bin);
-    let home = tmp.to_string_lossy().replace('\\', "/");
-    let custom = Some(format!("~/my-claude").replace("~", &home)); // absolute after expansion
-    // tilde expansion test: pass "~/<relative-under-fake-home>" via HOME override
-    std::env::set_var("HOME", &tmp);
-    let found = find_agent(AgentKind::Claude, Some("~/my-claude"));
-    std::env::remove_var("HOME");
-    let found = found.expect("custom path resolves");
-    assert_eq!(found.path, bin);
-    assert!(found.version.starts_with("1.0.0"));
-}
-
-#[test]
-fn login_shell_path_and_candidates_discovered_in_order() {
-    // a fake claude in a temp dir; put that dir on PATH via a fake login shell is
-    // environment-dependent — instead rely on the candidates list with HOME override
-    let tmp = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(tmp.join(".local/bin")).unwrap();
-    let bin = tmp.join(".local/bin/claude");
-    std::fs::write(&bin, "#!/bin/sh\necho '9.9.9 (fake)'\n").unwrap();
-    make_executable(&bin);
-    std::env::set_var("HOME", &tmp);
-    let found = find_agent(AgentKind::Claude, None);
-    std::env::remove_var("HOME");
-    // may ALSO find a real claude on the test host's PATH — accept ours or any valid hit
-    match found {
-        Some(p) => assert!(p.version.contains('.')),
-        None => panic!("expected ~/.local/bin/claude candidate to be found under fake HOME"),
-    }
-}
-
-#[test]
-fn invalid_binary_is_rejected() {
-    let tmp = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("claude");
-    std::fs::write(&bin, "#!/bin/sh\nexit 3\n").unwrap();
-    make_executable(&bin);
-    std::env::set_var("HOME", &tmp);
-    // remove other candidates from contention: HOME override makes ~/.local absent, but
-    // PATH discovery could still find a real one; assert OUR binary was skipped by
-    // checking that if something is found it is NOT the failing one
-    if let Some(p) = find_agent(AgentKind::Claude, Some(bin.to_str().unwrap())) {
-        assert_ne!(p.path, bin, "--version exit != 0 must be rejected");
-    }
-    std::env::remove_var("HOME");
-}
-
-fn make_executable(p: &std::path::Path) {
+fn mk_bin(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn tilde_expansion_is_pure() {
+    assert_eq!(expand_tilde("~/bin/claude", "/home/p"), "/home/p/bin/claude");
+    assert_eq!(expand_tilde("/abs/claude", "/home/p"), "/abs/claude");
+    assert_eq!(expand_tilde("~x/claude", "/home/p"), "~x/claude", "only bare ~ expands");
+}
+
+#[test]
+fn candidates_follow_upstream_order_under_fake_home() {
+    let home = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
+    // upstream AgentLocator.swift order: ~/.claude/local/claude FIRST, then ~/.local/bin/claude, …
+    let want: Vec<std::path::PathBuf> = [".claude/local/claude", ".local/bin/claude", ".cargo/bin/claude",
+        ".npm-global/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude"]
+        .iter().map(|r| if r.starts_with('/') { r.into() } else { home.join(r) }).collect();
+    assert_eq!(home_candidates(&home), want);
+}
+
+#[test]
+fn discovery_uses_custom_path_then_candidates() {
+    // ONE unsafe block, serial by construction (single test):
+    unsafe {
+        let home = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join(".claude/local")).unwrap();
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let good = mk_bin(&home.join(".claude/local"), "claude", "#!/bin/sh\necho '2.0.0 (fake)'\n");
+        let _bad = mk_bin(&home.join(".local/bin"), "claude", "#!/bin/sh\nexit 3\n");
+        std::env::set_var("HOME", &home);
+        // candidate order: ~/.claude/local wins over the failing ~/.local/bin binary
+        let found = find_agent(AgentKind::Claude, None).expect("first valid candidate found");
+        assert_eq!(found.path, good);
+        assert!(found.version.contains("2.0.0"), "version = whole trimmed --version output");
+        // invalid custom path is rejected (falls through to candidates, none valid → None
+        // here because we did not put anything on PATH discovery)
+        let bad_custom = mk_bin(&home, "failing-claude", "#!/bin/sh\nexit 3\n");
+        let found2 = find_agent(AgentKind::Claude, Some(bad_custom.to_str().unwrap()));
+        assert_ne!(found2.as_ref().map(|p| p.path.clone()), Some(bad_custom),
+            "--version exit != 0 must be rejected");
+        // custom good path beats candidates
+        let custom = mk_bin(&home, "my-claude", "#!/bin/sh\necho '1.0.0 (fake)'\n");
+        let found3 = find_agent(AgentKind::Claude, Some(custom.to_str().unwrap())).unwrap();
+        assert_eq!(found3.path, custom);
+        std::env::remove_var("HOME");
+    }
 }
 ```
 
-(Env-var mutation makes these three tests order-sensitive — annotate `#[serial]`-style by running them in one `#[test]` fn with three blocks instead, or accept the shared-HOME serialization by keeping them in one test. SIMPLEST: fold all three into one `#[test] fn locator_discovery()` with sequential blocks and restored env — do that.)
+(PATH discovery via login shell is exercised implicitly on thelio — the real `~/.local/bin/claude` is found when HOME is real; the pure tests carry the logic.)
 
-- [ ] **Step 2: FAIL; Step 3: Implement** `locator.rs` per the interface: tilde expansion (`~/` → `$HOME`), login-shell PATH via `$SHELL -lc "echo $PATH"` (fallback `/bin/bash -lc`), candidate list above, `--version` spawn with 3 s timeout (std::process, not tokio — locator is sync), first line as version. `agent/mod.rs`: `pub mod locator;` + module doc.
+- [ ] **Step 2: FAIL; Step 3: Implement** `locator.rs`: `expand_tilde(path: &str, home: &str) -> String` (bare `~/` prefix only), `home_candidates(home: &Path) -> Vec<PathBuf>` in UPSTREAM ORDER (~/.claude/local/claude first — AgentLocator.swift:56), `find_agent` = custom (tilde-expanded via real $HOME, `--version` validated: exit 0, whole trimmed stdout as version) → login-shell-PATH dirs (via `$SHELL -lc "echo $PATH"`, fallback `/bin/bash -lc`) in order → home_candidates in order; also export `pub fn shell_env() -> std::collections::HashMap<String,String>` (current env with login-shell PATH merged + fallback dirs appended — ShellEnvironment.swift:18-36; the SESSION spawns agents with this env; MPLBACKEND/PYTHONUNBUFFERED are M5's python-runner vars, NOT agent envs — carry-forward). `agent/mod.rs`: `pub mod locator;` + module doc.
 
 - [ ] **Step 4: PASS on thelio (the REAL claude at ~/.local/bin/claude will be found on thelio — the test's fake-HOME blocks must therefore run before any discovery that could pick the real one; keep the single-test-fn structure). Step 5: Commit** `feat(engine): agent locator — login-shell PATH + candidates + version validation`.
 
@@ -374,7 +370,16 @@ fn synthetic_error_assistant_fields_tolerated() {
 
 **Interfaces:**
 - Consumes: none (pure).
-- Produces: `engine::agent::tool_summary::{summarize(name: &str, input: &serde_json::Value) -> String, live_summary(name: &str, partial_json: &str) -> String, rel_path(path: &str, root: &str) -> String}` — titles per the vendored ToolSummary.swift table (Bash first-word classes: pip/uv → "Installs components"; `python* model.py` → "Compiles the model"; other python → "Analyzes"; image converters → "Prepares a preview"; read-only file cmds → "Examines files"; sed/perl on model.py → "Edits the model"; other file shuffling → "Tidies files"; else "Works on the project". Write/Edit: basename model.py → "Writes the model"/"Edits the model" else support-file wording. Read: references/ → "Studies the reference"; schematic*/pdf → "Checks the drawing"; manifest.json → "Checks results"; image exts → "Checks a preview". Path display: relative to project root, venv python → "python", leading `cd <root> && ` stripped).
+- Produces: `engine::agent::tool_summary::{summarize(name: &str, input: &serde_json::Value) -> String, live_title(name: &str, partial_json: &str) -> String, live_preview(partial_json: &str) -> Option<String>, rel_path(path: &str, root: &str) -> String, short_command(command: &str, root: &str, python: &str) -> String}`.
+
+Semantics per vendored ToolSummary.swift (READ IT — the table below is the COMPLETE map; titles take the ENGLISH values from `app/i18n/en/main.ftl` where they exist, else the plan's English rendering noted):
+- Bash first-word classes IN ORDER: pip/uv → "Installs components"; `python* model.py` → "Compiles the model"; other python → "Analyzes"; rsvg-convert/sips/magick/convert/qlmanage → "Prepares a preview"; ls/cat/head/tail/grep/rg/find/wc/file/stat AND `sed` WITHOUT " -i" → "Examines files" (read-only sed is checked BEFORE the model.py-edit case — ToolSummary.swift:53); sed/perl on model.py → "Edits the model"; sed/mv/cp/rm/mkdir/touch/perl otherwise → "Tidies files"; else "Works on the project".
+- Write: basename model.py → "Writes the model" (live: title + " · N lines" from the content parsed so far); else support-file wording. Edit AND MultiEdit share the case: model.py → "Edits the model" else support file (live preview: last 4 non-empty lines of content/new_string).
+- Read: model.py → the en-catalog equivalent of "Rilegge il modello" (upstream Swift literal; use the en/main.ftl value); references/ prefix → "Studies the reference"; schematic*/pdf → "Checks the drawing"; manifest.json → "Checks results"; png/jpg/jpeg/svg/webp → "Checks a preview"; default/empty → the en equivalent of "Legge un file".
+- `rel_path(path, root)`: absolute-under-root → relative; else as-given (ToolSummary.swift file()).
+- `short_command(command, root, python)`: root-relative display + venv python → "python" + leading `cd <root> && ` stripped (ToolSummary.swift:119-129).
+- `live_title`: summarize-equivalent title from the partial JSON's keys + the line-count suffix when the content key is countable; NEVER errors on garbage prefix.
+- `live_preview`: last 4 non-empty lines of the content/new_string found in the partial prefix; None when absent.
 
 - [ ] **Step 1: Failing tests** — `engine/tests/tool_summary.rs`: a table test with every case above (inputs as `serde_json::json!` values; ~25 assertions), plus live-summary cases: partial `{"file_path": "/tmp/p/model.py", "conte` → "Writes the model" + trailing "…"; partial starting `{` empty → generic tool name; garbage `not json` → tool name. Plus `rel_path`: absolute under root → relative; the venv python rewrite; `cd /root && python model.py` → `python model.py`.
 
@@ -404,6 +409,7 @@ pub fn build_args(
     system_prompt: &str,
     s: &Settings,
     session_id: Option<&str>,
+    venv_python: &Path,
 ) -> Vec<String>;
 pub fn render_system_prompt(tpl: &str, ctx: &PromptCtx) -> String;
 pub struct PromptCtx {
@@ -416,11 +422,16 @@ pub struct PromptCtx {
     pub guidelines: String,
     pub date: String,                // numeric, no time
 }
-pub fn build_prompt(req: &TurnRequest, root: &Path, manifest: Option<&Manifest>) -> String;
+pub fn build_prompt(req: &TurnRequest, root: &Path, missing: &MissingCtx) -> String;
+// MissingCtx is M1's: {project_root, output_dir, parts_count, printer_model, manifest: Option<&Manifest>}
+// The SESSION assembles it: root/output_dir from the project, parts_count from
+// parse_3mf(output/model.3mf).map(|p| p.len()).unwrap_or(0), printer_model from settings,
+// manifest from Manifest::load (None when missing/unparseable). build_prompt passes it to
+// missing_requirements verbatim — no field silently dropped.
 pub fn copy_attachments(req: &TurnRequest, root: &Path) -> Vec<String>; // references/<unixts>-<i>-<name>
 ```
 
-Argv per vendored ClaudeRunner.swift + contract §1: `-p <prompt> --output-format stream-json --verbose --include-partial-messages --append-system-prompt <rendered> --permission-mode acceptEdits --allowedTools Read,Write,Edit,Glob,Grep,Bash` (+ `--strict-mcp-config --setting-sources project,local` when isolates_claude; resume: `--resume <id> --fork-session`; model/effort when set). Restricted bash swaps the allowedTools value for the 15-entry allowlist (one arg, comma-joined, venv-python double-quoted iff it contains a space). Non-streaming fallback (streaming_output=false): `--output-format json` replaces the stream-json/verbose/include-partial trio.
+Argv per vendored ClaudeRunner.swift + contract §1: `-p <prompt> --output-format stream-json --verbose --include-partial-messages --append-system-prompt <rendered> --permission-mode acceptEdits --allowedTools <ONE comma-joined arg: Read,Write,Edit,Glob,Grep,Bash>` (+ `--strict-mcp-config --setting-sources project,local` when isolates_claude; resume: `--resume <id> --fork-session`; model/effort when set). Restricted bash replaces the allowedTools VALUE with **15 separate argv entries** — `--allowedTools` then `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash(<venv-python>:*)`, `Bash(ls:*)`, … `Bash(stat:*)` each its own element (ClaudeRunner.swift:57-64); the venv-python entry is double-quoted iff the path contains a space — the quoting lives INSIDE the entry string, e.g. `Bash("/opt/my venv/python":*)`. Non-streaming fallback (streaming_output=false): `--output-format json` replaces the stream-json/verbose/include-partial trio. `build_args` takes `venv_python: &Path` (from PromptCtx) — it cannot construct the restricted list without it.
 
 - [ ] **Step 1: Failing tests** — `engine/tests/claude_runner.rs` (~6 tests, all real code in the plan): golden argv equality for the four flag combinations (default / isolated-off / restricted-bash / resume+model+effort); rendered prompt contains every `{{PLACEHOLDER}}` replaced and NONE left behind; `build_prompt` with attachments produces the "Attached reference files:" list + (empty text → "Create a model based on the attached files.") + the missing-note ("Note from CAD Studio: model.py does not produce these required outputs yet. Add them in this turn as well, following your instructions:" + indented missing list) driven by a temp project with model.py + partial output/; `copy_attachments` writes `references/<unixts>-0-sketch.png` and returns prompt-relative paths; system prompt template loaded from `fixtures/upstream/CADSystemPrompt.md` renders with all seven placeholders.
 
@@ -429,7 +440,7 @@ Argv per vendored ClaudeRunner.swift + contract §1: `-p <prompt> --output-forma
 fn argv_default_isolation() {
     let claude = fake_path(); // AgentPath { path: "/usr/bin/claude".into(), version: String::new() }
     let s = engine::settings::Settings::default(); // isolates_claude = true
-    let args = build_args(&claude, "make a box", "SYSTEM", &s, None);
+    let args = build_args(&claude, "make a box", "SYSTEM", &s, None, std::path::Path::new("/v/python"));
     assert_eq!(args[0], "-p");
     let joined = args.join("\u{1f}");
     assert!(joined.contains("--output-format\u{1f}stream-json"));
@@ -447,17 +458,33 @@ The six companion tests (same file, same style — complete bodies):
 
 ```rust
 #[test]
-fn argv_restricted_bash_allowlist() {
+fn argv_restricted_bash_allowlist_is_15_separate_entries() {
     let mut s = engine::settings::Settings::default();
     s.restricted_bash = true;
-    let args = build_args(&fake_path(), "p", "SYS", &s, None);
-    let expected = "Read,Write,Edit,Glob,Grep,Bash(\"/v/python\":*),Bash(ls:*),Bash(cat:*),\
-Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(file:*),Bash(test:*),Bash(pwd:*),Bash(stat:*)";
-    assert!(args.iter().any(|a| a == expected), "exact allowlist arg, got {args:?}");
+    let args = build_args(&fake_path(), "p", "SYS", &s, None, std::path::Path::new("/v/python"));
+    let expected = [
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash(/v/python:*)", "Bash(ls:*)",
+        "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(file:*)",
+        "Bash(test:*)", "Bash(pwd:*)", "Bash(stat:*)",
+    ];
+    // 15 consecutive separate argv entries after --allowedTools
+    let i = args.iter().position(|a| a == "--allowedTools").expect("flag present");
+    assert_eq!(&args[i + 1..i + 16], expected, "15 separate entries, exact order");
+    // spacey python path → the entry itself carries quotes
+    let args2 = build_args(&fake_path(), "p", "SYS", &s, None, std::path::Path::new("/opt/my venv/python"));
+    assert!(args2.contains(&"Bash(\"/opt/my venv/python\":*)".to_string()), "quoted inside the entry");
+}
+
+#[test]
+fn argv_isolation_off_omits_flags() {
+    let mut s = engine::settings::Settings::default();
+    s.isolates_claude = false;
+    let args = build_args(&fake_path(), "p", "SYS", &s, None, std::path::Path::new("/v/python"));
+    let joined = args.join("\u{1f}");
+    assert!(!joined.contains("--strict-mcp-config"));
+    assert!(!joined.contains("--setting-sources"));
 }
 ```
-
-(The expected string's venv-python segment uses ctx.venv_python, double-quoted iff it contains a space — this test's ctx uses "/v/python" (no space → unquoted); a second assertion with a spacey path ("My venv/python") covers the quoted form. Full list per vendored ClaudeRunner.swift: the 5 tools + Bash(<venv-python>:*) + the 9 read-only Bash prefixes.)
 
 ```rust
 #[test]
@@ -465,7 +492,7 @@ fn argv_resume_fork_model_effort() {
     let mut s = engine::settings::Settings::default();
     s.claude_model = Some("opus".into());
     s.claude_effort = Some("high".into());
-    let args = build_args(&fake_path(), "p", "SYS", &s, Some("sid-123"));
+    let args = build_args(&fake_path(), "p", "SYS", &s, Some("sid-123"), std::path::Path::new("/v/python"));
     let joined = args.join("\u{1f}");
     assert!(joined.contains("--resume\u{1f}sid-123"));
     assert!(joined.contains("--fork-session"));
@@ -477,7 +504,7 @@ fn argv_resume_fork_model_effort() {
 fn argv_nonstreaming_json() {
     let mut s = engine::settings::Settings::default();
     s.streaming_output = false;
-    let args = build_args(&fake_path(), "p", "SYS", &s, None);
+    let args = build_args(&fake_path(), "p", "SYS", &s, None, std::path::Path::new("/v/python"));
     let joined = args.join("\u{1f}");
     assert!(joined.contains("--output-format\u{1f}json"));
     assert!(!joined.contains("--include-partial-messages"));
@@ -509,9 +536,14 @@ fn prompt_assembly_with_attachments_and_missing_note() {
     assert!(p.contains("Create a model based on the attached files."));
     assert!(p.contains(&rels[0]));
     let manifest = engine::project::Manifest::default();
-    let p2 = build_prompt(&TurnRequest { prompt: "go".into(), attachments: vec![] }, &root, Some(&manifest));
+    let missing = engine::project::outputs::MissingCtx {
+        project_root: &root, output_dir: &root.join("output"), parts_count: 2,
+        printer_model: Some("P1S"), manifest: None,
+    };
+    let p2 = build_prompt(&TurnRequest { prompt: "go".into(), attachments: vec![] }, &root, &missing);
     assert!(p2.contains("Note from CAD Studio: model.py does not produce these required outputs yet."));
     assert!(p2.contains("model.stl"));
+    assert!(p2.contains("one drawing page per piece"), "parts_count>1 note flows through");
 }
 
 #[test]
@@ -544,7 +576,7 @@ fn attachments_copied_with_timestamp_names() {
 - Modify: `engine/Cargo.toml` (`tokio = { workspace = true }`), root `Cargo.toml` (workspace tokio: `features = ["rt-multi-thread", "process", "io-util", "time", "sync", "macros"]`)
 
 **Interfaces:**
-- Produces: `engine::processes::{spawn_streaming(argv: &[String], cwd: &Path, env: &[(String,String)]) -> std::io::Result<RunningProcess>, RunningProcess { pid: u32, lines: tokio::sync::mpsc::Receiver<Line>, stderr_text: tokio::sync::oneshot::Receiver<String> }, Line::{Stdout(String), Stderr(String)}, RunningProcess::interrupt(&self) (SIGINT → 3 s → SIGTERM, non-blocking), registry: `register(pid)`, `reap_orphans() -> Vec<u32>` (ppid==1 + /proc/<pid>/stat starttime matches the registry line), registry path `~/.local/share/cad-studio/running-processes`.** Spawn sets stdin to Stdio::null() ALWAYS.
+- Produces: `engine::processes::{spawn_streaming(argv: &[String], cwd: &Path, env: &[(String,String)]) -> std::io::Result<RunningProcess>, RunningProcess { pid: u32, lines: tokio::sync::mpsc::Receiver<Line>, stderr_text: tokio::sync::oneshot::Receiver<String> }, Line::{Stdout(String), Stderr(String)}, RunningProcess::interrupt(&self) (SIGINT → 3 s → SIGTERM, non-blocking), registry: `register(pid)`, `reap_orphans() -> Vec<u32>` (ppid==1 + /proc/<pid>/stat starttime matches the registry line; CLEARS the registry file afterward — upstream persists [] — ProcessRunner.swift:157), registry path `~/.local/share/cad-studio/running-processes`. The RunningProcesses class lives at the BOTTOM of Shared/ProcessRunner.swift:122-186 (no standalone file) — read it there; the launch-time reap call (upstream CADStudioApp.swift:41) is M4 wiring, carried forward.** Spawn sets stdin to Stdio::null() ALWAYS.
 
 - [ ] **Step 1: Failing tests** (tokio runtime per test; scripts under `std::env::temp_dir()`):
   - `stdout_and_stderr_stream_line_by_line`: script echoes 3 stdout lines + 1 stderr line + `#exit 0`; assert Line order per stream and stderr_text content.
@@ -588,16 +620,17 @@ pub enum TurnOutcome {
 pub struct Session::run_turn(&mut self, root: &Path, req: &TurnRequest) -> TurnHandle; // spawns the async turn; events via the handle's tokio mpsc
 ```
 
-Turn mechanics per AgentSession.swift + probe: spawn via processes (stdin null, cwd root), tee EVERY raw stdout line to `.cadstudio/logs/<yyyy-MM-dd'T'HH-mm-ss>.jsonl` (created alongside), translate events (one-block assistant semantics: TextConfirmed per assistant text block — the CURRENT unconfirmed row is REPLACED by each confirmed text, matching upstream's reconcile), tool rows keyed by tool_use id (live partial previews throttled by the caller — engine emits every input_json_delta; the app throttles), thinking via thinking_tokens, session-id capture from init OR result (persist via save_metadata immediately), synthetic-error assistant ignored as text (model == "<synthetic>" or is_api_error_message → skip TextConfirmed), result → TurnFinished (Success iff !is_error; Failed with error=result text + auth classification), process exit without result → Failed with last-line stderr. Cancel via handle → interrupt() → Cancelled.
+Turn mechanics per AgentSession.swift + probe: spawn via processes (stdin null, cwd root), tee EVERY raw stdout line to `.cadstudio/logs/<yyyy-MM-dd'T'HH-mm-ss>.jsonl` (created alongside), translate events (one-block assistant semantics: TextConfirmed per assistant text block — the CURRENT unconfirmed row is REPLACED by each confirmed text, matching upstream's reconcile), tool rows keyed by tool_use id (live partial previews throttled by the caller — engine emits every input_json_delta; the app throttles), thinking via thinking_tokens, TextConfirmed REPLACES the FIRST unconfirmed row FIFO (upstream unconfirmedTextIDs.removeFirst(), AgentSession.swift:244), session-id capture from init OR result (persist via save_metadata immediately), AssistantEvent carries {block: ContentBlock, model: Option<String>, is_api_error_message: bool, session_id: Option<String>} so the session can act on synthetic blocks, ToolStarted keys by the tool_use id present at content_block_start (probe-confirmed), synthetic-error assistant treated like ANY text block (TextConfirmed — upstream AgentSession.swift:237-245 shows the text row; M4 may suppress its DISPLAY, engine does not), result → TurnFinished (Success.text = result text ONLY when no confirmed text arrived this turn — upstream finish()'s hasText rule) (Success iff !is_error; Failed with error=result text + auth classification), process exit without result → Failed with the FULL joined stderr plus stdout (upstream AgentSession.swift:283-286 joins both on nonzero exit). Cancel via handle → interrupt() → Cancelled.
 
 - [ ] **Step 1: Failing tests** — `engine/tests/session_turn.rs` (fake agent from Task 1; CLAUDE resolution order: env `CAD_TEST_CLAUDE` → locator):
-  - `pong_turn_emits_full_event_sequence` (scenario pong.jsonl; assert event subsequence: Started → Text* → TurnFinished Success{text:"pong"}; project.json gains session_id; logs file exists with exactly N lines).
+  - `pong_turn_emits_full_event_sequence` (scenario pong.jsonl = VERBATIM copy of 02-minimal-session.jsonl; assert: Started → Text* → one StreamEvent::RateLimit consumed silently → TurnFinished Success{text:"pong"}; project.json gains session_id; the .cadstudio/logs file has exactly 19 lines).
   - `tool_turn_tracks_tool_rows` (tool-use.jsonl: Write + Read ToolStarted/ToolFinished with outputs; is_error false; the interleaved mid-stream tool_result decodes and completes the Write row while Read still streams).
   - `error_result_fails_turn` (error-result.jsonl: TurnFinished Failed with auth=false, error mentions model_not_found/404).
   - `tool_failure_marks_row_failed` (tool-failure.jsonl: ToolFinished is_error true with Traceback text).
   - `unknown_events_do_not_break_turn` (unknown-events.jsonl: turn completes Success).
-  - `argv_dump_asserts_flags` (fake writes argv JSON; assert resume/fork/isolation flags per settings; runs in a temp project root; cwd == root).
-  - `cancel_mid_stream` (cancel-mid-stream.jsonl: start, wait for ToolStarted/TextStreaming, cancel → TurnFinished Cancelled within 2 s; process gone (kill -0 fails)).
+  - `argv_dump_asserts_flags` (fake APPENDS one argv-JSON line per invocation; assert isolation flags per settings; cwd == root).
+  `forked_session_replaces_metadata_id` (two turns: first pong.jsonl → sid A; second with resume via a scenario built from 05-resume-fork-isolated.jsonl whose init carries the NEW forked id → project.json ends with the forked id, != A).
+  - `cancel_mid_stream` (cancel-mid-stream.jsonl: start, wait for Started (init arrives BEFORE the 5 s sleep — TextStreaming cannot fire until post-sleep deltas), then cancel → TurnFinished Cancelled within 2 s; process gone (kill -0 fails)).
 - [ ] **Step 2: FAIL; Step 3: Implement** `session.rs` (single `run_turn` path; the retry/busy/missing/auth logic is Task 8 — `run_turn` classifies but does not retry).
 - [ ] **Step 4: PASS; Step 5: Commit** `feat(engine): session turn state machine — event translation, tee logging, cancellation`.
 
@@ -610,16 +643,15 @@ Turn mechanics per AgentSession.swift + probe: spawn via processes (stdin null, 
 - Create: `engine/tests/session_lifecycle.rs`
 
 **Interfaces:**
-- Produces: `Session::send(root, req)` — the full upstream turn dance: with session_id → resume+fork argv; on Busy (combined stdout+stderr contains "already has an active writer"): sleep 5 s, retry ONCE with resume, still busy → clear session_id, emit a system EngineEvent, run FRESH (model.py untouched); on MissingSession (substring list: "No conversation found" / "no rollout found" / "session not found" / "thread not found"): clear session_id, system event, fresh run; auth (case-insensitive list: "invalid api key", "/login", "not logged in", "authentication", "oauth token", "unauthorized", "401"): TurnOutcome::Failed{auth: true} — NO retry. Queue: `Session::queue` holds sends while a turn runs; auto-dispatch 1 s after Success; after Failed/Busy-fresh-failure the queue PAUSES (caller drains). Message texts for the system rows verbatim from AgentSession.swift.
+- Produces: `Session::send(root, req)` — the full upstream turn dance (NO queue in M2 — controller ruling: the queue is M4 chat state; engine ships send/cancel): resume+fork argv ONLY when metadata.session_id is Some AND the turn ERRORED or produced no result (AgentSession.swift:72/87 guards — the directory-mode fake emits its constant stderr on EVERY invocation; runs 2/3 of the retry tests survive only because of these guards — implement them exactly); on Busy (COMBINED stdout+stderr, case-insensitive, contains "already has an active writer"): sleep retry_delay (default 5 s, injectable), retry ONCE with resume, still busy → clear session_id, emit a system EngineEvent, run FRESH (model.py untouched); on MissingSession (case-insensitive substrings: "No conversation found" / "no rollout found" / "session not found" / "thread not found"): clear session_id, system event, fresh run; auth (case-insensitive, FULL upstream list incl. "codex login": "invalid api key", "/login", "not logged in", "authentication", "oauth token", "unauthorized", "codex login", "401"): TurnOutcome::Failed{auth: true} — NO retry. System-row message texts verbatim from AgentSession.swift.
 
 - [ ] **Step 1: Failing tests** — `engine/tests/session_lifecycle.rs` using a stateful fake wrapper (`CAD_FAKE_SCENARIO` pointing at a scenario DIRECTORY: the fake reads `first.jsonl` then `second.jsonl` per invocation counter file — extend fake_claude.py by 6 lines: if scenario path is a directory, pick `<dir>/<n>.jsonl` where n = existing counter file + 1, write counter):
   - `busy_retries_once_then_fresh`: first/ busy, second/ busy, third/ pong → Busy…fresh…Success; session_id ends set from the THIRD run's init; assert exactly 3 spawns (argv dumps).
   - `busy_retry_succeeds_second_time`: first/ busy, second/ pong → Success with 2 spawns, resume used on both.
   - `missing_session_falls_back_fresh`: stderr has "No conversation found…" then pong → fresh run Success; metadata session_id replaced.
   - `auth_error_no_retry`: stderr auth text → Failed{auth:true}, exactly 1 spawn.
-  - `queue_autoruns_after_success`: two sends queued; first turn Success → second auto-dispatches ~1 s later (assert 2 argv dumps, order).
-  - `queue_pauses_after_failure`: first Failed → queued send NOT dispatched (assert 1 dump after 2 s).
-- [ ] **Step 2: FAIL; Step 3: Implement** the dance in session.rs (time::sleep for the 5 s — test injects a shorter retry delay via `Session::with_retry_delay(Duration)`; production default 5 s).
+  - `cancelled_turn_ends_cleanly` (queue semantics are M4 — but cancellation must TERMINATE the dance: cancel during a busy-retry sleep → TurnFinished Cancelled, no further spawns).
+- [ ] **Step 2: FAIL; Step 3: Implement** the dance in session.rs (time::sleep for the 5 s — test injects a shorter retry delay via `Session::with_retry_delay(Duration)`; production default 5 s). Spawn counting via the fake's APPEND-mode argv dump (Task 1's authoritative harness contract): each invocation adds one JSON line; tests count lines and check order.
 - [ ] **Step 4: PASS; Step 5: Commit** `feat(engine): session lifecycle — busy retry, missing/auth fallbacks, message queue`.
 
 ---
