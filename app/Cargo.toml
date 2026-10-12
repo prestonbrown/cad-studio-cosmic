@@ -20,6 +20,10 @@ uuid.workspace = true
 time.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# resvg matches the iced fork's own pin (0.45) so the tree carries one copy;
+# image (png) decodes the schematic.png fallback raster.
+resvg = "0.45"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tokio.workspace = true
