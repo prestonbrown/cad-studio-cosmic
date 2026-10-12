@@ -37,6 +37,7 @@ fn metadata_roundtrips_upstream_shape() {
     assert!(!json.contains("22:13:20."), "no fractional seconds: {json}");
     assert!(json.contains('Z'), "UTC");
     let back: ProjectMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.created_at, t, "whole-second round-trip");
     assert_eq!(back.session_id.as_deref(), Some("abc-123"));
     assert_eq!(back.layout, m.layout);
 }
