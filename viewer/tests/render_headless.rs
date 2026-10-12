@@ -11,9 +11,10 @@ use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
 use viewer::render::camera;
 use viewer::render::gpu;
+use viewer::render::grid;
 use viewer::render::lights;
 use viewer::render::{
-    Camera, MeshPipeline, PartScene, NEUTRAL, default_camera, srgb_to_linear,
+    Camera, MeshPipeline, NEUTRAL, Options, PartScene, default_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -35,6 +36,8 @@ fn golden_scene() -> PartScene {
 /// the app background, render the part pass on top, read the pixels back
 /// tightly packed (`w * h * 4` RGBA). `queue.write_buffer` calls from
 /// `prepare_parts` are ordered before the submitted encoder's commands.
+/// No overlay, solid mode — the common case; [`render_frame_opts`] carries
+/// the grid and render options.
 fn render_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -43,6 +46,32 @@ fn render_frame(
     camera: &Camera,
     w: u32,
     h: u32,
+) -> Vec<u8> {
+    render_frame_opts(
+        device,
+        queue,
+        pipeline,
+        scene,
+        camera,
+        w,
+        h,
+        None,
+        &Options::default(),
+    )
+}
+
+/// [`render_frame`] with the overlay and render mode: `grid` (when `Some`)
+/// is prepared and drawn after the parts, `options` picks e.g. wireframe.
+fn render_frame_opts(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+    grid: Option<&grid::GridMesh>,
+    options: &Options,
 ) -> Vec<u8> {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless target"),
@@ -59,7 +88,7 @@ fn render_frame(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare_parts(device, queue, (w, h), camera, scene);
+    pipeline.prepare_parts(device, queue, (w, h), camera, scene, grid, options);
     let mut encoder = device.create_command_encoder(&Default::default());
     // clear to the app background first, then viewer pass loads on top
     // (mirrors iced underlay)
@@ -185,7 +214,11 @@ fn ink_pixels(px: &[u8], bg: [u8; 4]) -> usize {
 /// staging applies, run on the stored byte. Readback is sRGB-encoded
 /// (Rgba8UnormSrgb target), so classification happens in linear space.
 fn decode_linear(c: &[u8]) -> [f32; 3] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])]
+    [
+        srgb_to_linear(c[0]),
+        srgb_to_linear(c[1]),
+        srgb_to_linear(c[2]),
+    ]
 }
 
 /// Chromaticity: the linear color scaled so its max component is 1.
@@ -249,7 +282,9 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// headroom; b < 120 clears the brightest blue face's 115 by 5; the g cap
 /// excludes any future bright-but-not-red surface.
 fn cap_red_pixels(px: &[u8]) -> usize {
-    px.chunks(4).filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120).count()
+    px.chunks(4)
+        .filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120)
+        .count()
 }
 
 /// Section cap: cutting the fixture along the model's Z stack must draw the
@@ -274,7 +309,15 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     let span = scene.aabb_max[1] - scene.aabb_min[1];
     let mut cap_at = |frac: f32| {
         cam.section_pos = scene.aabb_min[1] + span * frac;
-        cap_red_pixels(&render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600))
+        cap_red_pixels(&render_frame(
+            device,
+            queue,
+            &mut pipeline,
+            &scene,
+            &cam,
+            800,
+            600,
+        ))
     };
     let base = cap_at(4.0 / 26.0); // pinned y=4: middle of the 60mm base box
     let lid = cap_at(21.0 / 26.0); // pinned y=21: middle of the 40mm lid box
@@ -429,8 +472,7 @@ fn msaa_smooths_a_diagonal_edge() {
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
-    let mut p4 =
-        MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
+    let mut p4 = MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
     let a = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
     let b = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
     assert_eq!(a, b, "4x frames must be identical on one pipeline");
@@ -699,3 +741,152 @@ fn shaded_faces_differ() {
     );
 }
 
+/// Wireframe mode draws hairlines, not faces (facts #44): the same scene,
+/// same camera, `Options { wireframe: true }` vs solid — the line pass
+/// draws the 1px edge list where the fill pass painted whole triangles, so
+/// the wireframe ink is a small fraction of the solid ink. And the lines
+/// carry the SAME material: every wireframe ink pixel classifies (by
+/// chroma, lighting divides out) as one of the two part colors — a tinted
+/// or recolored wireframe fails the classification half.
+#[test]
+fn wireframe_renders_lines_not_faces() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let solid = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
+    let wire = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        &Options { wireframe: true },
+    );
+    let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
+    assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
+    // measured on Metal: solid 98560 ink px, wireframe 3423 — the hairline
+    // edge list of two boxes against their filled faces
+    assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
+    let ratio = wi as f64 / si as f64;
+    assert!(
+        (0.01..0.12).contains(&ratio),
+        "wireframe/solid ink ratio {ratio:.3} must sit well below 1 — hairlines, not faces"
+    );
+    // same material: wire ink classifies as base-blue or lid-red chroma
+    let (blue, red) = fixture_chromas();
+    const TOL: f32 = 0.05;
+    let classified = wire
+        .chunks(4)
+        .filter(|c| is_ink(c, bg))
+        .filter(|c| {
+            let x = chroma(decode_linear(c));
+            chroma_dist(x, blue) < TOL || chroma_dist(x, red) < TOL
+        })
+        .count();
+    // measured 3423/3423 (100%); the 90% bar absorbs driver raster drift
+    assert!(
+        classified as f64 >= 0.90 * wi as f64,
+        "only {classified}/{wi} wireframe ink pixels carry a part color"
+    );
+}
+
+/// Pixels within TOL of the bed accent's chromaticity — the overlay is
+/// unlit and opaque, so an unoccluded bed pixel is the pure accent and
+/// u8 storage noise is the only deviation.
+fn accent_pixels(px: &[u8]) -> usize {
+    let accent = chroma(grid::ACCENT);
+    px.chunks(4)
+        .filter(|c| chroma_dist(chroma(decode_linear(c)), accent) < 0.05)
+        .count()
+}
+
+/// The bed rectangle (facts #37): with `bed = Some` the accent-colored
+/// outline draws around the model's footprint; with `None` no accent pixel
+/// exists. Border, not a filled plate: the outline covers ~perimeter x
+/// line-width while a filled quad would cover the bed's whole area — an
+/// order of magnitude apart — and the accent bbox stays centered on the
+/// model it surrounds.
+#[test]
+fn bed_rectangle_present() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let aabb = (scene.aabb_min, scene.aabb_max);
+    // 80mm bed around the fixture's 60mm footprint: wide enough to clear
+    // the model, small enough to stay inside the framing
+    let with_bed = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        Some(&grid::geometry(aabb, Some([80.0, 80.0]))),
+        &Options::default(),
+    );
+    let sans_bed = render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        Some(&grid::geometry(aabb, None)),
+        &Options::default(),
+    );
+    assert_eq!(accent_pixels(&sans_bed), 0, "bed None must draw no accent");
+    let n = accent_pixels(&with_bed);
+    // measured on Metal: 1520 accent px for the 80mm outline (perimeter
+    // x ~2px line width); a FILLED bed would read ~1.3e5 (bed area minus
+    // the model base), so the 8_000 ceiling sits 5x above the outline and
+    // 16x below a filled plate
+    assert!(
+        n > 500,
+        "bed Some must draw a visible outline: {n} accent px"
+    );
+    assert!(
+        n < 8_000,
+        "the bed is an outline, not a filled plate: {n} accent px"
+    );
+    // centered on the model: the accent bbox midpoint sits within 10% of
+    // the frame width of the solid ink bbox midpoint
+    let bbox_mid = |px: &[u8], pred: &dyn Fn(&[u8]) -> bool| -> (f64, f64) {
+        let (mut mn_x, mut mx_x, mut mn_y, mut mx_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for (i, c) in px.chunks(4).enumerate() {
+            if pred(c) {
+                let (x, y) = (i % 800, i / 800);
+                mn_x = mn_x.min(x);
+                mx_x = mx_x.max(x);
+                mn_y = mn_y.min(y);
+                mx_y = mx_y.max(y);
+            }
+        }
+        assert!(mn_x <= mx_x, "predicate matched no pixels");
+        ((mn_x + mx_x) as f64 / 2.0, (mn_y + mx_y) as f64 / 2.0)
+    };
+    let is_accent = |c: &[u8]| chroma_dist(chroma(decode_linear(c)), chroma(grid::ACCENT)) < 0.05;
+    let (bed_x, bed_y) = bbox_mid(&with_bed, &is_accent);
+    let ink_of_bg = |c: &[u8]| is_ink(c, bg);
+    let (ink_x, ink_y) = bbox_mid(&with_bed, &ink_of_bg);
+    // horizontally centered on the model, and at its floor: screen y grows
+    // downward, so the rectangle's mid sits below the ink mid (the stacked
+    // lid pulls the model's mid up), but still under the model — measured
+    // 123px below on Metal
+    assert!(
+        (bed_x - ink_x).abs() < 40.0,
+        "accent bbox mid x {bed_x:.0} must center on the model's {ink_x:.0}"
+    );
+    assert!(
+        (0.0..200.0).contains(&(bed_y - ink_y)),
+        "accent bbox mid y {bed_y:.0} must sit at the model's floor, below mid {ink_y:.0}"
+    );
+}

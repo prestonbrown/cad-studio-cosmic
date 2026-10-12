@@ -1,13 +1,14 @@
 //! Windowed spike: the golden fixture model in a window through the
 //! viewer's own Depth24PlusStencil8 pass. Mirrors iced's `custom_shader`
-//! example app shape; drag orbits, scroll zooms. Run from the repo root:
-//! `cargo run -p viewer --example spike_window`
+//! example app shape; drag orbits, scroll zooms, the checkboxes toggle
+//! wireframe mode (facts #44) and the parity grid overlay. Run from the
+//! repo root: `cargo run -p viewer --example spike_window`
 
 use std::sync::Arc;
 
 use engine::parsing::threemf::parse_3mf;
 use iced::mouse::ScrollDelta;
-use iced::widget::{center, column, mouse_area, shader, text};
+use iced::widget::{center, checkbox, column, mouse_area, row, shader, text};
 use iced::{Center, Element, Fill, Point, Size};
 
 use viewer::render::{NEUTRAL, PartScene, SpikeScene};
@@ -25,6 +26,8 @@ enum Message {
     Released,
     Moved(Point),
     Zoom(ScrollDelta),
+    Wireframe(bool),
+    ShowGrid(bool),
 }
 
 struct Spike {
@@ -77,22 +80,30 @@ impl Spike {
                 };
                 self.scene.zoom = (self.scene.zoom * 0.9f32.powf(steps)).clamp(0.05, 50.0);
             }
+            Message::Wireframe(on) => self.scene.wireframe = on,
+            Message::ShowGrid(on) => self.scene.show_grid = on,
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let canvas = mouse_area(
-            shader(&self.scene)
-                .width(Fill)
-                .height(Fill),
-        )
-        .on_press(Message::Pressed)
-        .on_release(Message::Released)
-        .on_move(Message::Moved)
-        .on_scroll(Message::Zoom);
+        let canvas = mouse_area(shader(&self.scene).width(Fill).height(Fill))
+            .on_press(Message::Pressed)
+            .on_release(Message::Released)
+            .on_move(Message::Moved)
+            .on_scroll(Message::Zoom);
+
+        let toggles = row![
+            checkbox(self.scene.wireframe)
+                .label("wireframe")
+                .on_toggle(Message::Wireframe),
+            checkbox(self.scene.show_grid)
+                .label("grid")
+                .on_toggle(Message::ShowGrid),
+        ]
+        .spacing(12);
 
         center(
-            column![canvas, text("drag: orbit · scroll: zoom").size(12)]
+            column![canvas, toggles, text("drag: orbit · scroll: zoom").size(12)]
                 .spacing(4)
                 .align_x(Center),
         )
