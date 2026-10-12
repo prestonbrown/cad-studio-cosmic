@@ -75,7 +75,7 @@ pub struct GpuPart {
     pub edges: Vec<[u32; 2]>,
     /// The part's model transform (group 1) — identity from `from_parts`.
     /// A changed transform re-stages the part today (the residency check
-    /// covers it alongside the content hash); M5's playback writes the
+    /// covers it alongside the content hash); M7's playback writes the
     /// per-part transform uniform per frame without vertex rewrites
     /// (spec §5).
     pub transform: [[f32; 4]; 4],
