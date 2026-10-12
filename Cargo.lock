@@ -190,8 +190,7 @@ dependencies = [
  "engine",
  "libcosmic",
  "serde_json",
- "time",
- "tokio",
+ "thiserror 2.0.21",
  "uuid",
 ]
 

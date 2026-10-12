@@ -18,7 +18,8 @@ libcosmic.workspace = true
 engine = { path = "../engine" }
 uuid.workspace = true
 time.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-serde_json.workspace = true
