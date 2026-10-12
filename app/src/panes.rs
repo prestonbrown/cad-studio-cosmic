@@ -5,7 +5,9 @@
 
 use cosmic::widget::pane_grid::{self, Configuration, Node, Split, State};
 use engine::project::layout::{self, Axis, LayoutNode, PaneKind};
-use engine::project::store::{load_metadata, save_metadata, ProjectStoreError};
+use engine::project::store::{
+    load_metadata, save_metadata, ProjectMetadata, ProjectStoreError,
+};
 use engine::settings::{Settings, SettingsError};
 use std::path::Path;
 
@@ -73,10 +75,18 @@ pub enum PersistLayoutError {
     Json(#[from] serde_json::Error),
 }
 
-/// Persist a layout change the moment it happens (upstream `persistLayout`,
-/// Project.swift:163-167): the project manifest's `layout` and the global
-/// default layout both update, and project.json is rewritten immediately —
-/// not deferred to window close.
+/// A fraction (drag-resize) change: stage the new tree in memory only
+/// (upstream `setFraction`, Project.swift:142-146). The disk is untouched —
+/// the established save points (window close, turn-end saves) flush it later.
+pub fn set_fraction(metadata: &mut ProjectMetadata, node: &LayoutNode) {
+    metadata.layout = Some(node.clone());
+}
+
+/// Persist a structure change (preset switch, pane move, visibility) the
+/// moment it happens (upstream `setLayout` → `persistLayout`,
+/// Project.swift:139, 163-167): the project manifest's `layout` and the
+/// global default layout both update, and project.json is rewritten
+/// immediately.
 pub fn persist_layout(
     project_root: &Path,
     settings_path: &Path,
@@ -199,7 +209,7 @@ fn find_split<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::project::store::{load_metadata, save_metadata, ProjectMetadata};
+    use engine::project::store::{load_metadata, save_metadata};
     use std::path::PathBuf;
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -325,35 +335,67 @@ mod tests {
         );
     }
 
+    /// Rebuild `base` with a new root fraction — what a drag produces.
+    fn with_root_fraction(base: &LayoutNode, fraction: f64) -> LayoutNode {
+        match base {
+            LayoutNode::Split { axis, first, second, .. } => LayoutNode::Split {
+                axis: *axis,
+                first: first.clone(),
+                second: second.clone(),
+                fraction,
+            },
+            pane => pane.clone(),
+        }
+    }
+
     #[test]
-    fn every_fraction_change_persists() {
-        let root = tmp_dir("persist");
+    fn fraction_change_stays_in_memory_until_established_save() {
+        let root = tmp_dir("fraction");
+        let mut metadata = ProjectMetadata::new("0.1.0");
+        let base = LayoutNode::chat_leading();
+        metadata.layout = Some(base.clone());
+        save_metadata(&root, &metadata).unwrap();
+        let settings_path = root.join("settings.json");
+
+        let resized = with_root_fraction(&base, 0.45);
+        set_fraction(&mut metadata, &resized);
+
+        assert_eq!(metadata.layout.as_ref(), Some(&resized), "model sees the drag");
+        assert_eq!(
+            load_metadata(&root).unwrap().layout.as_ref(),
+            Some(&base),
+            "no disk write on a fraction change (Project.swift:142-146)"
+        );
+        assert!(
+            !settings_path.exists(),
+            "fraction changes do not touch the default layout"
+        );
+
+        // The established save points (window close, turn-end saves) flush it.
+        save_metadata(&root, &metadata).unwrap();
+        assert_eq!(load_metadata(&root).unwrap().layout.as_ref(), Some(&resized));
+    }
+
+    #[test]
+    fn structure_change_persists_eagerly() {
+        let root = tmp_dir("structure");
         let metadata = ProjectMetadata::new("0.1.0");
         save_metadata(&root, &metadata).unwrap();
         let settings_path = root.join("settings.json");
 
-        fn with_root_fraction(base: &LayoutNode, fraction: f64) -> LayoutNode {
-            match base {
-                LayoutNode::Split { axis, first, second, .. } => LayoutNode::Split {
-                    axis: *axis,
-                    first: first.clone(),
-                    second: second.clone(),
-                    fraction,
-                },
-                pane => pane.clone(),
-            }
-        }
-
-        let base = LayoutNode::chat_leading();
-        for fraction in [0.40, 0.45, 0.50] {
-            let node = with_root_fraction(&base, fraction);
+        // Pane moves and preset switches land as different structures.
+        for node in [
+            LayoutNode::chat_trailing(),
+            LayoutNode::three_columns(),
+            LayoutNode::chat_bottom(),
+        ] {
             persist_layout(&root, &settings_path, &node).unwrap();
 
             let reloaded = load_metadata(&root).unwrap();
             assert_eq!(
                 reloaded.layout.as_ref(),
                 Some(&node),
-                "fraction {fraction} must be on disk immediately"
+                "structure change must be on disk immediately"
             );
             // project.json stores whole-second timestamps; anything within
             // that truncation means created_at survived the load-modify-save.
