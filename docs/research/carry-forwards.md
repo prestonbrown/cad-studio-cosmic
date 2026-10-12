@@ -36,6 +36,31 @@ From M1's reviews, for later milestones:
 - M8: `AppleLanguages` setting intentionally omitted in M1 (language override
   lands with i18n).
 
+## M4 (app shell)
+
+From M2's agent-lifecycle work (task 9 wrap):
+
+- EngineEvent is the chat-row source: tool rows are keyed by the
+  `tool_use` id they carry; `TextStreaming` is the unconfirmed row —
+  reconcile a `TextConfirmed` by replacing the FIRST unconfirmed row,
+  FIFO (upstream `unconfirmedTextIDs.removeFirst()`).
+- `ToolInput` throttling is app-side, never by not reading: upstream
+  throttles the row's accumulating preview at 0.15 s; the engine
+  forwards every delta.
+- The app drains EngineEvents for the whole dance (every attempt): the
+  256-deep event channel backpressures a stalled reader — and cancel is
+  only polled between event translations, so a stalled drain stalls the
+  cancel too (T7/T8 forensics).
+- An auth-classified `TurnOutcome::Failed { auth: true, .. }` is the one
+  failure whose chat row carries the `openTerminal` action hint
+  (upstream's auth system message instructs running `claude` / `codex
+  login` in a terminal; upstream-contract.md:41).
+- The auth classifier's `"401"` needle can substring-match token counts
+  or other numbers in the joined details on nonzero exits (usage
+  objects, durations) — upstream-inherited (AgentSession.swift:321,
+  documented in T8's report); expect a false auth flag to surface here
+  first.
+
 ## M3 (viewer productization)
 
 - Upload-once: replace per-frame `TriMesh` clone + full vertex re-upload

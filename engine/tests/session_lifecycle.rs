@@ -1,20 +1,23 @@
 //! Session-lifecycle integration tests (task 8): the full upstream turn
 //! dance through `Session::send` — busy retry then fresh restart,
 //! missing-session fresh fallback, auth failure without retry, and
-//! cancellation during the busy-retry wait. The fake agent runs in directory
-//! mode (`CAD_FAKE_SCENARIO` points at a directory; the fake picks
-//! `<n>.jsonl` per its counter file), so one `send` walks a scripted
-//! sequence of attempts, and every invocation appends one argv-dump line —
-//! spawn counts and per-run flags read those lines. `CAD_FAKE_STDERR` stays
-//! constant across the directory's runs ON PURPOSE: only the dance's guards
-//! (a resumed, uncancelled attempt that errored or produced no result) keep
-//! the SUCCESSFUL later runs from being misclassified by the same stderr.
+//! cancellation during the busy-retry wait — plus the task-9
+//! `EngineCommand` surface driving the same dance. The fake agent runs in
+//! directory mode (`CAD_FAKE_SCENARIO` points at a directory; the fake
+//! picks `<n>.jsonl` per its counter file), so one `send` walks a
+//! scripted sequence of attempts, and every invocation appends one
+//! argv-dump line — spawn counts and per-run flags read those lines.
+//! `CAD_FAKE_STDERR` stays constant across the directory's runs ON
+//! PURPOSE: only the dance's guards (a resumed, uncancelled attempt that
+//! errored or produced no result) keep the SUCCESSFUL later runs from
+//! being misclassified by the same stderr.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engine::agent::EngineCommand;
 use engine::agent::claude::TurnRequest;
-use engine::agent::session::{EngineEvent, Session, TurnOutcome};
+use engine::agent::session::{EngineEvent, Session, TurnHandle, TurnOutcome};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
@@ -389,4 +392,111 @@ async fn cancelled_turn_ends_cleanly() {
 
     // the retry wait absorbed the cancel: no second spawn ever happened
     assert_eq!(dump_argv(&dump).len(), 1, "no spawn after a cancelled retry wait");
+}
+
+// ─── the command surface (task 9) ────────────────────────────────────────────
+
+/// The `EngineCommand` surface M4's app speaks, driving the same machinery
+/// the tests above drive through the raw handle: a `Send` installs the
+/// running turn, a command-routed `Cancel` ends the dance parked in the
+/// busy-retry wait with no further spawn, the next `Send` replaces the
+/// finished turn and replays the scenario's pong run to `Success` with the
+/// exact translation sequence, and `Shutdown` reaps with nothing left
+/// listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_command_drives_the_dance() {
+    let root = mk_project();
+    let scenario =
+        scenario_dir("cmd", &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"]);
+
+    let guard = ENV_LOCK.lock().await;
+    let mut metadata = ProjectMetadata::new("test");
+    metadata.session_id = Some("seed-sid".into());
+    save_metadata(&root, &metadata).unwrap();
+    let dump = root.join("argv-dump.jsonl");
+    // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
+        std::env::set_var("CAD_FAKE_SCENARIO", &scenario);
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        std::env::set_var("CAD_FAKE_ARGV_OUT", &dump);
+        std::env::set_var(
+            "CAD_FAKE_STDERR",
+            fixture_fake("scenarios/busy-then-success.stderr"),
+        );
+    }
+    let mut session = Session::new(Settings::default())
+        .with_system_template(system_template())
+        // wide enough that the cancel below lands inside the retry wait,
+        // not inside the busy attempt itself
+        .with_retry_delay(Duration::from_secs(2));
+    let mut running: Option<TurnHandle> = None;
+
+    // Send: the busy attempt streams and errors out, parking the dance in
+    // the 2 s retry wait
+    EngineCommand::Send {
+        root: root.clone(),
+        request: TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+    }
+    .apply(&mut session, &mut running);
+    {
+        let handle = running.as_mut().expect("Send installs the running turn");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, handle.events.recv()).await {
+                Ok(Some(EngineEvent::Started { session_id })) => {
+                    assert_eq!(session_id.as_deref(), Some(BUSY_SID), "the busy attempt starts");
+                    break;
+                }
+                Ok(other) => panic!("expected the busy attempt's Started first: {other:?}"),
+                Err(_) => panic!("Started never arrived"),
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Cancel: routed to the running handle's interrupt, ending the dance
+    // cancelled with no respawn
+    EngineCommand::Cancel.apply(&mut session, &mut running);
+    let tail = collect_until_finished(running.as_mut().unwrap()).await;
+    assert_eq!(tail.last(), Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled)));
+    assert_eq!(dump_argv(&dump).len(), 1, "no spawn after a cancelled retry wait");
+
+    // Send again: replaces the finished turn; run 2 resumes the id run
+    // 1's init persisted and replays the pong scenario verbatim
+    EngineCommand::Send {
+        root: root.clone(),
+        request: TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+    }
+    .apply(&mut session, &mut running);
+    let events = collect_until_finished(running.as_mut().unwrap()).await;
+    assert_eq!(
+        events,
+        vec![
+            EngineEvent::Started { session_id: Some(PONG_SID.into()) },
+            EngineEvent::Thinking { estimated_tokens: 50 },
+            EngineEvent::Thinking { estimated_tokens: 192 },
+            EngineEvent::TextStreaming { text: "pong".into() },
+            EngineEvent::TextConfirmed { text: "pong".into() },
+            EngineEvent::TurnFinished(TurnOutcome::Success {
+                session_id: Some(PONG_SID.into()),
+                text: "pong".into(),
+            }),
+        ],
+        "{events:?}"
+    );
+    let argv = dump_argv(&dump);
+    assert_eq!(argv.len(), 2, "the cancelled dance left one spawn, the replay another");
+    assert!(has_pair(&argv[1], "--resume", BUSY_SID), "run 2 resumes the persisted id");
+    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+
+    // Shutdown: interrupts the (finished) running turn and reaps the
+    // registry — both of this test's spawns exited and unregistered, so
+    // nothing may remain listed
+    EngineCommand::Shutdown.apply(&mut session, &mut running);
+    assert!(
+        engine::processes::reap_orphans_at(&root.join("registry")).is_empty(),
+        "Shutdown leaves no live registry entry"
+    );
+    drop(guard);
 }
