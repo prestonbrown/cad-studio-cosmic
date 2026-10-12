@@ -5393,8 +5393,8 @@ dependencies = [
  "glam 0.33.12",
  "iced",
  "image",
+ "pollster",
  "resvg",
- "tokio",
  "wgpu",
 ]
 

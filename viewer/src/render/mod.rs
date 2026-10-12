@@ -26,6 +26,7 @@
 //! fragments excluded), and a red cap quad drawn right after fills exactly
 //! the cut face (stencil != 0) when `Camera::section_enable` is set.
 
+pub mod gpu;
 pub mod parts;
 pub mod scene;
 
@@ -1068,21 +1069,6 @@ mod tests {
         parse_3mf(&bytes).expect("golden model.3mf parses: 2 parts x 12 triangles")
     }
 
-    async fn device() -> (wgpu::Device, wgpu::Queue) {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: None,
-                ..Default::default()
-            })
-            .await
-            .expect("surfaceless wgpu adapter (Metal locally, Vulkan on thelio)");
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .unwrap()
-    }
-
     #[test]
     fn from_parts_remaps_and_pins_floor_at_origin() {
         let part = engine::parsing::Part {
@@ -1261,13 +1247,11 @@ mod tests {
 
     #[test]
     fn upload_once_second_frame_no_reupload() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (device, queue) = rt.block_on(device());
+        let (device, queue) = gpu::device_queue();
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         let camera = default_camera(&scene, 4.0 / 3.0);
-        let mut pipeline =
-            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene);
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1276,7 +1260,7 @@ mod tests {
         // second frame, same scene, MOVED camera: mesh bytes must not move
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &moved, &scene);
+        pipeline.prepare_parts(device, queue, (800, 600), &moved, &scene);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1,
@@ -1291,14 +1275,12 @@ mod tests {
 
     #[test]
     fn new_scene_reuploads() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (device, queue) = rt.block_on(device());
+        let (device, queue) = gpu::device_queue();
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
-        let mut pipeline =
-            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1311,7 +1293,7 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1322,14 +1304,12 @@ mod tests {
 
     #[test]
     fn middle_vertex_mutation_reuploads() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (device, queue) = rt.block_on(device());
+        let (device, queue) = gpu::device_queue();
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
-        let mut pipeline =
-            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1341,7 +1321,7 @@ mod tests {
         let n = parts[0].positions.len();
         parts[0].positions[n / 2][0] -= 5.0;
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1357,22 +1337,20 @@ mod tests {
     /// pin against a future hash that stops covering color bytes.
     #[test]
     fn neutral_change_reuploads() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (device, queue) = rt.block_on(device());
+        let (device, queue) = gpu::device_queue();
         // the STL is the all-None fixture: every triangle paints neutral,
         // so the neutral is load-bearing in the staged bytes
         let parts = golden_stl_parts();
         assert!(parts[0].triangle_colors.iter().all(|c| c.is_none()));
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
-        let mut pipeline =
-            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
         let u1 = pipeline.upload_count_for_tests();
         // facts #43's light-mode neutral: same geometry, only the paint
         // changes — a skipped upload would serve the dark-mode colors
         let scene2 = PartScene::from_parts(&parts, [0.55, 0.64, 0.75]);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1504,14 +1482,12 @@ mod tests {
     /// resident at the stale pin.
     #[test]
     fn pin_shift_reuploads_every_part() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let (device, queue) = rt.block_on(device());
+        let (device, queue) = gpu::device_queue();
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
-        let mut pipeline =
-            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene1);
         let u1 = pipeline.upload_count_for_tests();
         // grow past MODEL x=30: union widens, the pin's x-center shifts
         for corner in [[40.0, 0.0, 16.0], [41.0, 0.0, 16.0], [40.0, 1.0, 16.0]] {
@@ -1519,7 +1495,7 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        pipeline.prepare_parts(device, queue, (800, 600), &camera, &scene2);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 2,

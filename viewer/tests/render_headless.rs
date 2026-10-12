@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
 use viewer::render::camera;
+use viewer::render::gpu;
 use viewer::render::lights;
 use viewer::render::{
     Camera, MeshPipeline, PartScene, NEUTRAL, default_camera, srgb_to_linear,
@@ -28,21 +29,6 @@ fn golden_scene() -> PartScene {
         .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
     let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
     PartScene::from_parts(&parts, NEUTRAL)
-}
-
-async fn device() -> (wgpu::Device, wgpu::Queue) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: None,
-            ..Default::default()
-        })
-        .await
-        .expect("surfaceless wgpu adapter (run on thelio; if none: check WGPU_BACKEND / Vulkan ICDs in this ssh session)");
-    adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await
-        .unwrap()
 }
 
 /// One frame at `w` x `h`: `prepare_parts` the pipeline, clear the target to
@@ -228,23 +214,22 @@ fn fixture_chromas() -> ([f32; 3], [f32; 3]) {
 
 #[test]
 fn mesh_renders_with_ink_and_is_frame_stable() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     let camera = default_camera(&scene, 800.0 / 600.0);
     // one pipeline across both frames (as iced's Storage holds it for the
     // app's lifetime): per-frame depth/stencil state that fails to clear
     // leaks into the second frame — and the second frame re-uploads
     // nothing, so any geometry difference would surface here too
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let a = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let a = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     assert!(
         ink_pixels(&a, bg) > 5_000,
         "mesh should cover a healthy area, got {}",
         ink_pixels(&a, bg)
     );
-    let b = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let b = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     assert_eq!(
         a, b,
         "second frame must be identical — uncleared stencil/depth leaks state (Review Focus 3)"
@@ -278,19 +263,18 @@ fn cap_red_pixels(px: &[u8]) -> usize {
 /// (8,16).
 #[test]
 fn section_cap_appears_and_shrinks_toward_the_edge() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     // one pipeline across every cut (iced Storage lifetime): stencil state
     // must not leak between frames
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut cam = default_camera(&scene, 800.0 / 600.0);
     cam.section_enable = 1.0;
     cam.section_axis = 1; // SCENE y — the MODEL z stack after the remap
     let span = scene.aabb_max[1] - scene.aabb_min[1];
     let mut cap_at = |frac: f32| {
         cam.section_pos = scene.aabb_min[1] + span * frac;
-        cap_red_pixels(&render_frame(&device, &queue, &mut pipeline, &scene, &cam, 800, 600))
+        cap_red_pixels(&render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600))
     };
     let base = cap_at(4.0 / 26.0); // pinned y=4: middle of the 60mm base box
     let lid = cap_at(21.0 / 26.0); // pinned y=21: middle of the 40mm lid box
@@ -313,19 +297,18 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
 
 #[test]
 fn viewport_resize_reallocates_depth_and_renders() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     // one pipeline through both sizes: prepare_parts() must reallocate the
     // depth texture when the viewport changes; each size gets its own
     // aspect-correct camera (both are 4:3, so the framing is identical and
     // only pixel density changes)
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let camera = default_camera(&scene, 800.0 / 600.0);
-    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let small = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let small = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     let camera_big = default_camera(&scene, 1024.0 / 768.0);
-    let big = render_frame(&device, &queue, &mut pipeline, &scene, &camera_big, 1024, 768);
+    let big = render_frame(device, queue, &mut pipeline, &scene, &camera_big, 1024, 768);
     assert!(ink_pixels(&small, bg) > 5_000);
     let growth = ink_pixels(&big, bg) as f64 / ink_pixels(&small, bg) as f64;
     assert!(
@@ -344,14 +327,13 @@ fn viewport_resize_reallocates_depth_and_renders() {
 /// width ratio reads ~1.6.
 #[test]
 fn aspect_from_viewport() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let ink_bbox_width = |pipeline: &mut MeshPipeline, w: u32, h: u32| -> usize {
         let camera = default_camera(&scene, w as f32 / h as f32);
-        let bg = background_reference(&device, &queue, pipeline, &camera, w, h);
-        let px = render_frame(&device, &queue, pipeline, &scene, &camera, w, h);
+        let bg = background_reference(device, queue, pipeline, &camera, w, h);
+        let px = render_frame(device, queue, pipeline, &scene, &camera, w, h);
         assert!(
             ink_pixels(&px, bg) > 5_000,
             "model must be on screen at {w}x{h}"
@@ -422,17 +404,16 @@ fn blend_pixels(px: &[u8], bg: [u8; 4], blue: [f32; 3], red: [f32; 3]) -> usize 
 /// depth/stencil clears hold through the resolve+blit path.
 #[test]
 fn msaa_smooths_a_diagonal_edge() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     let camera = default_camera(&scene, 800.0 / 600.0);
     // the two part chromas and a measured background — same clear + format
     // at any sample count
     let (blue, red) = fixture_chromas();
-    let mut bg_pipe = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let bg = background_reference(&device, &queue, &mut bg_pipe, &camera, 800, 600);
-    let px1 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 1);
-    let px4 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 4);
+    let mut bg_pipe = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut bg_pipe, &camera, 800, 600);
+    let px1 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 1);
+    let px4 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 4);
     let (e1, e4) = (
         blend_pixels(&px1, bg, blue, red),
         blend_pixels(&px4, bg, blue, red),
@@ -449,9 +430,9 @@ fn msaa_smooths_a_diagonal_edge() {
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
     let mut p4 =
-        MeshPipeline::with_msaa(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
-    let a = render_frame(&device, &queue, &mut p4, &scene, &camera, 800, 600);
-    let b = render_frame(&device, &queue, &mut p4, &scene, &camera, 800, 600);
+        MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
+    let a = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
+    let b = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
     assert_eq!(a, b, "4x frames must be identical on one pipeline");
     // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
     // [-4,4]; the pin lifts the floor to y=0, so the base spans pinned
@@ -460,7 +441,7 @@ fn msaa_smooths_a_diagonal_edge() {
     cam.section_enable = 1.0;
     cam.section_axis = 1;
     cam.section_pos = 4.0;
-    let cut = render_frame_msaa(&device, &queue, &scene, &cam, 800, 600, 4);
+    let cut = render_frame_msaa(device, queue, &scene, &cam, 800, 600, 4);
     assert!(
         cap_red_pixels(&cut) > 2_000,
         "section cap must render through the 4x path: {} red px",
@@ -479,13 +460,12 @@ fn msaa_smooths_a_diagonal_edge() {
 /// blue.
 #[test]
 fn two_parts_two_colors() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     let camera = default_camera(&scene, 800.0 / 600.0);
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let (blue, red) = fixture_chromas();
@@ -559,8 +539,7 @@ fn two_parts_two_colors() {
 /// staging against a future default-color or passthrough regression.
 #[test]
 fn neutral_when_uncolored() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let bytes = std::fs::read(fixture("model.stl"))
         .unwrap_or_else(|e| panic!("read fixture model.stl: {e}"));
     let parts = vec![parse_stl(&bytes).expect("golden model.stl parses")];
@@ -570,9 +549,9 @@ fn neutral_when_uncolored() {
     );
     let scene = PartScene::from_parts(&parts, NEUTRAL);
     let camera = default_camera(&scene, 800.0 / 600.0);
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let neutral = chroma(NEUTRAL);
@@ -639,8 +618,7 @@ fn white_diamond_cube() -> engine::parsing::Part {
 /// and the cube's geometry.
 #[test]
 fn shaded_faces_differ() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let (device, queue) = rt.block_on(device());
+    let (device, queue) = gpu::device_queue();
     let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
     let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
     // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
@@ -678,9 +656,9 @@ fn shaded_faces_differ() {
         e_top >= 2.0 * e_front,
         "geometry must give the constants a >=2x pair: {e_top} vs {e_front}"
     );
-    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let px = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     // flat white faces render unblended at 1x, so every region pixel carries
     // the region's exact value; the 0.01 band absorbs +-1 byte of storage
     // rounding (Metal rounds to nearest, other backends may differ) and the
