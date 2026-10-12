@@ -131,6 +131,10 @@ impl<'de> Deserialize<'de> for Frame {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StudyState {
     pub parts: HashMap<String, Pose>,
+    /// Display order comes from [`MotionStudy::value_names`] (first-seen,
+    /// then sorted — upstream's `State.values`), which iterates this map by
+    /// name; iterating the map directly would re-sort by key instead, so
+    /// players must go through `value_names()`.
     pub values: BTreeMap<String, f64>,
     pub label: Option<String>,
     pub collisions: Vec<Collision>,
