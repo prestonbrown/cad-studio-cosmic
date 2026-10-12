@@ -4,8 +4,9 @@
 Env: CAD_FAKE_SCENARIO = scenario .jsonl file, OR a directory (directory mode:
      picks <dir>/<n>.jsonl where n = value in <dir>/counter + 1, writing the
      counter back — starts at 1 on the first invocation).
-     CAD_FAKE_ARGV_OUT = path where one JSON line {"argv": [...], "cwd": "..."}
-     is APPENDED per invocation (never overwritten; spawn counts read line counts).
+     CAD_FAKE_ARGV_OUT = path where one JSON line {"argv": [...], "cwd": "...",
+     "env": {...}} is APPENDED per invocation (never overwritten; spawn counts
+     read line counts; env carries MPLBACKEND/PYTHONUNBUFFERED as received).
      CAD_FAKE_STDERR = optional file copied to stderr after the scenario.
 Scenario directives (lines starting with '#'):  #sleep <ms>   pause before next line
                                                 #exit <code>  exit code (default 0)
@@ -19,8 +20,10 @@ from pathlib import Path
 
 argv_out = os.environ.get("CAD_FAKE_ARGV_OUT")
 if argv_out:
+    # env: selected variables as the child actually received them
+    env = {k: os.environ.get(k) for k in ("MPLBACKEND", "PYTHONUNBUFFERED")}
     with open(argv_out, "a") as f:
-        f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+        f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "env": env}) + "\n")
 
 scenario_path = Path(os.environ["CAD_FAKE_SCENARIO"])
 if scenario_path.is_dir():

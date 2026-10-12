@@ -500,3 +500,52 @@ async fn engine_command_drives_the_dance() {
     );
     drop(guard);
 }
+
+/// Attachments survive the command surface: `Send` copies them into
+/// references/ (upstream Project.send's role, absorbed by the session) and
+/// the child's argv shows the empty-text fallback prompt naming the copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_copies_attachments_into_the_prompt() {
+    let root = mk_project();
+    let source = std::env::temp_dir().join(format!("cad-att-src-{}.png", uuid::Uuid::new_v4()));
+    std::fs::write(&source, b"png").unwrap();
+    let attachment = source.file_name().unwrap().to_string_lossy().into_owned();
+    let dump = root.join("argv-dump.jsonl");
+
+    let guard = ENV_LOCK.lock().await;
+    // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
+        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/pong.jsonl"));
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        std::env::set_var("CAD_FAKE_ARGV_OUT", &dump);
+        std::env::remove_var("CAD_FAKE_STDERR");
+    }
+    let mut session = Session::new(Settings::default()).with_system_template(system_template());
+    let mut running: Option<TurnHandle> = None;
+    EngineCommand::Send {
+        root: root.clone(),
+        request: TurnRequest { prompt: String::new(), attachments: vec![source] },
+    }
+    .apply(&mut session, &mut running);
+    let events = collect_until_finished(running.as_mut().unwrap()).await;
+    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    drop(guard);
+
+    // the copy landed in references/ as <stamp>-1-<name> (numbered from 1,
+    // upstream's index + 1)
+    let names: Vec<String> = std::fs::read_dir(root.join("references"))
+        .unwrap_or_else(|e| panic!("references/ missing: {e}"))
+        .flatten()
+        .map(|entry| entry.file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].ends_with(&format!("-1-{attachment}")), "{names:?}");
+
+    // the prompt the child received: the empty-text fallback + the copy
+    let argv = dump_argv(&dump).into_iter().next().expect("one dump line");
+    assert_eq!(argv[0], "-p");
+    let prompt = &argv[1];
+    assert!(prompt.starts_with("Create a model based on the attached files."), "{prompt}");
+    assert!(prompt.contains(&format!("references/{}", names[0])), "{prompt}");
+}

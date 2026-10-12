@@ -58,7 +58,8 @@ use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 
 use crate::agent::claude::{
-    PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets, render_system_prompt,
+    PromptCtx, TurnRequest, build_args, build_prompt, copy_attachments, environment_bullets,
+    render_system_prompt,
 };
 use crate::agent::locator::{self, AgentKind, AgentPath, shell_env};
 use crate::agent::stream_event::{
@@ -386,6 +387,12 @@ async fn full_dance(mut ctx: TurnCtx) {
 /// event. `resume_sid` is the id the argv resumes (None = fresh); the
 /// metadata the attempt persists into is re-read from disk here.
 async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
+    // Upstream copies the attachments in Project.send BEFORE the session
+    // runs (Project.swift:198-208); the port's session absorbed that role.
+    // The returned list is deliberately dropped — build_prompt reads the
+    // copies back from references/.
+    let _ = copy_attachments(&ctx.req, &ctx.root);
+
     let mut driver = TurnDriver {
         root: ctx.root.clone(),
         metadata: stored_metadata(&ctx.root),
@@ -426,7 +433,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let prompt = build_prompt(&ctx.req, &ctx.root, &missing);
     let system_prompt =
         render_system_prompt(&ctx.system_template, &prompt_ctx(&ctx.root, &ctx.settings));
-    let venv_python = ctx.root.join(".venv/bin/python");
+    let venv_python = app_venv_python();
     let mut argv = vec![executable.path.to_string_lossy().into_owned()];
     argv.extend(build_args(
         &executable,
@@ -438,7 +445,12 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     ));
     // The login environment is snapshotted per turn: upstream caches it in
     // its long-lived actor, which M4's app can layer on top the same way.
-    let env: Vec<(String, String)> = shell_env().into_iter().collect();
+    let mut env = shell_env();
+    // ModelBuilder.toolEnvironment's additions ride the login env
+    // (ClaudeRunner.swift:23; upstream-contract.md §1)
+    env.insert("MPLBACKEND".to_string(), "Agg".to_string());
+    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+    let env: Vec<(String, String)> = env.into_iter().collect();
 
     let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
@@ -531,6 +543,15 @@ fn clear_session_id(root: &Path) {
     }
 }
 
+/// The app-wide venv interpreter, `~/.local/share/cad-studio/venv/bin/
+/// python` (spec §2/§6) — the venv M5 creates there. `{{PYTHON}}` and the
+/// restricted-bash entry name it from day one; its existence is M5's to
+/// establish, so nothing here requires it to be present.
+fn app_venv_python() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/share/cad-studio/venv/bin/python")
+}
+
 /// The system-prompt substitutions the session can derive on its own. The
 /// date is ISO numeric: upstream's locale-dependent numeric format has no
 /// deterministic engine-side equivalent.
@@ -543,7 +564,7 @@ fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string()),
         python_display: PYTHON_UNVERIFIED.to_string(),
-        venv_python: root.join(".venv/bin/python"),
+        venv_python: app_venv_python(),
         environment: environment_bullets(root, PYTHON_UNVERIFIED),
         units: settings.measurement_unit.prompt_name().to_string(),
         printer: settings

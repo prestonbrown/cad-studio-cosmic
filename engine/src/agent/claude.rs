@@ -182,8 +182,8 @@ fn listing(dir: &Path) -> String {
 
 /// Copy the turn's attachments into `references/` as
 /// `<unix-seconds>-<index>-<name>` and return the prompt-relative paths
-/// (Project.swift:210-219). The index is 0-based; upstream numbers from 1,
-/// the M2 contract pins 0. Copies that fail are dropped from the list, as
+/// (Project.swift:210-219). The index is 1-based, upstream's `index + 1`
+/// (Project.swift:214). Copies that fail are dropped from the list, as
 /// upstream's compactMap does.
 pub fn copy_attachments(req: &TurnRequest, root: &Path) -> Vec<String> {
     if req.attachments.is_empty() {
@@ -199,7 +199,8 @@ pub fn copy_attachments(req: &TurnRequest, root: &Path) -> Vec<String> {
         .iter()
         .enumerate()
         .filter_map(|(index, source)| {
-            let name = format!("{stamp}-{index}-{}", source.file_name()?.to_string_lossy());
+            let number = index + 1;
+            let name = format!("{stamp}-{number}-{}", source.file_name()?.to_string_lossy());
             std::fs::copy(source, references.join(&name)).ok()?;
             Some(format!("references/{name}"))
         })
@@ -244,10 +245,10 @@ fn bullets(items: &[String]) -> String {
 /// The prompt-relative paths of this turn's attachment copies. Upstream
 /// threads the list `copyReferences` returns straight into the prompt;
 /// [`build_prompt`] only sees the request and the root, so it reads the
-/// copies back from references/: for attachment `index` the copy is the
-/// newest `<stamp>-<index>-<name>` entry — the one [`copy_attachments`]
-/// just wrote — and an attachment with no copy on disk is left out, as
-/// upstream leaves out failed copies.
+/// copies back from references/: for the attachment numbered `index + 1`
+/// the copy is the newest `<stamp>-<number>-<name>` entry — the one
+/// [`copy_attachments`] just wrote — and an attachment with no copy on
+/// disk is left out, as upstream leaves out failed copies.
 fn copied_references(req: &TurnRequest, root: &Path) -> Vec<String> {
     let entries: Vec<String> = std::fs::read_dir(root.join("references"))
         .map(|dir| {
@@ -260,7 +261,7 @@ fn copied_references(req: &TurnRequest, root: &Path) -> Vec<String> {
         .iter()
         .enumerate()
         .filter_map(|(index, source)| {
-            let tail = format!("{index}-{}", source.file_name()?.to_string_lossy());
+            let tail = format!("{}-{}", index + 1, source.file_name()?.to_string_lossy());
             let stamp_of = |entry: &str| -> Option<u64> {
                 let (stamp, rest) = entry.split_once('-')?;
                 (rest == tail).then(|| stamp.parse().ok())?

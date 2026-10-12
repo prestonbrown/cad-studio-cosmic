@@ -503,6 +503,53 @@ async fn cancel_mid_stream() {
     }
 }
 
+/// The app-wide venv interpreter the session names everywhere: the
+/// restricted-bash allowlist entry and the `{{PYTHON}}` substitution (the
+/// rendered system prompt) both carry `~/.local/share/cad-studio/venv/bin/
+/// python` — the venv M5 creates — and the child env carries
+/// ModelBuilder.toolEnvironment's pair over the login env.
+#[tokio::test(flavor = "multi_thread")]
+async fn restricted_allowlist_and_child_env_name_the_app_venv() {
+    let root = mk_project();
+    let settings = Settings { restricted_bash: true, ..Default::default() };
+    let dump = root.join("argv-dump.jsonl");
+    let events =
+        run_fake_with(&root, &fixture_fake("scenarios/pong.jsonl"), &settings, Some(&dump)).await;
+    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+
+    let line = std::fs::read_to_string(&dump)
+        .unwrap()
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("one dump line")
+        .to_string();
+    let invocation: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let argv = invocation["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<String>>();
+
+    let home = std::env::var("HOME").unwrap();
+    let venv = format!("{home}/.local/share/cad-studio/venv/bin/python");
+    assert!(
+        argv.contains(&format!("Bash({venv}:*)")),
+        "restricted entry names the app-wide venv: {argv:?}"
+    );
+    let prompt_pos = argv
+        .iter()
+        .position(|a| a == "--append-system-prompt")
+        .expect("append-system-prompt flag");
+    assert!(
+        argv[prompt_pos + 1].contains(&venv),
+        "{{PYTHON}} renders the app-wide venv: {}",
+        argv[prompt_pos + 1]
+    );
+    assert_eq!(invocation["env"]["MPLBACKEND"], "Agg", "{line}");
+    assert_eq!(invocation["env"]["PYTHONUNBUFFERED"], "1", "{line}");
+}
+
 // ─── classification surface for the lifecycle dance (task 8) ────────────────
 
 #[test]

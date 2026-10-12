@@ -325,8 +325,8 @@ fn attachments_copied_with_timestamp_names() {
     assert_eq!(names.len(), 1);
     let name = names[0].file_name().into_string().unwrap();
     assert!(
-        name.ends_with("-0-cad-att-sketch.png"),
-        "unixts-i-name: {name}"
+        name.ends_with("-1-cad-att-sketch.png"),
+        "unixts-1-name (upstream numbers from 1): {name}"
     );
     assert_eq!(rels[0], format!("references/{name}"));
 }
