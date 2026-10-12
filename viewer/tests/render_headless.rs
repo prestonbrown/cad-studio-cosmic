@@ -1,17 +1,28 @@
 //! Headless render gate: drives the pure-wgpu core (`MeshPipeline`) surfaceless
 //! — no iced, no window. The pipeline lifecycle mirrors iced's Storage: one
-//! `MeshPipeline` per test, then per frame `prepare` (camera + mesh upload,
-//! depth-texture realloc on size change) and `render` into a viewer-owned
-//! target. Every later viewer test renders through `render_frame`.
+//! `MeshPipeline` per test, then per frame `prepare_parts` (camera uniform +
+//! upload-once part residency, depth-texture realloc on size change) and
+//! `render` into a viewer-owned target. Every later viewer test renders
+//! through `render_frame`.
 
 use std::path::PathBuf;
 
-use viewer::render::{Camera, MeshPipeline, TriMesh, default_camera, load_fixture_stl};
+use engine::parsing::threemf::parse_3mf;
+use viewer::render::{Camera, MeshPipeline, PartScene, NEUTRAL, default_camera};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../fixtures/golden")
         .join(rel)
+}
+
+/// The golden model through the production parse path: model.3mf is two
+/// parts (base + lid) of 12 triangles each.
+fn golden_scene() -> PartScene {
+    let bytes = std::fs::read(fixture("model.3mf"))
+        .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
+    let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
+    PartScene::from_parts(&parts, NEUTRAL)
 }
 
 async fn device() -> (wgpu::Device, wgpu::Queue) {
@@ -29,15 +40,15 @@ async fn device() -> (wgpu::Device, wgpu::Queue) {
         .unwrap()
 }
 
-/// One frame at `w` x `h`: `prepare` the pipeline, clear the target to the app
-/// background, render the mesh pass on top, read the pixels back tightly
-/// packed (`w * h * 4` RGBA). `queue.write_buffer` calls from `prepare` are
-/// ordered before the submitted encoder's commands.
+/// One frame at `w` x `h`: `prepare_parts` the pipeline, clear the target to
+/// the app background, render the part pass on top, read the pixels back
+/// tightly packed (`w * h * 4` RGBA). `queue.write_buffer` calls from
+/// `prepare_parts` are ordered before the submitted encoder's commands.
 fn render_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipeline: &mut MeshPipeline,
-    mesh: &TriMesh,
+    scene: &PartScene,
     camera: &Camera,
     w: u32,
     h: u32,
@@ -57,7 +68,7 @@ fn render_frame(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare(device, queue, (w, h), camera, mesh);
+    pipeline.prepare_parts(device, queue, (w, h), camera, scene);
     let mut encoder = device.create_command_encoder(&Default::default());
     // clear to the app background first, then viewer pass loads on top
     // (mirrors iced underlay)
@@ -136,7 +147,7 @@ fn render_frame(
 fn render_frame_msaa(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    mesh: &TriMesh,
+    scene: &PartScene,
     camera: &Camera,
     w: u32,
     h: u32,
@@ -144,10 +155,10 @@ fn render_frame_msaa(
 ) -> Vec<u8> {
     let mut pipeline =
         MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, msaa);
-    render_frame(device, queue, &mut pipeline, mesh, camera, w, h)
+    render_frame(device, queue, &mut pipeline, scene, camera, w, h)
 }
 
-/// The app background, measured: render a frame with an empty mesh (the
+/// The app background, measured: render a frame with an empty scene (the
 /// pipeline's nothing-prepared path draws nothing) and take a corner pixel.
 /// The 0.1/0.1/0.12 clear lands in the Rgba8UnormSrgb target sRGB-encoded —
 /// measured (89, 89, 97), not the raw (26, 26, 31) — so the reference is
@@ -161,11 +172,7 @@ fn background_reference(
     w: u32,
     h: u32,
 ) -> [u8; 4] {
-    let empty = TriMesh {
-        vertices: Vec::new(),
-        aabb_min: [0.0; 3],
-        aabb_max: [0.0; 3],
-    };
+    let empty = PartScene::from_parts(&[], NEUTRAL);
     let frame = render_frame(device, queue, pipeline, &empty, camera, w, h);
     frame[0..4].try_into().unwrap()
 }
@@ -186,20 +193,21 @@ fn ink_pixels(px: &[u8], bg: [u8; 4]) -> usize {
 fn mesh_renders_with_ink_and_is_frame_stable() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
-    let camera = default_camera(&mesh);
+    let scene = golden_scene();
+    let camera = default_camera(&scene);
     // one pipeline across both frames (as iced's Storage holds it for the
     // app's lifetime): per-frame depth/stencil state that fails to clear
-    // leaks into the second frame
+    // leaks into the second frame — and the second frame re-uploads
+    // nothing, so any geometry difference would surface here too
     let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let a = render_frame(&device, &queue, &mut pipeline, &mesh, &camera, 800, 600);
+    let a = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
     assert!(
         ink_pixels(&a, bg) > 5_000,
         "mesh should cover a healthy area, got {}",
         ink_pixels(&a, bg)
     );
-    let b = render_frame(&device, &queue, &mut pipeline, &mesh, &camera, 800, 600);
+    let b = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
     assert_eq!(
         a, b,
         "second frame must be identical — uncleared stencil/depth leaks state (Review Focus 3)"
@@ -218,30 +226,32 @@ fn cap_red_pixels(px: &[u8]) -> usize {
     px.chunks(4).filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120).count()
 }
 
-/// Section cap: cutting the Z-up fixture along Z must draw the red cap face
-/// where the mesh pass left winding parity, and only there. The fixture is
-/// two disjoint boxes — base 60x60 z∈[-4,4], lid 40x40 z∈[12,22] — with 8mm
-/// of air between, so "mid-plane" means the middle of a box and "toward the
-/// edge" means the smaller lid and the empty gap above the base.
+/// Section cap: cutting the fixture along the model's Z stack must draw the
+/// red cap face where the mesh pass left winding parity, and only there.
+/// The fixture is two disjoint boxes — base 60x60 z∈[-4,4], lid 40x40
+/// z∈[12,22] — with 8mm of air between, so "mid-plane" means the middle of
+/// a box and "toward the edge" means the smaller lid and the empty gap
+/// above the base. MODEL z maps to SCENE y (the remap in `from_parts`), so
+/// the cut axis in scene space is 1.
 #[test]
 fn section_cap_appears_and_shrinks_toward_the_edge() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
+    let scene = golden_scene();
     // one pipeline across every cut (iced Storage lifetime): stencil state
     // must not leak between frames
     let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&mesh);
+    let mut cam = default_camera(&scene);
     cam.section_enable = 1.0;
-    cam.section_axis = 2; // Z — fixture STL is Z-up and the boxes stack along Z
-    let span = mesh.aabb_max[2] - mesh.aabb_min[2];
+    cam.section_axis = 1; // SCENE y — the MODEL z stack after the remap
+    let span = scene.aabb_max[1] - scene.aabb_min[1];
     let mut cap_at = |frac: f32| {
-        cam.section_pos = mesh.aabb_min[2] + span * frac;
-        cap_red_pixels(&render_frame(&device, &queue, &mut pipeline, &mesh, &cam, 800, 600))
+        cam.section_pos = scene.aabb_min[1] + span * frac;
+        cap_red_pixels(&render_frame(&device, &queue, &mut pipeline, &scene, &cam, 800, 600))
     };
-    let base = cap_at(4.0 / 26.0); // z=0: middle of the 60mm base box
-    let lid = cap_at(21.0 / 26.0); // z=17: middle of the 40mm lid box
-    let gap = cap_at(0.5); // z=9: the air gap between the two parts
+    let base = cap_at(4.0 / 26.0); // y=0: middle of the 60mm base box
+    let lid = cap_at(21.0 / 26.0); // y=17: middle of the 40mm lid box
+    let gap = cap_at(0.5); // y=9: the air gap between the two parts
     assert!(
         base > 2_000,
         "cap must be visible at mid-plane, got {base} red px"
@@ -260,14 +270,14 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
 fn viewport_resize_reallocates_depth_and_renders() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
-    let camera = default_camera(&mesh);
-    // one pipeline through both sizes: prepare() must reallocate the depth
-    // texture when the viewport changes
+    let scene = golden_scene();
+    let camera = default_camera(&scene);
+    // one pipeline through both sizes: prepare_parts() must reallocate the
+    // depth texture when the viewport changes
     let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
-    let small = render_frame(&device, &queue, &mut pipeline, &mesh, &camera, 800, 600);
-    let big = render_frame(&device, &queue, &mut pipeline, &mesh, &camera, 1024, 768);
+    let small = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
+    let big = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 1024, 768);
     assert!(ink_pixels(&small, bg) > 5_000);
     let growth = ink_pixels(&big, bg) as f64 / ink_pixels(&small, bg) as f64;
     assert!(
@@ -307,32 +317,34 @@ fn intermediate_edge_pixels(px: &[u8]) -> usize {
 fn msaa_smooths_a_diagonal_edge() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
-    let mesh = load_fixture_stl(&fixture("model.stl"));
-    let camera = default_camera(&mesh);
-    let px1 = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, 1);
-    let px4 = render_frame_msaa(&device, &queue, &mesh, &camera, 800, 600, 4);
+    let scene = golden_scene();
+    let camera = default_camera(&scene);
+    let px1 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 1);
+    let px4 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 4);
     let (e1, e4) = (intermediate_edge_pixels(&px1), intermediate_edge_pixels(&px4));
     assert!(
         e4 as f64 > e1 as f64 * 1.5,
         "4x MSAA should produce >=1.5x the intermediate-valued edge pixels: {e4} vs {e1}"
     );
-    // measured 1361 in-band pixels at 4x on Metal (the box silhouettes span
-    // a few thousand px); the floor guards "real AA happened", the ratio
-    // above guards "at least 1.5x better than 1x"
+    // measured 1551 in-band pixels at 4x on Metal (the upright box stack's
+    // silhouettes span a few tens of thousands of px); the floor guards
+    // "real AA happened", the ratio above guards "at least 1.5x better
+    // than 1x"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
     let mut p4 =
         MeshPipeline::with_msaa(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
-    let a = render_frame(&device, &queue, &mut p4, &mesh, &camera, 800, 600);
-    let b = render_frame(&device, &queue, &mut p4, &mesh, &camera, 800, 600);
+    let a = render_frame(&device, &queue, &mut p4, &scene, &camera, 800, 600);
+    let b = render_frame(&device, &queue, &mut p4, &scene, &camera, 800, 600);
     assert_eq!(a, b, "4x frames must be identical on one pipeline");
-    // cap at 4x, mid-base cut (task-8 geometry: base box z in [-4,4])
+    // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
+    // [-4,4], so SCENE y=0 is its middle)
     let mut cam = camera;
     cam.section_enable = 1.0;
-    cam.section_axis = 2;
+    cam.section_axis = 1;
     cam.section_pos = 0.0;
-    let cut = render_frame_msaa(&device, &queue, &mesh, &cam, 800, 600, 4);
+    let cut = render_frame_msaa(&device, &queue, &scene, &cam, 800, 600, 4);
     assert!(
         cap_red_pixels(&cut) > 2_000,
         "section cap must render through the 4x path: {} red px",

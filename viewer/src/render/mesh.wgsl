@@ -6,6 +6,13 @@ struct Camera {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
+// per-part model transform: one bind group per part draw (identity today;
+// explode offsets and playback poses go through this same binding)
+struct Model {
+    transform: mat4x4<f32>,
+};
+@group(1) @binding(0) var<uniform> model: Model;
+
 struct Vin {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -20,9 +27,10 @@ struct Vout {
 @vertex
 fn vs_main(in: Vin) -> Vout {
     var out: Vout;
-    out.clip = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    let world = model.transform * vec4<f32>(in.pos, 1.0);
+    out.clip = camera.view_proj * world;
     out.color = in.color;
-    out.world = in.pos;
+    out.world = world.xyz;
     return out;
 }
 
