@@ -1,13 +1,16 @@
-//! Windowed spike: the golden fixture mesh in a window through the viewer's
-//! own Depth24PlusStencil8 pass. Mirrors iced's `custom_shader` example app
-//! shape; drag orbits, scroll zooms. Run from the repo root:
+//! Windowed spike: the golden fixture model in a window through the
+//! viewer's own Depth24PlusStencil8 pass. Mirrors iced's `custom_shader`
+//! example app shape; drag orbits, scroll zooms. Run from the repo root:
 //! `cargo run -p viewer --example spike_window`
 
+use std::sync::Arc;
+
+use engine::parsing::threemf::parse_3mf;
 use iced::mouse::ScrollDelta;
 use iced::widget::{center, column, mouse_area, shader, text};
 use iced::{Center, Element, Fill, Point, Size};
 
-use viewer::render::{SpikeScene, load_fixture_stl};
+use viewer::render::{NEUTRAL, PartScene, SpikeScene};
 
 fn main() -> iced::Result {
     iced::application(Spike::default, Spike::update, Spike::view)
@@ -32,12 +35,14 @@ struct Spike {
 
 impl Default for Spike {
     fn default() -> Self {
-        let mesh = load_fixture_stl(std::path::Path::new(concat!(
+        let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../fixtures/golden/model.stl"
-        )));
+            "/../fixtures/golden/model.3mf"
+        ))
+        .expect("golden fixture model.3mf");
+        let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
         Self {
-            scene: SpikeScene::new(mesh),
+            scene: SpikeScene::new(Arc::new(PartScene::from_parts(&parts, NEUTRAL))),
             dragging: false,
             last: None,
         }

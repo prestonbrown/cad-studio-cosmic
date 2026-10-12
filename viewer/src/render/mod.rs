@@ -1,10 +1,18 @@
-//! Spike renderer: mesh via viewer-owned render pass with Depth24PlusStencil8.
-//! iced's compositor render pass carries no depth/stencil attachment, so
-//! everything the viewer draws happens in passes this module owns: the surface
-//! color attachment is loaded (`LoadOp::Load`, iced content underneath stays),
-//! depth and stencil are cleared every frame, and the depth texture is resized
-//! with the viewport. Pure wgpu — no iced types — so the headless test can
-//! reuse this module as-is; the iced adapter lives in [`crate::render::scene`].
+//! Part-keyed renderer: meshes via viewer-owned render pass with
+//! Depth24PlusStencil8. iced's compositor render pass carries no
+//! depth/stencil attachment, so everything the viewer draws happens in
+//! passes this module owns: the surface color attachment is loaded
+//! (`LoadOp::Load`, iced content underneath stays), depth and stencil are
+//! cleared every frame, and the depth texture is resized with the
+//! viewport. Pure wgpu — no iced types — so the headless test can reuse
+//! this module as-is; the iced adapter lives in [`crate::render::scene`].
+//!
+//! GPU-first (spec §5): the mesh arrives as a [`parts::PartScene`] whose
+//! parts carry full-content identities; [`MeshPipeline::prepare_parts`]
+//! uploads a part's vertices only when that identity differs from what is
+//! resident, so an unchanged scene costs zero mesh bytes however the
+//! camera moves. Camera and section-cap uniforms legitimately write per
+//! frame.
 //!
 //! msaa: `MeshPipeline::new` stays single-sample (the default, byte-identical
 //! frames); `MeshPipeline::with_msaa` (count 4) renders into an owned
@@ -18,11 +26,11 @@
 //! fragments excluded), and a red cap quad drawn right after fills exactly
 //! the cut face (stencil != 0) when `Camera::section_enable` is set.
 
+pub mod parts;
 pub mod scene;
 
+pub use parts::{GpuPart, PartScene, NEUTRAL};
 pub use scene::{SpikePrimitive, SpikeScene};
-
-use std::io::Read;
 
 use wgpu::util::DeviceExt;
 
@@ -46,11 +54,24 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
-#[derive(Clone, Debug)]
-pub struct TriMesh {
-    pub vertices: Vec<Vertex>, // one per corner (unindexed, per-face)
-    pub aabb_min: [f32; 3],
-    pub aabb_max: [f32; 3],
+/// Per-part model transform (group 1): identity while parts render where
+/// they sit; explode offsets and playback poses will write real matrices
+/// through the same binding.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Model {
+    transform: [[f32; 4]; 4],
+}
+
+impl Model {
+    const IDENTITY: Model = Model {
+        transform: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
 }
 
 #[repr(C)]
@@ -59,11 +80,11 @@ struct CapVertex {
     pos: [f32; 3],
 }
 
-/// World-space quad on the section plane: the mesh aabb cross-section at
+/// World-space quad on the section plane: the scene aabb cross-section at
 /// `camera.section_pos`, grown 10% on the two off-axis directions so the cap
 /// always covers the cut face (the stencil test clips it back to the solid).
 /// A 4-vertex triangle strip.
-fn cap_quad(mesh: &TriMesh, camera: &Camera) -> [CapVertex; 4] {
+fn cap_quad(scene: &PartScene, camera: &Camera) -> [CapVertex; 4] {
     // match the mesh shader: axis 0 -> x, 2 -> z, anything else -> y
     let axis = match camera.section_axis {
         0 | 1 | 2 => camera.section_axis as usize,
@@ -78,8 +99,8 @@ fn cap_quad(mesh: &TriMesh, camera: &Camera) -> [CapVertex; 4] {
         CapVertex { pos: p }
     };
     let edge = |a: usize| {
-        let center = (mesh.aabb_min[a] + mesh.aabb_max[a]) / 2.0;
-        let half = (mesh.aabb_max[a] - mesh.aabb_min[a]) / 2.0 * 1.1;
+        let center = (scene.aabb_min[a] + scene.aabb_max[a]) / 2.0;
+        let half = (scene.aabb_max[a] - scene.aabb_min[a]) / 2.0 * 1.1;
         (center - half, center + half)
     };
     let (u0, u1) = edge(u);
@@ -87,65 +108,22 @@ fn cap_quad(mesh: &TriMesh, camera: &Camera) -> [CapVertex; 4] {
     [at(u0, v0), at(u1, v0), at(u0, v1), at(u1, v1)]
 }
 
-/// Binary STL. `bytes` must be well-formed (call [`load_fixture_stl`], which
-/// length-checks, or check `84 + 50 * n == bytes.len()` first).
-pub fn parse_binary_stl(bytes: &[u8]) -> TriMesh {
-    let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
-    let mut vertices = Vec::with_capacity(n * 3);
-    let mut mn = [f32::MAX; 3];
-    let mut mx = [f32::MIN; 3];
-    for i in 0..n {
-        let off = 84 + i * 50;
-        // 50-byte record: 12 floats (normal, then 3 corners) + u16 attribute;
-        // float k sits at record offset 4k
-        let f = |k: usize| f32::from_le_bytes(bytes[off + k * 4..off + 4 + k * 4].try_into().unwrap());
-        let normal = [f(0), f(1), f(2)];
-        for c in 0..3 {
-            let p = [f(3 + c * 3), f(4 + c * 3), f(5 + c * 3)];
-            for a in 0..3 {
-                mn[a] = mn[a].min(p[a]);
-                mx[a] = mx[a].max(p[a]);
-            }
-            vertices.push(Vertex {
-                pos: p,
-                normal,
-                color: [0.62, 0.70, 0.80], // neutral color, upstream-contract §5
-            });
-        }
-    }
-    TriMesh {
-        vertices,
-        aabb_min: mn,
-        aabb_max: mx,
-    }
+/// Default iso camera framing `scene` (upstream presets: yaw π/4, pitch 0.6).
+pub fn default_camera(scene: &PartScene) -> Camera {
+    orbit_camera(scene, std::f32::consts::FRAC_PI_4, 0.6, 1.0)
 }
 
-pub fn load_fixture_stl(path: &std::path::Path) -> TriMesh {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
-        .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
-    let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
-    assert_eq!(bytes.len(), 84 + 50 * n as usize, "fixture must be binary STL");
-    parse_binary_stl(&bytes)
-}
-
-/// Default iso camera framing `mesh` (upstream presets: yaw π/4, pitch 0.6).
-pub fn default_camera(mesh: &TriMesh) -> Camera {
-    orbit_camera(mesh, std::f32::consts::FRAC_PI_4, 0.6, 1.0)
-}
-
-/// Orbit camera around the mesh aabb center; `zoom` scales the framing
+/// Orbit camera around the scene aabb center; `zoom` scales the framing
 /// distance (1.0 = default framing). Sectioning off.
-pub fn orbit_camera(mesh: &TriMesh, yaw: f32, pitch: f32, zoom: f32) -> Camera {
+pub fn orbit_camera(scene: &PartScene, yaw: f32, pitch: f32, zoom: f32) -> Camera {
     let center = glam::Vec3::from_array([
-        (mesh.aabb_min[0] + mesh.aabb_max[0]) / 2.0,
-        (mesh.aabb_min[1] + mesh.aabb_max[1]) / 2.0,
-        (mesh.aabb_min[2] + mesh.aabb_max[2]) / 2.0,
+        (scene.aabb_min[0] + scene.aabb_max[0]) / 2.0,
+        (scene.aabb_min[1] + scene.aabb_max[1]) / 2.0,
+        (scene.aabb_min[2] + scene.aabb_max[2]) / 2.0,
     ]);
-    let radius = ((mesh.aabb_max[0] - mesh.aabb_min[0])
-        .max(mesh.aabb_max[1] - mesh.aabb_min[1])
-        .max(mesh.aabb_max[2] - mesh.aabb_min[2])
+    let radius = ((scene.aabb_max[0] - scene.aabb_min[0])
+        .max(scene.aabb_max[1] - scene.aabb_min[1])
+        .max(scene.aabb_max[2] - scene.aabb_min[2])
         / 2.0)
         .max(1.0);
     let fov = 35f32.to_radians();
@@ -175,27 +153,38 @@ struct Blit {
     layout: wgpu::BindGroupLayout,
 }
 
-/// Owned multisample targets, recreated in [`MeshPipeline::prepare`] only on
-/// size change (never per frame). `color` is the sample-`count` attachment
-/// the mesh pass renders into; `resolve` is the single-sample intermediate
-/// the pass resolves into and the blit samples.
+/// Owned multisample targets, recreated in [`MeshPipeline::prepare_parts`]
+/// only on size change (never per frame). `color` is the sample-`count`
+/// attachment the mesh pass renders into; `resolve` is the single-sample
+/// intermediate the pass resolves into and the blit samples.
 struct MsaaTargets {
     color: wgpu::TextureView,
     resolve: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
 }
 
+/// A part's GPU residency: its vertex buffer, draw count, and the content
+/// identity the buffer currently holds. Built by `prepare_parts` when a
+/// part's hash differs; untouched otherwise.
+struct ResidentPart {
+    content_hash: u64,
+    vertex_buf: wgpu::Buffer,
+    vertex_count: u32,
+    /// Group 1 for this part's draws: the model transform.
+    model_bg: wgpu::BindGroup,
+}
+
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     cap_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
-    /// Depth24PlusStencil8, viewer-owned; resized in [`MeshPipeline::prepare`].
-    pub depth: wgpu::TextureView,
+    model_layout: wgpu::BindGroupLayout,
+    /// Depth24PlusStencil8, viewer-owned; resized in
+    /// [`MeshPipeline::prepare_parts`].
+    depth: wgpu::TextureView,
     depth_tex: wgpu::Texture,
     uniform_buf: wgpu::Buffer,
-    vertex_buf: Option<wgpu::Buffer>,
-    vertex_capacity: u64,
-    pub vertex_count: u32,
+    residents: Vec<ResidentPart>,
     cap_buf: wgpu::Buffer,
     draw_cap: bool,
     size: (u32, u32),
@@ -206,14 +195,23 @@ pub struct MeshPipeline {
     /// Present iff `sample_count > 1`.
     blit: Option<Blit>,
     /// Owned msaa color/resolve textures; `None` at count 1 and until the
-    /// first `prepare` at count > 1.
+    /// first `prepare_parts` at count > 1.
     msaa: Option<MsaaTargets>,
+    /// Vertex uploads since creation — one per part residency; camera and
+    /// cap uniforms write per frame and never count. Read only by the
+    /// `*_count_for_tests` accessors.
+    #[cfg_attr(not(test), allow(dead_code))]
+    upload_count: u32,
+    /// Vertex-buffer allocations since creation (one per residency). Read
+    /// only by the `*_count_for_tests` accessors.
+    #[cfg_attr(not(test), allow(dead_code))]
+    alloc_count: u32,
 }
 
 impl MeshPipeline {
     pub fn new(
         device: &wgpu::Device,
-        _queue: &wgpu::Queue, // camera/mesh data arrives per frame in `prepare`
+        _queue: &wgpu::Queue, // camera/mesh data arrives per frame in `prepare_parts`
         target_format: wgpu::TextureFormat,
     ) -> Self {
         Self::new_at_samples(device, target_format, 1)
@@ -274,6 +272,21 @@ impl MeshPipeline {
             }],
             label: None,
         });
+        // one bind group per part: no MAX_PARTS-style cap, just a bind per
+        // draw — assemblies of any size render correctly
+        let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("part model layout"),
+        });
         let vlayout = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x3,
@@ -292,7 +305,7 @@ impl MeshPipeline {
             },
         ];
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[&layout, &model_layout],
             immediate_size: 0,
             label: None,
         });
@@ -368,13 +381,19 @@ impl MeshPipeline {
         // inc/dec stays in the attachment; depth is read-only too (the quad
         // must not occlude anything drawn after it), and it wins LessEqual
         // only where the surviving mesh lies beyond the section plane.
+        // Camera-only layout: the cap has no per-part transform.
+        let cap_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+            label: None,
+        });
         let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cap.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("cap.wgsl").into()),
         });
         let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("section cap"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&cap_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &cap_shader,
                 entry_point: Some("vs_cap"),
@@ -433,8 +452,8 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
-        // 4-vertex strip, zeroed at build; `prepare` writes the real quad
-        // from the current mesh aabb + camera section params each frame
+        // 4-vertex strip, zeroed at build; `prepare_parts` writes the real
+        // quad from the current scene aabb + camera section params each frame
         let cap_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("section cap quad"),
             contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
@@ -446,12 +465,11 @@ impl MeshPipeline {
             pipeline,
             cap_pipeline,
             bind_group,
+            model_layout,
             depth,
             depth_tex,
             uniform_buf,
-            vertex_buf: None,
-            vertex_capacity: 0,
-            vertex_count: 0,
+            residents: Vec::new(),
             cap_buf,
             draw_cap: false,
             size: (1, 1),
@@ -459,6 +477,8 @@ impl MeshPipeline {
             format: target_format,
             blit,
             msaa: None,
+            upload_count: 0,
+            alloc_count: 0,
         }
     }
 
@@ -617,15 +637,19 @@ impl MeshPipeline {
         (t, v)
     }
 
-    /// Per-frame upload: camera uniform, mesh vertices, and depth-texture
-    /// resize to the render-target `size`.
-    pub fn prepare(
+    /// Per-frame upload: camera uniform, depth-texture resize to the
+    /// render-target `size`, and the upload-once mesh path — a part's
+    /// vertices are (re)written only when its content identity differs
+    /// from what is resident, so an unchanged scene costs zero mesh
+    /// uploads however the camera moves. Part transforms are identity
+    /// and written once per residency.
+    pub fn prepare_parts(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: (u32, u32),
         camera: &Camera,
-        mesh: &TriMesh,
+        scene: &PartScene,
     ) {
         if self.size != size {
             let (t, v) = Self::make_depth(device, size, self.sample_count);
@@ -643,27 +667,75 @@ impl MeshPipeline {
             self.size = size;
         }
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(camera));
-        let needed = (mesh.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-        if needed > self.vertex_capacity {
-            self.vertex_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("mesh vertices"),
-                size: needed,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.vertex_capacity = needed;
+        // upload-once: slot-keyed by part index. A resident part whose
+        // content identity still matches is skipped whole; a changed or new
+        // part gets a fresh exact-size vertex buffer (its allocation and
+        // init-write are what the counters track — model uniforms are not
+        // vertex/index data). Parts beyond the scene's length are dropped
+        // with their buffers.
+        self.residents.truncate(scene.parts.len());
+        for (i, part) in scene.parts.iter().enumerate() {
+            if self
+                .residents
+                .get(i)
+                .is_some_and(|r| r.content_hash == part.content_hash)
+            {
+                continue;
+            }
+            let label = &part.name;
+            let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("part {label} vertices")),
+                contents: bytemuck::cast_slice(&part.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            self.alloc_count += 1;
+            self.upload_count += 1;
+            let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("part {label} model")),
+                contents: bytemuck::bytes_of(&Model::IDENTITY),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.model_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: model_buf.as_entire_binding(),
+                }],
+                label: Some(&format!("part {label} model bindings")),
+            });
+            let resident = ResidentPart {
+                content_hash: part.content_hash,
+                vertex_buf,
+                vertex_count: part.vertices.len() as u32,
+                model_bg,
+            };
+            if i < self.residents.len() {
+                self.residents[i] = resident;
+            } else {
+                self.residents.push(resident);
+            }
         }
-        if let Some(buf) = &self.vertex_buf {
-            queue.write_buffer(buf, 0, bytemuck::cast_slice(&mesh.vertices));
-        }
-        self.vertex_count = mesh.vertices.len() as u32;
         self.draw_cap = camera.section_enable > 0.5;
         if self.draw_cap {
-            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(mesh, camera)));
+            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(scene, camera)));
         }
     }
 
-    /// Renders the mesh — and, when the camera sections (`section_enable` >
+    /// Vertex uploads since pipeline creation (test visibility): counts
+    /// vertex uploads only — camera and cap uniforms legitimately write
+    /// every frame and never count.
+    #[cfg(test)]
+    pub(crate) fn upload_count_for_tests(&self) -> u32 {
+        self.upload_count
+    }
+
+    /// Vertex-buffer allocations since pipeline creation (test visibility).
+    #[cfg(test)]
+    pub(crate) fn alloc_count_for_tests(&self) -> u32 {
+        self.alloc_count
+    }
+
+    /// Renders the parts — and, when the camera sections (`section_enable` >
     /// 0.5), the red cap quad over the cut face — into `target` (the iced
     /// surface view) inside a viewer-owned pass. Color attachment:
     /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
@@ -674,17 +746,18 @@ impl MeshPipeline {
     /// alpha) and resolves into the intermediate; a second pass then blits
     /// the intermediate over `target` with premultiplied alpha, keeping
     /// iced's content underneath. The msaa path maps the intermediate 1:1,
-    /// so it expects `viewport` to match the size last given to `prepare`
-    /// (true for the headless harness; the spike app keeps count 1).
+    /// so it expects `viewport` to match the size last given to
+    /// `prepare_parts` (true for the headless harness; the spike app keeps
+    /// count 1).
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         viewport: [f32; 4],
     ) {
-        let Some(vertex_buf) = &self.vertex_buf else {
+        if self.residents.is_empty() {
             return; // nothing prepared yet
-        };
+        }
         let set_vp = |pass: &mut wgpu::RenderPass| {
             pass.set_viewport(
                 viewport[0],
@@ -730,7 +803,7 @@ impl MeshPipeline {
                 multiview_mask: None,
             });
             set_vp(&mut pass);
-            self.draw_scene(&mut pass, vertex_buf);
+            self.draw_scene(&mut pass);
             drop(pass);
             // Composite the resolved frame over whatever is already in
             // `target` — the same Load-and-composite contract as the
@@ -777,18 +850,23 @@ impl MeshPipeline {
                 multiview_mask: None,
             });
             set_vp(&mut pass);
-            self.draw_scene(&mut pass, vertex_buf);
+            self.draw_scene(&mut pass);
         }
     }
 
-    /// Mesh draw — and, when the camera sections, the cap quad right after —
-    /// into the pass's color attachment (msaa or single-sample alike: the cap
-    /// inherits the pass attachment and its pipeline matches its sample count).
-    fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>, vertex_buf: &wgpu::Buffer) {
+    /// Part draws — one bind group + vertex buffer + draw per resident
+    /// part — and, when the camera sections, the cap quad right after —
+    /// into the pass's color attachment (msaa or single-sample alike: the
+    /// cap inherits the pass attachment and its pipeline matches its
+    /// sample count).
+    fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, vertex_buf.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        for resident in &self.residents {
+            pass.set_bind_group(1, &resident.model_bg, &[]);
+            pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+            pass.draw(0..resident.vertex_count, 0..1);
+        }
         if self.draw_cap {
             // Same pass, after the mesh: the stencil attachment already holds
             // the parity the mesh's inc/dec left, so the quad only survives
@@ -806,43 +884,194 @@ impl MeshPipeline {
 mod tests {
     use super::*;
 
-    fn golden() -> TriMesh {
-        load_fixture_stl(std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../fixtures/golden/model.stl"
-        )))
+    use engine::parsing::stl::parse_stl;
+    use engine::parsing::threemf::parse_3mf;
+
+    fn fixture(rel: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden").join(rel)
+    }
+
+    fn golden_stl_parts() -> Vec<engine::parsing::Part> {
+        let bytes = std::fs::read(fixture("model.stl"))
+            .unwrap_or_else(|e| panic!("read fixture model.stl: {e}"));
+        vec![parse_stl(&bytes).expect("golden model.stl parses")]
+    }
+
+    fn golden_3mf_parts() -> Vec<engine::parsing::Part> {
+        let bytes = std::fs::read(fixture("model.3mf"))
+            .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
+        parse_3mf(&bytes).expect("golden model.3mf parses: 2 parts x 12 triangles")
+    }
+
+    async fn device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: None,
+                ..Default::default()
+            })
+            .await
+            .expect("surfaceless wgpu adapter (Metal locally, Vulkan on thelio)");
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .unwrap()
     }
 
     #[test]
-    fn golden_fixture_is_24_triangles_inside_its_aabb() {
-        let mesh = golden();
-        assert_eq!(mesh.vertices.len(), 24 * 3);
-        for v in &mesh.vertices {
+    fn from_parts_remaps_model_z_up_to_scene_y_up() {
+        let part = engine::parsing::Part {
+            name: "tri".into(),
+            positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
+        // upstream sceneVector: (x, z, -y)
+        assert_eq!(scene.parts[0].vertices[0].pos, [1.0, 3.0, -2.0]);
+        assert_eq!(scene.parts[0].vertices[2].pos, [7.0, 9.0, -8.0]);
+        // neutral painted, per-part aabb is the remapped triangle's
+        assert_eq!(scene.parts[0].vertices[0].color, NEUTRAL);
+        assert_eq!(scene.parts[0].aabb_min, [1.0, 3.0, -8.0]);
+        assert_eq!(scene.parts[0].aabb_max, [7.0, 9.0, -2.0]);
+    }
+
+    #[test]
+    fn golden_stl_scene_is_24_triangles_inside_its_aabb() {
+        let scene = PartScene::from_parts(&golden_stl_parts(), NEUTRAL);
+        assert_eq!(scene.parts.len(), 1);
+        assert_eq!(scene.parts[0].vertices.len(), 24 * 3);
+        for v in &scene.parts[0].vertices {
             for a in 0..3 {
-                assert!(v.pos[a] >= mesh.aabb_min[a] - 1e-6);
-                assert!(v.pos[a] <= mesh.aabb_max[a] + 1e-6);
+                assert!(v.pos[a] >= scene.aabb_min[a] - 1e-6);
+                assert!(v.pos[a] <= scene.aabb_max[a] + 1e-6);
             }
         }
         for a in 0..3 {
-            assert!(mesh.aabb_max[a] > mesh.aabb_min[a]);
+            assert!(scene.aabb_max[a] > scene.aabb_min[a]);
         }
+    }
+
+    #[test]
+    fn golden_3mf_scene_is_two_parts_of_twelve_triangles() {
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        assert_eq!(scene.parts.len(), 2, "one GpuPart per engine part");
+        for part in &scene.parts {
+            assert_eq!(part.vertices.len(), 12 * 3);
+            for a in 0..3 {
+                assert!(part.aabb_max[a] > part.aabb_min[a]);
+                assert!(part.aabb_min[a] >= scene.aabb_min[a] - 1e-6);
+                assert!(part.aabb_max[a] <= scene.aabb_max[a] + 1e-6);
+            }
+        }
+        // fixture: two boxes, base 60x60 z in [-4,4] and lid 40x40 z in
+        // [12,22] — MODEL x/y/z spans 60/60/26 become SCENE x/y/z 60/26/60
+        let span = |a: usize| scene.aabb_max[a] - scene.aabb_min[a];
+        assert!((span(0) - 60.0).abs() < 1e-3, "scene x span {}", span(0));
+        assert!((span(1) - 26.0).abs() < 1e-3, "scene y span {}", span(1));
+        assert!((span(2) - 60.0).abs() < 1e-3, "scene z span {}", span(2));
     }
 
     #[test]
     fn cameras_are_finite() {
-        let mesh = golden();
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         for &(yaw, pitch, zoom) in &[
             (std::f32::consts::FRAC_PI_4, 0.6f32, 1.0f32),
             (0.0, 0.0, 0.05),
             (2.0 * std::f32::consts::PI, 1.4, 50.0),
         ] {
-            let camera = orbit_camera(&mesh, yaw, pitch, zoom);
+            let camera = orbit_camera(&scene, yaw, pitch, zoom);
             for row in camera.view_proj {
                 for x in row {
                     assert!(x.is_finite());
                 }
             }
         }
-        assert_eq!(default_camera(&mesh).section_enable, 0.0);
+        assert_eq!(default_camera(&scene).section_enable, 0.0);
+    }
+
+    #[test]
+    fn upload_once_second_frame_no_reupload() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (device, queue) = rt.block_on(device());
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        let camera = default_camera(&scene);
+        let mut pipeline =
+            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene);
+        let (u1, a1) = (
+            pipeline.upload_count_for_tests(),
+            pipeline.alloc_count_for_tests(),
+        );
+        assert_eq!((u1, a1), (2, 2), "one upload+alloc per part on residency");
+        // second frame, same scene, MOVED camera: mesh bytes must not move
+        let moved = orbit_camera(&scene, 0.9, 0.4, 2.0);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &moved, &scene);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1,
+            "unchanged scene must not reupload on frame 2"
+        );
+        assert_eq!(
+            pipeline.alloc_count_for_tests(),
+            a1,
+            "unchanged scene must not reallocate on frame 2"
+        );
+    }
+
+    #[test]
+    fn new_scene_reuploads() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (device, queue) = rt.block_on(device());
+        let mut parts = golden_3mf_parts();
+        let scene1 = PartScene::from_parts(&parts, NEUTRAL);
+        let camera = default_camera(&scene1);
+        let mut pipeline =
+            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let (u1, a1) = (
+            pipeline.upload_count_for_tests(),
+            pipeline.alloc_count_for_tests(),
+        );
+        // grow one part by a triangle (3 corners + its color slot)
+        for corner in [[40.0, 0.0, 30.0], [41.0, 0.0, 30.0], [40.0, 1.0, 30.0]] {
+            parts[1].positions.push(corner);
+        }
+        parts[1].triangle_colors.push(None);
+        let scene2 = PartScene::from_parts(&parts, NEUTRAL);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1 + 1,
+            "grown part reuploads; the untouched part does not"
+        );
+        assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
+    }
+
+    #[test]
+    fn middle_vertex_mutation_reuploads() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (device, queue) = rt.block_on(device());
+        let mut parts = golden_3mf_parts();
+        let scene1 = PartScene::from_parts(&parts, NEUTRAL);
+        let camera = default_camera(&scene1);
+        let mut pipeline =
+            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let (u1, a1) = (
+            pipeline.upload_count_for_tests(),
+            pipeline.alloc_count_for_tests(),
+        );
+        // move a middle corner: same count, same first/last vertex — only
+        // full-content identity can notice
+        let n = parts[0].positions.len();
+        parts[0].positions[n / 2][0] += 5.0;
+        let scene2 = PartScene::from_parts(&parts, NEUTRAL);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1 + 1,
+            "a moved middle vertex must reupload its part (full-content hash)"
+        );
+        assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
     }
 }

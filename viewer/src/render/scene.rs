@@ -1,18 +1,22 @@
-//! iced adapter for the spike renderer: [`SpikeScene`] is a
+//! iced adapter for the part-keyed renderer: [`SpikeScene`] is a
 //! `shader::Program` whose primitive drives [`MeshPipeline`]'s viewer-owned
 //! render pass from `shader::Primitive::render()`. Mirrors iced's
-//! `custom_shader` example structure (scene + Primitive + Pipeline).
+//! `custom_shader` example structure (scene + Primitive + Pipeline). The
+//! scene sits behind an `Arc`, so the per-frame primitive carries a
+//! refcount bump, not a mesh copy.
+
+use std::sync::Arc;
 
 use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Rectangle};
 
-use super::{Camera, MeshPipeline, TriMesh, orbit_camera};
+use super::{Camera, MeshPipeline, PartScene, orbit_camera};
 
-/// Interactive spike scene: fixed mesh, orbit camera state.
+/// Interactive spike scene: fixed part scene, orbit camera state.
 /// `zoom` scales the framing distance (scroll applies 0.9^steps,
 /// upstream-contract §5).
 pub struct SpikeScene {
-    pub mesh: TriMesh,
+    pub scene: Arc<PartScene>,
     pub yaw: f32,
     /// keep within (-π/2, π/2): the orbit formula uses Y as up
     pub pitch: f32,
@@ -20,9 +24,9 @@ pub struct SpikeScene {
 }
 
 impl SpikeScene {
-    pub fn new(mesh: TriMesh) -> Self {
+    pub fn new(scene: Arc<PartScene>) -> Self {
         Self {
-            mesh,
+            scene,
             yaw: std::f32::consts::FRAC_PI_4,
             pitch: 0.6,
             zoom: 1.0,
@@ -30,7 +34,7 @@ impl SpikeScene {
     }
 
     fn camera(&self) -> Camera {
-        orbit_camera(&self.mesh, self.yaw, self.pitch, self.zoom)
+        orbit_camera(&self.scene, self.yaw, self.pitch, self.zoom)
     }
 }
 
@@ -45,7 +49,7 @@ impl<Message> shader::Program<Message> for SpikeScene {
         _bounds: Rectangle,
     ) -> Self::Primitive {
         SpikePrimitive {
-            mesh: self.mesh.clone(),
+            scene: self.scene.clone(),
             camera: self.camera(),
         }
     }
@@ -53,7 +57,7 @@ impl<Message> shader::Program<Message> for SpikeScene {
 
 #[derive(Debug)]
 pub struct SpikePrimitive {
-    mesh: TriMesh,
+    scene: Arc<PartScene>,
     camera: Camera,
 }
 
@@ -69,12 +73,12 @@ impl shader::Primitive for SpikePrimitive {
         viewport: &Viewport,
     ) {
         let size = viewport.physical_size();
-        pipeline.prepare(
+        pipeline.prepare_parts(
             device,
             queue,
             (size.width, size.height),
             &self.camera,
-            &self.mesh,
+            &self.scene,
         );
     }
 
