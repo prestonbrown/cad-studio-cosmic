@@ -110,9 +110,17 @@ impl Spike {
     /// input keystrokes out.
     fn subscription(&self) -> Subscription<Message> {
         fn hotkey(event: keyboard::Event) -> Option<Message> {
-            let keyboard::Event::KeyPressed { modified_key, .. } = event else {
+            let keyboard::Event::KeyPressed {
+                modified_key,
+                modifiers,
+                ..
+            } = event
+            else {
                 return None;
             };
+            if !modifiers.is_empty() {
+                return None;
+            }
             match modified_key.as_ref() {
                 keyboard::Key::Character("m") => Some(Message::ToggleMsaa),
                 _ => None,

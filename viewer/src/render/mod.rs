@@ -1590,6 +1590,16 @@ mod tests {
         assert!((upp - expected).abs() < 1e-6, "{upp} vs {expected}");
     }
 
+    /// The default must be the single-sample count, not `u32::default()`
+    /// (0): that differs from a fresh pipeline's resident 1 and would
+    /// drive the first default-options prepare into an invalid 0-sample
+    /// rebuild — the derive(Default) bug the manual impl replaced.
+    #[test]
+    fn options_default_is_single_sample() {
+        assert_eq!(Options::default().msaa, 1);
+        assert!(!Options::default().wireframe);
+    }
+
     /// pan (facts #22): the target moves by (-right·dx + up·dy)·units/pt
     /// over the camera's own scene axes — verified against the look-at
     /// basis glam builds for the same pose (rows 0/1 of the view matrix's
