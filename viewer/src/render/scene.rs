@@ -10,31 +10,46 @@ use std::sync::Arc;
 use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Rectangle};
 
-use super::{Camera, MeshPipeline, PartScene, orbit_camera};
+use super::{Camera, MeshPipeline, PartScene, camera};
 
 /// Interactive spike scene: fixed part scene, orbit camera state.
-/// `zoom` scales the framing distance (scroll applies 0.9^steps,
-/// upstream-contract §5).
+/// Framing (target + base distance) comes from [`camera::frame`] at
+/// construction — aspect-free, against the pinned scene aabb — and `zoom`
+/// scales that distance (scroll applies 0.9^steps, upstream-contract §5).
 pub struct SpikeScene {
     pub scene: Arc<PartScene>,
     pub yaw: f32,
-    /// keep within (-π/2, π/2): the orbit formula uses Y as up
+    /// keep within ±[`camera::MAX_PITCH`]: the orbit formula uses Y as up
     pub pitch: f32,
     pub zoom: f32,
+    /// The aspect-free framing of `scene`: look-at target and the distance
+    /// `zoom` scales.
+    target: [f32; 3],
+    distance: f32,
 }
 
 impl SpikeScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
+        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
         Self {
             scene,
-            yaw: std::f32::consts::FRAC_PI_4,
-            pitch: 0.6,
+            yaw,
+            pitch,
             zoom: 1.0,
+            target,
+            distance,
         }
     }
 
-    fn camera(&self) -> Camera {
-        orbit_camera(&self.scene, self.yaw, self.pitch, self.zoom)
+    fn camera(&self, aspect: f32) -> Camera {
+        Camera::orbiting(
+            self.distance * self.zoom,
+            self.yaw,
+            self.pitch,
+            self.target,
+            aspect,
+        )
     }
 }
 
@@ -46,11 +61,18 @@ impl<Message> shader::Program<Message> for SpikeScene {
         &self,
         _state: &Self::State,
         _cursor: mouse::Cursor,
-        _bounds: Rectangle,
+        bounds: Rectangle,
     ) -> Self::Primitive {
+        // the projection aspect comes from the viewport being drawn — the
+        // widget's own bounds — never a fixed ratio
+        let aspect = if bounds.width > 0.0 && bounds.height > 0.0 {
+            bounds.width / bounds.height
+        } else {
+            16.0 / 9.0 // zero-size layout pass: nothing draws; any finite ratio
+        };
         SpikePrimitive {
             scene: self.scene.clone(),
-            camera: self.camera(),
+            camera: self.camera(aspect),
         }
     }
 }

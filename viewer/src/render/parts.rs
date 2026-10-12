@@ -1,11 +1,17 @@
 //! Part-keyed CPU scene: engine parts staged as scene-space vertices.
 //!
 //! MODEL (engine coords, Z-up) becomes SCENE (render coords, Y-up) through
-//! `(x, z, -y)` — a proper rotation, applied once here at scene build.
-//! Each part carries a full-content hash over positions+colors, so the
+//! `(x, z, -y)` — a proper rotation, applied once here at scene build —
+//! then the whole scene is translated by the floor pin (ModelViewer.swift:
+//! 167-168): `(-center.x, -min.y, -center.z)`, putting the model floor at
+//! scene y=0 and centering x/z. The grid, bed outline, and tripod (Task 5)
+//! and `camera::frame`'s `(0, size.y/2, 0)` target are all stated against
+//! this pinned frame.
+//!
+//! Each part carries a full-content hash over its staged vertices, so the
 //! pipeline's upload-once check (`MeshPipeline::prepare_parts`) rewrites a
-//! part's vertex buffer only when its real content changes; camera motion
-//! writes uniforms, never mesh bytes.
+//! part's vertex buffer only when that staged content — including the pin
+//! offset — changes; camera motion writes uniforms, never mesh bytes.
 
 use std::hash::Hasher;
 
@@ -27,9 +33,9 @@ pub struct GpuPart {
     pub vertices: Vec<Vertex>,
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
-    /// Full-content identity over positions+colors: a moved corner changes
-    /// it as surely as an added one, so residency tracks content, not
-    /// counts or endpoints.
+    /// Full-content identity over the STAGED vertices: a moved corner, a
+    /// new color, or a shifted floor pin each change it as surely as an
+    /// added corner, so residency tracks exactly what would be uploaded.
     pub content_hash: u64,
 }
 
@@ -42,22 +48,14 @@ pub struct PartScene {
     pub aabb_max: [f32; 3],
 }
 
-/// Content identity of one part: every position byte and every triangle
-/// color feeds the hash (O(n), run once per `PartScene` build). Valid only
+/// Content identity of one part: every staged vertex byte feeds the hash
+/// (O(n), run once per `PartScene` build, after the remap and pin — so the
+/// identity covers exactly the bytes residency would serve). Valid only
 /// for comparing scenes built in the same process.
-fn content_hash(part: &Part) -> u64 {
+fn content_hash(vertices: &[Vertex]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write_usize(part.positions.len());
-    h.write(bytemuck::cast_slice(&part.positions));
-    for color in &part.triangle_colors {
-        match color {
-            None => h.write_u8(0),
-            Some(rgb) => {
-                h.write_u8(1);
-                h.write(rgb);
-            }
-        }
-    }
+    h.write_usize(vertices.len());
+    h.write(bytemuck::cast_slice(vertices));
     h.finish()
 }
 
@@ -67,9 +65,9 @@ fn remap(p: [f32; 3]) -> [f32; 3] {
 }
 
 impl PartScene {
-    /// Stage engine parts for rendering: remap to scene space, paint the
-    /// neutral, hash each part's content. Parts keep engine order; slot `i`
-    /// in the scene is slot `i` at residency.
+    /// Stage engine parts for rendering: remap to scene space, pin the
+    /// floor, paint the neutral, hash each part's staged content. Parts
+    /// keep engine order; slot `i` in the scene is slot `i` at residency.
     pub fn from_parts(parts: &[Part], neutral: [f32; 3]) -> Self {
         let mut staged = Vec::with_capacity(parts.len());
         for part in parts {
@@ -103,7 +101,7 @@ impl PartScene {
                 vertices,
                 aabb_min: mn,
                 aabb_max: mx,
-                content_hash: content_hash(part),
+                content_hash: 0, // set after the pin below
             });
         }
         let (mut scene_min, mut scene_max) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -115,8 +113,41 @@ impl PartScene {
         }
         if staged.is_empty() {
             // an empty scene renders nothing; keep the aabb finite for the
-            // camera math
-            (scene_min, scene_max) = ([0.0; 3], [0.0; 3]);
+            // camera math (the pin of a degenerate box is zero anyway)
+            return Self {
+                parts: staged,
+                aabb_min: [0.0; 3],
+                aabb_max: [0.0; 3],
+            };
+        }
+        // Floor pin (ModelViewer.swift:167-168): translate the remapped
+        // scene so the model floor sits at y=0 and x/z center on the
+        // origin. Baked into the staged vertices — a later part growing
+        // past the union aabb moves this offset, and the content hashes
+        // (computed after) pick that up so residency never serves a part
+        // at a stale pin.
+        let mut pin = [0.0f32; 3];
+        for a in 0..3 {
+            pin[a] = -(scene_min[a] + scene_max[a]) / 2.0;
+        }
+        pin[1] = -scene_min[1];
+        for part in &mut staged {
+            for v in &mut part.vertices {
+                for a in 0..3 {
+                    v.pos[a] += pin[a];
+                }
+            }
+            for a in 0..3 {
+                part.aabb_min[a] += pin[a];
+                part.aabb_max[a] += pin[a];
+            }
+        }
+        for a in 0..3 {
+            scene_min[a] += pin[a];
+            scene_max[a] += pin[a];
+        }
+        for part in &mut staged {
+            part.content_hash = content_hash(&part.vertices);
         }
         Self {
             parts: staged,

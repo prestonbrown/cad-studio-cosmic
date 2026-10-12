@@ -108,41 +108,141 @@ fn cap_quad(scene: &PartScene, camera: &Camera) -> [CapVertex; 4] {
     [at(u0, v0), at(u1, v0), at(u0, v1), at(u1, v1)]
 }
 
-/// Default iso camera framing `scene` (upstream presets: yaw π/4, pitch 0.6).
-pub fn default_camera(scene: &PartScene) -> Camera {
-    orbit_camera(scene, std::f32::consts::FRAC_PI_4, 0.6, 1.0)
+impl Camera {
+    /// The orbit camera at `(distance, yaw, pitch)` around `target` for a
+    /// `aspect`-wide viewport, sectioning off — the uniform form of
+    /// [`camera::orbit`].
+    pub fn orbiting(
+        distance: f32,
+        yaw: f32,
+        pitch: f32,
+        target: [f32; 3],
+        aspect: f32,
+    ) -> Camera {
+        Camera {
+            view_proj: camera::orbit(distance, yaw, pitch, target, aspect),
+            section_axis: 1,
+            section_pos: f32::MAX,
+            section_enable: 0.0,
+            _pad: 0.0,
+        }
+    }
 }
 
-/// Orbit camera around the scene aabb center; `zoom` scales the framing
-/// distance (1.0 = default framing). Sectioning off.
-pub fn orbit_camera(scene: &PartScene, yaw: f32, pitch: f32, zoom: f32) -> Camera {
-    let center = glam::Vec3::from_array([
-        (scene.aabb_min[0] + scene.aabb_max[0]) / 2.0,
-        (scene.aabb_min[1] + scene.aabb_max[1]) / 2.0,
-        (scene.aabb_min[2] + scene.aabb_max[2]) / 2.0,
-    ]);
-    let radius = ((scene.aabb_max[0] - scene.aabb_min[0])
-        .max(scene.aabb_max[1] - scene.aabb_min[1])
-        .max(scene.aabb_max[2] - scene.aabb_min[2])
-        / 2.0)
-        .max(1.0);
-    let fov = 35f32.to_radians();
-    let distance = radius / (fov / 2.0).sin() * 1.15 * zoom;
-    // pitch clamped by callers to keep cos(pitch) > 0 (up vector stays Y)
-    let eye = center
-        + glam::Vec3::new(pitch.cos() * yaw.sin(), pitch.sin(), pitch.cos() * yaw.cos())
-            * distance;
-    let view = glam::camera::rh::view::look_at_mat4(eye, center, glam::Vec3::Y);
-    // directx = WebGPU NDC (Z in [0,1], Y-up); spike uses a fixed 16:9 aspect,
-    // the real renderer derives it from the viewport
-    let proj = glam::camera::rh::proj::directx::perspective(fov, 16.0 / 9.0, 1.0, 100_000.0);
-    Camera {
-        view_proj: (proj * view).to_cols_array_2d(),
-        section_axis: 1,
-        section_pos: f32::MAX,
-        section_enable: 0.0,
-        _pad: 0.0,
+/// Parity camera math, transcribed from ModelViewer.swift (facts §1).
+/// Pure — no GPU types — so the formulas are testable headless; the
+/// adapter owns the state (yaw/pitch/distance/target) and calls in.
+pub mod camera {
+    /// Vertical FOV (ModelViewer.swift:144) with near and far planes
+    /// (:142-143) — absolute, never radius-relative.
+    pub const FOV: f32 = 35.0_f32.to_radians();
+    pub const NEAR: f32 = 1.0;
+    pub const FAR: f32 = 100_000.0;
+    /// Upstream's exact pitch clamp (ModelViewer.swift:95), π/2 minus
+    /// ~0.01 — not a value this crate invents.
+    pub const MAX_PITCH: f32 = 1.5607;
+    /// Drag-to-orbit sensitivity, radians per point (ModelViewer.swift:302-303).
+    pub const ORBIT_SENSITIVITY: f32 = 0.008;
+
+    /// Upstream's named views (ModelViewer.swift:4-33).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Preset {
+        Iso,
+        Front,
+        Top,
+        Right,
     }
+
+    impl Preset {
+        pub fn yaw_pitch(self) -> (f32, f32) {
+            match self {
+                Preset::Iso => (std::f32::consts::FRAC_PI_4, 0.6),
+                Preset::Front => (0.0, 0.0),
+                // top looks straight down at the same maximumPitch constant
+                Preset::Top => (0.0, MAX_PITCH),
+                Preset::Right => (std::f32::consts::FRAC_PI_2, 0.0),
+            }
+        }
+    }
+
+    /// placeCamera (ModelViewer.swift:339-342): look at `target` from
+    /// `target + dir(yaw, pitch)·distance` with Y up, projected at
+    /// `aspect` — the viewport's width/height, required, so the projection
+    /// always matches the window it renders into.
+    pub fn orbit(
+        distance: f32,
+        yaw: f32,
+        pitch: f32,
+        target: [f32; 3],
+        aspect: f32,
+    ) -> [[f32; 4]; 4] {
+        let at = glam::Vec3::from_array(target);
+        let dir = glam::Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+        let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
+        // directx = WebGPU NDC (Z in [0,1], Y-up)
+        let proj = glam::camera::rh::proj::directx::perspective(FOV, aspect, NEAR, FAR);
+        (proj * view).to_cols_array_2d()
+    }
+
+    /// Framing radius: half the aabb DIAGONAL, floored at 1
+    /// (ModelViewer.swift:330) — a long-thin part frames by its diagonal,
+    /// not its longest extent.
+    pub fn framing_radius(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
+        let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
+        (size.length() / 2.0).max(1.0)
+    }
+
+    /// frame() (ModelViewer.swift:328-337), aspect-free by construction:
+    /// the target is half the scene height above the pinned floor, the
+    /// distance fits the radius through the FOV with 15% headroom. The
+    /// x/z zeros assume the PartScene's floor pin already centered the
+    /// model horizontally.
+    pub fn frame(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> ([f32; 3], f32) {
+        let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
+        let target = [0.0, size.y / 2.0, 0.0];
+        let distance = framing_radius(aabb_min, aabb_max) / (FOV / 2.0).sin() * 1.15;
+        (target, distance)
+    }
+
+    /// zoom (ModelViewer.swift:307-310): distance × factor clamped to
+    /// [0.1·radius, 200·radius].
+    pub fn zoomed(distance: f32, factor: f32, radius: f32) -> f32 {
+        (distance * factor).clamp(radius * 0.1, radius * 200.0)
+    }
+
+    /// pan's units-per-point (ModelViewer.swift:312-320): the view-plane
+    /// height covered by one point at `distance`. The target translation
+    /// wiring is M4's; this is the parity formula.
+    pub fn pan_units_per_point(distance: f32, view_height: f32) -> f32 {
+        2.0 * distance * (FOV / 2.0).tan() / view_height
+    }
+
+    /// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
+    /// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
+    /// scaled 0.008, pitch clamped to ±MAX_PITCH.
+    pub fn orbit_drag(yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f32) {
+        (
+            yaw - dx * ORBIT_SENSITIVITY,
+            (pitch + dy * ORBIT_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
+        )
+    }
+}
+
+/// The camera for `preset` framing `scene` (upstream's preset-change
+/// reframe, ModelViewer.swift:322-337).
+pub fn preset_camera(scene: &PartScene, preset: camera::Preset, aspect: f32) -> Camera {
+    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+    let (yaw, pitch) = preset.yaw_pitch();
+    Camera::orbiting(distance, yaw, pitch, target, aspect)
+}
+
+/// Default iso camera framing `scene` (upstream presets: yaw π/4, pitch 0.6).
+pub fn default_camera(scene: &PartScene, aspect: f32) -> Camera {
+    preset_camera(scene, camera::Preset::Iso, aspect)
 }
 
 /// Blit stage for the msaa > 1 path: a fullscreen-textured-quad pipeline
@@ -919,20 +1019,26 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_remaps_model_z_up_to_scene_y_up() {
+    fn from_parts_remaps_and_pins_floor_at_origin() {
         let part = engine::parsing::Part {
             name: "tri".into(),
             positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
             triangle_colors: vec![None],
         };
         let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
-        // upstream sceneVector: (x, z, -y)
-        assert_eq!(scene.parts[0].vertices[0].pos, [1.0, 3.0, -2.0]);
-        assert_eq!(scene.parts[0].vertices[2].pos, [7.0, 9.0, -8.0]);
-        // neutral painted, per-part aabb is the remapped triangle's
+        // upstream sceneVector (x, z, -y) maps the MODEL triangle to
+        // x[1,7] y[3,9] z[-8,-2]; the pin then translates by
+        // (-center.x, -min.y, -center.z) = (-4, -3, +5): floor at scene
+        // y=0, x/z centered (ModelViewer.swift:167-168)
+        assert_eq!(scene.parts[0].vertices[0].pos, [-3.0, 0.0, 3.0]);
+        assert_eq!(scene.parts[0].vertices[2].pos, [3.0, 6.0, -3.0]);
+        // neutral painted, per-part aabb is the pinned triangle's
         assert_eq!(scene.parts[0].vertices[0].color, NEUTRAL);
-        assert_eq!(scene.parts[0].aabb_min, [1.0, 3.0, -8.0]);
-        assert_eq!(scene.parts[0].aabb_max, [7.0, 9.0, -2.0]);
+        assert_eq!(scene.parts[0].aabb_min, [-3.0, 0.0, -3.0]);
+        assert_eq!(scene.parts[0].aabb_max, [3.0, 6.0, 3.0]);
+        // the scene aabb is the pinned union: y from 0, x/z symmetric
+        assert_eq!(scene.aabb_min, [-3.0, 0.0, -3.0]);
+        assert_eq!(scene.aabb_max, [3.0, 6.0, 3.0]);
     }
 
     #[test]
@@ -969,24 +1075,123 @@ mod tests {
         assert!((span(0) - 60.0).abs() < 1e-3, "scene x span {}", span(0));
         assert!((span(1) - 26.0).abs() < 1e-3, "scene y span {}", span(1));
         assert!((span(2) - 60.0).abs() < 1e-3, "scene z span {}", span(2));
+        // post-pin the union aabb itself: MODEL floor (z=-4) at scene y=0,
+        // x/z centered on the scene origin, spans unchanged
+        let pinned = [
+            (scene.aabb_min[0], scene.aabb_max[0], -30.0, 30.0),
+            (scene.aabb_min[1], scene.aabb_max[1], 0.0, 26.0),
+            (scene.aabb_min[2], scene.aabb_max[2], -30.0, 30.0),
+        ];
+        for (a, &(mn, mx, emn, emx)) in pinned.iter().enumerate() {
+            assert!(
+                (mn - emn).abs() < 1e-3 && (mx - emx).abs() < 1e-3,
+                "pinned aabb[{a}] [{mn}, {mx}] vs [{emn}, {emx}]"
+            );
+        }
     }
 
     #[test]
-    fn cameras_are_finite() {
-        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
-        for &(yaw, pitch, zoom) in &[
-            (std::f32::consts::FRAC_PI_4, 0.6f32, 1.0f32),
-            (0.0, 0.0, 0.05),
-            (2.0 * std::f32::consts::PI, 1.4, 50.0),
+    fn frame_radius_is_diagonal_half() {
+        // the long-thin regression: max-extent/2 would frame at 5.0, the
+        // diagonal at √102/2 ≈ 5.05 (facts #1: ModelViewer.swift:328-337)
+        let (min, max) = ([0.0, 0.0, 0.0], [10.0, 1.0, 1.0]);
+        let r = f32::sqrt(102.0) / 2.0;
+        assert!((camera::framing_radius(min, max) - r).abs() < 1e-5);
+        let (target, distance) = camera::frame(min, max);
+        // aspect-free: half the height; x/z zero assumes the pinned scene
+        assert_eq!(target, [0.0, 0.5, 0.0]);
+        let expected = r / f32::sin(17.5f32.to_radians()) * 1.15;
+        assert!(
+            (distance - expected).abs() < 1e-3,
+            "distance {distance} vs r/sin(17.5°)·1.15 = {expected}"
+        );
+        // the radius floors at 1 so a degenerate model still frames
+        assert_eq!(camera::framing_radius([0.0; 3], [0.0; 3]), 1.0);
+    }
+
+    #[test]
+    fn zoom_clamps_and_presets() {
+        // zoom: distance × factor clamped to [0.1r, 200r] (facts #19)
+        assert_eq!(camera::zoomed(50.0, 0.5, 10.0), 25.0);
+        assert_eq!(camera::zoomed(50.0, 0.001, 10.0), 1.0, "floor 0.1r");
+        assert_eq!(camera::zoomed(50.0, 100.0, 10.0), 2000.0, "ceiling 200r");
+        // pitch clamp is upstream's exact constant, not π/2 − ε (facts #18)
+        assert_eq!(camera::MAX_PITCH, 1.5607);
+        assert!(camera::MAX_PITCH < std::f32::consts::FRAC_PI_2);
+        // drag: yaw -= dx·0.008, pitch += dy·0.008, clamped at ±MAX_PITCH
+        let (yaw, pitch) = camera::orbit_drag(0.3, 0.2, 100.0, 25.0);
+        assert!((yaw + 0.5).abs() < 1e-6, "yaw {yaw}");
+        assert!((pitch - 0.4).abs() < 1e-6, "pitch {pitch}");
+        assert_eq!(camera::orbit_drag(0.0, 1.5, 0.0, 1000.0).1, 1.5607);
+        assert_eq!(camera::orbit_drag(0.0, -1.5, 0.0, -1000.0).1, -1.5607);
+        // presets (facts #25): top reuses the maximumPitch constant
+        assert_eq!(
+            camera::Preset::Iso.yaw_pitch(),
+            (std::f32::consts::FRAC_PI_4, 0.6)
+        );
+        assert_eq!(camera::Preset::Front.yaw_pitch(), (0.0, 0.0));
+        assert_eq!(
+            camera::Preset::Top.yaw_pitch(),
+            (0.0, camera::MAX_PITCH)
+        );
+        assert_eq!(
+            camera::Preset::Right.yaw_pitch(),
+            (std::f32::consts::FRAC_PI_2, 0.0)
+        );
+        // pan: world units per view point at `distance` (facts #22)
+        let upp = camera::pan_units_per_point(100.0, 500.0);
+        let expected = 2.0 * 100.0 * f32::tan(17.5f32.to_radians()) / 500.0;
+        assert!((upp - expected).abs() < 1e-6, "{upp} vs {expected}");
+    }
+
+    /// The ported orbit test: the view_proj is exactly the Swift
+    /// placeCamera formula (facts #1: ModelViewer.swift:339-342), the
+    /// orbit target sits at clip-space (0, 0) for every pose, the aspect
+    /// argument is load-bearing, and extreme poses stay finite.
+    #[test]
+    fn orbit_view_proj_matches_formula() {
+        // arbitrary off-center target: the formula must not assume pinning
+        let target = [3.0, -4.0, 5.0];
+        let aspect = 800.0 / 600.0;
+        for &(yaw, pitch, distance) in &[
+            (0.7f32, 0.3f32, 120.0f32),
+            (0.0, 0.0, 1.0),
+            (-2.5, camera::MAX_PITCH, 90_000.0),
+            (std::f32::consts::PI, -camera::MAX_PITCH, 250.0),
         ] {
-            let camera = orbit_camera(&scene, yaw, pitch, zoom);
-            for row in camera.view_proj {
+            let vp = camera::orbit(distance, yaw, pitch, target, aspect);
+            let dir = glam::Vec3::new(
+                pitch.cos() * yaw.sin(),
+                pitch.sin(),
+                pitch.cos() * yaw.cos(),
+            );
+            let at = glam::Vec3::from_array(target);
+            let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
+            let proj = glam::camera::rh::proj::directx::perspective(
+                35f32.to_radians(),
+                aspect,
+                1.0,
+                100_000.0,
+            );
+            let expected = (proj * view).to_cols_array_2d();
+            for (row, erow) in vp.iter().zip(expected.iter()) {
+                for (a, b) in row.iter().zip(erow.iter()) {
+                    assert!((a - b).abs() < 1e-4, "{vp:?} vs {expected:?}");
+                }
+            }
+            // the target is the look-at point: it projects to (0, 0)
+            let clip = glam::Mat4::from_cols_array_2d(&vp)
+                * glam::Vec4::new(target[0], target[1], target[2], 1.0);
+            assert!(clip.x.abs() < 1e-3 && clip.y.abs() < 1e-3, "{clip:?}");
+            for row in vp {
                 for x in row {
                     assert!(x.is_finite());
                 }
             }
+            // aspect is load-bearing: a 16:9 projection differs from 4:3 —
+            // the hardcode this task kills would render both identically
+            assert_ne!(vp, camera::orbit(distance, yaw, pitch, target, 16.0 / 9.0));
         }
-        assert_eq!(default_camera(&scene).section_enable, 0.0);
     }
 
     #[test]
@@ -994,7 +1199,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (device, queue) = rt.block_on(device());
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
-        let camera = default_camera(&scene);
+        let camera = default_camera(&scene, 4.0 / 3.0);
         let mut pipeline =
             MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene);
@@ -1004,7 +1209,8 @@ mod tests {
         );
         assert_eq!((u1, a1), (2, 2), "one upload+alloc per part on residency");
         // second frame, same scene, MOVED camera: mesh bytes must not move
-        let moved = orbit_camera(&scene, 0.9, 0.4, 2.0);
+        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
         pipeline.prepare_parts(&device, &queue, (800, 600), &moved, &scene);
         assert_eq!(
             pipeline.upload_count_for_tests(),
@@ -1024,7 +1230,7 @@ mod tests {
         let (device, queue) = rt.block_on(device());
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
-        let camera = default_camera(&scene1);
+        let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline =
             MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
@@ -1032,8 +1238,10 @@ mod tests {
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
         );
-        // grow one part by a triangle (3 corners + its color slot)
-        for corner in [[40.0, 0.0, 30.0], [41.0, 0.0, 30.0], [40.0, 1.0, 30.0]] {
+        // grow one part by a triangle, INSIDE the union aabb so the floor
+        // pin does not move — isolating per-part identity (the pin-shift
+        // case is pinned by pin_shift_reuploads_every_part below)
+        for corner in [[10.0, 0.0, 16.0], [11.0, 0.0, 16.0], [10.0, 1.0, 16.0]] {
             parts[1].positions.push(corner);
         }
         parts[1].triangle_colors.push(None);
@@ -1053,7 +1261,7 @@ mod tests {
         let (device, queue) = rt.block_on(device());
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
-        let camera = default_camera(&scene1);
+        let camera = default_camera(&scene1, 4.0 / 3.0);
         let mut pipeline =
             MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
@@ -1061,10 +1269,12 @@ mod tests {
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
         );
-        // move a middle corner: same count, same first/last vertex — only
-        // full-content identity can notice
+        // move a middle corner INWARD (fixture corner is aabb-edge
+        // (30,30,4); +5 would move the union aabb and the pin with it):
+        // same count, same first/last vertex — only full-content identity
+        // can notice
         let n = parts[0].positions.len();
-        parts[0].positions[n / 2][0] += 5.0;
+        parts[0].positions[n / 2][0] -= 5.0;
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
         pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
         assert_eq!(
@@ -1073,5 +1283,35 @@ mod tests {
             "a moved middle vertex must reupload its part (full-content hash)"
         );
         assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
+    }
+
+    /// The floor pin is baked into the staged vertices, so content identity
+    /// must track them: a part growing past the union aabb moves the pin,
+    /// and every part's scene-space content changes with it — revert the
+    /// identity to raw MODEL positions and this test catches parts left
+    /// resident at the stale pin.
+    #[test]
+    fn pin_shift_reuploads_every_part() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (device, queue) = rt.block_on(device());
+        let mut parts = golden_3mf_parts();
+        let scene1 = PartScene::from_parts(&parts, NEUTRAL);
+        let camera = default_camera(&scene1, 4.0 / 3.0);
+        let mut pipeline =
+            MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene1);
+        let u1 = pipeline.upload_count_for_tests();
+        // grow past MODEL x=30: union widens, the pin's x-center shifts
+        for corner in [[40.0, 0.0, 16.0], [41.0, 0.0, 16.0], [40.0, 1.0, 16.0]] {
+            parts[1].positions.push(corner);
+        }
+        parts[1].triangle_colors.push(None);
+        let scene2 = PartScene::from_parts(&parts, NEUTRAL);
+        pipeline.prepare_parts(&device, &queue, (800, 600), &camera, &scene2);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1 + 2,
+            "a moved pin re-renders every part at the new offset"
+        );
     }
 }

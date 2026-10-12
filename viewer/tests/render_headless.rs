@@ -194,7 +194,7 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
     let scene = golden_scene();
-    let camera = default_camera(&scene);
+    let camera = default_camera(&scene, 800.0 / 600.0);
     // one pipeline across both frames (as iced's Storage holds it for the
     // app's lifetime): per-frame depth/stencil state that fails to clear
     // leaks into the second frame — and the second frame re-uploads
@@ -228,11 +228,13 @@ fn cap_red_pixels(px: &[u8]) -> usize {
 
 /// Section cap: cutting the fixture along the model's Z stack must draw the
 /// red cap face where the mesh pass left winding parity, and only there.
-/// The fixture is two disjoint boxes — base 60x60 z∈[-4,4], lid 40x40
-/// z∈[12,22] — with 8mm of air between, so "mid-plane" means the middle of
-/// a box and "toward the edge" means the smaller lid and the empty gap
-/// above the base. MODEL z maps to SCENE y (the remap in `from_parts`), so
-/// the cut axis in scene space is 1.
+/// The fixture is two disjoint boxes — base 60x60 MODEL z∈[-4,4], lid 40x40
+/// MODEL z∈[12,22] — with 8mm of air between, so "mid-plane" means the
+/// middle of a box and "toward the edge" means the smaller lid and the
+/// empty gap above the base. MODEL z maps to SCENE y (the remap in
+/// `from_parts`), so the cut axis in scene space is 1; the floor pin then
+/// puts the pinned aabb at y∈[0,26] with base y∈[0,8], lid y∈[16,26], gap
+/// (8,16).
 #[test]
 fn section_cap_appears_and_shrinks_toward_the_edge() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -241,7 +243,7 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     // one pipeline across every cut (iced Storage lifetime): stencil state
     // must not leak between frames
     let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&scene);
+    let mut cam = default_camera(&scene, 800.0 / 600.0);
     cam.section_enable = 1.0;
     cam.section_axis = 1; // SCENE y — the MODEL z stack after the remap
     let span = scene.aabb_max[1] - scene.aabb_min[1];
@@ -249,9 +251,11 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
         cam.section_pos = scene.aabb_min[1] + span * frac;
         cap_red_pixels(&render_frame(&device, &queue, &mut pipeline, &scene, &cam, 800, 600))
     };
-    let base = cap_at(4.0 / 26.0); // y=0: middle of the 60mm base box
-    let lid = cap_at(21.0 / 26.0); // y=17: middle of the 40mm lid box
-    let gap = cap_at(0.5); // y=9: the air gap between the two parts
+    let base = cap_at(4.0 / 26.0); // pinned y=4: middle of the 60mm base box
+    let lid = cap_at(21.0 / 26.0); // pinned y=21: middle of the 40mm lid box
+    let gap = cap_at(0.5); // pinned y=13: the air gap between the two parts
+    // re-measured after T2 (pin + diagonal framing, camera at distance
+    // ~170 vs ~115 before): base-mid 26450 red px, lid-mid 12374, gap 0
     assert!(
         base > 2_000,
         "cap must be visible at mid-plane, got {base} red px"
@@ -271,18 +275,71 @@ fn viewport_resize_reallocates_depth_and_renders() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
     let scene = golden_scene();
-    let camera = default_camera(&scene);
     // one pipeline through both sizes: prepare_parts() must reallocate the
-    // depth texture when the viewport changes
+    // depth texture when the viewport changes; each size gets its own
+    // aspect-correct camera (both are 4:3, so the framing is identical and
+    // only pixel density changes)
     let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let camera = default_camera(&scene, 800.0 / 600.0);
     let bg = background_reference(&device, &queue, &mut pipeline, &camera, 800, 600);
     let small = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 800, 600);
-    let big = render_frame(&device, &queue, &mut pipeline, &scene, &camera, 1024, 768);
+    let camera_big = default_camera(&scene, 1024.0 / 768.0);
+    let big = render_frame(&device, &queue, &mut pipeline, &scene, &camera_big, 1024, 768);
     assert!(ink_pixels(&small, bg) > 5_000);
     let growth = ink_pixels(&big, bg) as f64 / ink_pixels(&small, bg) as f64;
     assert!(
         (1.2..1.9).contains(&growth),
         "1024x768 vs 800x600 ink ratio {growth:.2} should track area ratio ~1.64 (Review Focus 4)"
+    );
+}
+
+/// Aspect comes from the viewport (Review Focus 3, the discriminator): the
+/// same model, framed identically (framing is aspect-free), rendered at
+/// 800×600 (4:3) and 1280×600 (≈2.13:1) — equal heights. With a vertical
+/// FOV a point's pixel x offset scales as h / (2·tan(fov/2))·aspect_factor
+/// — with the aspect correctly taken from the viewport, the ink bbox WIDTH
+/// in pixels is identical at both sizes. Pixel HEIGHT is aspect-blind and
+/// would pass vacuously; under the 16:9 hardcode this task kills, the
+/// width ratio reads ~1.6.
+#[test]
+fn aspect_from_viewport() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (device, queue) = rt.block_on(device());
+    let scene = golden_scene();
+    let mut pipeline = MeshPipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let ink_bbox_width = |pipeline: &mut MeshPipeline, w: u32, h: u32| -> usize {
+        let camera = default_camera(&scene, w as f32 / h as f32);
+        let bg = background_reference(&device, &queue, pipeline, &camera, w, h);
+        let px = render_frame(&device, &queue, pipeline, &scene, &camera, w, h);
+        assert!(
+            ink_pixels(&px, bg) > 5_000,
+            "model must be on screen at {w}x{h}"
+        );
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        for (i, c) in px.chunks(4).enumerate() {
+            let ink = (c[0] as i32 - bg[0] as i32).abs()
+                + (c[1] as i32 - bg[1] as i32).abs()
+                + (c[2] as i32 - bg[2] as i32).abs()
+                > 30;
+            if ink {
+                min_x = min_x.min(i % w as usize);
+                max_x = max_x.max(i % w as usize);
+            }
+        }
+        assert!(min_x <= max_x, "ink bbox must be non-empty");
+        max_x - min_x + 1
+    };
+    let narrow = ink_bbox_width(&mut pipeline, 800, 600);
+    let wide = ink_bbox_width(&mut pipeline, 1280, 600);
+    let ratio = wide as f64 / narrow as f64;
+    // measured on Metal: identical ink counts (31834) and bbox widths
+    // (468 px) at both sizes — ratio 1.000; the 5% band only absorbs
+    // driver rounding. Under the 16:9 hardcode this same render measures
+    // 1.606 (verified against this test during T2).
+    assert!(
+        (0.95..=1.05).contains(&ratio),
+        "ink bbox width ratio {ratio:.3} must be ~1.0 — viewport aspect must drive the projection (16:9 hardcode reads ~1.6)"
     );
 }
 
@@ -318,7 +375,7 @@ fn msaa_smooths_a_diagonal_edge() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (device, queue) = rt.block_on(device());
     let scene = golden_scene();
-    let camera = default_camera(&scene);
+    let camera = default_camera(&scene, 800.0 / 600.0);
     let px1 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 1);
     let px4 = render_frame_msaa(&device, &queue, &scene, &camera, 800, 600, 4);
     let (e1, e4) = (intermediate_edge_pixels(&px1), intermediate_edge_pixels(&px4));
@@ -326,10 +383,11 @@ fn msaa_smooths_a_diagonal_edge() {
         e4 as f64 > e1 as f64 * 1.5,
         "4x MSAA should produce >=1.5x the intermediate-valued edge pixels: {e4} vs {e1}"
     );
-    // measured 1551 in-band pixels at 4x on Metal (the upright box stack's
-    // silhouettes span a few tens of thousands of px); the floor guards
-    // "real AA happened", the ratio above guards "at least 1.5x better
-    // than 1x"
+    // measured 1199 in-band pixels at 4x on Metal with the parity framing
+    // (T2 re-measurement: the diagonal-radius framing pulled the camera to
+    // distance ~170, shrinking the silhouette ~0.68x vs the old 1551); the
+    // floor guards "real AA happened", the ratio above guards "at least
+    // 1.5x better than 1x"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too
@@ -339,11 +397,12 @@ fn msaa_smooths_a_diagonal_edge() {
     let b = render_frame(&device, &queue, &mut p4, &scene, &camera, 800, 600);
     assert_eq!(a, b, "4x frames must be identical on one pipeline");
     // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
-    // [-4,4], so SCENE y=0 is its middle)
+    // [-4,4]; the pin lifts the floor to y=0, so the base spans pinned
+    // y in [0,8] and its middle is y=4)
     let mut cam = camera;
     cam.section_enable = 1.0;
     cam.section_axis = 1;
-    cam.section_pos = 0.0;
+    cam.section_pos = 4.0;
     let cut = render_frame_msaa(&device, &queue, &scene, &cam, 800, 600, 4);
     assert!(
         cap_red_pixels(&cut) > 2_000,
