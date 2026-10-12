@@ -19,10 +19,14 @@
 //!   `content_block_start`; the assistant snapshot that repeats the block
 //!   carries the full input, which upstream uses only to refine the row's
 //!   title/preview — the engine has no event for that refinement, so it is a
-//!   no-op here. Every `input_json_delta` is forwarded as [`EngineEvent::ToolInput`];
-//!   throttling is the app's job (upstream does it at 0.15 s).
-//! - Thinking surfaces through the `system/thinking_tokens` estimate, not
-//!   `thinking_delta`.
+//!   no-op here. [`EngineEvent::ToolStarted`] carries the block's name
+//!   alongside the live title; every `input_json_delta` is forwarded as
+//!   [`EngineEvent::ToolInput`]; throttling is the app's job (upstream does
+//!   it at 0.15 s).
+//! - Thinking blocks open at their `content_block_start` and close at the
+//!   matching `content_block_stop` (upstream `startBlock`/`stopBlock`),
+//!   redacted thinking included; the token estimate still rides
+//!   `system/thinking_tokens`, not `thinking_delta`.
 //! - The session id is captured from `system/init` OR `result` and persisted
 //!   immediately (upstream `project.save()` on both).
 //!
@@ -31,7 +35,8 @@
 //! assistant text, or — only when no text was confirmed this turn — the
 //! result text (upstream `finish()`'s `hasText` rule). Failures join the
 //! result text, the FULL stderr, and the full stdout when the process exited
-//! nonzero. Cancellation is requested-side, not exit-side: a turn whose
+//! nonzero, and carry the child's exit code for the app's "(code N)" row.
+//! Cancellation is requested-side, not exit-side: a turn whose
 //! handle was cancelled ends [`TurnOutcome::Cancelled`] whatever exit code
 //! the child reports (upstream `wasInterrupted` is `Task.isCancelled`).
 //!
@@ -112,13 +117,21 @@ pub enum EngineEvent {
     Started { session_id: Option<String> },
     /// `system/thinking_tokens`.
     Thinking { estimated_tokens: i64 },
+    /// A thinking (or redacted thinking) block opened at
+    /// `content_block_start`. One block is open at a time, keyed by the
+    /// block index like a tool row.
+    ThinkingStarted,
+    /// The open thinking block's `content_block_stop` arrived; the duration
+    /// the app reports is its own clock over the open interval.
+    ThinkingFinished,
     /// A text delta, accumulated over the current text block.
     TextStreaming { text: String },
     /// One authoritative assistant text block.
     TextConfirmed { text: String },
     /// A tool row opened at `content_block_start` (or by an assistant
-    /// snapshot the stream never announced).
-    ToolStarted { id: String, title: String },
+    /// snapshot the stream never announced). `name` is the `tool_use`
+    /// block's tool name.
+    ToolStarted { id: String, name: String, title: String },
     /// One `input_json_delta` for the row's accumulating input JSON.
     ToolInput { id: String, partial: String },
     /// A `user` tool result closed the row.
@@ -135,7 +148,10 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnOutcome {
     Success { session_id: Option<String>, text: String },
-    Failed { error: String, auth: bool },
+    /// The child's exit code — `None` when no process was ever spawned or
+    /// it died without reporting one (signal), `Some(0)` when it exited
+    /// clean but the turn still failed (an error result line).
+    Failed { error: String, auth: bool, exit_code: Option<i32> },
     /// A resume collided with an active writer twice. [`Session::send`]'s
     /// dance absorbs this itself (retry, then a fresh run), so the engine
     /// never emits it; it names the classification for a caller that drives
@@ -270,6 +286,8 @@ struct TurnState {
     streaming_text: String,
     /// `content_block_start`'s index → the tool_use id announced there.
     tool_ids: HashMap<i64, String>,
+    /// The open thinking block's index (upstream `thinkingIndex`).
+    thinking_index: Option<i64>,
     /// Tool ids a row exists for.
     seen_tools: HashSet<String>,
     has_confirmed_text: bool,
@@ -293,7 +311,7 @@ impl Attempt {
     /// A turn that never produced a stream to classify.
     fn failed(error: impl Into<String>) -> Self {
         Self {
-            outcome: TurnOutcome::Failed { error: error.into(), auth: false },
+            outcome: TurnOutcome::Failed { error: error.into(), auth: false, exit_code: None },
             turn_result: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -400,6 +418,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
             session_id: None,
             streaming_text: String::new(),
             tool_ids: HashMap::new(),
+            thinking_index: None,
             seen_tools: HashSet::new(),
             has_confirmed_text: false,
             last_confirmed_text: String::new(),
@@ -511,7 +530,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let outcome = if interrupted {
         TurnOutcome::Cancelled
     } else {
-        outcome(&driver.state, &stderr, status.success())
+        outcome(&driver.state, &stderr, status.code())
     };
     Attempt { outcome, turn_result: driver.state.turn_result, stdout: driver.state.stdout_text, stderr }
 }
@@ -632,14 +651,31 @@ impl TurnDriver {
                 InnerEvent::ContentStart { index, block } => {
                     // any block start closes the streaming text row
                     self.state.streaming_text.clear();
-                    if let ContentBlock::ToolUse { id, name, .. } = block {
-                        self.state.tool_ids.insert(index, id.clone());
-                        self.state.seen_tools.insert(id.clone());
-                        let title = live_title(&name, "");
-                        let _ = self
-                            .events
-                            .send(EngineEvent::ToolStarted { id, title })
-                            .await;
+                    match block {
+                        ContentBlock::ToolUse { id, name, .. } => {
+                            self.state.tool_ids.insert(index, id.clone());
+                            self.state.seen_tools.insert(id.clone());
+                            let title = live_title(&name, "");
+                            let _ = self
+                                .events
+                                .send(EngineEvent::ToolStarted { id, name, title })
+                                .await;
+                        }
+                        // thinking and redacted thinking open the same row
+                        // shape (upstream BlockKind maps both to .thinking)
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking => {
+                            self.state.thinking_index = Some(index);
+                            let _ = self.events.send(EngineEvent::ThinkingStarted).await;
+                        }
+                        ContentBlock::Text { .. } => {}
+                    }
+                }
+                InnerEvent::ContentStop { index } => {
+                    // only the open thinking block's stop closes the row
+                    // (upstream stopBlock's `index == thinkingIndex` guard)
+                    if self.state.thinking_index == Some(index) {
+                        self.state.thinking_index = None;
+                        let _ = self.events.send(EngineEvent::ThinkingFinished).await;
                     }
                 }
                 InnerEvent::ContentDelta { index, delta } => match delta {
@@ -678,7 +714,7 @@ impl TurnDriver {
                         let title = summarize(&name, &input);
                         let _ = self
                             .events
-                            .send(EngineEvent::ToolStarted { id, title })
+                            .send(EngineEvent::ToolStarted { id, name, title })
                             .await;
                     }
                 }
@@ -719,8 +755,9 @@ impl TurnDriver {
     }
 }
 
-/// Classify the finished process (AgentSession.swift:264-303).
-fn outcome(state: &TurnState, stderr: &str, exit_ok: bool) -> TurnOutcome {
+/// Classify the finished process (AgentSession.swift:264-303). `exit_code`
+/// is the child's `ExitStatus::code()`.
+fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutcome {
     match state.turn_result.as_ref() {
         Some(result) if !result.is_error => TurnOutcome::Success {
             session_id: result.session_id.clone().or_else(|| state.session_id.clone()),
@@ -734,7 +771,7 @@ fn outcome(state: &TurnState, stderr: &str, exit_ok: bool) -> TurnOutcome {
             let message = result
                 .map(|result| result.result.clone())
                 .unwrap_or_default();
-            let stdout = if exit_ok { "" } else { state.stdout_text.as_str() };
+            let stdout = if exit_code == Some(0) { "" } else { state.stdout_text.as_str() };
             let mut details: Vec<String> = [message, stderr.to_string(), stdout.to_string()]
                 .into_iter()
                 .map(|piece| piece.trim().to_string())
@@ -746,7 +783,11 @@ fn outcome(state: &TurnState, stderr: &str, exit_ok: bool) -> TurnOutcome {
                 details.push(format!("api error status {status}"));
             }
             let details = details.join("\n");
-            TurnOutcome::Failed { auth: is_authentication_error(&details), error: details }
+            TurnOutcome::Failed {
+                auth: is_authentication_error(&details),
+                error: details,
+                exit_code,
+            }
         }
     }
 }
@@ -763,7 +804,10 @@ pub fn is_missing_session(text: &str) -> bool {
         .any(|needle| contains_ci(text, needle))
 }
 
-/// Upstream `isAuthenticationError`'s needles.
+/// Upstream `isAuthenticationError`'s needles, with one M4 amendment: the
+/// bare `401` must stand as a whole word — "1401 tokens used" and "duration
+/// 4.401s" are counts and latencies, not an auth status (upstream's plain
+/// substring match mis-fires on both).
 pub fn is_authentication_error(text: &str) -> bool {
     [
         "invalid api key",
@@ -773,10 +817,23 @@ pub fn is_authentication_error(text: &str) -> bool {
         "oauth token",
         "unauthorized",
         "codex login",
-        "401",
     ]
     .iter()
     .any(|needle| contains_ci(text, needle))
+        || contains_word(text, "401")
+}
+
+/// `\b<needle>\b` for an ASCII needle: some occurrence whose neighboring
+/// characters are both non-word (alphanumeric or `_`), or absent at the
+/// string's edges.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    fn is_word(edge: Option<char>) -> bool {
+        matches!(edge, Some(c) if c.is_ascii_alphanumeric() || c == '_')
+    }
+    haystack.match_indices(needle).any(|(at, _)| {
+        !is_word(haystack[..at].chars().next_back())
+            && !is_word(haystack[at + needle.len()..].chars().next())
+    })
 }
 
 /// `localizedCaseInsensitiveContains` for ASCII needles.

@@ -121,3 +121,36 @@ fn recents_dedupe_evict_and_filter_missing() {
             "existing projects are kept");
     assert_eq!(filtered.0.len(), 11);
 }
+
+// ─── project creation (M4 task 0) ────────────────────────────────────────────
+
+/// `create_project` scaffolds the upstream tree (ProjectStore.create +
+/// prepare, contract §4:126): the root as a leaf of the parent, `output/`,
+/// `.cadstudio/logs/`, and a default `project.json` that loads back.
+#[test]
+fn create_project_scaffolds_tree() {
+    let parent = tmp();
+    let root = create_project(&parent, "gearbox").unwrap();
+    assert_eq!(root, parent.join("gearbox"));
+    assert!(root.join("output").is_dir(), "output/ scaffolded");
+    assert!(root.join(".cadstudio").join("logs").is_dir(), ".cadstudio/logs/ scaffolded");
+    let metadata = load_metadata(&root).unwrap();
+    assert_eq!(metadata.session_id, None, "a fresh project has no session yet");
+    assert!(!metadata.app_version.is_empty());
+    // upstream refuses to clobber a folder that already exists
+    assert!(create_project(&parent, "gearbox").is_err(), "second create must fail");
+}
+
+/// An invalid name fails before anything is created — no partial scaffold.
+#[test]
+fn create_project_rejects_invalid_name() {
+    let parent = tmp();
+    for name in ["", ".hidden", "a/b", "a:b"] {
+        assert!(create_project(&parent, name).is_err(), "{name:?}");
+    }
+    assert_eq!(
+        std::fs::read_dir(&parent).unwrap().count(),
+        0,
+        "nothing scaffolded for an invalid name"
+    );
+}

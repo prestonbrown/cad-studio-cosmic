@@ -213,11 +213,13 @@ async fn tool_turn_tracks_tool_rows() {
     assert_eq!(started.len(), 2, "{events:?}");
     match (&events[started[0]], &events[started[1]]) {
         (
-            EngineEvent::ToolStarted { id: a, title: ta },
-            EngineEvent::ToolStarted { id: b, title: tb },
+            EngineEvent::ToolStarted { id: a, name: na, title: ta },
+            EngineEvent::ToolStarted { id: b, name: nb, title: tb },
         ) => {
             assert_eq!(a, WRITE_ID);
             assert_eq!(b, READ_ID);
+            assert_eq!(na, "Write", "the tool_use block's name rides along");
+            assert_eq!(nb, "Read");
             assert_eq!(ta, "Writing a file", "live title at content_block_start");
             assert_eq!(tb, "Reading a file");
         }
@@ -271,8 +273,9 @@ async fn error_result_fails_turn() {
         "{events:?}"
     );
     match finished(&events) {
-        TurnOutcome::Failed { error, auth } => {
+        TurnOutcome::Failed { error, auth, exit_code } => {
             assert!(!auth);
+            assert_eq!(exit_code, &Some(0), "the child exited clean; the result failed");
             assert!(error.contains("no-such-model"), "{error}");
             assert!(error.contains("404"), "the api error status rides along: {error}");
         }
@@ -580,4 +583,123 @@ fn classification_helpers_are_case_insensitive() {
         assert!(is_authentication_error(auth), "{auth}");
     }
     assert!(!is_authentication_error("model not found 404"));
+}
+
+// ─── shell parity extensions (M4 task 0) ─────────────────────────────────────
+
+/// A thinking block opens a boundary pair at its `content_block_start` and
+/// closes it at the matching `content_block_stop` (upstream
+/// `startBlock`/`stopBlock`, AgentSession.swift:147-174): the open interval
+/// carries the token estimates and ends before the message's text block
+/// starts streaming. A `redacted_thinking` block opens the same pair; a
+/// stream with no stop for it leaves the boundary open at turn end.
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_boundaries_emitted() {
+    let root = mk_project();
+    let events =
+        run_fake(&root, &fixture_fake("02-minimal-session.jsonl"), &Settings::default()).await;
+
+    let started = positions(&events, |e| matches!(e, EngineEvent::ThinkingStarted));
+    let finished_at = positions(&events, |e| matches!(e, EngineEvent::ThinkingFinished));
+    assert_eq!(started.len(), 1, "the thinking block opens one pair: {events:?}");
+    assert_eq!(finished_at.len(), 1, "{events:?}");
+    let first_text = positions(&events, |e| matches!(e, EngineEvent::TextStreaming { .. }));
+    assert!(
+        started[0] < finished_at[0] && finished_at[0] < first_text[0],
+        "start → stop, closed before the text block streams: {events:?}"
+    );
+    assert!(
+        events[started[0]..finished_at[0]]
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Thinking { .. })),
+        "the estimates ride inside the open interval: {events:?}"
+    );
+
+    let root = mk_project();
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/redacted-thinking.jsonl"),
+        &Settings::default(),
+    )
+    .await;
+    assert_eq!(
+        positions(&events, |e| matches!(e, EngineEvent::ThinkingStarted)).len(),
+        1,
+        "redacted_thinking opens the same pair: {events:?}"
+    );
+    assert_eq!(
+        positions(&events, |e| matches!(e, EngineEvent::ThinkingFinished)).len(),
+        0,
+        "no content_block_stop in this scenario: {events:?}"
+    );
+    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+}
+
+/// Both tool rows carry the tool_use block's name alongside the title — at
+/// the stream announce and at the assistant snapshot that opens an
+/// unannounced row.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_started_carries_name() {
+    let root = mk_project();
+    let events =
+        run_fake(&root, &fixture_fake("scenarios/tool-use.jsonl"), &Settings::default()).await;
+
+    let started = positions(&events, |e| matches!(e, EngineEvent::ToolStarted { .. }));
+    assert_eq!(started.len(), 2, "{events:?}");
+    for (at, want) in [(started[0], "Write"), (started[1], "Read")] {
+        match &events[at] {
+            EngineEvent::ToolStarted { name, .. } => assert_eq!(name, want, "{events:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // the second emit site: a row the stream never announced opens at an
+    // assistant snapshot, name included
+    let root = mk_project();
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/tool-failure.jsonl"),
+        &Settings::default(),
+    )
+    .await;
+    match events.iter().find(|e| matches!(e, EngineEvent::ToolStarted { .. })) {
+        Some(EngineEvent::ToolStarted { id, name, .. }) => {
+            assert_eq!(id, "toolu_fake_0001");
+            assert_eq!(name, "Bash");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A nonzero child exit rides the Failed outcome (upstream's "(code N)"
+/// failure row), next to the result text that explains it.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_carries_exit_code() {
+    let root = mk_project();
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/exit-code-failure.jsonl"),
+        &Settings::default(),
+    )
+    .await;
+    match finished(&events) {
+        TurnOutcome::Failed { error, auth, exit_code } => {
+            assert!(!auth, "{error}");
+            assert_eq!(exit_code, &Some(3), "{error}");
+            assert!(error.contains("the agent fell over"), "{error}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The bare "401" needle matches only as a whole word: token counts and
+/// latencies that embed the digits are not an auth status (the other needles
+/// stay plain case-insensitive substrings).
+#[test]
+fn auth_401_word_boundary_engine() {
+    assert!(!is_authentication_error("1401 tokens used"));
+    assert!(!is_authentication_error("duration 4.401s"));
+    assert!(!is_authentication_error("failed with 4013"));
+    assert!(is_authentication_error("api error status 401"));
+    assert!(is_authentication_error("returned (401)"));
 }
