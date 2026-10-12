@@ -53,6 +53,13 @@ fn load_tolerates_unknown_and_invalid_values() {
     let s = Settings::load(&p).unwrap();
     assert_eq!(s.agent_engine, "codex");
     assert_eq!(s.measurement_unit, MeasurementUnit::Millimeters, "unknown enum falls back, load never fails");
+    // upstream reads every key with ?? default: unknown enum rawValues and
+    // non-string values (null) fall back per key instead of failing the load
+    std::fs::write(&p, "{\"printerType\":\"resinXL\",\"partsLayout\":\"diagonal\",\"measurementUnit\":null}").unwrap();
+    let s = Settings::load(&p).unwrap();
+    assert_eq!(s.printer_type, PrinterType::Fdm, "unknown printerType -> default");
+    assert_eq!(s.parts_layout, PartsLayout::Exploded, "unknown partsLayout -> default");
+    assert_eq!(s.measurement_unit, MeasurementUnit::Millimeters, "null -> default");
     assert!(Settings::load(&d.join("absent.json")).unwrap().agent_engine == "claude");
 }
 

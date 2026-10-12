@@ -4,7 +4,6 @@
 //! spaces, so the app id must already be "cad-studio").
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,10 +14,10 @@ pub enum MeasurementUnit {
     Inches,
 }
 
-// Upstream stores rawValues "millimeters"/"centimeters"/"meters"/"inches" and
-// falls back to the default on values it does not recognize (regionDefault on
-// a failed MeasurementUnit init), so the Deserialize half maps unknown strings
-// to Millimeters instead of erroring.
+// Upstream stores rawValues "millimeters"/"centimeters"/"meters"/"inches"
+// and reads the key as string(forKey:) ?? default, so the Deserialize half
+// maps unknown strings AND non-string values (null, numbers) to the default
+// instead of erroring — same rule for PrinterType and PartsLayout below.
 impl Serialize for MeasurementUnit {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
@@ -31,28 +30,16 @@ impl Serialize for MeasurementUnit {
 }
 
 impl<'de> Deserialize<'de> for MeasurementUnit {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct UnitVisitor;
-
-        impl serde::de::Visitor<'_> for UnitVisitor {
-            type Value = MeasurementUnit;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a measurement unit string")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(match value {
-                    "millimeters" => MeasurementUnit::Millimeters,
-                    "centimeters" => MeasurementUnit::Centimeters,
-                    "meters" => MeasurementUnit::Meters,
-                    "inches" => MeasurementUnit::Inches,
-                    _ => MeasurementUnit::Millimeters,
-                })
-            }
-        }
-
-        deserializer.deserialize_str(UnitVisitor)
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(de)? {
+            serde_json::Value::String(s) => match s.as_str() {
+                "centimeters" => MeasurementUnit::Centimeters,
+                "meters" => MeasurementUnit::Meters,
+                "inches" => MeasurementUnit::Inches,
+                _ => MeasurementUnit::Millimeters,
+            },
+            _ => MeasurementUnit::Millimeters,
+        })
     }
 }
 
@@ -84,7 +71,7 @@ impl MeasurementUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PrinterType {
     #[serde(rename = "fdm")]
     Fdm,
@@ -94,6 +81,21 @@ pub enum PrinterType {
     Resin,
     #[serde(rename = "sls")]
     Sls,
+}
+
+// string(forKey:) ?? default: unknown rawValues and non-strings read .fdm.
+impl<'de> Deserialize<'de> for PrinterType {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(de)? {
+            serde_json::Value::String(s) => match s.as_str() {
+                "fdmMultiMaterial" => PrinterType::FdmMultiMaterial,
+                "resin" => PrinterType::Resin,
+                "sls" => PrinterType::Sls,
+                _ => PrinterType::Fdm,
+            },
+            _ => PrinterType::Fdm,
+        })
+    }
 }
 
 /// Verbatim from fixtures/upstream-source/PrintPreferences.swift:73-107,
@@ -116,7 +118,7 @@ impl PrinterType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PartsLayout {
     #[serde(rename = "assembled")]
     Assembled,
@@ -124,6 +126,20 @@ pub enum PartsLayout {
     Exploded,
     #[serde(rename = "plate")]
     Plate,
+}
+
+// string(forKey:) ?? default: unknown rawValues and non-strings read .exploded.
+impl<'de> Deserialize<'de> for PartsLayout {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(de)? {
+            serde_json::Value::String(s) => match s.as_str() {
+                "assembled" => PartsLayout::Assembled,
+                "plate" => PartsLayout::Plate,
+                _ => PartsLayout::Exploded,
+            },
+            _ => PartsLayout::Exploded,
+        })
+    }
 }
 
 /// Persisted app preferences. Defaults mirror upstream AppSettings.swift
