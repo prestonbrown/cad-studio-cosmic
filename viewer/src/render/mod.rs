@@ -19,7 +19,11 @@
 //! multisample color + depth attachment, resolves into an intermediate
 //! single-sample texture, and blits that over the target with premultiplied
 //! alpha — iced's content underneath survives, same Load-and-composite
-//! contract as the single-sample path.
+//! contract as the single-sample path. The app's `m`-key toggle flips
+//! [`Options::msaa`] between 1 and 4; `prepare_parts` then rebuilds the
+//! render pipelines and owned attachments in place (iced's Storage owns one
+//! pipeline per type and cannot hand out replacements), while the wireframe
+//! toggle stays a pure draw-path switch.
 //!
 //! Cross-sections: the mesh pass writes winding parity into the stencil
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
@@ -69,30 +73,39 @@ pub struct Vertex {
 /// hairline edge list — same material and opacity as fill, only the
 /// topology changes (facts #44: upstream is the same material with
 /// `triangleFillMode = .lines`; wgpu/WebGPU fixes line width at 1, so no
-/// tint and no wide lines).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// tint and no wide lines). `msaa` picks the sample count (1 is the
+/// default); unlike wireframe's pure draw-path switch, a count flip
+/// REBUILDS the render pipelines and owned attachments in
+/// [`MeshPipeline::prepare_parts`] — iced's Storage owns one pipeline per
+/// type and cannot hand out replacements, so the app's toggle mutates in
+/// place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
     pub wireframe: bool,
+    /// Samples per pixel (1 or 4); a change from what is resident
+    /// triggers the in-place rebuild.
+    pub msaa: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        // msaa must default to the single-sample count, not u32::default():
+        // 0 would differ from a fresh pipeline's resident 1 and drive the
+        // rebuild into an invalid 0-sample attachment
+        Options {
+            wireframe: false,
+            msaa: 1,
+        }
+    }
 }
 
 /// Per-part model transform (group 1): identity while parts render where
-/// they sit; explode offsets and playback poses will write real matrices
+/// they sit; explode offsets and playback poses write real matrices
 /// through the same binding.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Model {
     transform: [[f32; 4]; 4],
-}
-
-impl Model {
-    const IDENTITY: Model = Model {
-        transform: [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-    };
 }
 
 #[repr(C)]
@@ -236,6 +249,38 @@ pub mod camera {
         2.0 * distance * (FOV / 2.0).tan() / view_height
     }
 
+    /// pan(by:viewHeight:) (ModelViewer.swift:312-320): the look-at target
+    /// shifted by the drag in camera-plane world units — `target +=
+    /// (-right·dx + up·dy)·units_per_point` over the camera's own scene
+    /// axes, derived here from the yaw/pitch pose the same way
+    /// [`orbit`]'s look-at builds them. `dx`/`dy` are AppKit-convention
+    /// deltas (dy bottom-up; iced's top-down cursor y must be negated by
+    /// the caller). The drag WIRING is M4's; this is the parity formula.
+    pub fn panned(
+        target: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        distance: f32,
+        view_height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> [f32; 3] {
+        if view_height <= 0.0 {
+            return target;
+        }
+        let back = glam::Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+        // the look-at basis: camera +X/+Y in scene space, Y-up world
+        let right = glam::Vec3::Y.cross(back).normalize_or_zero();
+        let up = back.cross(right);
+        let t = glam::Vec3::from_array(target)
+            + (right * -dx + up * dy) * pan_units_per_point(distance, view_height);
+        t.to_array()
+    }
+
     /// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
     /// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
     /// scaled 0.008, pitch clamped to ±MAX_PITCH.
@@ -332,6 +377,9 @@ struct MsaaTargets {
 /// part's hash differs; untouched otherwise.
 struct ResidentPart {
     content_hash: u64,
+    /// The transform the resident model uniform carries — part of the
+    /// identity alongside the hash, so a transform-only change restages.
+    transform: [[f32; 4]; 4],
     vertex_buf: wgpu::Buffer,
     vertex_count: u32,
     /// The wireframe line list as a u32 index buffer into `vertex_buf`
@@ -358,6 +406,12 @@ pub struct MeshPipeline {
     line_pipeline: wgpu::RenderPipeline,
     /// Unlit grid/bed/tripod overlay (facts #34/#37).
     grid_pipeline: wgpu::RenderPipeline,
+    /// Part-draw pipeline layout (camera + per-part model groups): the mesh
+    /// and line pipelines; rebuilt pipelines keep using this object so the
+    /// resident bind groups stay compatible.
+    part_pass_layout: wgpu::PipelineLayout,
+    /// Camera-only pipeline layout: the cap and grid pipelines.
+    camera_pass_layout: wgpu::PipelineLayout,
     bind_group: wgpu::BindGroup,
     model_layout: wgpu::BindGroupLayout,
     /// Depth24PlusStencil8, viewer-owned; resized in
@@ -409,6 +463,16 @@ fn mesh_wgsl_source() -> String {
         .replace("@LIT_MAX@", &lights::LIT_MAX.to_string())
 }
 
+/// The sample-count-dependent render pipelines, rebuilt as a set by
+/// [`MeshPipeline::make_pipelines`] at creation and on every
+/// [`Options::msaa`] flip in `prepare_parts`.
+struct Pipelines {
+    mesh: wgpu::RenderPipeline,
+    cap: wgpu::RenderPipeline,
+    line: wgpu::RenderPipeline,
+    grid: wgpu::RenderPipeline,
+}
+
 impl MeshPipeline {
     pub fn new(
         device: &wgpu::Device,
@@ -437,10 +501,6 @@ impl MeshPipeline {
         target_format: wgpu::TextureFormat,
         sample_count: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mesh.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source().into()),
-        });
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
             contents: bytemuck::bytes_of(&Camera {
@@ -488,6 +548,73 @@ impl MeshPipeline {
             }],
             label: Some("part model layout"),
         });
+        let part_pass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout, &model_layout],
+            immediate_size: 0,
+            label: None,
+        });
+        let camera_pass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&layout],
+            immediate_size: 0,
+            label: None,
+        });
+        let pipelines = Self::make_pipelines(
+            device,
+            target_format,
+            sample_count,
+            &part_pass_layout,
+            &camera_pass_layout,
+        );
+        // 4-vertex strip, zeroed at build; `prepare_parts` writes the real
+        // quad from the current scene aabb + camera section params each frame
+        let cap_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("section cap quad"),
+            contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let blit = (sample_count > 1).then(|| Self::make_blit(device, target_format));
+        let (depth_tex, depth) = Self::make_depth(device, (1, 1), sample_count);
+        Self {
+            pipeline: pipelines.mesh,
+            cap_pipeline: pipelines.cap,
+            line_pipeline: pipelines.line,
+            grid_pipeline: pipelines.grid,
+            part_pass_layout,
+            camera_pass_layout,
+            bind_group,
+            model_layout,
+            depth,
+            depth_tex,
+            uniform_buf,
+            residents: Vec::new(),
+            grid: None,
+            cap_buf,
+            draw_cap: false,
+            size: (1, 1),
+            sample_count,
+            format: target_format,
+            blit,
+            msaa: None,
+            wireframe: false,
+            upload_count: 0,
+            alloc_count: 0,
+        }
+    }
+
+    /// The four render pipelines at `sample_count`, built against the SAME
+    /// pipeline layout objects the resident bind groups reference — a
+    /// rebuilt pipeline stays bind-compatible without re-staging anything.
+    fn make_pipelines(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
+        part_layout: &wgpu::PipelineLayout,
+        camera_layout: &wgpu::PipelineLayout,
+    ) -> Pipelines {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mesh.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source().into()),
+        });
         let vlayout = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x3,
@@ -505,14 +632,9 @@ impl MeshPipeline {
                 shader_location: 2,
             },
         ];
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            bind_group_layouts: &[&layout, &model_layout],
-            immediate_size: 0,
-            label: None,
-        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mesh"),
-            layout: Some(&pipeline_layout),
+            layout: Some(part_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -582,19 +704,14 @@ impl MeshPipeline {
         // inc/dec stays in the attachment; depth is read-only too (the quad
         // must not occlude anything drawn after it), and it wins LessEqual
         // only where the surviving mesh lies beyond the section plane.
-        // Camera-only layout: the cap has no per-part transform.
-        let cap_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            bind_group_layouts: &[&layout],
-            immediate_size: 0,
-            label: None,
-        });
+        // Camera-only (camera_layout): the cap has no per-part transform.
         let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cap.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("cap.wgsl").into()),
         });
         let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("section cap"),
-            layout: Some(&cap_pipeline_layout),
+            layout: Some(camera_layout),
             vertex: wgpu::VertexState {
                 module: &cap_shader,
                 entry_point: Some("vs_cap"),
@@ -661,7 +778,7 @@ impl MeshPipeline {
         // trick, and the cap it feeds is disabled in wireframe anyway.
         let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("wireframe lines"),
-            layout: Some(&pipeline_layout),
+            layout: Some(part_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -724,11 +841,6 @@ impl MeshPipeline {
             label: Some("grid.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
         });
-        let grid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            bind_group_layouts: &[&layout],
-            immediate_size: 0,
-            label: None,
-        });
         let grid_vlayout = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x3,
@@ -743,7 +855,7 @@ impl MeshPipeline {
         ];
         let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("grid overlay"),
-            layout: Some(&grid_layout),
+            layout: Some(camera_layout),
             vertex: wgpu::VertexState {
                 module: &grid_shader,
                 entry_point: Some("vs_grid"),
@@ -798,38 +910,47 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
-        // 4-vertex strip, zeroed at build; `prepare_parts` writes the real
-        // quad from the current scene aabb + camera section params each frame
-        let cap_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("section cap quad"),
-            contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let blit = (sample_count > 1).then(|| Self::make_blit(device, target_format));
-        let (depth_tex, depth) = Self::make_depth(device, (1, 1), sample_count);
-        Self {
-            pipeline,
-            cap_pipeline,
-            line_pipeline,
-            grid_pipeline,
-            bind_group,
-            model_layout,
-            depth,
-            depth_tex,
-            uniform_buf,
-            residents: Vec::new(),
-            grid: None,
-            cap_buf,
-            draw_cap: false,
-            size: (1, 1),
-            sample_count,
-            format: target_format,
-            blit,
-            msaa: None,
-            wireframe: false,
-            upload_count: 0,
-            alloc_count: 0,
+        Pipelines {
+            mesh: pipeline,
+            cap: cap_pipeline,
+            line: line_pipeline,
+            grid: grid_pipeline,
         }
+    }
+
+    /// The msaa toggle's in-place rebuild (iced's Storage owns one
+    /// [`MeshPipeline`] per type and cannot hand out replacements):
+    /// recreate every render pipeline and owned attachment at `count`,
+    /// keeping the layouts, buffers, and part residency — the fresh
+    /// pipelines are built against the kept layout objects, so the
+    /// resident bind groups stay valid.
+    fn set_msaa(&mut self, device: &wgpu::Device, count: u32) {
+        let pipelines = Self::make_pipelines(
+            device,
+            self.format,
+            count,
+            &self.part_pass_layout,
+            &self.camera_pass_layout,
+        );
+        self.pipeline = pipelines.mesh;
+        self.cap_pipeline = pipelines.cap;
+        self.line_pipeline = pipelines.line;
+        self.grid_pipeline = pipelines.grid;
+        self.blit = (count > 1).then(|| Self::make_blit(device, self.format));
+        let (depth_tex, depth) = Self::make_depth(device, self.size, count);
+        self.depth_tex = depth_tex;
+        self.depth = depth;
+        self.msaa = match &self.blit {
+            Some(blit) => Some(Self::make_msaa_targets(
+                device,
+                blit,
+                self.format,
+                count,
+                self.size,
+            )),
+            None => None,
+        };
+        self.sample_count = count;
     }
 
     /// Blit pipeline for the msaa path: fullscreen triangle sampling the
@@ -989,12 +1110,13 @@ impl MeshPipeline {
 
     /// Per-frame upload: camera uniform, depth-texture resize to the
     /// render-target `size`, and the upload-once mesh path — a part's
-    /// vertices are (re)written only when its content identity differs
-    /// from what is resident, so an unchanged scene costs zero mesh
-    /// uploads however the camera moves. Part transforms are identity
-    /// and written once per residency. `grid` (when `Some`) is the
-    /// overlay [`grid::geometry`] built — its residency follows the same
-    /// content-identity contract; `options` picks the frame's mode.
+    /// vertices and transform are (re)written only when its content
+    /// identity differs from what is resident, so an unchanged scene
+    /// costs zero mesh uploads however the camera moves. `grid` (when
+    /// `Some`) is the overlay [`grid::geometry`] built — its residency
+    /// follows the same content-identity contract; `options` picks the
+    /// frame's mode, and an `options.msaa` flip triggers the in-place
+    /// rebuild ([`Self::set_msaa`]) before anything else.
     pub fn prepare_parts(
         &mut self,
         device: &wgpu::Device,
@@ -1005,6 +1127,9 @@ impl MeshPipeline {
         grid: Option<&GridMesh>,
         options: &Options,
     ) {
+        if options.msaa != self.sample_count {
+            self.set_msaa(device, options.msaa);
+        }
         if self.size != size {
             let (t, v) = Self::make_depth(device, size, self.sample_count);
             self.depth_tex = t;
@@ -1029,11 +1154,9 @@ impl MeshPipeline {
         // with their buffers.
         self.residents.truncate(scene.parts.len());
         for (i, part) in scene.parts.iter().enumerate() {
-            if self
-                .residents
-                .get(i)
-                .is_some_and(|r| r.content_hash == part.content_hash)
-            {
+            if self.residents.get(i).is_some_and(|r| {
+                r.content_hash == part.content_hash && r.transform == part.transform
+            }) {
                 continue;
             }
             let label = &part.name;
@@ -1056,7 +1179,9 @@ impl MeshPipeline {
             let edge_count = edge_indices.len() as u32;
             let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("part {label} model")),
-                contents: bytemuck::bytes_of(&Model::IDENTITY),
+                contents: bytemuck::bytes_of(&Model {
+                    transform: part.transform,
+                }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1069,6 +1194,7 @@ impl MeshPipeline {
             });
             let resident = ResidentPart {
                 content_hash: part.content_hash,
+                transform: part.transform,
                 vertex_buf,
                 vertex_count: part.vertices.len() as u32,
                 edge_buf,
@@ -1149,10 +1275,12 @@ impl MeshPipeline {
     /// multisample attachment (cleared transparent — coverage lives in
     /// alpha) and resolves into the intermediate; a second pass then blits
     /// the intermediate over `target` with premultiplied alpha, keeping
-    /// iced's content underneath. The msaa path maps the intermediate 1:1,
-    /// so it expects `viewport` to match the size last given to
-    /// `prepare_parts` (true for the headless harness; the spike app keeps
-    /// count 1).
+    /// iced's content underneath. The blit covers the WHOLE prepared size
+    /// (`self.size`, the surface), not just `viewport`: the mesh pass
+    /// placed the scene into the surface-sized intermediate at the
+    /// viewport's offset, and the uncovered region composites as
+    /// transparent — so a widget clip rect smaller than the surface (the
+    /// app's canvas beside its control strip) maps 1:1 either way.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1232,7 +1360,17 @@ impl MeshPipeline {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            set_vp(&mut blit_pass);
+            // the blit spans the whole prepared size: the mesh pass placed
+            // the viewport-offset scene inside the surface-sized
+            // intermediate, and the uncovered region composites transparent
+            blit_pass.set_viewport(
+                0.0,
+                0.0,
+                self.size.0 as f32,
+                self.size.1 as f32,
+                0.0,
+                1.0,
+            );
             blit_pass.set_pipeline(&blit.pipeline);
             blit_pass.set_bind_group(0, &msaa.bind_group, &[]);
             blit_pass.draw(0..3, 0..1);
@@ -1450,6 +1588,58 @@ mod tests {
         let upp = camera::pan_units_per_point(100.0, 500.0);
         let expected = 2.0 * 100.0 * f32::tan(17.5f32.to_radians()) / 500.0;
         assert!((upp - expected).abs() < 1e-6, "{upp} vs {expected}");
+    }
+
+    /// The default must be the single-sample count, not `u32::default()`
+    /// (0): that differs from a fresh pipeline's resident 1 and would
+    /// drive the first default-options prepare into an invalid 0-sample
+    /// rebuild — the derive(Default) bug the manual impl replaced.
+    #[test]
+    fn options_default_is_single_sample() {
+        assert_eq!(Options::default().msaa, 1);
+        assert!(!Options::default().wireframe);
+    }
+
+    /// pan (facts #22): the target moves by (-right·dx + up·dy)·units/pt
+    /// over the camera's own scene axes — verified against the look-at
+    /// basis glam builds for the same pose (rows 0/1 of the view matrix's
+    /// rotation block are the camera's right/up in world space). Dragging
+    /// right (dx > 0) moves the target LEFT, so the model follows the
+    /// cursor; a non-positive view height leaves the target alone, as the
+    /// upstream guard does.
+    #[test]
+    fn pan_matches_lookat_basis() {
+        let target = [3.0, -4.0, 5.0];
+        let (yaw, pitch, distance) = (0.7f32, 0.3f32, 120.0f32);
+        let (dx, dy, view_height) = (25.0f32, -10.0f32, 500.0f32);
+        let panned = camera::panned(target, yaw, pitch, distance, view_height, dx, dy);
+        let at = glam::Vec3::from_array(target);
+        let back = glam::Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+        let view =
+            glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
+        // col-major glam: matrix rows 0/1 are the camera right/up axes
+        let right = glam::Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
+        let up = glam::Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
+        let upp = camera::pan_units_per_point(distance, view_height);
+        let expected = at + (right * -dx + up * dy) * upp;
+        for a in 0..3 {
+            assert!(
+                (panned[a] - expected[a]).abs() < 1e-4,
+                "panned {panned:?} vs look-at basis {expected:?}"
+            );
+        }
+        // the model follows the cursor: dx > 0 shifts the target against
+        // the camera's right axis
+        assert!(glam::Vec3::from_array(panned).dot(right) < at.dot(right));
+        assert_eq!(
+            camera::panned(target, yaw, pitch, distance, 0.0, dx, dy),
+            target,
+            "zero view height must not pan"
+        );
     }
 
     /// The ported orbit test: the view_proj is exactly the Swift
@@ -1848,6 +2038,47 @@ mod tests {
         );
     }
 
+    /// The transform slot rides the same residency contract as the staged
+    /// vertices: changing a part's model transform without touching its
+    /// geometry must still restage it, or the model uniform would keep
+    /// serving the old matrix (the orientation test moves the lid this
+    /// way; explode offsets and playback poses follow in M4).
+    #[test]
+    fn transform_change_reuploads() {
+        let (device, queue) = gpu::device_queue();
+        let parts = golden_3mf_parts();
+        let mut scene = PartScene::from_parts(&parts, NEUTRAL);
+        let camera = default_camera(&scene, 4.0 / 3.0);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene,
+            None,
+            &Options::default(),
+        );
+        let u1 = pipeline.upload_count_for_tests();
+        // translate the lid through its transform slot: no vertex changes
+        scene.parts[1].transform =
+            glam::Mat4::from_translation(glam::Vec3::new(40.0, 0.0, 0.0)).to_cols_array_2d();
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &camera,
+            &scene,
+            None,
+            &Options::default(),
+        );
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            u1 + 1,
+            "a transform-only change must restage its part"
+        );
+    }
+
     /// A 10mm axis-aligned cube as 6 quads -> 12 triangles, corners drawn
     /// from a shared 8-entry table so identical positions repeat across
     /// faces exactly like real unindexed engine parts.
@@ -1917,7 +2148,10 @@ mod tests {
             &camera,
             &scene,
             None,
-            &Options { wireframe: true },
+            &Options {
+                wireframe: true,
+                ..Options::default()
+            },
         );
         assert_eq!(
             pipeline.line_vertex_count_for_tests(),

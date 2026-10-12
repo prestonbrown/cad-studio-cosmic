@@ -13,11 +13,12 @@ use iced::{Rectangle, mouse};
 use super::{Camera, GridMesh, MeshPipeline, Options, PartScene, camera, grid};
 
 /// Interactive spike scene: fixed part scene, orbit camera state.
-/// Framing (target + base distance) comes from [`camera::frame`] at
-/// construction — aspect-free, against the pinned scene aabb — and `zoom`
-/// scales that distance (scroll applies 0.9^steps, upstream-contract §5).
-/// The overlay ([`grid::geometry`]) is built once alongside: it depends
-/// only on the scene aabb, never on the camera.
+/// Framing (target + distance) comes from [`camera::frame`] at
+/// construction — aspect-free, against the pinned scene aabb — and the
+/// input methods ([`SpikeScene::orbit`], [`SpikeScene::zoom`],
+/// [`SpikeScene::pan`]) are the parity formulas over that state. The
+/// overlay ([`grid::geometry`]) is built once alongside: it depends only
+/// on the scene aabb, never on the camera.
 pub struct SpikeScene {
     pub scene: Arc<PartScene>,
     pub grid: Arc<GridMesh>,
@@ -25,19 +26,25 @@ pub struct SpikeScene {
     pub show_grid: bool,
     /// Wireframe mode (upstream `showsWireframe` — facts #44).
     pub wireframe: bool,
+    /// Samples per pixel, 1 or 4 (the example's `m` toggle): flows into
+    /// `Options::msaa`, whose flip rebuilds the pipeline in place.
+    pub msaa: u32,
     pub yaw: f32,
     /// keep within ±[`camera::MAX_PITCH`]: the orbit formula uses Y as up
     pub pitch: f32,
-    pub zoom: f32,
-    /// The aspect-free framing of `scene`: look-at target and the distance
-    /// `zoom` scales.
+    /// Camera distance from `target` — scroll zooms this itself, not a
+    /// multiplier, so the clamp is the radius-relative parity one.
+    pub distance: f32,
+    /// The aspect-free framing of `scene`: look-at target and the framing
+    /// radius the zoom clamp scales.
     target: [f32; 3],
-    distance: f32,
+    radius: f32,
 }
 
 impl SpikeScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
         let grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
         Self {
@@ -45,22 +52,45 @@ impl SpikeScene {
             grid,
             show_grid: true,
             wireframe: false,
+            msaa: 1,
             yaw,
             pitch,
-            zoom: 1.0,
-            target,
             distance,
+            target,
+            radius,
         }
     }
 
-    fn camera(&self, aspect: f32) -> Camera {
-        Camera::orbiting(
-            self.distance * self.zoom,
+    /// orbit(by:) (facts #18): yaw −= dx·0.008, pitch += dy·0.008 clamped
+    /// to ±[`camera::MAX_PITCH`]. `dx`/`dy` are AppKit-convention deltas
+    /// (dy bottom-up) — iced's top-down cursor y must be negated by the
+    /// caller.
+    pub fn orbit(&mut self, dx: f32, dy: f32) {
+        (self.yaw, self.pitch) = camera::orbit_drag(self.yaw, self.pitch, dx, dy);
+    }
+
+    /// zoom(by:) (facts #19): distance × factor clamped to
+    /// [0.1·radius, 200·radius].
+    pub fn zoom(&mut self, factor: f32) {
+        self.distance = camera::zoomed(self.distance, factor, self.radius);
+    }
+
+    /// pan(by:viewHeight:) (facts #22) — the parity formula. The drag and
+    /// modifier-scroll WIRING is M4's; nothing calls this yet.
+    pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
+        self.target = camera::panned(
+            self.target,
             self.yaw,
             self.pitch,
-            self.target,
-            aspect,
-        )
+            self.distance,
+            view_height,
+            dx,
+            dy,
+        );
+    }
+
+    fn camera(&self, aspect: f32) -> Camera {
+        Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect)
     }
 }
 
@@ -87,6 +117,7 @@ impl<Message> shader::Program<Message> for SpikeScene {
             camera: self.camera(aspect),
             options: Options {
                 wireframe: self.wireframe,
+                msaa: self.msaa,
             },
         }
     }

@@ -1,15 +1,21 @@
 //! Windowed spike: the golden fixture model in a window through the
 //! viewer's own Depth24PlusStencil8 pass. Mirrors iced's `custom_shader`
-//! example app shape; drag orbits, scroll zooms, the checkboxes toggle
-//! wireframe mode (facts #44) and the parity grid overlay. Run from the
-//! repo root: `cargo run -p viewer --example spike_window`
+//! example app shape; drag orbits and scroll zooms through the parity
+//! input formulas (facts #18-#20: 0.008 rad/pt, pitch clamp 1.5607,
+//! precise deltas / 12, zoom clamps [0.1r, 200r] on the distance); the
+//! checkboxes toggle wireframe mode (facts #44) and the parity grid
+//! overlay, and `m` flips msaa 1x <-> 4x — an internal pipeline rebuild,
+//! since iced's Storage owns one pipeline per type. Pan exists as the
+//! scene formula but stays unwired until M4. Run from the repo root:
+//! `cargo run -p viewer --example spike_window`
 
 use std::sync::Arc;
 
 use engine::parsing::threemf::parse_3mf;
+use iced::keyboard;
 use iced::mouse::ScrollDelta;
 use iced::widget::{center, checkbox, column, mouse_area, row, shader, text};
-use iced::{Center, Element, Fill, Point, Size};
+use iced::{Center, Element, Fill, Point, Size, Subscription};
 
 use viewer::render::{NEUTRAL, PartScene, SpikeScene};
 
@@ -17,6 +23,7 @@ fn main() -> iced::Result {
     iced::application(Spike::default, Spike::update, Spike::view)
         .title("CAD viewer spike")
         .window_size(Size::new(900.0, 700.0))
+        .subscription(Spike::subscription)
         .run()
 }
 
@@ -28,6 +35,7 @@ enum Message {
     Zoom(ScrollDelta),
     Wireframe(bool),
     ShowGrid(bool),
+    ToggleMsaa,
 }
 
 struct Spike {
@@ -67,22 +75,58 @@ impl Spike {
                 if self.dragging {
                     if let Some(last) = self.last {
                         let (dx, dy) = (p.x - last.x, p.y - last.y);
-                        self.scene.yaw -= dx * 0.01;
-                        self.scene.pitch = (self.scene.pitch + dy * 0.01).clamp(-1.4, 1.4);
+                        // iced's cursor y grows downward; the parity
+                        // formulas speak AppKit's bottom-up deltas (facts
+                        // #18: drag up increases pitch) — flip dy at the
+                        // boundary, dx passes through
+                        self.scene.orbit(dx, -dy);
                     }
                     self.last = Some(p);
                 }
             }
             Message::Zoom(delta) => {
-                let steps = match delta {
-                    ScrollDelta::Lines { y, .. } => y,
-                    ScrollDelta::Pixels { y, .. } => y / 40.0,
+                // facts #20: precise (trackpad) deltas count 12 px per zoom
+                // step; notched-wheel line deltas are steps already. iced's
+                // Pixels variant is the precise one. A zero vertical delta
+                // falls back to horizontal, as upstream's scrollWheel does.
+                let (x, y, precise) = match delta {
+                    ScrollDelta::Lines { x, y } => (x, y, false),
+                    ScrollDelta::Pixels { x, y } => (x, y, true),
                 };
-                self.scene.zoom = (self.scene.zoom * 0.9f32.powf(steps)).clamp(0.05, 50.0);
+                let d = if y != 0.0 { y } else { x };
+                let steps = if precise { d / 12.0 } else { d };
+                self.scene.zoom(0.9f32.powf(steps));
             }
             Message::Wireframe(on) => self.scene.wireframe = on,
             Message::ShowGrid(on) => self.scene.show_grid = on,
+            Message::ToggleMsaa => {
+                self.scene.msaa = if self.scene.msaa == 1 { 4 } else { 1 };
+            }
         }
+    }
+
+    /// `m` flips msaa — plain keys only, so a modifier combo stays free for
+    /// M4's pan wiring. listen() delivers ignored events, keeping real text
+    /// input keystrokes out.
+    fn subscription(&self) -> Subscription<Message> {
+        fn hotkey(event: keyboard::Event) -> Option<Message> {
+            let keyboard::Event::KeyPressed {
+                modified_key,
+                modifiers,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            if !modifiers.is_empty() {
+                return None;
+            }
+            match modified_key.as_ref() {
+                keyboard::Key::Character("m") => Some(Message::ToggleMsaa),
+                _ => None,
+            }
+        }
+        keyboard::listen().filter_map(hotkey)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -103,9 +147,17 @@ impl Spike {
         .spacing(12);
 
         center(
-            column![canvas, toggles, text("drag: orbit · scroll: zoom").size(12)]
-                .spacing(4)
-                .align_x(Center),
+            column![
+                canvas,
+                toggles,
+                text(format!(
+                    "drag: orbit · scroll: zoom · m: msaa ({}×)",
+                    self.scene.msaa
+                ))
+                .size(12)
+            ]
+            .spacing(4)
+            .align_x(Center),
         )
         .padding(8)
         .into()
