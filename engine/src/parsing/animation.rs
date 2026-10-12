@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashMap};
 
 /// A part's placement at one keyframe. Both fields are load-time
 /// normalized: `translate` of any arity but 3 decodes as zero (upstream
-/// does not pad), `rotate` of any arity but 4 decodes as identity.
+/// does not pad), `rotate` of any arity but 4 decodes as identity — and an
+/// array holding any non-number decodes as zero/identity too, because
+/// upstream's `[Float]` decode is all-or-nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pose {
     pub translate: [f32; 3],
@@ -34,20 +36,25 @@ impl Pose {
 impl<'de> Deserialize<'de> for Pose {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(de)?;
-        let nums = |key: &str| -> Vec<f32> {
-            v.get(key)
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|n| n as f32)).collect())
-                .unwrap_or_default()
+        // Upstream decodes [Float] all-or-nothing (try? ?? []): one
+        // non-number entry drops the whole array before the arity gate.
+        let nums = |key: &str| -> Option<Vec<f32>> {
+            v.get(key).and_then(|v| v.as_array()).and_then(|a| {
+                a.iter()
+                    .map(|x| x.as_f64().map(|n| n as f32))
+                    .collect::<Option<Vec<_>>>()
+            })
         };
         let t = nums("translate");
         let r = nums("rotate");
         Ok(Pose {
-            translate: if t.len() == 3 { [t[0], t[1], t[2]] } else { [0.0; 3] },
-            rotate: if r.len() == 4 {
-                glam::Quat::from_xyzw(r[0], r[1], r[2], r[3]).normalize()
-            } else {
-                glam::Quat::IDENTITY
+            translate: match t.as_deref() {
+                Some([x, y, z]) => [*x, *y, *z],
+                _ => [0.0; 3],
+            },
+            rotate: match r.as_deref() {
+                Some([x, y, z, w]) => glam::Quat::from_xyzw(*x, *y, *z, *w).normalize(),
+                _ => glam::Quat::IDENTITY,
             },
         })
     }
@@ -60,6 +67,9 @@ pub struct Collision {
     pub volume: Option<f64>,
 }
 
+/// One keyframe. `values` and `collisions` decode with per-entry tolerance
+/// — malformed entries drop individually, where upstream drops the whole
+/// container (`try? ?? default`); a documented widening.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Frame {
     pub t: f64,

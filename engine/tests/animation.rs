@@ -32,6 +32,22 @@ fn malformed_entries_default_to_identity() {
 }
 
 #[test]
+fn non_numeric_array_entry_zeros_the_whole_field() {
+    // Upstream decodes [Float] all-or-nothing (try? ?? []): one non-number
+    // drops the whole array, so the arity gate sees nothing and the pose is
+    // zero/identity. Filter-mapping entries instead would read [1,2,4].
+    let s = MotionStudy::parse(br#"{"frames":[
+        {"t": 0.0, "parts": {
+            "a": {"translate": [1.0, 2.0, "x", 4.0]},
+            "b": {"rotate": [1.0, "x", 2.0, 3.0]}
+        }}
+    ]}"#).unwrap();
+    let f = &s.frames[0];
+    assert_eq!(f.parts["a"].translate, [0.0, 0.0, 0.0], "one bad entry nulls the whole translate");
+    assert_eq!(f.parts["b"].rotate, glam::Quat::IDENTITY, "one bad entry nulls the whole rotate");
+}
+
+#[test]
 fn interpolation_lerps_translates_and_slerps_rotations() {
     let s = MotionStudy::parse(br#"{"frames":[
         {"t": 0.0, "parts": {"lid": {"translate": [0.0, 0.0, 0.0]}},
