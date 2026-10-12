@@ -163,7 +163,11 @@ fn render_frame_opts(
 
 /// `render_frame` with the pipeline built at `msaa` samples per pixel
 /// (`MeshPipeline::with_msaa`): a fresh pipeline per call, so frames at
-/// different sample counts are independent.
+/// different sample counts are independent. The options carry `msaa`
+/// explicitly — `Options::msaa` owns the count from the first prepare on,
+/// so default options would flip a fresh 4x pipeline back to 1x before it
+/// ever rendered multisampled (exactly the regression that zeroed this
+/// suite's blend counts).
 fn render_frame_msaa(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -175,7 +179,20 @@ fn render_frame_msaa(
 ) -> Vec<u8> {
     let mut pipeline =
         MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, msaa);
-    render_frame(device, queue, &mut pipeline, scene, camera, w, h)
+    render_frame_opts(
+        device,
+        queue,
+        &mut pipeline,
+        scene,
+        camera,
+        w,
+        h,
+        None,
+        &Options {
+            msaa,
+            ..Options::default()
+        },
+    )
 }
 
 /// The app background, measured: render a frame with an empty scene (the
@@ -471,10 +488,16 @@ fn msaa_smooths_a_diagonal_edge() {
     // guards "real AA happened"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
-    // leak into the second frame through the resolve path too
+    // leak into the second frame through the resolve path too. The options
+    // must ask for 4x — with defaults the prepare would flip p4 to 1x and
+    // the frame-stability check would stop exercising the resolve path.
     let mut p4 = MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
-    let a = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
-    let b = render_frame(device, queue, &mut p4, &scene, &camera, 800, 600);
+    let at4 = &Options {
+        msaa: 4,
+        ..Options::default()
+    };
+    let a = render_frame_opts(device, queue, &mut p4, &scene, &camera, 800, 600, None, at4);
+    let b = render_frame_opts(device, queue, &mut p4, &scene, &camera, 800, 600, None, at4);
     assert_eq!(a, b, "4x frames must be identical on one pipeline");
     // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
     // [-4,4]; the pin lifts the floor to y=0, so the base spans pinned
