@@ -8,6 +8,11 @@
 //! and `camera::frame`'s `(0, size.y/2, 0)` target are all stated against
 //! this pinned frame.
 //!
+//! Per-triangle colors stage here too: `TriangleColor::Some` is u8 sRGB
+//! and crosses [`srgb_to_linear`] exactly once, at build; `None` paints
+//! the neutral. Both land in the staged vertex bytes, so the upload-once
+//! content identity below covers color changes and neutral changes alike.
+//!
 //! Each part carries a full-content hash over its staged vertices, so the
 //! pipeline's upload-once check (`MeshPipeline::prepare_parts`) rewrites a
 //! part's vertex buffer only when that staged content — including the pin
@@ -15,14 +20,42 @@
 
 use std::hash::Hasher;
 
-use engine::parsing::Part;
+use engine::parsing::{Part, TriangleColor};
 
 use super::Vertex;
 
-/// The app's fixed neutral face color (upstream-contract §5). `from_parts`
-/// paints it onto the mesh; it is a parameter so a theme-supplied neutral
-/// can take its place.
+/// The app's fixed neutral face color (upstream-contract §5): dark mode's
+/// (0.62, 0.70, 0.80) (ModelViewer.swift:401-403). The facts give values,
+/// not a color space; LINEAR is the recorded assumption — it is staged as
+/// the vertex color straight into the shader's lit multiply, like every
+/// EOTF-converted triangle color beside it. `from_parts` paints it onto
+/// uncolored triangles; it is a parameter so a theme-supplied neutral can
+/// take its place.
 pub const NEUTRAL: [f32; 3] = [0.62, 0.70, 0.80];
+
+/// Exact piecewise sRGB EOTF (IEC 61966-2-2): u8 sRGB -> scene-linear f32.
+/// The linear segment below 0.04045 is not negotiable — a single 2.2 power
+/// reads the golden base's own blue R (31) as 0.0097 instead of 0.0137,
+/// 29% dark, and drifts worst exactly where dark colors live.
+pub fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// A triangle's u8 sRGB color -> linear; `None` paints the `neutral`.
+fn stage_color(color: TriangleColor, neutral: [f32; 3]) -> [f32; 3] {
+    color.map_or(neutral, |c| {
+        [
+            srgb_to_linear(c[0]),
+            srgb_to_linear(c[1]),
+            srgb_to_linear(c[2]),
+        ]
+    })
+}
 
 /// One engine part staged for upload: scene-space per-corner vertices, its
 /// aabb, and the content identity the upload-once check compares.
@@ -65,9 +98,10 @@ fn remap(p: [f32; 3]) -> [f32; 3] {
 }
 
 impl PartScene {
-    /// Stage engine parts for rendering: remap to scene space, pin the
-    /// floor, paint the neutral, hash each part's staged content. Parts
-    /// keep engine order; slot `i` in the scene is slot `i` at residency.
+    /// Stage engine parts for rendering: remap to scene space, paint each
+    /// triangle's color (sRGB -> linear, or the neutral), pin the floor,
+    /// hash each part's staged content. Parts keep engine order; slot `i`
+    /// in the scene is slot `i` at residency.
     pub fn from_parts(parts: &[Part], neutral: [f32; 3]) -> Self {
         let mut staged = Vec::with_capacity(parts.len());
         for part in parts {
@@ -77,15 +111,22 @@ impl PartScene {
                 "part {}: 3 corners per triangle, one color per triangle",
                 part.name
             );
-            // mesh.wgsl derives normals in screen space and never reads the
-            // normal attribute today
+            // one color per triangle onto its 3 corners: `Some` is u8 sRGB
+            // (3MF displaycolor) and crosses the exact EOTF here, at scene
+            // build — the shader never sees an encoded value. mesh.wgsl
+            // derives normals in screen space and never reads the normal
+            // attribute today.
             let vertices = part
                 .positions
-                .iter()
-                .map(|&p| Vertex {
-                    pos: remap(p),
-                    normal: [0.0; 3],
-                    color: neutral,
+                .chunks_exact(3)
+                .zip(&part.triangle_colors)
+                .flat_map(|(corners, &color)| {
+                    let color = stage_color(color, neutral);
+                    corners.iter().map(move |&p| Vertex {
+                        pos: remap(p),
+                        normal: [0.0; 3],
+                        color,
+                    })
                 })
                 .collect::<Vec<_>>();
             let mut mn = [f32::MAX; 3];
