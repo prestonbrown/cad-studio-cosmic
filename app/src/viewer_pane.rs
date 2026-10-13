@@ -53,10 +53,8 @@
 //! ([`ViewerPane::rebuild_markers`], the single writer), and Esc clears
 //! the measurement (ModelPane.swift:54-58 — ignored otherwise).
 //!
-//! M4 status: this module is the pane model + view; the shell task wires it
-//! into a window (pane focus commands, i18n via the extracted ftl keys all
-//! land there). User-visible strings are plain English pending that wiring,
-//! matching the schematic pane's documented M4 state.
+//! The pane's user-visible strings go through [`crate::fl`] with the
+//! extracted ftl keys (live since the M6 overlay work).
 //!
 //! M6: the pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
 //! ModelViewerState port) drives `viewer::tools::arrangement`, and
@@ -752,6 +750,7 @@ impl ViewerPane {
                         let duration = study.duration();
                         self.tools.player.time = time.min(duration);
                         self.tools.player.is_playing = false;
+                        self.posed_time = Some(self.tools.player.time);
                         self.apply_poses();
                     }
                 }
@@ -1145,6 +1144,11 @@ impl ViewerPane {
                     ));
                 }
             }
+        }
+        // a fresh study restarts the pose stream: the dedupe gate must not
+        // compare a new study's first frame against the old one's last
+        if self.study.is_some() {
+            self.posed_time = None;
         }
         if self.study.is_none() && self.tools.animating {
             self.tools.set_animating(false);
