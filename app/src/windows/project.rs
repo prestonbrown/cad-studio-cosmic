@@ -444,11 +444,22 @@ impl ProjectWindow {
                 CosmicTask::future(async move { Message::PresentSetupSheet })
             }
             // the shell owns the compare state (parameters_view docs): the
-            // picker's report goes to the bridge, never the pane
+            // picker's report reaches BOTH halves — the bridge stores the
+            // selection (and parses the version's parameter values), and
+            // the pane stages the version's MESH as the ghost from the
+            // version-store directory the history writes (upstream
+            // `compare(with:)`, Project.swift:363-368)
             Message::Viewer(crate::viewer_pane::Message::Parameters(
                 parameters_view::Message::Compare(number),
             )) => {
                 self.bridge.compare_with(number);
+                let version = number.map(|n| {
+                    (
+                        n,
+                        engine::project::versions::versions_root(&self.root).join(n.to_string()),
+                    )
+                });
+                self.viewer.set_compare(version);
                 Task::none()
             }
             // the slider/field commit the pane emits (the pane's local
@@ -1566,5 +1577,75 @@ mod tests {
         let after = store::load_metadata(&root).unwrap();
         assert_eq!(after.current_version, Some(1));
         assert_eq!(after.session_id.as_deref(), Some("session-v1"));
+    }
+
+    /// The compare wiring's window half (upstream `compare(with:)`,
+    /// Project.swift:363-368): the picker's report reaches BOTH halves —
+    /// the bridge stores the selection (and parses the version's parameter
+    /// values) while the pane stages the version's MESH as the ghost from
+    /// the version-store directory the history writes. `None` clears both.
+    #[tokio::test]
+    async fn compare_picker_drives_bridge_and_ghost() {
+        use engine::project::versions;
+
+        let root = std::env::temp_dir().join(format!("cad-compare-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        // version 1 snapshots a floating box; the live output then becomes
+        // a different (grounded) model, so the ghost is distinguishable
+        // from the scene it floats over
+        std::fs::write(
+            root.join("output/model.stl"),
+            crate::viewer_pane::stl_of_box([[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]),
+        )
+        .unwrap();
+        let mut history = Vec::new();
+        versions::record(
+            &root,
+            &mut history,
+            "a floating box",
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("output/model.stl"),
+            crate::viewer_pane::stl_of_box([[0.0, 0.0, 0.0], [20.0, 20.0, 10.0]]),
+        )
+        .unwrap();
+
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        assert!(!window.viewer.comparing);
+
+        let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Parameters(
+            parameters_view::Message::Compare(Some(1)),
+        )));
+        assert_eq!(
+            window.bridge.compare_version(),
+            Some(1),
+            "the bridge holds the selection"
+        );
+        assert!(window.viewer.comparing);
+        let ghost = window.viewer.scene.ghost.as_ref().unwrap();
+        // the current scene's floor is model z 0 (the grounded box), so the
+        // version's floating box stages at scene y 40..60 — the version's
+        // mesh at the CURRENT pin
+        assert!(
+            (ghost.aabb_min[1] - 40.0).abs() < 1e-3,
+            "version 1's mesh at the current pin: {:?}",
+            ghost.aabb_min
+        );
+        assert!((ghost.aabb_max[1] - 60.0).abs() < 1e-3);
+
+        let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Parameters(
+            parameters_view::Message::Compare(None),
+        )));
+        assert_eq!(window.bridge.compare_version(), None);
+        assert!(!window.viewer.comparing);
+        assert!(window.viewer.scene.ghost.is_none());
     }
 }

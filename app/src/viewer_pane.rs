@@ -190,6 +190,20 @@ pub struct ViewerPane {
     /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
     /// toggles).
     pub parameters_visible: bool,
+    /// Whether a comparison is active (upstream `compareVersion != nil`):
+    /// while set, the layout picker disables and the effective layout
+    /// forces Assembled — the `comparing` argument of
+    /// [`crate::viewer_tools::ViewerTools::effective_layout`]
+    /// (PartsOverlay.swift:23, ModelViewerState.swift:78-86). Set only by
+    /// [`ViewerPane::set_compare`].
+    pub comparing: bool,
+    /// The compared version — its number and the version-store directory
+    /// its MESH parses from (`.cadstudio/versions/<n>/`). Kept so a model
+    /// reload can re-stage the ghost at the new scene's pin: the ghost's
+    /// identity is the VERSION, not the current output, so it survives
+    /// every reload until the picker clears it (upstream
+    /// `loadComparison` parses once per selection, ProjectOutput.swift:164).
+    ghost_version: Option<(i64, PathBuf)>,
     project_root: PathBuf,
     output_dir: PathBuf,
     printer_model: Option<String>,
@@ -244,6 +258,8 @@ impl ViewerPane {
             parameter_drafts: HashMap::new(),
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
+            comparing: false,
+            ghost_version: None,
             project_root: project_root.to_path_buf(),
             output_dir,
             printer_model,
@@ -456,6 +472,52 @@ impl ViewerPane {
         self.commit_parameter(name)
     }
 
+    // ── compare ghost (upstream loadComparison) ──────────────────────────
+
+    /// The compare picker's landing (upstream `compare(with:)`,
+    /// Project.swift:363-368 + `loadComparison`): stage the chosen
+    /// version's MESH as the ghost, or drop the comparison.
+    ///
+    /// `Some((number, version_dir))` parses `version_dir/output` through
+    /// the same 3MF-then-STL seam the live model loads
+    /// ([`load_model_parts`]) and stages it with the CURRENT scene's pin —
+    /// the ghost floats where the version's model sits relative to the
+    /// CURRENT floor, where its own pin would ground it
+    /// ([`PartScene::from_parts_with_pin`], ModelViewer.swift:135). A
+    /// version whose mesh does not parse stages no ghost while `comparing`
+    /// still holds (upstream's `try?` leaves `comparisonMesh` nil,
+    /// ProjectOutput.swift:177). `None` clears the ghost and the flag —
+    /// the ONLY clear: a mesh reload or a version restore never drops the
+    /// comparison (upstream resets `compareVersion` nowhere else).
+    pub fn set_compare(&mut self, version: Option<(i64, PathBuf)>) {
+        match version {
+            None => {
+                self.scene.ghost = None;
+                self.comparing = false;
+                self.ghost_version = None;
+            }
+            Some((number, dir)) => {
+                self.comparing = true;
+                self.ghost_version = Some((number, dir));
+                self.restage_ghost();
+            }
+        }
+    }
+
+    /// Stage the ghost from `ghost_version`'s mesh at the CURRENT scene's
+    /// pin — the initial stage [`ViewerPane::set_compare`] makes, and the
+    /// re-derivation a scene swap owes ([`ModelScene::replace_scene`]
+    /// drops the ghost with the old pin; upstream restages the ghost on
+    /// every mesh change, ModelViewer.swift:176-178).
+    fn restage_ghost(&mut self) {
+        let Some((_, dir)) = self.ghost_version.clone() else {
+            return;
+        };
+        let pin = self.scene.scene.pin;
+        self.scene.ghost = load_model_parts(&dir.join("output"))
+            .map(|parts| Arc::new(PartScene::from_parts_with_pin(&parts, NEUTRAL, pin)));
+    }
+
     /// The 3D pane's element: the shader canvas in a mouse area over the
     /// status bar (upstream ModelPane's VStack: content then
     /// PaneStatusBar).
@@ -522,6 +584,10 @@ impl ViewerPane {
             if scenes_differ(&self.scene.scene, &next) {
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
                 self.scene.replace_scene(next);
+                // replace_scene drops the ghost with the old pin; the
+                // comparison survives the reload (only the picker's None
+                // clears it), so re-stage the version's mesh at the new pin
+                self.restage_ghost();
                 self.sync_pose();
             }
         }
@@ -751,6 +817,50 @@ pub fn scenes_differ(current: &PartScene, next: &PartScene) -> bool {
                 || a.aabb_min != b.aabb_min
                 || a.aabb_max != b.aabb_max
         })
+}
+
+/// A one-box binary STL at the given MODEL-space `[[min], [max]]` corners —
+/// the version-snapshot mesh of the compare tests (12 triangles, zero
+/// normals: the parser drops normals, the viewer recomputes them from the
+/// corners). Shared with the project window's tests.
+#[cfg(test)]
+pub(crate) fn stl_of_box(bounds: [[f64; 3]; 2]) -> Vec<u8> {
+    fn push_f32s(out: &mut Vec<u8>, fs: &[f32]) {
+        for f in fs {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    let mn = bounds[0].map(|c| c as f32);
+    let mx = bounds[1].map(|c| c as f32);
+    // corner (i, j, k) picks min/max per axis; the six faces as quads
+    let corner = |i: u8, j: u8, k: u8| {
+        [
+            [mn[0], mx[0]][i as usize],
+            [mn[1], mx[1]][j as usize],
+            [mn[2], mx[2]][k as usize],
+        ]
+    };
+    let quads: [[(u8, u8, u8); 4]; 6] = [
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], // z = min
+        [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], // z = max
+        [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)], // y = min
+        [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], // y = max
+        [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], // x = min
+        [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], // x = max
+    ];
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0u8; 80]);
+    out.extend_from_slice(&12u32.to_le_bytes());
+    for quad in quads {
+        for tri in [(0usize, 1, 2), (0, 2, 3)] {
+            push_f32s(&mut out, &[0.0; 3]); // normal: unused by the parser
+            for idx in [tri.0, tri.1, tri.2] {
+                push_f32s(&mut out, &corner(quad[idx].0, quad[idx].1, quad[idx].2));
+            }
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
+    out
 }
 
 /// The relay stream: one thread draining the std event channel into the
@@ -1254,5 +1364,114 @@ mod tests {
             compare: None,
         };
         let _ = pane.view_model_3d(Some(ctx));
+    }
+
+    /// A version-store snapshot for the compare tests:
+    /// `.cadstudio/versions/<n>/output/model.stl` holding one box, returning
+    /// the version directory (the handoff shape the window passes the pane).
+    fn write_version(root: &Path, number: i64, bounds: [[f64; 3]; 2]) -> PathBuf {
+        let dir = root
+            .join(".cadstudio")
+            .join("versions")
+            .join(number.to_string());
+        std::fs::create_dir_all(dir.join("output")).unwrap();
+        std::fs::write(dir.join("output").join("model.stl"), stl_of_box(bounds)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn ghost_uses_the_current_scene_pin() {
+        let (root, mut pane) = pane("ghost", &[], &["golden/model.3mf"]);
+        // a "version" whose model floats at MODEL z 40..60 — above the
+        // current scene's z -4..22. Staged with the CURRENT pin it keeps
+        // the current floor: golden's pin lifts model z -4 to scene y 0, so
+        // the version's z 40 stages at scene y 44. Its OWN pin would read
+        // 0 (from_parts grounds every scene at its own floor).
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        let ghost = pane.scene.ghost.as_ref().unwrap();
+        assert!(
+            (ghost.aabb_min[1] - 44.0).abs() < 1e-3,
+            "current pin kept (golden floor model z -4 -> scene y 0): {:?}",
+            ghost.aabb_min
+        );
+        assert_eq!(ghost.parts.len(), 1, "the ghost mesh is the version's STL");
+        assert!(pane.comparing);
+    }
+
+    #[test]
+    fn compare_stages_and_clears_on_none() {
+        let (root, mut pane) = pane("ghost2", &[], &["golden/model.3mf"]);
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        assert!(pane.scene.ghost.is_some(), "a version with a mesh stages");
+        assert!(pane.comparing);
+        // None is the ONLY clear: the flag, the ghost, and the recorded
+        // version all go together
+        pane.set_compare(None);
+        assert!(pane.scene.ghost.is_none());
+        assert!(!pane.comparing);
+        assert!(pane.ghost_version.is_none());
+        // clearing with nothing staged settles the same way
+        pane.set_compare(None);
+        assert!(pane.scene.ghost.is_none() && !pane.comparing);
+    }
+
+    #[test]
+    fn mesh_reload_keeps_the_comparison_restaging_at_the_new_pin() {
+        let (root, mut pane) = pane("ghost-reload", &[], &["golden/model.3mf"]);
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        assert!(
+            (pane.scene.ghost.as_ref().unwrap().aabb_min[1] - 44.0).abs() < 1e-3,
+            "precondition: staged at golden's pin"
+        );
+
+        // a different model lands in output/: the scene swaps, and the
+        // comparison SURVIVES it (upstream clears on nothing but the
+        // picker's None) with the ghost re-staged at the NEW pin — the flat
+        // box's floor is model z 0, so the version's z 40 stages at y 40
+        std::fs::remove_file(root.join("output/model.3mf")).unwrap();
+        std::fs::write(
+            root.join("output/model.stl"),
+            stl_of_box([[0.0, 0.0, 0.0], [20.0, 20.0, 10.0]]),
+        )
+        .unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(pane.comparing, "the selection survives a mesh reload");
+        let ghost = pane.scene.ghost.as_ref().unwrap();
+        assert!(
+            (ghost.aabb_min[1] - 40.0).abs() < 1e-3,
+            "re-staged at the new pin: {:?}",
+            ghost.aabb_min
+        );
+        assert!(
+            (ghost.aabb_max[1] - 60.0).abs() < 1e-3,
+            "still the VERSION's mesh (its model z 40..60 box)"
+        );
+
+        // an idempotent reload (same content) never re-stages: the ghost
+        // keeps its Arc identity through the short-circuit
+        let ghost_before = pane.scene.ghost.clone().unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(
+            Arc::ptr_eq(&ghost_before, pane.scene.ghost.as_ref().unwrap()),
+            "identical content rebuilds nothing"
+        );
+    }
+
+    #[test]
+    fn comparing_without_a_readable_version_mesh_has_no_ghost() {
+        let (root, mut pane) = pane("ghost-none", &[], &["golden/model.3mf"]);
+        // a picked version whose output never materialized: upstream's
+        // `try?` leaves comparisonMesh nil (ProjectOutput.swift:177) while
+        // the selection still holds (it gates the layout and the picker)
+        pane.set_compare(Some((7, root.join(".cadstudio/versions/7"))));
+        assert!(pane.comparing);
+        assert!(pane.scene.ghost.is_none());
+        // a real version still stages afterwards
+        let vdir = write_version(&root, 8, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((8, vdir)));
+        assert!(pane.scene.ghost.is_some());
     }
 }
