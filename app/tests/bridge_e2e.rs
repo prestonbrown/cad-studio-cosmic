@@ -144,7 +144,8 @@ async fn drain_turn_messages(
                 assert_eq!(seen, prompt, "{seen:?}");
                 break;
             }
-            Message::QueueChanged { .. } => continue,
+            // the PREVIOUS turn's success tail announces after its terminal
+            Message::QueueChanged { .. } | Message::TurnSuccessBookkeeping => continue,
             other => panic!("expected TurnStarted for {prompt:?}, got {other:?}"),
         }
     }
@@ -188,8 +189,9 @@ async fn send_success_streams_and_saves() {
     let guard = ENV_LOCK.lock().await;
     set_env(&root, &scenario, None, &dump);
     let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-    bridge.enqueue("first".into(), Vec::new());
-    bridge.enqueue("second".into(), Vec::new()); // lands while the first runs → FIFO
+    bridge.mark_python_ready_for_test(); // the send gate refuses without a ready python
+    bridge.enqueue("first".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap(); // lands while the first runs → FIFO
 
     let events = drain_turn_messages(&mut messages, "first").await;
     assert_eq!(
@@ -295,8 +297,9 @@ async fn auth_failure_pauses_queue_and_rows_action() {
         &dump,
     );
     let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-    bridge.enqueue("first".into(), Vec::new());
-    bridge.enqueue("second".into(), Vec::new());
+    bridge.mark_python_ready_for_test(); // the send gate refuses without a ready python
+    bridge.enqueue("first".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap();
 
     let events = drain_turn_messages(&mut messages, "first").await;
     match finished(&events) {
@@ -343,8 +346,9 @@ async fn auth_401_in_other_numbers_is_not_auth() {
     let guard = ENV_LOCK.lock().await;
     set_env(&root, &scenario, None, &dump);
     let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-    bridge.enqueue("first".into(), Vec::new());
-    bridge.enqueue("second".into(), Vec::new());
+    bridge.mark_python_ready_for_test(); // the send gate refuses without a ready python
+    bridge.enqueue("first".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap();
 
     let events = drain_turn_messages(&mut messages, "first").await;
     match finished(&events) {
@@ -386,8 +390,9 @@ async fn cancel_mid_turn_pauses_queue_fails_open() {
     let guard = ENV_LOCK.lock().await;
     set_env(&root, &scenario, None, &dump);
     let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-    bridge.enqueue("parked".into(), Vec::new());
-    bridge.enqueue("second".into(), Vec::new());
+    bridge.mark_python_ready_for_test(); // the send gate refuses without a ready python
+    bridge.enqueue("parked".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap();
 
     // wait until a tool row is open, then interrupt
     match recv(&mut messages, "TurnStarted").await {
@@ -462,7 +467,8 @@ async fn flood_does_not_wedge_cancel() {
     let guard = ENV_LOCK.lock().await;
     set_env(&root, &scenario, None, &dump);
     let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-    bridge.enqueue("flood".into(), Vec::new());
+    bridge.mark_python_ready_for_test(); // the send gate refuses without a ready python
+    bridge.enqueue("flood".into(), Vec::new()).unwrap();
     match recv(&mut messages, "TurnStarted").await {
         Message::TurnStarted { prompt, .. } => assert_eq!(prompt, "flood"),
         other => panic!("expected TurnStarted, got {other:?}"),
