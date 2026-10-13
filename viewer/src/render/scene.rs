@@ -65,6 +65,16 @@ pub struct ModelScene {
     /// radius the zoom clamp scales.
     target: [f32; 3],
     radius: f32,
+    /// The manifest bed the overlay was last built with — kept across
+    /// [`ModelScene::replace_scene`] so a reload's grid derives from it
+    /// (upstream's pane re-sends the bed every update; a mesh swap alone
+    /// never clears it).
+    bed: Option<[f64; 2]>,
+    /// The aabb [`ModelScene::grid`] was last built against — the change
+    /// check [`ModelScene::set_overlay_frame`] compares against. Normally
+    /// the staged scene's own; the pane's frozen stamp (T10) writes
+    /// layout-switch-time values here instead.
+    grid_aabb: ([f32; 3], [f32; 3]),
 }
 
 impl ModelScene {
@@ -72,7 +82,8 @@ impl ModelScene {
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
-        let grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
+        let grid_aabb = (scene.aabb_min, scene.aabb_max);
+        let grid = Arc::new(grid::geometry(grid_aabb, None));
         Self {
             poses: identity_poses(scene.parts.len()),
             scene,
@@ -86,6 +97,8 @@ impl ModelScene {
             distance,
             target,
             radius,
+            bed: None,
+            grid_aabb,
         }
     }
 
@@ -132,15 +145,36 @@ impl ModelScene {
         self.target = target;
     }
 
+    /// Store the overlay frame — the aabb the grid/bed/tripod derive from
+    /// and the manifest bed — rebuilding [`ModelScene::grid`] only when
+    /// either input changed from what is stored (upstream's guards:
+    /// `rebuildGrid` fires when the mesh changes, `showBed` when the size
+    /// differs, ModelViewer.swift:165-190). The pane stamps this exactly on
+    /// scene/layout/plate-identity changes and hands its FROZEN `grid_aabb`
+    /// — upstream rebuilds the grid on sceneID, never on explode/hidden
+    /// sweeps, so the grid's size freezes at layout-switch-time explode and
+    /// the pane's stamp is what reproduces that quirk (T10 owns the
+    /// freezing; this method only obeys the inputs it is given).
+    pub fn set_overlay_frame(&mut self, aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) {
+        if aabb == self.grid_aabb && bed == self.bed {
+            return;
+        }
+        self.grid_aabb = aabb;
+        self.bed = bed;
+        self.grid = Arc::new(grid::geometry(aabb, bed));
+    }
+
     /// Swap in a new part scene (an output reload): rebuilds the overlay
-    /// against the new pinned aabb, resets the poses to the new scene's
+    /// against the new pinned aabb (deriving from the STORED bed — the pane
+    /// re-sends it on its next stamp), resets the poses to the new scene's
     /// assembled identities (a new model has no carried explode offsets),
     /// and re-derives the framing fields so the struct stays
     /// self-consistent; the caller decides whether the camera actually
     /// re-frames (the > 50 % diagonal rule) and pushes the settled pose
     /// through [`ModelScene::set_pose`].
     pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
-        self.grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
+        self.grid_aabb = (scene.aabb_min, scene.aabb_max);
+        self.grid = Arc::new(grid::geometry(self.grid_aabb, self.bed));
         // the measurement's points belong to the old model — a reload
         // drops them with the markers they staged
         self.markers = None;
@@ -250,5 +284,106 @@ impl shader::Primitive for ModelPrimitive {
 impl shader::Pipeline for MeshPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         MeshPipeline::new(device, queue, format)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::NEUTRAL;
+
+    /// The mod.rs staging test's triangle, staged: pinned aabb exactly
+    /// x/z ±3, y [0, 6] — small, known, GPU-free.
+    fn tri_scene(scale: f32) -> Arc<PartScene> {
+        let part = engine::parsing::Part {
+            name: "tri".into(),
+            positions: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+                .map(|p| p.map(|c| c * scale))
+                .to_vec(),
+            triangle_colors: vec![None],
+        };
+        Arc::new(PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL))
+    }
+
+    /// The bed outline's vertex color: the accent at full alpha.
+    fn accent() -> [f32; 4] {
+        [grid::ACCENT[0], grid::ACCENT[1], grid::ACCENT[2], 1.0]
+    }
+
+    /// `set_overlay_frame` is change-gated on BOTH inputs (upstream's
+    /// rebuildGrid/showBed guards, ModelViewer.swift:165-190): the
+    /// constructor's own (aabb, None) rebuilds nothing, a bed change
+    /// rebuilds with the outline in the mesh, and an aabb change rebuilds
+    /// at the new extents — the seam T10 stamps on scene/layout/plate
+    /// identity changes, reproducing upstream's grid freeze through
+    /// explode/hidden sweeps (those never reach this method).
+    #[test]
+    fn set_overlay_frame_rebuilds_only_on_change() {
+        let scene = tri_scene(1.0);
+        let mut model = ModelScene::new(scene.clone());
+        let built = model.grid.clone();
+        model.set_overlay_frame((scene.aabb_min, scene.aabb_max), None);
+        assert!(
+            Arc::ptr_eq(&built, &model.grid),
+            "the constructor's own inputs must not rebuild"
+        );
+        // bed change: the accent outline lands in the rebuilt overlay
+        model.set_overlay_frame((scene.aabb_min, scene.aabb_max), Some([80.0, 80.0]));
+        assert!(!Arc::ptr_eq(&built, &model.grid));
+        assert!(
+            model.grid.vertices.iter().any(|v| v.color == accent()),
+            "the stored bed draws the accent outline"
+        );
+        // aabb change with the bed held: rebuilt at the new extents —
+        // footprint 400 -> half (floor(30)+1)*10 = 310
+        model.set_overlay_frame(
+            ([-200.0, 0.0, -200.0], [200.0, 50.0, 200.0]),
+            Some([80.0, 80.0]),
+        );
+        assert_eq!(model.grid.half_extent, 310.0);
+        assert!(
+            model.grid.vertices.iter().any(|v| v.color == accent()),
+            "the bed survives the aabb change"
+        );
+        // resending the stored pair is again a no-op
+        let rebuilt = model.grid.clone();
+        model.set_overlay_frame(
+            ([-200.0, 0.0, -200.0], [200.0, 50.0, 200.0]),
+            Some([80.0, 80.0]),
+        );
+        assert!(
+            Arc::ptr_eq(&rebuilt, &model.grid),
+            "matching stored inputs must not rebuild"
+        );
+    }
+
+    /// `replace_scene` keeps the stored bed — the new overlay derives from
+    /// it (upstream's pane re-sends the bed every update, so a mesh swap
+    /// alone never clears it) — and records the new scene's aabb as the
+    /// grid frame: resending that pair with the kept bed rebuilds nothing.
+    #[test]
+    fn replace_scene_keeps_bed_and_reframes() {
+        let scene = tri_scene(1.0);
+        let mut model = ModelScene::new(scene);
+        model.set_overlay_frame(([-3.0, 0.0, -3.0], [3.0, 6.0, 3.0]), Some([80.0, 80.0]));
+        // scale 30: pinned aabb grows to spans 180 -> grid half 140 (the
+        // scale-1 scene's 6mm footprint reads the max(100, ·) floor)
+        let scene2 = tri_scene(30.0);
+        assert_eq!(model.grid.half_extent, 100.0);
+        model.replace_scene(scene2.clone());
+        assert_eq!(
+            model.grid.half_extent, 140.0,
+            "the overlay rebuilt against the new scene's aabb"
+        );
+        assert!(
+            model.grid.vertices.iter().any(|v| v.color == accent()),
+            "the new grid derives from the STORED bed"
+        );
+        let rebuilt = model.grid.clone();
+        model.set_overlay_frame((scene2.aabb_min, scene2.aabb_max), Some([80.0, 80.0]));
+        assert!(
+            Arc::ptr_eq(&rebuilt, &model.grid),
+            "replace_scene recorded the new aabb and kept the bed"
+        );
     }
 }
