@@ -6,5 +6,7 @@
 
 pub mod bridge;
 pub mod chat;
+pub mod chat_view;
+pub mod markdown;
 pub mod panes;
 pub mod schematic;

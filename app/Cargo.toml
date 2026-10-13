@@ -28,3 +28,5 @@ tokio.workspace = true
 # image (png) decodes the schematic.png fallback raster.
 resvg = "0.45"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+# Inline-only markdown for the chat pane; parser only — no html/escape/cli.
+pulldown-cmark = { version = "0.13.4", default-features = false }
