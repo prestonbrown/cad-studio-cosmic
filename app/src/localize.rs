@@ -69,3 +69,56 @@ macro_rules! fl {
         $crate::localize::LANGUAGE_LOADER.get($message_id)
     }};
 }
+
+/// Substitute Swift-style placeholders onto a looked-up catalog string.
+/// The extracted catalogs still carry their Swift-era `%lld`/`%@` markers
+/// (fluent's `{$arg}` form rides with the M8 placeable sweep), so callers
+/// with values substitute them here: the first `values.len()` markers,
+/// leftmost first — an earlier `%@` beats a later `%lld` — with later
+/// markers and substituted text left alone.
+pub fn substitute_placeholders(template: &str, values: &[&str]) -> String {
+    let mut out = template.to_string();
+    let mut scanned = 0;
+    for value in values {
+        let Some(at) = [out[scanned..].find("%lld"), out[scanned..].find("%@")]
+            .into_iter()
+            .flatten()
+            .map(|at| at + scanned)
+            .min()
+        else {
+            break; // no markers left
+        };
+        let len = if out[at..].starts_with("%lld") { 4 } else { 2 };
+        out.replace_range(at..at + len, value);
+        scanned = at + value.len();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitutes_leftmost_first_leaving_later_markers() {
+        assert_eq!(substitute_placeholders("no markers", &["x"]), "no markers");
+        assert_eq!(substitute_placeholders("%@ wrote", &["ada"]), "ada wrote");
+        assert_eq!(
+            substitute_placeholders("Version %lld of %lld", &["3"]),
+            "Version 3 of %lld",
+            "only the first marker consumes a value"
+        );
+        // the leftmost marker wins regardless of kind: %@ before %lld
+        assert_eq!(
+            substitute_placeholders("%@ then %lld", &["first", "7"]),
+            "first then 7"
+        );
+        // more values than markers: the extras find nothing
+        assert_eq!(substitute_placeholders("only %@", &["a", "b"]), "only a");
+        // substituted text is never rescanned for another marker
+        assert_eq!(
+            substitute_placeholders("%@ and %@", &["%lld", "2"]),
+            "%lld and 2"
+        );
+    }
+}
