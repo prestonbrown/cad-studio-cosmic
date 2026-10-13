@@ -124,6 +124,10 @@ pub enum ProjectStoreError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     InvalidName(#[from] ProjectNameError),
+    /// Upstream `ProjectError.notAFolder` (ProjectStore.swift:48-50): the
+    /// path a project was asked to open is not a directory.
+    #[error("project path is not a folder: {0}")]
+    NotAFolder(PathBuf),
 }
 
 /// Per-project support directory (upstream ProjectFolder.support) holding
@@ -213,6 +217,11 @@ pub fn validate_project_name(name: &str) -> Result<(), ProjectNameError> {
 /// on open, not only at create): `output/`, `.cadstudio/logs/`, and a
 /// default `project.json` when none is present.
 pub fn prepare(project_root: &Path) -> Result<(), ProjectStoreError> {
+    // upstream guards `fileExists(isDirectory:)` and throws `.notAFolder`:
+    // opening a typo'd or file path must not scaffold a tree around it
+    if !project_root.is_dir() {
+        return Err(ProjectStoreError::NotAFolder(project_root.to_path_buf()));
+    }
     std::fs::create_dir_all(project_root.join("output"))?;
     std::fs::create_dir_all(project_root.join(".cadstudio").join("logs"))?;
     if !support_dir(project_root).join("project.json").exists() {

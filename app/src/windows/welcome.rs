@@ -31,15 +31,14 @@ pub mod new_project {
     use super::*;
 
     /// The sheet's messages; the portal/create effects are the app's — it
-    /// acts on `Advance`/`ParentChosen`, then folds the result in.
+    /// acts on `Advance` (asking for the parent folder) and reports the
+    /// outcome back as `Created`.
     #[derive(Debug, Clone)]
     pub enum Message {
         Name(String),
         Cancel,
         /// "Avanti": validate, then the app asks for the parent folder.
         Advance,
-        /// The parent-folder portal answered.
-        ParentChosen(Result<Vec<PathBuf>, String>),
         /// `create_project` finished.
         Created(Result<PathBuf, String>),
     }
@@ -76,8 +75,6 @@ pub mod new_project {
             Message::Name(name) => sheet.name = name.clone(),
             Message::Cancel => {}
             Message::Advance => sheet.awaiting_parent = true,
-            Message::ParentChosen(Ok(_)) => sheet.awaiting_parent = false,
-            Message::ParentChosen(Err(_)) => sheet.awaiting_parent = false,
             Message::Created(Ok(_)) => {}
             Message::Created(Err(why)) => {
                 sheet.awaiting_parent = false;
@@ -97,6 +94,9 @@ pub mod new_project {
                 Column::new().spacing(6).push(text("Project name:")).push(
                     text_input::text_input("L bracket", &sheet.name)
                         .on_input(Message::Name)
+                        // Return runs Avanti (upstream `.onSubmit(create)`,
+                        // NewProjectSheet.swift:27)
+                        .on_submit(|_| Message::Advance)
                         .size(14),
                 ),
             )
@@ -145,8 +145,6 @@ pub mod new_project {
 pub enum Message {
     NewProject,
     OpenExisting,
-    /// The open-existing folder portal answered.
-    FolderChosen(Result<Vec<PathBuf>, String>),
     OpenRecent(PathBuf),
     RevealRecent(PathBuf),
     RemoveRecent(PathBuf),
@@ -213,7 +211,6 @@ impl Welcome {
             }
             // the app layer owns these (portals, windows, recents store)
             Message::OpenExisting
-            | Message::FolderChosen(_)
             | Message::OpenRecent(_)
             | Message::RevealRecent(_)
             | Message::RemoveRecent(_)

@@ -29,7 +29,7 @@ use cosmic::iced::futures::stream::BoxStream;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::stream;
 use cosmic::iced::time::every;
-use cosmic::iced::{Color, Length, Subscription, Task};
+use cosmic::iced::{Color, Length, Size, Subscription, Task};
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::pane_grid::{self, DragEvent, ResizeEvent};
 use cosmic::widget::{Column, Row, Space, button, container, popover, text};
@@ -112,6 +112,8 @@ pub enum Message {
     Bridge(bridge::Message),
     /// The shell's output watcher saw a settled change.
     OutputReload(ReloadKind),
+    /// The pane grid's laid-out size (the resize clamp's input).
+    GridResized(Size),
     /// The 1 s tick while working (elapsed label, focus flash).
     Tick,
     Command(Command),
@@ -154,7 +156,9 @@ pub struct ProjectWindow {
     pub layout: LayoutNode,
     pub chat_visible: bool,
     pub grid: pane_grid::State<PaneKind>,
-    /// The window's pixel size, for resize clamping.
+    /// The pane grid's laid-out pixel size, for resize clamping (reported
+    /// from layout through the shell relay — the window size would ignore
+    /// the header).
     pub size: (f32, f32),
     pub chat: ChatState,
     pub chat_pane: ChatPane,
@@ -171,24 +175,38 @@ pub struct ProjectWindow {
     pub shown_issues: Option<IssueKind>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
+    /// The last reported grid size (the report dedup).
+    last_size: Arc<Mutex<Size>>,
     /// Keeps the shell's output watch alive; dropped with the window.
     #[allow(dead_code)] // read by no one: the field's DROP stops the watch
     watch: Option<WatchHandle>,
     /// The relay's sending half, kept so the stream ends with the window.
     #[allow(dead_code)]
-    events: std::sync::mpsc::Sender<ReloadKind>,
+    events: std::sync::mpsc::Sender<ShellEvent>,
     relay: Arc<OutputRelay>,
+}
+
+/// What crosses the shell's event channel into the subscription: output
+/// reloads and the pane grid's size report (the viewer pane's `PaneEvent`
+/// shape).
+#[derive(Debug, Clone, Copy)]
+enum ShellEvent {
+    Reload(ReloadKind),
+    /// The grid's laid-out size — the extent the resize clamp must see
+    /// (the WINDOW size would ignore the header and overestimate it,
+    /// loosening the per-split minimums).
+    GridResized(Size),
 }
 
 /// The output-watch relay (the take-once pattern the viewer and schematic
 /// panes established).
 struct OutputRelay {
     id: u64,
-    events: Mutex<Option<Receiver<ReloadKind>>>,
+    events: Mutex<Option<Receiver<ShellEvent>>>,
 }
 
 impl OutputRelay {
-    fn take_events(&self) -> Option<Receiver<ReloadKind>> {
+    fn take_events(&self) -> Option<Receiver<ShellEvent>> {
         self.events.lock().unwrap().take()
     }
 }
@@ -256,7 +274,7 @@ impl ProjectWindow {
 
         // The shell's own output watch: schematic reloads + missing-output
         // recomputes (the viewer pane's watch serves the 3D pane alone).
-        let (events, receiver) = std::sync::mpsc::channel::<ReloadKind>();
+        let (events, receiver) = std::sync::mpsc::channel::<ShellEvent>();
         let watch = watch_directory(&output_dir, WATCH_DEBOUNCE)
             .ok()
             .map(|(handle, reloads)| {
@@ -265,7 +283,7 @@ impl ProjectWindow {
                     .name("project-output-watch".into())
                     .spawn(move || {
                         while let Ok(kind) = reloads.recv() {
-                            if events.send(kind).is_err() {
+                            if events.send(ShellEvent::Reload(kind)).is_err() {
                                 return; // window gone
                             }
                         }
@@ -298,6 +316,7 @@ impl ProjectWindow {
                 missing_outputs: activity::missing_output_files(&output_dir),
                 shown_issues: None,
                 focus_flash: None,
+                last_size: Arc::new(Mutex::new(Size::default())),
                 watch,
                 events,
                 relay: Arc::new(OutputRelay {
@@ -381,6 +400,10 @@ impl ProjectWindow {
                     }
                     ReloadKind::Motion => {}
                 }
+                Task::none()
+            }
+            Message::GridResized(size) => {
+                self.size = (size.width, size.height);
                 Task::none()
             }
             Message::Tick => {
@@ -641,6 +664,40 @@ impl ProjectWindow {
     /// The whole window: header over the pane grid (upstream
     /// ProjectSplitView), with the open issue list as a popover.
     pub fn view(&self) -> Element<'_, Message> {
+        let events = self.events.clone();
+        let last_size = self.last_size.clone();
+        let this = self;
+        // the grid reports its laid-out size through the shell relay: the
+        // resize clamp needs the GRID extent, and the window size would
+        // ignore the header (the panes' responsive report pattern)
+        let sized = cosmic::iced::widget::responsive(move |size: Size| {
+            {
+                let mut last = last_size.lock().unwrap();
+                if *last != size {
+                    *last = size;
+                    let _ = events.send(ShellEvent::GridResized(size));
+                }
+            }
+            this.view_grid()
+        });
+        let base: Element<'_, Message> = Column::with_capacity(2)
+            .push(self.view_header())
+            .push(sized)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+
+        // the issue list rides as a non-modal popover over the content
+        let mut pop = popover(base);
+        if let Some(kind) = self.shown_issues {
+            pop = pop.popup(self.view_issue_list(kind));
+        }
+        pop.into()
+    }
+
+    /// The resizable pane grid (rebuilt per layout — iced elements are
+    /// single-use), filling the window below the header.
+    fn view_grid(&self) -> Element<'_, Message> {
         let grid = pane_grid::PaneGrid::new(&self.grid, |_pane, kind: &PaneKind, _| {
             let body: Element<'_, Message> = match kind {
                 PaneKind::Chat => chat_view::view_chat(
@@ -667,20 +724,10 @@ impl ProjectWindow {
         .spacing(GRID_SPACING)
         .on_resize(6, Message::Resized)
         .on_drag(Message::Dragged);
-
-        let base: Element<'_, Message> = Column::with_capacity(2)
-            .push(self.view_header())
-            .push(container(grid).width(Length::Fill).height(Length::Fill))
+        container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .into();
-
-        // the issue list rides as a non-modal popover over the content
-        let mut pop = popover(base);
-        if let Some(kind) = self.shown_issues {
-            pop = pop.popup(self.view_issue_list(kind));
-        }
-        pop.into()
+            .into()
     }
 
     /// The toolbar (ProjectToolbar.swift, M4 subset): chat toggle + stop |
@@ -1006,8 +1053,11 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
             let _ = std::thread::Builder::new()
                 .name("project-output-events".to_string())
                 .spawn(move || {
-                    while let Ok(kind) = events.recv() {
-                        let message = Message::OutputReload(kind);
+                    while let Ok(event) = events.recv() {
+                        let message = match event {
+                            ShellEvent::Reload(kind) => Message::OutputReload(kind),
+                            ShellEvent::GridResized(size) => Message::GridResized(size),
+                        };
                         let mut backoff = Duration::from_millis(1);
                         let started = Instant::now();
                         loop {

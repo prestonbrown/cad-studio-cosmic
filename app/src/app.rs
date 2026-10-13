@@ -21,7 +21,7 @@ use cosmic::cosmic_config::Config;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::window;
 use cosmic::iced::{Length, Subscription, Task};
-use cosmic::widget::{Column, popover, text};
+use cosmic::widget::{Column, container, popover, text};
 use cosmic::{Action, Application, Element};
 use engine::agent::locator::{self, AgentKind};
 use engine::project::store;
@@ -57,7 +57,10 @@ pub enum Message {
     SetupSheet(sheets::SetupMessage),
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),
-    /// A window finished closing.
+    /// A window's header close button: libcosmic's `on_close` is
+    /// message-only, so the handler must issue the `window::close` itself.
+    CloseWindow(window::Id),
+    /// A window finished closing (the platform Closed event).
     WindowClosed(window::Id),
     /// The startup/verify locate finished (`true` = a working executable).
     AgentLocated(bool),
@@ -147,12 +150,19 @@ impl Application for CadStudio {
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
+            Message::CloseWindow(id) => self.close_window(id),
             Message::WindowClosed(id) => self.window_closed(id),
             Message::AgentLocated(found) => {
                 if found {
                     self.agent_missing = None;
                 } else if self.agent_missing.is_none() {
-                    self.agent_missing = Some(sheets::AgentMissing::default());
+                    // the missing line shows from first presentation
+                    // (AgentMissingSheet.swift:42 gates on
+                    // `locator.state == .missing`, not on a Verify)
+                    self.agent_missing = Some(sheets::AgentMissing {
+                        last_verified_missing: true,
+                        ..sheets::AgentMissing::default()
+                    });
                 }
                 Task::none()
             }
@@ -171,7 +181,13 @@ impl Application for CadStudio {
                 })
                 .map(Action::App)
             }
-            Message::ParentFolderChosen(Err(_cancelled)) => Task::none(),
+            Message::ParentFolderChosen(Err(_cancelled)) => {
+                // the sheet stops waiting; a cancelled pick leaves it open
+                if let Some(sheet) = self.welcome.creating.as_mut() {
+                    sheet.awaiting_parent = false;
+                }
+                Task::none()
+            }
             Message::OpenFolderChosen(result) => match result {
                 Ok(paths) => paths
                     .first()
@@ -222,8 +238,16 @@ impl Application for CadStudio {
                 self.decorate(id, focused, with_sheet, "Welcome to CAD Studio")
             }
             Some(WindowKind::Project(project)) => {
+                // ONE header: the window's own view_header is the ProjectToolbar
+                // port and already carries the close button (ProjectWindow.swift:54-56
+                // `.toolbar { ProjectToolbar(project) }` + `.toolbar(removing: .title)`);
+                // decorating again would stack a second bar.
                 let body = project.view().map(move |m| Message::Project(id, m));
-                self.decorate(id, focused, body, project.name.as_str())
+                container(body)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .class(cosmic::theme::Container::WindowBackground)
+                    .into()
             }
             None => self.decorate(
                 id,
@@ -257,13 +281,6 @@ impl Application for CadStudio {
         }
         subs.push(cosmic::iced::event::listen_with(key_events));
         Subscription::batch(subs)
-    }
-
-    /// Track each window's pixel size (the resize clamp's input).
-    fn on_window_resize(&mut self, id: window::Id, width: f32, height: f32) {
-        if let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) {
-            project.size = (width, height);
-        }
     }
 
     /// A window finished closing: drop it, exit when it was the last one,
@@ -322,9 +339,7 @@ impl CadStudio {
                 let path = path.clone();
                 self.recents.remove(path);
             }
-            welcome::Message::FolderChosen(_)
-            | welcome::Message::NewProject
-            | welcome::Message::RecentMenu(_, _) => {}
+            welcome::Message::NewProject | welcome::Message::RecentMenu(_, _) => {}
             welcome::Message::NewSheet(sheet_msg) => match sheet_msg {
                 welcome::new_project::Message::Cancel => {
                     self.welcome.creating = None;
@@ -336,24 +351,6 @@ impl CadStudio {
                     let future = choose_folder("Choose where to create the project");
                     return Task::future(async move { Message::ParentFolderChosen(future.await) })
                         .map(Action::App);
-                }
-                welcome::new_project::Message::ParentChosen(result) => {
-                    if let Ok(parents) = result {
-                        let Some(sheet) = self.welcome.creating.as_ref() else {
-                            return Task::none();
-                        };
-                        let Some(parent) = parents.first().cloned() else {
-                            return Task::none();
-                        };
-                        let name = sheet.trimmed_name().to_string();
-                        return Task::future(async move {
-                            Message::ProjectCreated(
-                                store::create_project(&parent, &name)
-                                    .map_err(|why| why.to_string()),
-                            )
-                        })
-                        .map(Action::App);
-                    }
                 }
                 welcome::new_project::Message::Created(_)
                 | welcome::new_project::Message::Name(_) => {}
@@ -498,6 +495,12 @@ impl CadStudio {
                 }
             }
         }
+        if let Err(why) = store::prepare(&root) {
+            // upstream throws and ProjectWindow shows the load-error view;
+            // the M4 port declines to open (the surface is noted for M6)
+            eprintln!("cad-studio: cannot open {}: {why}", root.display());
+            return Task::none();
+        }
         let (window, bridge_task) = ProjectWindow::new(root.clone(), &self.settings);
         let name = window.name.clone();
         let (id, spawn) = window::open(window::Settings {
@@ -615,7 +618,7 @@ impl CadStudio {
                     cosmic::widget::header_bar()
                         .title(title.to_string())
                         .focused(focused)
-                        .on_close(Message::WindowClosed(id)),
+                        .on_close(Message::CloseWindow(id)),
                 )
                 .push(body),
         )

@@ -258,3 +258,28 @@ fn prepare_restores_scaffolding_without_clobbering_metadata() {
     let after = std::fs::read_to_string(root.join(".cadstudio/project.json")).unwrap();
     assert_eq!(before, after, "an existing manifest is never rewritten");
 }
+
+/// Upstream prepare's `notAFolder` guard (ProjectStore.swift:47-50): a
+/// missing path or a plain FILE never gets a project tree scaffolded
+/// around it.
+#[test]
+fn prepare_rejects_non_folders() {
+    let d = tmp();
+    let missing = d.join("no-such-project");
+    match prepare(&missing) {
+        Err(ProjectStoreError::NotAFolder(path)) => assert_eq!(path, missing),
+        other => panic!("a missing path is NotAFolder, got {other:?}"),
+    }
+    assert!(!missing.exists(), "nothing was scaffolded");
+
+    let file = d.join("a-file");
+    std::fs::write(&file, b"not a project").unwrap();
+    assert!(matches!(
+        prepare(&file),
+        Err(ProjectStoreError::NotAFolder(_))
+    ));
+    assert!(
+        !file.join("output").exists(),
+        "no scaffolding beside a file path"
+    );
+}

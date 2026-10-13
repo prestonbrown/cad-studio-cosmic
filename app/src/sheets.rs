@@ -126,6 +126,8 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         .push(
             text_input::text_input(CUSTOM_PATH_PLACEHOLDER, &sheet.custom_path)
                 .on_input(AgentMessage::CustomPath)
+                // Return runs Verify (upstream's default action)
+                .on_submit(|_| AgentMessage::Verify)
                 .font(cosmic::font::mono())
                 .size(14),
         )
@@ -293,7 +295,8 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
 }
 
 /// One labeled radio-style option list; `pick` maps the option index to the
-/// typed message.
+/// typed message. The picked row carries the check icon; unpicked rows
+/// reserve the icon column so the labels align (upstream's Picker rows).
 fn option_list<'a>(
     label: &str,
     options: [&'a str; 4],
@@ -303,18 +306,18 @@ fn option_list<'a>(
     let mut list = Column::new().spacing(4).push(body(label.to_string()));
     for (index, option) in options.into_iter().enumerate() {
         let picked = index == selected;
+        // the mark column: a check icon when picked, reserved blank space
+        // otherwise, so the labels align (upstream's Picker rows)
+        let mark: Element<'_, SetupMessage> = if picked {
+            icon("object-select", 14).into()
+        } else {
+            Space::new().width(14).into()
+        };
         list = list.push(
             button::custom(
                 Row::new()
                     .spacing(8)
-                    .push(icon(
-                        if picked {
-                            "object-select"
-                        } else {
-                            "non-starred"
-                        },
-                        14,
-                    ))
+                    .push(mark)
                     .push(body(option.to_string()))
                     .width(Length::Fill),
             )
