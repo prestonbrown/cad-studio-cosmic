@@ -278,6 +278,15 @@ impl Application for CadStudio {
 
 impl CadStudio {
     fn update_welcome(&mut self, msg: welcome::Message) -> Task<Action<Message>> {
+        // the new-project command presents the sheet AND makes sure the
+        // welcome window carrying it is on screen (upstream ⌘N:
+        // openWindow(id: WelcomeWindow.id) + isCreatingProject = true)
+        if matches!(msg, welcome::Message::NewProject) {
+            if self.welcome.creating.is_none() {
+                self.welcome.creating = Some(welcome::new_project::NewProject::default());
+            }
+            return self.show_welcome();
+        }
         // a context-menu entry resolves against the recents store first
         if let welcome::Message::RecentMenu(index, kind) = &msg {
             let path = self.recents.paths().get(*index).cloned();
@@ -371,6 +380,17 @@ impl CadStudio {
         }
         if matches!(msg, project::Message::CloseRequested) {
             return self.close_window(id);
+        }
+        if let project::Message::App(request) = msg {
+            let translated = match request {
+                project::AppRequest::NewProject => welcome::Message::NewProject,
+                project::AppRequest::OpenProject => welcome::Message::OpenExisting,
+                // the recents list lives in the welcome window
+                project::AppRequest::OpenRecent | project::AppRequest::Welcome => {
+                    return self.show_welcome();
+                }
+            };
+            return self.update_welcome(translated);
         }
         let task = project.update(msg).map(move |m| Message::Project(id, m));
         task.map(Action::App)

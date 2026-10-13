@@ -95,6 +95,14 @@ impl MenuAction for Command {
     }
 }
 
+impl MenuAction for AppRequest {
+    type Message = Message;
+
+    fn message(&self) -> Message {
+        Message::App(*self)
+    }
+}
+
 /// The project window's messages.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -117,6 +125,20 @@ pub enum Message {
     ToggleIssues(Option<IssueKind>),
     /// The header's close button (the app layer closes the window).
     CloseRequested,
+    /// An app-level request bubbled from the File menu (the window cannot
+    /// act on windows or portals itself).
+    App(AppRequest),
+}
+
+/// App-level commands the project window's File menu bubbles up
+/// (upstream's global CommandGroups; the recents list itself lives in the
+/// welcome window, so "Open Recent" focuses it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRequest {
+    NewProject,
+    OpenProject,
+    OpenRecent,
+    Welcome,
 }
 
 /// One open project's window state.
@@ -407,7 +429,7 @@ impl ProjectWindow {
                 self.shown_issues = kind;
                 Task::none()
             }
-            Message::CloseRequested => Task::none(), // the app layer acts
+            Message::CloseRequested | Message::App(_) => Task::none(), // the app layer acts
         }
     }
 
@@ -838,10 +860,27 @@ impl ProjectWindow {
             .into()
     }
 
-    /// The commands menu bar (the M4 subset of upstream AppCommands): one
-    /// "View" root over the pane/layout/viewer/schematic commands.
+    /// The commands menu bar (the M4 subset of upstream AppCommands): a
+    /// "File" root bubbling the app-level commands, and a "View" root over
+    /// the pane/layout/viewer/schematic commands.
     fn view_menu(&self) -> Element<'static, Message> {
         use cosmic::widget::menu::{Item, items, root};
+
+        let file_entries = vec![
+            Item::Button("New Project…", None, AppRequest::NewProject),
+            Item::Button("Open Project…", None, AppRequest::OpenProject),
+            Item::Button("Open Recent…", None, AppRequest::OpenRecent),
+            Item::Divider,
+            Item::Button("Welcome Window", None, AppRequest::Welcome),
+        ];
+        let file_binds = std::collections::HashMap::new();
+        let file_tree = cosmic::widget::menu::Tree::with_children(
+            {
+                let root_button: Element<'_, Message> = root("File").into();
+                root_button
+            },
+            items(&file_binds, file_entries),
+        );
 
         let entries = vec![
             Item::Button(
@@ -892,7 +931,7 @@ impl ProjectWindow {
         let root_button: Element<'_, Message> = root("View").into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
-        cosmic::widget::menu::bar(vec![tree]).into()
+        cosmic::widget::menu::bar(vec![file_tree, tree]).into()
     }
 }
 
