@@ -99,29 +99,35 @@ From M2's agent-lifecycle work (task 9 wrap):
 
 ## M5 (python environment)
 
-- `session.rs`'s `PYTHON_UNVERIFIED` display text must adopt upstream's
+- ~~`session.rs`'s `PYTHON_UNVERIFIED` display text must adopt upstream's
   exact fallback: `"build123d, matplotlib, numpy"` when the verified
   package list is empty (AgentSession.swift:206,
   `PythonEnvironment.shared.versions.isEmpty ? "build123d, matplotlib, numpy"`)
-  — not the current "python interpreter not verified yet" wording.
-- Intentional classifier divergences to PRESERVE when porting
+  — not the current "python interpreter not verified yet" wording.~~
+  (landed M5 — T4: session.rs builds the line through
+  `python::env::versions_display()`, whose fallback `VERSIONS_FALLBACK`
+  pins the upstream text; engine/tests/python_env.rs gates it)
+- ~~Intentional classifier divergences to PRESERVE when porting
   ModelBuilder-side summaries (all supersets of upstream, each with a
-  port-side test):
-  - `live_preview` also previews MultiEdit: it scans `content` OR
+  port-side test):~~ (landed M5 — T4: all three preserved with tests in
+  engine/tests/tool_summary.rs)
+  - ~~`live_preview` also previews MultiEdit: it scans `content` OR
     `new_string`, where upstream's `livePreview` keys off the tool name
-    (Write → `content`, Edit → `new_string`, MultiEdit → none).
-  - `read_title` matches `references/` as a path SEGMENT
+    (Write → `content`, Edit → `new_string`, MultiEdit → none).~~
+  - ~~`read_title` matches `references/` as a path SEGMENT
     (`starts_with("references/") || contains("/references/")`); upstream
-    is prefix-only (`hasPrefix("references/")`).
-  - `short_command` with an empty root strips ANY leading `cd … &&`
+    is prefix-only (`hasPrefix("references/")`).~~
+  - ~~`short_command` with an empty root strips ANY leading `cd … &&`
     (upstream requires the cd target to be the project root), so a
-    foreign-cd command classifies one class up from upstream.
-- `EngineCommand::Shutdown`'s `reap_orphans` empties the registry
+    foreign-cd command classifies one class up from upstream.~~
+- ~~`EngineCommand::Shutdown`'s `reap_orphans` empties the registry
   unconditionally: a just-cancelled child of THIS process is not signalled
   (only ppid-1 entries are) but its listing is cleared, so if the app dies
   before the child does, a later launch's reap no longer knows the pid —
   consider excluding still-live children from the clearing pass when M5
-  touches process teardown.
+  touches process teardown.~~ (landed M5 — T4: `reap_orphans_at` keeps
+  still-live non-orphaned entries listed; engine/tests/processes.rs's
+  `reap_keeps_live_children_listed` gates it)
 
 ## M3 (viewer productization)
 

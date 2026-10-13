@@ -1,7 +1,10 @@
-//! Modal sheets: the FULL AgentMissingSheet port (Agent/AgentMissingSheet.swift)
-//! and the first-run SetupSheet (App/SetupSheet.swift + PrintPreferences'
-//! section). State machines are plain data the app layer folds messages
-//! into; the views render them.
+//! Modal sheets: the FULL AgentMissingSheet port (Agent/AgentMissingSheet.swift),
+//! the first-run SetupSheet (App/SetupSheet.swift + PrintPreferences'
+//! section), and the PythonSetupSheet port (Python/PythonSetupSheet.swift)
+//! with the sheet-side half of PythonEnvironment's state machine — the
+//! event-to-state reduction the engine's check/install drivers feed.
+//! State machines are plain data the app layer folds messages into; the
+//! views render them.
 //!
 //! The AgentMissingSheet's custom-path field writes the ENGINE settings
 //! (`settings.claude_path`) — the single-writer law's one sanctioned path:
@@ -10,9 +13,10 @@
 //!
 //! Cosmetic port notes: upstream's `CodeBlock` and pickers become a mono
 //! block with a copy button and radio-style option lists (no nested popup
-//! inside a modal). User-visible strings follow the landed modules'
-//! convention: plain English values, each named for its en/main.ftl key,
-//! pending the repo-wide `fl!()` swap.
+//! inside a modal); the PythonSetupSheet's DisclosureGroup becomes a
+//! toggle button over the mono log. User-visible strings follow the
+//! landed modules' convention: plain English values, each named for its
+//! en/main.ftl key, pending the repo-wide `fl!()` swap.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,6 +28,7 @@ use cosmic::iced::widget::text::Wrapping;
 use cosmic::widget::{Column, Row, Space, button, container, text_input};
 use cosmic::{Element, Task};
 use engine::agent::locator::find_executable;
+use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
 use crate::activity::ENGINE_NAME;
@@ -327,6 +332,260 @@ fn option_list<'a>(
         );
     }
     list.into()
+}
+
+// ─── python setup sheet ─────────────────────────────────────────────────────
+
+/// EN catalog `installazione-componenti` (PythonSetupSheet.swift:15).
+pub const PYTHON_SETUP_HEADER: &str = "Installing Components";
+/// EN catalog
+/// `cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-…`
+/// (PythonSetupSheet.swift:17).
+pub const PYTHON_SETUP_DESCRIPTION: &str = "CAD Studio uses a dedicated Python environment with build123d, matplotlib and numpy to generate models and technical drawings. The installation downloads about 200 MB.";
+/// EN catalog `mostra-dettagli` (the disclosure's label, :37).
+pub const PYTHON_SHOW_DETAILS: &str = "Show Details";
+/// EN catalog `fine` (the ready state's button, :65).
+pub const PYTHON_DONE: &str = "Done";
+/// EN catalog `pi-tardi` (:73).
+pub const PYTHON_LATER: &str = "Later";
+/// EN catalog `installa` (:77).
+pub const PYTHON_INSTALL: &str = "Install";
+/// EN catalog `installazione-in-corso` (the disabled busy button, :70).
+pub const PYTHON_INSTALLING: &str = "Installing…";
+
+/// The head's app icon, by app id (upstream shows NSApp.applicationIconImage;
+/// the freedesktop lookup resolves once the app ships its icon — libcosmic's
+/// own About-page convention). Keep in sync with `CadStudio::APP_ID`.
+const PYTHON_SHEET_ICON: &str = "net.brownhouse.CadStudio";
+
+/// PythonSetupSheet messages. The driver kicks are the shell's: it acts on
+/// `Install` (reinstall through the engine seams) and folds `Event`s into
+/// the state as they arrive.
+#[derive(Debug, Clone)]
+pub enum PythonMessage {
+    /// "Fine"/"Più tardi": `isSetupSheetPresented = false` — ignored while
+    /// an install runs (upstream `interactiveDismissDisabled`).
+    Close,
+    /// "Installa": reinstall (the button's action, PythonSetupSheet.swift:78).
+    Install,
+    /// The "Mostra dettagli" disclosure.
+    ToggleLog,
+    /// One driver event, in arrival order.
+    Event(EnvEvent),
+}
+
+/// The sheet-side environment state (upstream `PythonEnvironment`'s
+/// observed fields): the reduced [`EnvState`], the appended log, and the
+/// progress bar's value + step label. The drivers emit [`EnvEvent`]s; this
+/// reducer is the ONLY writer of the state a Ready terminal leaves behind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupSheetState {
+    pub state: EnvState,
+    pub log: String,
+    pub progress: f64,
+    pub step: String,
+}
+
+impl SetupSheetState {
+    pub fn new() -> Self {
+        Self {
+            state: EnvState::Unknown,
+            log: String::new(),
+            progress: 0.0,
+            step: String::new(),
+        }
+    }
+
+    /// Fold one driver event (upstream's appendLog/advance/state writes):
+    /// a log line appends with its newline, a progress milestone sets the
+    /// bar and the step together, and a terminal sets the state — `Ok`
+    /// maps to `Ready`, and the typed failures split `Missing` (its own
+    /// state, the presentation gate upstream reads) from the
+    /// message-carrying `CheckFailed`/`InstallFailed`.
+    pub fn apply(&mut self, event: &EnvEvent) {
+        match event {
+            EnvEvent::Log(line) => {
+                self.log.push_str(line);
+                self.log.push('\n');
+            }
+            EnvEvent::Progress { value, step } => {
+                self.progress = *value;
+                self.step = step.clone();
+            }
+            EnvEvent::Finished(Ok(ready)) => {
+                self.state = EnvState::Ready {
+                    build123d_version: ready.build123d_version.clone(),
+                };
+            }
+            EnvEvent::Finished(Err(EnvFailure::Missing)) => self.state = EnvState::Missing,
+            EnvEvent::Finished(Err(
+                EnvFailure::CheckFailed(message) | EnvFailure::InstallFailed(message),
+            )) => {
+                self.state = EnvState::Failed(message.clone());
+            }
+        }
+    }
+
+    /// Enter `Checking` — the app's own kick of `check` (the drivers never
+    /// emit this; upstream `check()` sets `.checking` first thing,
+    /// PythonEnvironment.swift:35). The log is kept: a check adds nothing
+    /// to it, and a retry after a failed install should not lose the run.
+    pub fn begin_checking(&mut self) {
+        self.state = EnvState::Checking;
+    }
+
+    /// Enter `Installing` with the previous run cleared (upstream
+    /// install()'s `state = .installing; log = ""; progress = 0`,
+    /// PythonEnvironment.swift:56-58) — a failed run's log and bar never
+    /// bleed into the retry.
+    pub fn begin_installing(&mut self) {
+        self.state = EnvState::Installing;
+        self.log.clear();
+        self.progress = 0.0;
+        self.step.clear();
+    }
+}
+
+impl Default for SetupSheetState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The sheet's button machine (PythonSetupSheet.swift:61-82): Done when
+/// ready, one disabled Installing… while a check or install runs, Later +
+/// Install in every other state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupButtons {
+    Done,
+    Busy,
+    LaterAndInstall,
+}
+
+/// Classify a state's button row (PythonSetupSheet.swift:63-81).
+pub fn buttons(state: &EnvState) -> SetupButtons {
+    match state {
+        EnvState::Ready { .. } => SetupButtons::Done,
+        EnvState::Installing | EnvState::Checking => SetupButtons::Busy,
+        EnvState::Unknown | EnvState::Missing | EnvState::Failed(_) => {
+            SetupButtons::LaterAndInstall
+        }
+    }
+}
+
+/// Whether the sheet may be dismissed: blocked while an install runs ONLY
+/// (upstream `interactiveDismissDisabled(python.isInstalling)`,
+/// PythonSetupSheet.swift:58 — a check does NOT block dismissal).
+pub fn dismiss_blocked(state: &EnvState) -> bool {
+    matches!(state, EnvState::Installing)
+}
+
+/// The PythonSetupSheet's whole state: the reduced environment state plus
+/// the sheet's own log disclosure (upstream `@State private var showsLog`)
+/// and presentation flag (upstream `PythonEnvironment.isSetupSheetPresented`
+/// — the state outlives the sheet, so a check runs at startup whether or
+/// not the sheet is up).
+#[derive(Debug, Default)]
+pub struct PythonSetup {
+    pub state: SetupSheetState,
+    pub shows_log: bool,
+    pub presented: bool,
+}
+
+/// PythonSetupSheet (PythonSetupSheet.swift:7-59): the app-icon head with
+/// the corpus description, the progress bar + step while an install runs
+/// (or the bar already moved), the failure line, the "Show Details"
+/// disclosure over the monospaced log, and the state-driven button row.
+/// Width 520, padding 20.
+pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
+    let head = Row::new()
+        .spacing(14)
+        .push(icon(PYTHON_SHEET_ICON, 64))
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(bold(PYTHON_SETUP_HEADER.to_string(), 18.0))
+                .push(body(PYTHON_SETUP_DESCRIPTION.to_string()).class(secondary_text())),
+        );
+    let state = &sheet.state;
+    let mut stack = Column::new().spacing(14).push(head);
+    // the bar shows while installing, or once any progress moved (a failed
+    // run keeps its last position — upstream's same condition, :23)
+    let installing = matches!(state.state, EnvState::Installing);
+    if installing || state.progress > 0.0 {
+        stack = stack.push(
+            Column::new()
+                .spacing(4)
+                .push(cosmic::iced::widget::progress_bar(
+                    0.0..=1.0,
+                    state.progress as f32,
+                ))
+                .push(body(state.step.clone()).class(secondary_text())),
+        );
+    }
+    if let EnvState::Failed(message) = &state.state {
+        stack = stack.push(
+            Row::new()
+                .spacing(8)
+                .push(icon("dialog-error", 18))
+                .push(body(message.clone()).class(error_text())),
+        );
+    }
+    // the disclosure (upstream DisclosureGroup): the label toggles the
+    // mono log's visibility and stays "Show Details" either way
+    stack = stack.push(
+        button::text(PYTHON_SHOW_DETAILS.to_string())
+            .class(cosmic::theme::Button::Transparent)
+            .on_press(PythonMessage::ToggleLog),
+    );
+    if sheet.shows_log {
+        stack = stack.push(
+            container(
+                cosmic::widget::scrollable(
+                    cosmic::widget::text(state.log.clone())
+                        .font(cosmic::font::mono())
+                        .size(11)
+                        .wrapping(Wrapping::Glyph),
+                )
+                .height(180.0),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .class(subtle_block()),
+        );
+    }
+    let stack = stack.push(
+        Row::new()
+            .spacing(8)
+            .push(Space::new().width(Length::Fill))
+            .push(python_buttons(&state.state)),
+    );
+    container(stack).padding(20).width(520.0).into()
+}
+
+/// The button row for one state (PythonSetupSheet.swift:61-82): the busy
+/// button carries no press handler, matching upstream's `.disabled(true)`.
+fn python_buttons(state: &EnvState) -> Element<'static, PythonMessage> {
+    match buttons(state) {
+        SetupButtons::Done => button::text(PYTHON_DONE.to_string())
+            .class(cosmic::theme::Button::Suggested)
+            .on_press(PythonMessage::Close)
+            .into(),
+        SetupButtons::Busy => button::text(PYTHON_INSTALLING.to_string()).into(),
+        SetupButtons::LaterAndInstall => Row::new()
+            .spacing(8)
+            .push(
+                button::text(PYTHON_LATER.to_string())
+                    .class(cosmic::theme::Button::Standard)
+                    .on_press(PythonMessage::Close),
+            )
+            .push(
+                button::text(PYTHON_INSTALL.to_string())
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press(PythonMessage::Install),
+            )
+            .into(),
+    }
 }
 
 // ─── terminal launch ───────────────────────────────────────────────────────

@@ -262,6 +262,17 @@ impl ProjectWindow {
     /// bridge's message-stream task — the app maps it into this window's
     /// messages. Must run inside the tokio runtime cosmic runs on.
     pub fn new(root: PathBuf, settings: &Settings) -> (Self, CosmicTask<bridge::Message>) {
+        let (bridge, bridge_task) = Bridge::new(settings.clone(), root.clone());
+        (Self::with_bridge(root, settings, bridge), bridge_task)
+    }
+
+    /// [`ProjectWindow::new`] over an already-launched bridge — the
+    /// headless harness's seam: a cosmic Task's stream is private to the
+    /// iced runtime, so tests launch through [`Bridge::launch`] (whose
+    /// receiver they can tap) and fold the messages by hand exactly as the
+    /// app maps them; the window then reads the same bridge's pipeline the
+    /// live app reads.
+    pub fn with_bridge(root: PathBuf, settings: &Settings, bridge: Bridge) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let _ = store::prepare(&root);
         let name = root
@@ -280,8 +291,6 @@ impl ProjectWindow {
         let output_dir = root.join("output");
         let manifest = Manifest::load(&output_dir.join("manifest.json")).ok();
         let files = drawing_pages(&output_dir);
-
-        let (bridge, bridge_task) = Bridge::new(settings.clone(), root.clone());
 
         // The shell's own output watch: schematic reloads + missing-output
         // recomputes (the viewer pane's watch serves the 3D pane alone).
@@ -302,42 +311,39 @@ impl ProjectWindow {
                 handle
             });
 
-        (
-            ProjectWindow {
-                name,
-                settings_path: engine::settings::settings_path(),
-                metadata,
-                layout,
-                chat_visible,
-                grid,
-                size: DEFAULT_SIZE,
-                chat: ChatState::new(store::load_chat(&root).unwrap_or_default()),
-                chat_pane: ChatPane::new(),
-                viewer: ViewerPane::new(
-                    &root,
-                    settings.measurement_unit,
-                    settings.printer_model.clone(),
-                ),
-                schematic: SchematicPane::new(&files, manifest.as_ref()),
-                bridge,
-                queue: Vec::new(),
-                queue_paused: false,
-                activity: Activity::Idle,
-                work_started_at: None,
-                missing_outputs: activity::missing_output_files(&output_dir),
-                shown_issues: None,
-                focus_flash: None,
-                last_size: Arc::new(Mutex::new(Size::default())),
-                watch,
-                events,
-                relay: Arc::new(OutputRelay {
-                    id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    events: Mutex::new(Some(receiver)),
-                }),
-                root,
-            },
-            bridge_task,
-        )
+        ProjectWindow {
+            name,
+            settings_path: engine::settings::settings_path(),
+            metadata,
+            layout,
+            chat_visible,
+            grid,
+            size: DEFAULT_SIZE,
+            chat: ChatState::new(store::load_chat(&root).unwrap_or_default()),
+            chat_pane: ChatPane::new(),
+            viewer: ViewerPane::new(
+                &root,
+                settings.measurement_unit,
+                settings.printer_model.clone(),
+            ),
+            schematic: SchematicPane::new(&files, manifest.as_ref()),
+            bridge,
+            queue: Vec::new(),
+            queue_paused: false,
+            activity: Activity::Idle,
+            work_started_at: None,
+            missing_outputs: activity::missing_output_files(&output_dir),
+            shown_issues: None,
+            focus_flash: None,
+            last_size: Arc::new(Mutex::new(Size::default())),
+            watch,
+            events,
+            relay: Arc::new(OutputRelay {
+                id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                events: Mutex::new(Some(receiver)),
+            }),
+            root,
+        }
     }
 
     /// Whether a turn is running (upstream `isBusy`).
@@ -381,6 +387,15 @@ impl ProjectWindow {
         self.missing_outputs = activity::missing_output_files(&self.output_dir());
     }
 
+    /// Reload the transcript fresh from chat.json, keeping the input
+    /// bar's draft (the load-fresh law — the driver's bookkeeping saved
+    /// rows behind the window's back; row ids reconcile to the disk
+    /// truth restore and reopen load).
+    fn reload_chat_rows(&mut self) {
+        let rows = store::load_chat(&self.root).unwrap_or_default();
+        self.chat.reload_rows(rows);
+    }
+
     /// Apply a structure change (preset switch, pane move): the grid
     /// rebuilds and both the project manifest and the global default
     /// layout persist eagerly (upstream `setLayout` → `persistLayout`).
@@ -410,6 +425,15 @@ impl ProjectWindow {
                 parameters_view::Message::Compare(number),
             )) => {
                 self.bridge.compare_with(number);
+                Task::none()
+            }
+            // the slider/field commit the pane emits (the pane's local
+            // half — value snap, draft clear — already ran): the bridge
+            // rewrites model.py and starts the build, and the working
+            // activity crosses to the window the moment it does
+            Message::Viewer(crate::viewer_pane::Message::ParameterCommit(name, value)) => {
+                let _ = self.bridge.set_parameter(&name, value);
+                self.set_activity(self.bridge.activity().into());
                 Task::none()
             }
             Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
@@ -539,13 +563,25 @@ impl ProjectWindow {
             // the app layer runs the attach portal and feeds the result
             // back as AttachChosen
             chat_view::Message::Attach => {}
-            // a system row's Open Terminal action (MessageView.swift:71-77);
-            // AskClaudeToFix has no build errors to read until M5 and
-            // ConfigureClaude is the M8 settings window
+            // a system row's Open Terminal action (MessageView.swift:71-77)
             chat_view::Message::RowAction(_, Action::OpenTerminal) => {
                 crate::app::launch_terminal();
             }
-            chat_view::Message::RowAction(_, _) => {}
+            // the build-failure row's action: the row's detail (the build
+            // output carrying the traceback) goes back to the agent as an
+            // ordinary turn (upstream askClaudeToFix, Project.swift:258-260)
+            chat_view::Message::RowAction(id, Action::AskClaudeToFix) => {
+                let traceback = self
+                    .chat
+                    .messages
+                    .iter()
+                    .find(|row| row.id == *id)
+                    .and_then(|row| row.detail.clone())
+                    .unwrap_or_default();
+                let _ = self.bridge.ask_agent_to_fix(&traceback);
+            }
+            // ConfigureClaude is the M8 settings window
+            chat_view::Message::RowAction(_, Action::ConfigureClaude) => {}
             // a markdown link: the system opener (upstream NSWorkspace.open)
             chat_view::Message::OpenUrl(url) => {
                 let url = url.clone();
@@ -631,23 +667,30 @@ impl ProjectWindow {
                 self.queue_paused = paused;
                 Task::none()
             }
-            // The build pipeline's M5 wiring (outputs reload, version rows,
-            // sheet presentation) is the vertical slice's to own; these arms
-            // keep the shell compiling over the union with the pause/activity
-            // semantics that already hold. Carry-forward (T7): when the
-            // slice wires these arms, ParameterCommitted and BuildFinished
-            // are also the pane's sync_parameters triggers — the restore
-            // path already syncs.
+            // The build pipeline's window surface: the driver's bookkeeping
+            // (version summary rows, the build-failure row) lands on disk
+            // behind the window's back, so both terminal arms reload the
+            // transcript fresh — keeping the input bar's draft — and the
+            // activity folds from the pipeline, the same source that
+            // classified the outcome. `ParameterCommitted`/`BuildFinished`
+            // as overlay sync_parameters triggers remain the F2b
+            // carry-forward (M6 T10); restore already syncs.
             bridge::Message::ParameterCommitted { .. } => Task::none(),
+            // upstream's build is buffered (ModelBuilder.build returns one
+            // result, no per-line surface) — the events exist for the drain
             bridge::Message::BuildEventBridge(_) => Task::none(),
             bridge::Message::BuildFinished { .. } => {
                 self.refresh_missing_outputs();
-                Task::none()
+                self.reload_chat_rows();
+                self.set_activity(self.bridge.activity().into());
+                ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
                 self.refresh_missing_outputs();
                 self.save_metadata();
-                Task::none()
+                self.reload_chat_rows();
+                self.set_activity(self.bridge.activity().into());
+                ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
                 CosmicTask::future(async move { Message::PresentSetupSheet })
@@ -722,8 +765,11 @@ impl ProjectWindow {
             Command::Build => {
                 // the menu entry is disabled while busy (upstream's guard);
                 // the shortcut can still land, where the bridge's own busy
-                // refusal is the guard
+                // refusal is the guard. The working (or refused-guard
+                // failed) activity crosses to the window immediately — the
+                // stop button and the elapsed timer ride it.
                 let _ = self.bridge.start_build(None);
+                self.set_activity(self.bridge.activity().into());
                 Task::none()
             }
             Command::Reveal => {
@@ -943,7 +989,7 @@ impl ProjectWindow {
         }
         row = row.push(Space::new().width(Length::Fill));
 
-        let issues = activity::issues(None, &self.missing_outputs);
+        let issues = activity::issues(self.bridge.build_error().as_deref(), &self.missing_outputs);
         for kind in [IssueKind::Error, IssueKind::Warning] {
             let matching: Vec<_> = issues.iter().filter(|i| i.kind == kind).collect();
             if matching.is_empty() {
@@ -978,7 +1024,7 @@ impl ProjectWindow {
 
     /// The issue list popover (upstream `IssueList`).
     fn view_issue_list(&self, kind: IssueKind) -> Element<'_, Message> {
-        let issues = activity::issues(None, &self.missing_outputs);
+        let issues = activity::issues(self.bridge.build_error().as_deref(), &self.missing_outputs);
         let mut list = Column::new()
             .spacing(8)
             .padding(12)

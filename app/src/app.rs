@@ -25,6 +25,9 @@ use cosmic::widget::{Column, container, popover, text};
 use cosmic::{Action, Application, Element};
 use engine::agent::locator::{self, AgentKind};
 use engine::project::store;
+use engine::python::env::{
+    EnvEvent, EnvHandle, EnvState, check, command_probe, reinstall, streaming_spawn, venv_dir,
+};
 use engine::settings::{Settings as EngineSettings, settings_path};
 
 use crate::recents::{self, Recents};
@@ -55,6 +58,9 @@ pub enum Message {
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
     SetupSheet(sheets::SetupMessage),
+    /// The python setup sheet (PythonSetupSheet + the driver events it
+    /// reduces).
+    PythonSheet(sheets::PythonMessage),
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),
     /// A window's header close button: libcosmic's `on_close` is
@@ -91,6 +97,10 @@ pub struct CadStudio {
     agent_missing: Option<sheets::AgentMissing>,
     /// The first-run setup sheet, when presented.
     setup: Option<sheets::Setup>,
+    /// The python environment state + its sheet (upstream
+    /// `PythonEnvironment.shared`: the state exists from launch, the sheet
+    /// presents on top of it).
+    python: sheets::PythonSetup,
 }
 
 impl Application for CadStudio {
@@ -110,7 +120,8 @@ impl Application for CadStudio {
 
     /// Startup (CADStudioApp.swift:37-54): reap any crash orphans and arm
     /// the SIGTERM handler BEFORE any window opens, load the settings and
-    /// the recents, decide the first-run sheet, and kick the agent locate.
+    /// the recents, decide the first-run sheet, and kick the agent locate
+    /// and the python check (:50-52 — the check runs before the locate).
     fn init(core: Core, _flags: ()) -> (Self, Task<Action<Message>>) {
         engine::processes::reap_orphans();
 
@@ -119,6 +130,10 @@ impl Application for CadStudio {
         let settings = EngineSettings::load(&settings_file).unwrap_or_default();
         let recents = Recents::load(config.clone());
         let setup = recents::needs_setup(&config).then(|| sheets::Setup::from_settings(&settings));
+        let mut python = sheets::PythonSetup::default();
+        // the sheet state the check reduces from — the drivers emit only
+        // their events, so Checking is the app's own preset
+        python.state.begin_checking();
 
         let app = CadStudio {
             windows: HashMap::from([(
@@ -134,13 +149,18 @@ impl Application for CadStudio {
             settings_file,
             agent_missing: None,
             setup,
+            python,
         };
 
         // locate the agent off the UI thread; a miss presents the sheet
         let locate = Task::future(locate_agent(app.settings.claude_path.clone()))
             .map(|found| Action::App(Message::AgentLocated(found)));
         let sigterm = Task::stream(sigterm_stream()).map(Action::App);
-        (app, Task::batch([locate, sigterm]))
+        // the startup python check: its terminal folds into the sheet
+        // state (a missing/failed venv presents the sheet once first-run
+        // setup is done)
+        let python_check = python_events(check(&venv_dir(), &streaming_spawn()));
+        (app, Task::batch([locate, sigterm, python_check]))
     }
 
     fn update(&mut self, message: Message) -> Task<Action<Message>> {
@@ -149,6 +169,7 @@ impl Application for CadStudio {
             Message::Project(id, msg) => self.update_project(id, msg),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
+            Message::PythonSheet(msg) => self.update_python_sheet(msg),
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
             Message::WindowClosed(id) => self.window_closed(id),
@@ -243,7 +264,12 @@ impl Application for CadStudio {
                 // `.toolbar { ProjectToolbar(project) }` + `.toolbar(removing: .title)`);
                 // decorating again would stack a second bar.
                 let body = project.view().map(move |m| Message::Project(id, m));
-                container(body)
+                // the app-level sheets present over project windows too
+                // (upstream attaches the python and agent-missing sheets to
+                // ProjectWindow, ProjectWindow.swift:59-68; the first-run
+                // sheet is welcome-only and can never be up here)
+                let with_sheet = self.apply_sheets(body);
+                container(with_sheet)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .class(cosmic::theme::Container::WindowBackground)
@@ -379,10 +405,11 @@ impl CadStudio {
             return self.close_window(id);
         }
         if matches!(msg, project::Message::PresentSetupSheet) {
-            // a python-readiness refusal presents the sheet over whatever
-            // window is up (the sheet lives at app level)
-            let settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
-            self.setup = Some(sheets::Setup::from_settings(&settings));
+            // a python-readiness refusal presents the setup sheet over
+            // whatever window is up, UNCONDITIONALLY (Project.swift:184-197
+            // set isSetupSheetPresented = true; the hasCompletedSetup gate
+            // belongs to the startup check's terminal only)
+            self.python.presented = true;
             return Task::none();
         }
         if let project::Message::App(request) = msg {
@@ -457,10 +484,81 @@ impl CadStudio {
             }
             let _ = recents::complete_setup(&self.config);
             self.setup = None;
+            // the first-run sheet coming down presents the python sheet
+            // whenever the environment is not ready yet
+            // (WelcomeWindow.swift:23's onDismiss)
+            if !matches!(self.python.state.state, EnvState::Ready { .. }) {
+                self.python.presented = true;
+            }
             return Task::none();
         }
         setup.update(&msg);
         Task::none()
+    }
+
+    /// The python setup sheet: the sheet-side halves of upstream's
+    /// PythonEnvironment (presentation, install kicks) over the pure
+    /// reducer in `sheets`.
+    fn update_python_sheet(&mut self, msg: sheets::PythonMessage) -> Task<Action<Message>> {
+        match msg {
+            // interactiveDismissDisabled(isInstalling): an install blocks
+            // dismissal, a check does not
+            sheets::PythonMessage::Close => {
+                if !sheets::dismiss_blocked(&self.python.state.state) {
+                    self.python.presented = false;
+                }
+            }
+            // the one Install button runs reinstall() under the
+            // not-installing guard (PythonEnvironment.install:55,
+            // PythonSetupSheet.swift:78) — the production seams drive it
+            sheets::PythonMessage::Install => {
+                if !matches!(self.python.state.state, EnvState::Installing) {
+                    self.python.state.begin_installing();
+                    self.sync_python_state();
+                    return python_events(reinstall(
+                        &venv_dir(),
+                        &streaming_spawn(),
+                        &command_probe(),
+                    ));
+                }
+            }
+            sheets::PythonMessage::ToggleLog => self.python.shows_log = !self.python.shows_log,
+            sheets::PythonMessage::Event(event) => {
+                // which driver spoke: only a check kick ever leaves
+                // Checking behind (installs leave Installing)
+                let from_check = matches!(self.python.state.state, EnvState::Checking);
+                let terminal = matches!(event, EnvEvent::Finished(_));
+                self.python.state.apply(&event);
+                self.sync_python_state();
+                // upstream check()'s presentation (PythonEnvironment.swift:38,
+                // 45): a failed or missing CHECK terminal presents the
+                // sheet, gated by hasCompletedSetup — the port's flag is
+                // the cosmic-config first-run key (the engine settings
+                // field of that name stays dead by the single-writer law,
+                // recents.rs)
+                if from_check
+                    && terminal
+                    && !matches!(self.python.state.state, EnvState::Ready { .. })
+                    && !recents::needs_setup(&self.config)
+                {
+                    self.python.presented = true;
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Push the python state into every open project's bridge (upstream's
+    /// `PythonEnvironment.shared` singleton: one environment, every
+    /// Project reads it; here each bridge holds a copy the app mirrors on
+    /// every change).
+    fn sync_python_state(&mut self) {
+        let state = self.python.state.state.clone();
+        for window in self.windows.values_mut() {
+            if let WindowKind::Project(project) = window {
+                project.bridge.set_python_state(state.clone());
+            }
+        }
     }
 
     /// Route an unconsumed key press: app-level shortcuts act globally,
@@ -519,6 +617,13 @@ impl CadStudio {
             ..Default::default()
         });
         self.windows.insert(id, WindowKind::Project(window));
+        // the window inherits the app-level python state (a check that
+        // finished before the window opened — upstream's shared singleton)
+        if let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) {
+            project
+                .bridge
+                .set_python_state(self.python.state.state.clone());
+        }
         self.recents.add(&root);
 
         let title = self.set_window_title(name, id);
@@ -596,11 +701,17 @@ impl CadStudio {
     }
 
     /// Wrap a window's body with the app-level sheets (first-run setup
-    /// first — it is dismiss-blocked upstream — then agent-missing).
+    /// first — it is dismiss-blocked upstream — then the python sheet,
+    /// then agent-missing; ProjectWindow.swift:59-68 stacks python over
+    /// agent-missing, and the first-run gate sits before both).
     fn apply_sheets<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {
         let mut pop = popover(body);
         if let Some(setup) = &self.setup {
             let sheet: Element<'_, Message> = sheets::view_setup(setup).map(Message::SetupSheet);
+            pop = pop.popup(sheet);
+        } else if self.python.presented {
+            let sheet: Element<'_, Message> =
+                sheets::view_python_setup(&self.python).map(Message::PythonSheet);
             pop = pop.popup(sheet);
         } else if let Some(sheet) = &self.agent_missing {
             let sheet: Element<'_, Message> =
@@ -683,6 +794,33 @@ async fn locate_agent(custom_path: Option<String>) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+/// Stream one python driver's events to the app as sheet messages — every
+/// [`EnvEvent`] in arrival order (the drain law), so the log and the
+/// progress bar move live through an install.
+fn python_events(handle: EnvHandle) -> Task<Action<Message>> {
+    use cosmic::iced::futures::SinkExt;
+    Task::stream(cosmic::iced::stream::channel(
+        16,
+        move |mut output: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            let EnvHandle { mut events } = handle;
+            while let Some(event) = events.recv().await {
+                // the terminal must land: a dropped Finished would leave
+                // the sheet stuck Installing, so it sends awaited
+                // (backpressure, the Sink trait) where the streaming body
+                // merely tries
+                let terminal = matches!(event, EnvEvent::Finished(_));
+                let message = Message::PythonSheet(sheets::PythonMessage::Event(event));
+                if terminal {
+                    let _ = output.send(message).await;
+                } else {
+                    let _ = output.try_send(message);
+                }
+            }
+        },
+    ))
+    .map(Action::App)
 }
 
 /// The SIGTERM watcher (CADStudioApp.swift:42-49's dispatch source).

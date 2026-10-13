@@ -38,5 +38,8 @@ for name in ("model.3mf", "model.stl", "model.step", "schematic.svg", "schematic
              "schematic.pdf", "manifest.json"):
     dst = out / name
     if not dst.exists():
-        shutil.copy2(src / name, dst)
+        # copyfile, not copy2: preserving the fixture's mtime would read
+        # as content older than an output watch and never emit a reload
+        # (fake_claude.py's copy_outputs carries the same comment)
+        shutil.copyfile(src / name, dst)
 sys.exit(0)
