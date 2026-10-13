@@ -579,6 +579,36 @@ fn ghost_identity(scene: &PartScene) -> u64 {
     h.finish()
 }
 
+/// The depth/stencil contract every unlit post-mesh pass shares — the
+/// grid/markers overlay pipeline and the compare ghost: depth-TESTED so
+/// the opaque mesh occludes these draws, depth-write OFF so they occlude
+/// nothing after them, stencil inert (Always/Keep — the mesh pass's
+/// winding parity stays untouched for whoever reads it next).
+fn overlay_depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth24PlusStencil8,
+        depth_write_enabled: false,
+        depth_compare: wgpu::CompareFunction::LessEqual,
+        stencil: wgpu::StencilState {
+            front: wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Always,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+            back: wgpu::StencilFaceState {
+                compare: wgpu::CompareFunction::Always,
+                fail_op: wgpu::StencilOperation::Keep,
+                depth_fail_op: wgpu::StencilOperation::Keep,
+                pass_op: wgpu::StencilOperation::Keep,
+            },
+            read_mask: 0xFF,
+            write_mask: 0xFF,
+        },
+        bias: Default::default(),
+    }
+}
+
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     cap_pipeline: wgpu::RenderPipeline,
@@ -1078,7 +1108,8 @@ impl MeshPipeline {
         });
         // Grid / bed / tripod overlay (facts #34/#37): unlit vertex colors,
         // alpha-blended, no culling. Depth-tested so the model occludes
-        // the overlay, but NO depth write — an overlay must not occlude.
+        // the overlay, but NO depth write — an overlay must not occlude
+        // ([`overlay_depth_stencil`]).
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grid.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
@@ -1122,28 +1153,7 @@ impl MeshPipeline {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
+            depth_stencil: Some(overlay_depth_stencil()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 mask: !0,
@@ -1198,28 +1208,7 @@ impl MeshPipeline {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
+            depth_stencil: Some(overlay_depth_stencil()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 mask: !0,
