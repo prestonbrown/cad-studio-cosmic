@@ -708,7 +708,7 @@ impl ProjectWindow {
                     self.queue_paused,
                 )
                 .map(Message::Chat),
-                PaneKind::Model3D => self.viewer.view_model_3d().map(Message::Viewer),
+                PaneKind::Model3D => self.viewer.view_model_3d(None).map(Message::Viewer),
                 PaneKind::Schematic => self.schematic.view().map(Message::Schematic),
             };
             // the focus command's one-second highlight (upstream
