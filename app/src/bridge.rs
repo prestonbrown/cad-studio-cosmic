@@ -174,6 +174,16 @@ impl Pipeline {
     fn python_ready(&self) -> bool {
         matches!(self.python_state, EnvState::Ready { .. })
     }
+
+    /// Upstream `send()`'s pre-task state (Project.swift:201-203): the stale
+    /// build error clears and the working activity opens. EVERY turn start
+    /// runs this — a handle-issued send, the 1 s auto-run, and a resume all
+    /// go through the same `send()` upstream, and the busy flag must not
+    /// care who started the turn.
+    fn begin_turn(&mut self) {
+        self.build_error = None;
+        self.activity = Activity::Working(WORKING.replace("%@", AGENT_NAME));
+    }
 }
 
 /// The manifest's parameters in model.py order — the panel list the bridge
@@ -368,10 +378,11 @@ impl Bridge {
                 let _ = self.out.unbounded_send(Message::PythonSheetRequested);
                 return Err(BuildRefusal::PythonNotReady);
             } else {
-                // upstream send() marks the working activity before the
-                // task exists; doing it here keeps the busy flag ahead of
-                // the driver's turn start
-                pipeline.activity = Activity::Working(WORKING.replace("%@", AGENT_NAME));
+                // the handle-side half of send()'s pre-task state: marking
+                // busy HERE keeps the flag ahead of the driver's turn start
+                // (the driver-side half lives in start_turn, which every
+                // turn-start path reaches)
+                pipeline.begin_turn();
                 pipeline.draft = None;
             }
         }
@@ -389,6 +400,14 @@ impl Bridge {
     pub fn set_parameter(&mut self, name: &str, value: f64) -> Result<(), BuildRefusal> {
         if self.pipeline().busy() {
             return Err(BuildRefusal::Busy);
+        }
+        // upstream's guard reads the script with `try?` (Project.swift:344):
+        // ANY read failure — missing, unreadable, any kind — returns
+        // silently before anything happens. The pre-read is what splits
+        // read from write failures downstream; the second read inside the
+        // engine helper is the price of not widening its error type.
+        if std::fs::read_to_string(self.root.join("model.py")).is_err() {
+            return Ok(());
         }
         match rewrite_parameter(&self.root, name, value) {
             Ok(rewrite) => {
@@ -412,9 +431,8 @@ impl Bridge {
                     Activity::Failed(PARAMETER_NOT_FOUND.replace("%@", name));
                 Ok(())
             }
-            // upstream's guard reads the script with `try?` — an unreadable
-            // model.py returns before anything happens
-            Err(ParameterError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // the read above succeeded, so an io error now is the WRITE
+            // failing — upstream's catch sets the failed activity
             Err(ParameterError::Io(err)) => {
                 self.pipeline().activity = Activity::Failed(err.to_string());
                 Ok(())
@@ -752,10 +770,13 @@ impl Drive {
 
     /// Start a turn (upstream `send`, Project.swift:192-208): append the user
     /// row, save, announce, and hand the request to the engine's lifecycle
-    /// dance. The transcript reloads from disk — the last turn's save is this
-    /// turn's base, exactly the crash-recovery shape `load_chat`'s
-    /// `unwrap_or_default` gives a fresh project.
+    /// dance — every turn-start path lands here (a direct send, the 1 s
+    /// auto-run, a resume), so this is where busy rises for turns the
+    /// handle never marked. The transcript reloads from disk — the last
+    /// turn's save is this turn's base, exactly the crash-recovery shape
+    /// `load_chat`'s `unwrap_or_default` gives a fresh project.
     fn start_turn(&mut self, session: &mut Session, send: QueuedSend) -> Phase {
+        self.pipeline().begin_turn();
         let mut transcript = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
         transcript.append(ChatMessage {
             id: Uuid::new_v4(),
@@ -1077,13 +1098,20 @@ impl Drive {
             attachments: Vec::new(),
         });
         let _ = store::save_chat(&self.root, &chat);
+        // the snapshot copies the whole output/ tree — run it on a local
+        // copy of the history so the shared cell's guard is not held across
+        // the file copies (the driver is this method's only caller, and the
+        // engine never touches the in-memory list, so nothing races the
+        // write-back)
+        let mut versions = self.pipeline().versions.clone();
         let recorded = versions::record(
             &self.root,
-            &mut self.pipeline().versions,
+            &mut versions,
             prompt,
             metadata.session_id.as_deref(),
             OffsetDateTime::now_utc(),
         );
+        self.pipeline().versions = versions;
         match recorded {
             Ok(version) => {
                 metadata.current_version = Some(version.number);
@@ -1281,20 +1309,23 @@ mod tests {
     /// A successful turn's tail records a version whose snapshot carries the
     /// session id the ENGINE wrote mid-turn, and the record's metadata save
     /// keeps it: project.json is loaded fresh at each record, never held
-    /// from launch.
+    /// from launch. The engine's write lands AFTER the driver exists (a
+    /// held-from-launch copy would have captured `session_id: None` and the
+    /// tail's save would revert it — that is the regression pinned here).
     #[tokio::test(flavor = "multi_thread")]
     async fn turn_tail_record_keeps_engine_session_id() {
         let root = std::env::temp_dir().join(format!("cad-bridge-rec-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("output")).unwrap();
-        // the "engine's" mid-turn write: a session id in project.json
-        let mut metadata = ProjectMetadata::new("test");
-        metadata.session_id = Some("engine-session".into());
-        store::save_metadata(&root, &metadata).unwrap();
-        // ...and every expected output on disk, so the tail records
+        // every expected output on disk, so the tail records
         for name in engine::project::outputs::expected_outputs() {
             std::fs::write(root.join("output").join(name), b"x").unwrap();
         }
         let (mut drive, _cmd_tx, mut messages) = harness(&root);
+        // the "engine's" mid-turn write: a session id in project.json,
+        // BETWEEN the driver's construction and the tail's save
+        let mut metadata = ProjectMetadata::new("test");
+        metadata.session_id = Some("engine-session".into());
+        store::save_metadata(&root, &metadata).unwrap();
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<EngineEvent>(4);
         ev_tx

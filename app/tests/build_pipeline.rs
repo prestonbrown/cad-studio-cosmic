@@ -3,9 +3,10 @@
 //! gates split by path (turn vs build). No network; the interpreter is
 //! the fake_python.py wrapper, the agent (one test) is fake_claude.py.
 
-use app::bridge::{Bridge, BuildRefusal, Message};
+use app::bridge::{Activity, Bridge, BuildRefusal, Message};
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::channel::mpsc::UnboundedReceiver;
+use engine::agent::session::EngineEvent;
 use engine::project::store::{Role, load_chat, load_metadata};
 use engine::settings::Settings;
 use std::path::PathBuf;
@@ -24,6 +25,9 @@ fn fake_python() -> PathBuf {
 fn fake_agent() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent/fake_claude.py")
 }
+fn fixture_fake(p: &str) -> PathBuf {
+    fake_agent().parent().unwrap().join(p)
+}
 fn golden_fixtures() -> PathBuf {
     // BLOCKER 1: the build123d outputs live in fixtures/golden —
     // fixtures/upstream holds only the prompt + xcstrings.
@@ -39,6 +43,40 @@ fn project() -> PathBuf {
     .unwrap();
     std::fs::write(root.join("model.py"), "wall = 2\nheight = 10\n").unwrap();
     root
+}
+
+/// A directory-mode scenario: run n replays `sources[n-1]` (M4
+/// bridge_e2e.rs's scenario_dir, inlined for this suite's binary).
+fn scenario_dir(sources: &[&str]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("cad-pipe-scenario-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (n, source) in sources.iter().enumerate() {
+        std::fs::copy(fixture_fake(source), dir.join(format!("{}.jsonl", n + 1))).unwrap();
+    }
+    dir
+}
+
+/// The tool-use scenario parked mid-tool (M4 bridge_e2e.rs's
+/// scenario_dir_mid_tool): the fake sleeps 5 s after the tool rows open,
+/// before any tool result arrives — a deterministic window a busy-guard
+/// assert can land inside.
+fn parked_tool_use() -> String {
+    let original = std::fs::read_to_string(fixture_fake("scenarios/tool-use.jsonl")).unwrap();
+    let mut parked = String::new();
+    let mut slept = false;
+    for line in original.lines() {
+        if !slept && line.starts_with("{\"type\":\"user\"") {
+            parked.push_str("#sleep 5000\n");
+            slept = true;
+        }
+        parked.push_str(line);
+        parked.push('\n');
+    }
+    assert!(
+        slept,
+        "the tool-use scenario has a tool result line to park before"
+    );
+    parked
 }
 
 /// Drains bridge messages until `pred`, bounded (5 s) — never a fixed
@@ -310,4 +348,111 @@ fn parameter_list_refreshes_from_manifest_in_model_py_order() {
         params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
         ["wall", "height"]
     );
+}
+
+/// Review fix-round pin (finding 1a): the 1 s auto-run starts its turn
+/// DRIVER-side — busy must cover a queue-started turn exactly like a
+/// handle-issued send (upstream sendNextQueued → send sets
+/// activity = .working, Project.swift:302-306 → 203).
+#[tokio::test]
+async fn set_parameter_refused_busy_during_auto_run_turn() {
+    let _guard = ENV_LOCK.lock().await;
+    let root = project();
+    let scenario = scenario_dir(&["scenarios/pong.jsonl"]);
+    std::fs::write(scenario.join("2.jsonl"), parked_tool_use()).unwrap();
+    // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+        std::env::set_var("CAD_FAKE_SCENARIO", scenario);
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+    }
+    let (mut bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(Settings::default(), root.clone());
+    bridge.mark_python_ready_for_test();
+    bridge.enqueue("first".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap(); // queues → auto-runs
+    // the second TurnStarted is the AUTO-RUN path's start
+    run_until(
+        &mut messages,
+        |m| matches!(m, Message::TurnStarted { prompt, .. } if prompt == "second"),
+    )
+    .await;
+    // a tool row open in the parked turn: the turn is indisputably running
+    run_until(&mut messages, |m| {
+        matches!(m, Message::Event(EngineEvent::ToolStarted { .. }))
+    })
+    .await;
+    assert_eq!(bridge.set_parameter("wall", 3.0), Err(BuildRefusal::Busy));
+    bridge.cancel(); // end the parked turn within the test's bounds
+    run_until(&mut messages, |m| {
+        matches!(m, Message::Event(EngineEvent::TurnFinished(_)))
+    })
+    .await;
+    unsafe {
+        std::env::remove_var("CAD_FAKE_SCENARIO");
+        std::env::remove_var("CAD_TEST_CLAUDE");
+        std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+    }
+}
+
+/// Review fix-round pin (finding 1b): the resume path (`resume_queue`,
+/// upstream sendQueuedNow → sendNextQueued → send) raises busy the same
+/// way — a build issued during a resumed turn refuses.
+#[tokio::test]
+async fn start_build_refused_busy_during_resumed_turn() {
+    let _guard = ENV_LOCK.lock().await;
+    let root = project();
+    // run 1 fails so the queue pauses; the resume starts run 2 parked
+    let scenario = scenario_dir(&["scenarios/exit-code-failure.jsonl"]);
+    std::fs::write(scenario.join("2.jsonl"), parked_tool_use()).unwrap();
+    // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+        std::env::set_var("CAD_FAKE_SCENARIO", scenario);
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+    }
+    let (mut bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(Settings::default(), root.clone());
+    bridge.mark_python_ready_for_test();
+    bridge.enqueue("first".into(), Vec::new()).unwrap();
+    bridge.enqueue("second".into(), Vec::new()).unwrap();
+    // the failed first turn pauses the queue — second waits for the resume
+    run_until(&mut messages, |m| {
+        matches!(m, Message::Event(EngineEvent::TurnFinished(_)))
+    })
+    .await;
+    bridge.resume_queue();
+    run_until(
+        &mut messages,
+        |m| matches!(m, Message::TurnStarted { prompt, .. } if prompt == "second"),
+    )
+    .await;
+    run_until(&mut messages, |m| {
+        matches!(m, Message::Event(EngineEvent::ToolStarted { .. }))
+    })
+    .await;
+    assert_eq!(bridge.start_build(None), Err(BuildRefusal::Busy));
+    bridge.cancel();
+    run_until(&mut messages, |m| {
+        matches!(m, Message::Event(EngineEvent::TurnFinished(_)))
+    })
+    .await;
+    unsafe {
+        std::env::remove_var("CAD_FAKE_SCENARIO");
+        std::env::remove_var("CAD_TEST_CLAUDE");
+        std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+    }
+}
+
+/// Review fix-round pin (finding 3): upstream's `try? String(contentsOf:)`
+/// guard (Project.swift:344) — ANY read failure of model.py returns
+/// silently, before anything happens: no rewrite, no failed activity.
+#[tokio::test]
+async fn set_parameter_with_unreadable_script_returns_silently() {
+    let root = project();
+    std::fs::remove_file(root.join("model.py")).unwrap();
+    let (mut bridge, _messages) =
+        Bridge::with_interpreter(fake_python()).launch(Settings::default(), root.clone());
+    assert_eq!(bridge.set_parameter("wall", 3.0), Ok(()));
+    assert_eq!(bridge.activity(), Activity::Idle);
 }
