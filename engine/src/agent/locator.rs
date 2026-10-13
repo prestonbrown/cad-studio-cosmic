@@ -86,6 +86,31 @@ pub fn find_agent(kind: AgentKind, custom_path: Option<&str>) -> Option<AgentPat
         .find_map(|c| validate(&c, &env).map(|version| AgentPath { path: c, version }))
 }
 
+/// The directories executable discovery searches: the env's PATH dirs in
+/// order, with `~/.local/bin` appended when absent (the fallback dir
+/// upstream's uv install relies on that a default PATH may lack).
+pub(crate) fn executable_dirs(env: &HashMap<String, String>) -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = env
+        .get("PATH")
+        .map(|path| path.split(':').map(PathBuf::from).collect())
+        .unwrap_or_default();
+    let local = Path::new(&home).join(".local/bin");
+    if !dirs.contains(&local) {
+        dirs.push(local);
+    }
+    dirs
+}
+
+/// First searchable directory holding an executable file `name` (upstream
+/// `ShellEnvironment.locate`, which PATH-searches without validating).
+pub fn find_executable(name: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
+    executable_dirs(env)
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
 /// The environment agents are spawned with: the current environment with
 /// `PATH` replaced by the login-shell PATH plus the fallback dirs appended
 /// (ShellEnvironment.swift).
@@ -153,7 +178,7 @@ fn login_path_output() -> Option<String> {
 }
 
 /// `FileManager.isExecutableFile`: a regular file with an execute bit.
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(path) {
         Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,

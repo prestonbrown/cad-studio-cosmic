@@ -562,13 +562,14 @@ fn clear_session_id(root: &Path) {
     }
 }
 
-/// The app-wide venv interpreter, `~/.local/share/cad-studio/venv/bin/
-/// python` (spec §2/§6) — the venv M5 creates there. `{{PYTHON}}` and the
-/// restricted-bash entry name it from day one; its existence is M5's to
-/// establish, so nothing here requires it to be present.
+/// The app-wide venv interpreter, routed through python::env's canonical
+/// data-dir helper so the session can never name a different venv than the
+/// one M5 installs: `~/.local/share/cad-studio/venv/bin/python` on Linux
+/// (spec §2/§6). `{{PYTHON}}` and the restricted-bash entry name it from
+/// day one; its existence is M5's to establish, so nothing here requires
+/// it to be present.
 fn app_venv_python() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/share/cad-studio/venv/bin/python")
+    crate::python::env::interpreter_path(&crate::python::env::venv_dir())
 }
 
 /// The system-prompt substitutions the session can derive on its own. The
