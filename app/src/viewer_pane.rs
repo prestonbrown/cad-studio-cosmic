@@ -41,6 +41,18 @@
 //! versions, compare selection — at view time via
 //! [`parameters_view::OverlayContext`].
 //!
+//! M6 measure (ModelPane's `onPick` flow): while the tool measures, a
+//! primary-button CLICK (release under 4 px of travel) casts
+//! [`camera::pick_ray`] at the release cursor and runs
+//! [`picking::first_hit`] on a named std thread — click-driven and
+//! off-thread per spec §5, never the cosmic executor — with the answer
+//! returning as [`Message::Picked`] through the pane's relay, the same
+//! channel reloads and resizes ride. One pick is in flight at a time; a
+//! click during a pending pick is dropped. The landed point joins
+//! `tools.measure_points`, restages the orange markers
+//! ([`ViewerPane::rebuild_markers`], the single writer), and Esc clears
+//! the measurement (ModelPane.swift:54-58 — ignored otherwise).
+//!
 //! M4 status: this module is the pane model + view; the shell task wires it
 //! into a window (pane focus commands, i18n via the extracted ftl keys all
 //! land there). User-visible strings are plain English pending that wiring,
@@ -84,8 +96,10 @@ use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
-use viewer::render::{ModelScene, NEUTRAL, PartPose, PartScene, camera::Preset};
+use viewer::render::markers;
+use viewer::render::{ModelScene, NEUTRAL, PartPose, PartScene, camera, camera::Preset};
 use viewer::tools::arrangement::{self, PartGroup};
+use viewer::tools::picking;
 use viewer::tools::section::{self, SectionAxis};
 
 use crate::camera_input::CameraInput;
@@ -147,6 +161,12 @@ pub enum Message {
     /// (Commands.swift:69-73); the pane's subscription reports it until the
     /// shell owns menu commands.
     ToggleParameters,
+    /// A measure pick settled (the viewer-pick thread → relay): the
+    /// MODEL-space hit, or `None` when the ray missed everything.
+    Picked(Option<[f32; 3]>),
+    /// Esc — clears an in-flight measurement (ModelPane.swift:54-58);
+    /// ignored when the tool is not measuring.
+    Escape,
     // ── M6 tool controls (the widgets land with the parts-overlay task;
     // the pane arms the semantics) ────────────────────────────────────────
     /// Upstream `showsGrid` (facts #38): the parity grid overlay.
@@ -181,11 +201,22 @@ pub enum Message {
 }
 
 /// Events crossing the pane's std channel into the subscription: watcher
-/// reloads (bridged from the engine's own channel) and the canvas size
-/// reports.
+/// reloads (bridged from the engine's own channel), the canvas size
+/// reports, and the measure picks' answers (the viewer-pick thread).
 enum PaneEvent {
     Reload(ReloadKind),
     Resized(Size),
+    Picked(Option<[f32; 3]>),
+}
+
+/// The PaneEvent → Message translation every consumer of the relay uses
+/// (the subscription's drain thread and the tests' pump).
+fn relay_message(event: PaneEvent) -> Message {
+    match event {
+        PaneEvent::Reload(kind) => Message::Reload(kind),
+        PaneEvent::Resized(size) => Message::Resized(size),
+        PaneEvent::Picked(hit) => Message::Picked(hit),
+    }
 }
 
 /// The subscription's identity + the event receiver slot it takes once
@@ -198,6 +229,13 @@ struct OutputRelay {
 impl OutputRelay {
     fn take_events(&self) -> Option<Receiver<PaneEvent>> {
         self.events.lock().unwrap().take()
+    }
+
+    /// Seat a receiver back after [`OutputRelay::take_events`] — the test
+    /// pump's borrow-and-return; production takes exactly once.
+    #[cfg(test)]
+    fn restore_events(&self, events: Receiver<PaneEvent>) {
+        *self.events.lock().unwrap() = Some(events);
     }
 }
 
@@ -244,6 +282,20 @@ pub struct ViewerPane {
     /// The toolbar/overlay state behind the pane (the ModelViewerState
     /// port, T8).
     pub tools: ViewerTools,
+    /// The last cursor position the pane saw (iced top-down, canvas-local)
+    /// — the aim a measure click casts its pick ray through. Hover moves
+    /// reach it too, so a press without any drag still knows where it
+    /// happened.
+    last_cursor: Point,
+    /// Which button the open press started with: the pane funnels
+    /// right/middle releases into [`Message::Released`] the same as
+    /// primary ones, and upstream picks on LEFT mouseUp only
+    /// (CameraInputView.swift:50-53) — the press kind is the gate.
+    last_press_primary: bool,
+    /// A measure pick is in flight on the viewer-pick thread. Single
+    /// in-flight: a click while this is set is dropped, and the flag
+    /// clears when the pick reports back.
+    pick_pending: bool,
     // Comparison state (the compare-ghost task owns the full machinery;
     // this is the window-facing surface project.rs calls)
     pub(crate) ghost_version: Option<(i64, std::path::PathBuf)>,
@@ -365,6 +417,9 @@ impl ViewerPane {
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
             tools: ViewerTools::new(settings.parts_layout, settings.parts_collapsed),
+            last_cursor: Point::ORIGIN,
+            last_press_primary: false,
+            pick_pending: false,
             comparing: false,
             ghost_version: None,
             model_parts: Vec::new(),
@@ -415,19 +470,32 @@ impl ViewerPane {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Pressed => {
+                self.last_press_primary = true;
                 self.input.press(self.pan_modifiers());
                 self.sync_pose();
             }
             Message::RightPressed | Message::MiddlePressed => {
+                self.last_press_primary = false;
                 self.input.press(true);
                 self.sync_pose();
             }
             Message::Released => {
-                // a click (< 4 px travel) has no M4 action — measure, the
-                // click consumer, is a later milestone's
-                let _click = self.input.release();
+                // a click (< 4 px travel) while measuring fires the pick;
+                // the pane funnels right/middle releases here too, so the
+                // PRESS kind gates (upstream picks on left mouseUp only,
+                // CameraInputView.swift:50-53), and one pick at a time —
+                // a click during a pending pick is dropped
+                let was_click = self.input.release();
+                if was_click
+                    && self.last_press_primary
+                    && self.tools.measuring
+                    && !self.pick_pending
+                {
+                    self.spawn_pick();
+                }
             }
             Message::Moved(point) => {
+                self.last_cursor = point;
                 self.input.move_to(point.x, point.y);
                 self.sync_pose();
             }
@@ -466,9 +534,31 @@ impl ViewerPane {
                 ReloadKind::Plate => self.reload_plate(),
                 ReloadKind::Motion | ReloadKind::Schematic => {}
             },
-            Message::Resized(size) => self.input.set_view_height(size.height),
+            Message::Resized(size) => {
+                // the relay delivers what report_size already deduped
+                // through last_size; recording it here keeps the message
+                // self-consistent — anything that drives Resized directly
+                // aims picks at the right viewport
+                *self.last_size.lock().unwrap() = size;
+                self.input.set_view_height(size.height);
+            }
             Message::ToggleParameters => {
                 self.parameters_visible = !self.parameters_visible;
+            }
+            Message::Picked(hit) => {
+                self.pick_pending = false;
+                // the flight can outlive the mode it was fired under (Esc,
+                // a toggle mid-pick): a stale pick never lands
+                if let (true, Some(p)) = (self.tools.measuring, hit) {
+                    self.tools.add_measure_point(p);
+                    self.rebuild_markers();
+                }
+            }
+            Message::Escape => {
+                if self.tools.measuring {
+                    self.tools.clear_measurement();
+                    self.rebuild_markers();
+                }
             }
             Message::ToggleGrid => {
                 self.tools.shows_grid = !self.tools.shows_grid;
@@ -480,9 +570,9 @@ impl ViewerPane {
             }
             Message::ToggleMeasure => {
                 // any change drops the collected points
-                // (ModelViewerState.swift:51-53); the click flow and the
-                // marker staging are the measure task's
+                // (ModelViewerState.swift:51-53), markers with them
                 self.tools.toggle_measuring();
+                self.rebuild_markers();
             }
             Message::ToggleSection => {
                 self.tools.set_sectioning(!self.tools.sectioning);
@@ -545,8 +635,9 @@ impl ViewerPane {
     }
 
     /// The pane's subscriptions: the output-event relay plus keyboard
-    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag)
-    /// and the parameters overlay's ⌥⌘I toggle.
+    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag),
+    /// the parameters overlay's ⌥⌘I toggle, and Esc (clears an in-flight
+    /// measurement, ModelPane.swift:54-58).
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
         let modifiers = keyboard::listen().filter_map(|event| match event {
@@ -563,6 +654,10 @@ impl ViewerPane {
             {
                 Some(Message::ToggleParameters)
             }
+            keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            } => Some(Message::Escape),
             _ => None,
         });
         Subscription::batch([relay, modifiers])
@@ -768,6 +863,9 @@ impl ViewerPane {
                 self.model_parts = parts;
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
                 self.tools.mesh_changed();
+                // points collected against the old geometry are gone
+                // (ModelViewerState.swift:128) — their markers go with them
+                self.rebuild_markers();
                 self.model_scene = next;
             }
         }
@@ -1079,6 +1177,76 @@ impl ViewerPane {
         );
     }
 
+    // ── measure (M6) ────────────────────────────────────────────────────
+
+    /// Fire the measure pick: click-driven and OFF-THREAD per spec §5 — a
+    /// named std thread runs [`picking::first_hit`] over an immutable
+    /// snapshot (the scene `Arc`, the poses, the section tuple, the ray),
+    /// never the cosmic executor — and the answer returns as
+    /// [`PaneEvent::Picked`] through the pane's relay. The caller gates:
+    /// primary click, measuring, no pick in flight.
+    fn spawn_pick(&mut self) {
+        let size = *self.last_size.lock().unwrap();
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return; // no layout pass yet: nothing to aim at
+        }
+        let (origin, dir) = camera::pick_ray(
+            self.input.distance,
+            self.input.yaw,
+            self.input.pitch,
+            self.input.target,
+            size.width / size.height,
+            (self.last_cursor.x, self.last_cursor.y),
+            (size.width, size.height),
+        );
+        let scene = self.scene.scene.clone();
+        let poses = self.scene.poses.to_vec();
+        let section = self.pick_section();
+        let events = self.events.clone();
+        self.pick_pending = true;
+        let spawned = thread::Builder::new()
+            .name("viewer-pick".into())
+            .spawn(move || {
+                let hit = picking::first_hit(&scene, &poses, section, origin, dir);
+                let _ = events.send(PaneEvent::Picked(hit));
+            });
+        if spawned.is_err() {
+            // never left the ground: let the next click try again
+            self.pick_pending = false;
+        }
+    }
+
+    /// The section tuple a pick honors — the same discard plane the mesh
+    /// pass is running (what [`ModelScene::set_section`] last stored), so
+    /// a click never answers through geometry the user cannot see; with
+    /// sectioning off every pick runs the whole scene.
+    fn pick_section(&self) -> Option<(u32, f32)> {
+        self.scene.section()
+    }
+
+    /// Restage the measure markers from the tool's points — the ONE writer
+    /// of `scene.markers`, so every `measure_points` clear site (toggle,
+    /// Esc, mesh change) funnels here and an empty measurement stages
+    /// nothing. Radius rides the assembled scene's framing radius
+    /// (ModelViewer.swift:383: `max(radius · 0.03, 0.4)`); upstream's
+    /// `modelRadius` is the last-REFRAMED size, so marker size carries a
+    /// bounded cosmetic drift across layouts — the plan's recorded
+    /// acceptance.
+    fn rebuild_markers(&mut self) {
+        let radius = markers::marker_radius(camera::framing_radius(
+            self.scene.scene.aabb_min,
+            self.scene.scene.aabb_max,
+        ));
+        let points = self
+            .tools
+            .measure_points
+            .iter()
+            .map(|&p| self.scene.scene.to_scene(p))
+            .collect::<Vec<_>>();
+        self.scene.markers =
+            (!points.is_empty()).then(|| Arc::new(markers::geometry(&points, radius)));
+    }
+
     /// shift/option held — the scroll/primary-drag pan gate
     /// (CameraInputView.swift:43-47,63-66).
     fn pan_modifiers(&self) -> bool {
@@ -1296,10 +1464,7 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
                 .name("viewer-events".to_string())
                 .spawn(move || {
                     while let Ok(event) = events.recv() {
-                        let message = match event {
-                            PaneEvent::Reload(kind) => Message::Reload(kind),
-                            PaneEvent::Resized(size) => Message::Resized(size),
-                        };
+                        let message = relay_message(event);
                         let mut backoff = RELAY_RETRY_MIN;
                         let started = std::time::Instant::now();
                         loop {
@@ -2096,5 +2261,185 @@ mod tests {
         let _ = pane.update(Message::TogglePartsCollapsed);
         let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
         assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
+    }
+
+    // ── M6 T11: the measure click flow ────────────────────────────────────
+
+    impl ViewerPane {
+        /// Drain the pane's relay until `done` holds or `timeout` elapses,
+        /// translating each event exactly as `relay_stream` does — tests
+        /// never start the subscription, so the receiver still sits in the
+        /// relay to borrow (take → pump → restore). Panics on timeout: the
+        /// pick thread stalled or never answered.
+        fn pump_pending_pick(&mut self, timeout: Duration, done: impl Fn(&ViewerPane) -> bool) {
+            let events = self
+                .relay
+                .take_events()
+                .expect("relay receiver still seated");
+            let started = std::time::Instant::now();
+            while !done(self) {
+                assert!(
+                    started.elapsed() < timeout,
+                    "pump timed out after {timeout:?}"
+                );
+                match events.try_recv() {
+                    Ok(event) => {
+                        let _ = self.update(relay_message(event));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("relay disconnected before the pick answered")
+                    }
+                }
+            }
+            self.relay.restore_events(events);
+        }
+    }
+
+    #[test]
+    fn click_while_measuring_adds_a_model_space_point() {
+        let (_, mut pane) = pane("pick", &[], &["golden/model.3mf"]);
+        // settings default the pane to Exploded; pin Assembled so the
+        // camera's center ray runs at the geometry the framing derived
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        let _ = pane.update(Message::Resized(Size::new(800.0, 600.0)));
+        let _ = pane.update(Message::ToggleMeasure);
+        // aim at the canvas center: the golden base's top face is under the
+        // iso camera's center ray; drive press + tiny move + release
+        let _ = pane.update(Message::Moved(Point::new(400.0, 300.0)));
+        let _ = pane.update(Message::Pressed);
+        let _ = pane.update(Message::Moved(Point::new(401.0, 300.0))); // < 4px: still a click
+        let _ = pane.update(Message::Released);
+        assert!(pane.pick_pending, "the pick spawned off-thread");
+        // the pick ran on a thread and reports through the relay: drain its
+        // message into update until Picked lands (bounded, house pattern)
+        pane.pump_pending_pick(Duration::from_secs(2), |pane| {
+            pane.tools.measure_points.len() == 1
+        });
+        let p = pane.tools.measure_points[0];
+        // golden base spans MODEL z -4..4 (lid 12..22): the center ray with
+        // the section OFF hits the lid top at z=22 or the base — assert on-model
+        assert!(p[2] > -5.0 && p[2] < 23.0, "hit the model region: {p:?}");
+        assert!(pane.scene.markers.is_some(), "markers staged");
+        assert!(!pane.pick_pending, "single in-flight cleared on the report");
+        // second click completes the pair; the pair stages the link box
+        // (the badge's ΔX/ΔY/ΔZ delta form over the pair is parts_overlay's
+        // own pinned test — T9's badge mounts over exactly this state)
+        let _ = pane.update(Message::Moved(Point::new(430.0, 300.0)));
+        let _ = pane.update(Message::Pressed);
+        let _ = pane.update(Message::Released);
+        let one_point = pane.scene.markers.as_ref().unwrap().vertices.len();
+        pane.pump_pending_pick(Duration::from_secs(2), |pane| {
+            pane.tools.measure_points.len() == 2
+        });
+        let markers = pane.scene.markers.as_ref().unwrap();
+        // the second sphere (24 segments x 16 rings x 2 triangles) plus the
+        // 12-triangle link box (markers.rs geometry)
+        let sphere = 24 * 16 * 2 * 3;
+        assert_eq!(
+            markers.vertices.len() - one_point,
+            sphere + 36,
+            "two spheres plus the two-point link"
+        );
+    }
+
+    #[test]
+    fn drag_is_not_a_click() {
+        let (_, mut pane) = pane("drag", &[], &["golden/model.3mf"]);
+        // a real viewport, so a gate removal actually spawns (pick_pending
+        // is the observable) instead of dying at spawn_pick's 0x0 early-out
+        let _ = pane.update(Message::Resized(Size::new(800.0, 600.0)));
+        let _ = pane.update(Message::ToggleMeasure);
+        let _ = pane.update(Message::Moved(Point::new(100.0, 100.0)));
+        let _ = pane.update(Message::Pressed);
+        // the first post-press move only anchors; the second accumulates
+        // the travel (CameraInput.move_to) — 199 px is a drag, not a click
+        let _ = pane.update(Message::Moved(Point::new(101.0, 100.0)));
+        let _ = pane.update(Message::Moved(Point::new(200.0, 200.0)));
+        let _ = pane.update(Message::Released);
+        assert!(
+            !pane.pick_pending,
+            "199 px of travel is a drag — the was_click gate must hold the pick"
+        );
+        // a stationary NON-primary release is not a pick either: the right
+        // press is the production path that records the press kind (the pane
+        // funnels right releases into Released; upstream picks on left
+        // mouseUp only, CameraInputView.swift:50-53)
+        let _ = pane.update(Message::Moved(Point::new(400.0, 300.0)));
+        let _ = pane.update(Message::RightPressed);
+        let _ = pane.update(Message::Released);
+        assert!(
+            !pane.pick_pending,
+            "stationary right release never spawns a pick"
+        );
+        assert!(pane.tools.measure_points.is_empty());
+    }
+
+    #[test]
+    fn escape_clears_only_when_measuring() {
+        let (_, mut pane) = pane("esc", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::ToggleMeasure);
+        pane.tools.measure_points = vec![[1.0; 3], [2.0; 3]];
+        pane.rebuild_markers(); // test seam, or set via the same private path
+        assert!(pane.scene.markers.is_some());
+        let _ = pane.update(Message::Escape);
+        assert!(pane.tools.measure_points.is_empty());
+        assert!(pane.scene.markers.is_none());
+        // Esc with measure off: no panic, no state change
+        let _ = pane.update(Message::Escape);
+    }
+
+    #[test]
+    fn toggling_measure_drops_the_points_and_markers() {
+        // ModelViewerState.swift:51-53: ANY toggle — on or off — drops the
+        // points collected under the old mode, and the markers follow
+        let (_, mut pane) = pane("measure-toggle", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::ToggleMeasure);
+        pane.tools.measure_points = vec![[0.0; 3], [1.0, 0.0, 0.0]];
+        pane.rebuild_markers();
+        assert!(pane.scene.markers.is_some());
+        let _ = pane.update(Message::ToggleMeasure);
+        assert!(pane.tools.measure_points.is_empty());
+        assert!(pane.scene.markers.is_none());
+    }
+
+    #[test]
+    fn a_miss_or_a_stale_pick_lands_no_point() {
+        let (_, mut pane) = pane("miss", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::ToggleMeasure);
+        // the ray missed: pending clears, nothing lands
+        pane.pick_pending = true;
+        let _ = pane.update(Message::Picked(None));
+        assert!(!pane.pick_pending, "pending cleared on the report");
+        assert!(pane.tools.measure_points.is_empty());
+        // a pick that settles after the tool toggled off drops its point —
+        // the flight outlived the mode it was fired under
+        let _ = pane.update(Message::ToggleMeasure); // off
+        pane.pick_pending = true;
+        let _ = pane.update(Message::Picked(Some([1.0, 2.0, 3.0])));
+        assert!(!pane.pick_pending);
+        assert!(
+            pane.tools.measure_points.is_empty(),
+            "stale pick never lands"
+        );
+        assert!(pane.scene.markers.is_none());
+    }
+
+    #[test]
+    fn mesh_reload_clears_the_measurement() {
+        let (root, mut pane) = pane("measure-reload", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::ToggleMeasure);
+        pane.tools.measure_points = vec![[0.0; 3], [1.0, 0.0, 0.0]];
+        pane.rebuild_markers();
+        assert!(pane.scene.markers.is_some());
+        // a different model on disk: points collected against the old
+        // geometry are meaningless (ModelViewerState.swift:128)
+        std::fs::remove_file(root.join("output/model.3mf")).unwrap();
+        std::fs::copy(fixture("golden/model.stl"), root.join("output/model.stl")).unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(pane.tools.measure_points.is_empty());
+        assert!(pane.scene.markers.is_none());
     }
 }
