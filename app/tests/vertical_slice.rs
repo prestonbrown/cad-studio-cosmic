@@ -414,7 +414,7 @@ async fn prompt_to_rendered_model() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "thelio-only: surfaceless GPU render, writes the screenshot PNG"]
 async fn slice_offscreen_render() {
-    use viewer::render::{Frame, MeshPipeline, Options, PartPose, default_camera};
+    use viewer::render::{Frame, MeshPipeline, Options, PartAppearance, PartPose, default_camera};
 
     let SliceRun { window, .. } = run_slice().await;
     let scene = window.viewer.scene.scene.clone();
@@ -451,10 +451,13 @@ async fn slice_offscreen_render() {
         ]);
         scene.parts.len()
     ];
+    // opaque appearances: the slice's assembled draw carries no motion flags
+    let appearances = vec![PartAppearance::default(); scene.parts.len()];
     let frame = Frame {
         camera: &camera,
         scene: &scene,
         poses: &poses,
+        appearances: &appearances,
         effective_aabb: (scene.aabb_min, scene.aabb_max),
         grid: Some(overlay.as_ref()),
         markers: None,
