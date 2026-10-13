@@ -150,6 +150,14 @@ Source of record: `.superpowers/sdd/m3-viewer-facts.md` — it moves to
 
 ## M6 (viewer tools)
 
+From the M5 T7 review (2026-10-13):
+
+- Overlay parameter rows must sync on `ParameterCommitted` and
+  `BuildFinished` too (the in-code comment at the project-window arms names
+  the triggers); restore already wires sync_parameters — the build/slider
+  paths need the same call when their full wiring lands (M6 T10 owns the
+  overlay refresh seam).
+
 - Winding parity assumes consistently-wound closed meshes; real STL imports
   with flipped facets will produce stray caps/holes — winding robustness needed.
 - No test pins the tripod corner's z placement (from M3's overlay work: the
