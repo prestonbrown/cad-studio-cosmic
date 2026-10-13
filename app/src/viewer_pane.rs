@@ -710,8 +710,16 @@ impl ViewerPane {
             Message::ToggleAnimation => {
                 // no re-frame: upstream's isAnimating didSet bumps no
                 // cameraID; set_animating owns the player reset and the
-                // measuring/sectioning exclusion
+                // measuring/sectioning exclusion; the exclusion clears the
+                // points through isMeasuring's didSet chain
+                // (ModelViewerState.swift:28-38, 51-53) — the markers go
+                // with them or they'd render through playback
+                let was_measuring = self.tools.measuring;
                 self.tools.set_animating(!self.tools.animating);
+                if was_measuring && self.tools.animating {
+                    self.tools.measure_points.clear();
+                    self.rebuild_markers();
+                }
                 self.last_tick = None;
                 self.apply_poses();
             }
@@ -2743,6 +2751,30 @@ mod tests {
         let _ = pane.update(Message::Reload(ReloadKind::Motion));
         assert!(pane.tools.animating, "a changed study never stops playback");
         assert!(pane.study.as_ref().unwrap().duration() == 1.0);
+    }
+
+    #[test]
+    fn starting_animation_clears_a_live_measurement() {
+        // the recap finding: isMeasuring's didSet chain clears the points
+        // when the exclusion fires (ModelViewerState.swift:28-38) — the
+        // markers must not render through playback
+        let (root, mut pane) = pane("anim-measure", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::Resized(Size::new(800.0, 600.0)));
+        let _ = pane.update(Message::ToggleMeasure);
+        let _ = pane.update(Message::Moved(Point::new(400.0, 300.0)));
+        let _ = pane.update(Message::Pressed);
+        let _ = pane.update(Message::Moved(Point::new(401.0, 300.0)));
+        let _ = pane.update(Message::Released);
+        pane.pump_pending_pick(Duration::from_secs(2), |p| {
+            p.tools.measure_points.len() == 1
+        });
+        let _ = pane.update(Message::ToggleAnimation);
+        assert!(pane.tools.animating && !pane.tools.measuring);
+        assert!(
+            pane.tools.measure_points.is_empty(),
+            "the exclusion clears the points"
+        );
+        assert!(pane.scene.markers.is_none(), "and the markers go with them");
     }
 
     #[test]
