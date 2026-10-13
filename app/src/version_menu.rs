@@ -22,7 +22,7 @@ use engine::project::versions::ProjectVersion;
 
 // ─── catalog strings (each constant names its en/main.ftl key) ─────────────
 
-/// `versione-lld-lld` (VersionMenu.swift:17/19).
+/// `versione-lld-2` (VersionMenu.swift:17/19).
 const VERSION_LABEL: &str = "Version %lld · %@";
 /// `nessuna-versione-salvata` (VersionMenu.swift:9).
 const NO_SAVED_VERSIONS: &str = "No Saved Versions";

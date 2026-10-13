@@ -350,12 +350,19 @@ impl ProjectWindow {
     }
 
     /// An established save point (upstream `save()`, Project.swift:429-433):
-    /// metadata with the current layout, timestamps bumped.
+    /// metadata with the current layout, timestamps bumped — written
+    /// THROUGH the disk copy (the bridge's load-fresh law,
+    /// [`bridge::fresh_metadata`]): the engine writes the session id into
+    /// project.json mid-turn and `record_version` the version pointer, both
+    /// behind the window's back, so those fields are re-read here, never
+    /// held from open.
     fn save_metadata(&mut self) {
-        self.metadata.layout = Some(self.layout.clone());
-        self.metadata.updated_at = OffsetDateTime::now_utc();
-        self.metadata.app_version = env!("CARGO_PKG_VERSION").to_string();
-        let _ = store::save_metadata(&self.root, &self.metadata);
+        let mut metadata = bridge::fresh_metadata(&self.root);
+        metadata.layout = Some(self.layout.clone());
+        metadata.updated_at = OffsetDateTime::now_utc();
+        metadata.app_version = env!("CARGO_PKG_VERSION").to_string();
+        self.metadata = metadata.clone();
+        let _ = store::save_metadata(&self.root, &metadata);
     }
 
     /// Upstream `activity`'s didSet (Project.swift:74-83): entering work
@@ -484,23 +491,26 @@ impl ProjectWindow {
     /// the view half around the bridge's state half): the bridge swaps the
     /// files and the metadata's version pointer; the window then reloads
     /// what it mirrors from disk — the metadata pointer the menu label and
-    /// save points read, the chat transcript the snapshot saved, and the
-    /// missing-output warnings (upstream `chat.reload()` after `save()`; the
-    /// output watch refreshes the panes on its own debounce). A refusal
+    /// save points read, the chat transcript the snapshot saved — and
+    /// clears the missing-output list (upstream `missingOutputs = []`, not
+    /// a recompute; the output watch re-derives warnings from the restored
+    /// outputs on its own debounce). The overlay's rows follow the
+    /// parameters the bridge re-read from the restored manifest. A refusal
     /// (busy) or an engine failure changed nothing observable, so there is
     /// nothing to reload (upstream's catch skips the reloads too).
     fn restore(&mut self, number: i64) -> Task<Message> {
         if self.bridge.restore(number).is_err() || self.bridge.build_error().is_some() {
             return Task::none();
         }
-        if let Ok(fresh) = store::load_metadata(&self.root) {
-            // the layout stays the window's: only the fields the bridge's
-            // save owns cross over
-            self.metadata.session_id = fresh.session_id;
-            self.metadata.current_version = fresh.current_version;
-        }
+        // the layout stays the window's: only the fields the bridge's save
+        // owns cross over
+        let fresh = bridge::fresh_metadata(&self.root);
+        self.metadata.session_id = fresh.session_id;
+        self.metadata.current_version = fresh.current_version;
         self.chat = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
-        self.refresh_missing_outputs();
+        self.missing_outputs.clear();
+        let parameters = self.bridge.parameters();
+        self.viewer.sync_parameters(&parameters);
         ChatPane::scroll_to_bottom().map(Message::Chat)
     }
 
@@ -514,11 +524,11 @@ impl ProjectWindow {
                 // the pane keeps its buffer (sent() is skipped)
                 if let Some((text, attachments)) = self.chat.take_draft() {
                     self.chat_pane.sent();
-                    self.bridge.enqueue(text, attachments);
+                    let _ = self.bridge.enqueue(text, attachments);
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
-                self.bridge.enqueue(suggestion.clone(), Vec::new());
+                let _ = self.bridge.enqueue(suggestion.clone(), Vec::new());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
             chat_view::Message::RemoveQueued(id) => {
@@ -608,7 +618,10 @@ impl ProjectWindow {
             // The build pipeline's M5 wiring (outputs reload, version rows,
             // sheet presentation) is the vertical slice's to own; these arms
             // keep the shell compiling over the union with the pause/activity
-            // semantics that already hold.
+            // semantics that already hold. Carry-forward (T7): when the
+            // slice wires these arms, ParameterCommitted and BuildFinished
+            // are also the pane's sync_parameters triggers — the restore
+            // path already syncs.
             bridge::Message::ParameterCommitted { .. } => Task::none(),
             bridge::Message::BuildEventBridge(_) => Task::none(),
             bridge::Message::BuildFinished { .. } => {
@@ -1351,5 +1364,88 @@ mod tests {
             ],
             "schematic.svg leads, numbered pages sort numerically, non-pages excluded"
         );
+    }
+
+    /// The metadata-clobber pin (T7 review F1): the window's save points
+    /// (turn end, bookkeeping) must write project.json THROUGH the disk
+    /// copy. The engine writes the session id into the same file mid-turn
+    /// and `record_version` the version pointer — both BEHIND the window's
+    /// back — so a save from the window's open-time copy reverts them. The
+    /// restore-then-bookkeeping tail pins the same law after a restore
+    /// moves both fields.
+    #[tokio::test]
+    async fn bookkeeping_saves_through_the_bridge_s_metadata() {
+        use engine::agent::session::TurnOutcome;
+        use engine::project::versions;
+
+        let root = std::env::temp_dir().join(format!("cad-meta-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        let mut history = Vec::new();
+        versions::record(
+            &root,
+            &mut history,
+            "a 20 mm cube",
+            Some("session-v1"),
+            ::time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 5\n").unwrap();
+        // v1 is what the window opens on
+        let mut metadata = store::load_metadata(&root).unwrap();
+        metadata.session_id = Some("session-v1".into());
+        metadata.current_version = Some(1);
+        store::save_metadata(&root, &metadata).unwrap();
+
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+
+        // the driver's second record + the engine's mid-turn session write,
+        // landing straight on disk BEHIND the window's back: v2 current, a
+        // NEWER session id
+        metadata.session_id = Some("engine-session-2".into());
+        metadata.current_version = Some(2);
+        store::save_metadata(&root, &metadata).unwrap();
+
+        // the bookkeeping arms save — through the fresh copy, never the
+        // window's open-time hold (which would still say no session, v1)
+        let _ = window.update(Message::Bridge(bridge::Message::Event(
+            EngineEvent::TurnFinished(TurnOutcome::Success {
+                session_id: Some("engine-session-2".into()),
+                text: String::new(),
+            }),
+        )));
+        let _ = window.update(Message::Bridge(bridge::Message::TurnSuccessBookkeeping));
+        let saved = store::load_metadata(&root).unwrap();
+        assert_eq!(
+            saved.current_version,
+            Some(2),
+            "the driver's version pointer survives the window's save points"
+        );
+        assert_eq!(
+            saved.session_id.as_deref(),
+            Some("engine-session-2"),
+            "the engine's mid-turn session id survives the window's save points"
+        );
+        assert_eq!(
+            window.metadata.current_version,
+            Some(2),
+            "the window's copy (the version menu's checkmark source) is in step"
+        );
+
+        // the restore-then-bookkeeping tail: restore v1 (disk moves to v1's
+        // pointer and session), bookkeep again — both still standing
+        let _ = window.update(Message::Restore(1));
+        assert_eq!(
+            std::fs::read_to_string(root.join("model.py")).unwrap(),
+            "wall = 3\n"
+        );
+        let _ = window.update(Message::Bridge(bridge::Message::TurnSuccessBookkeeping));
+        let after = store::load_metadata(&root).unwrap();
+        assert_eq!(after.current_version, Some(1));
+        assert_eq!(after.session_id.as_deref(), Some("session-v1"));
     }
 }

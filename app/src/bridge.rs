@@ -684,9 +684,11 @@ fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// The project's metadata, loaded now — the discipline every writer in
-/// this file follows for `project.json` (see [`Drive::record_version`]).
-fn fresh_metadata(root: &Path) -> ProjectMetadata {
+/// The project's metadata, loaded now — the load-fresh law EVERY writer of
+/// `project.json` follows, the shell's save points included (see
+/// [`Drive::record_version`] for why: the engine writes `session_id` into
+/// the same file mid-turn, and a copy held from launch would clobber it).
+pub fn fresh_metadata(root: &Path) -> ProjectMetadata {
     store::load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(app_version()))
 }
 
