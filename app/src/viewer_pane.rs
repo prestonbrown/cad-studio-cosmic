@@ -713,12 +713,16 @@ pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit, warnings: usiz
 }
 
 /// Parse the output directory's model: `model.3mf` preferred (one part per
-/// build item), `model.stl` the fallback (a single part). Neither readable
-/// → `None` (upstream keeps its last good mesh; so does the pane).
+/// build item), `model.stl` the fallback (a single part) — including when
+/// the 3MF parses but yields ZERO parts (upstream parseMesh's fallback; a
+/// well-formed-but-empty file is not a model). Neither readable → `None`
+/// (upstream keeps its last good mesh; so does the pane).
 pub fn load_model_parts(output_dir: &Path) -> Option<Vec<Part>> {
     if let Ok(bytes) = std::fs::read(output_dir.join("model.3mf")) {
         if let Ok(parts) = parse_3mf(&bytes) {
-            return Some(parts);
+            if !parts.is_empty() {
+                return Some(parts);
+            }
         }
     }
     std::fs::read(output_dir.join("model.stl"))
@@ -898,6 +902,22 @@ mod tests {
         std::fs::copy(fixture("golden/model.3mf"), both.join("model.3mf")).unwrap();
         std::fs::copy(fixture("golden/model.stl"), both.join("model.stl")).unwrap();
         assert_eq!(load_model_parts(&both).unwrap().len(), 2, "3MF: 2 parts");
+
+        // an empty-parts 3MF is a fallback, not a model: upstream parseMesh
+        // reads the STL beside it rather than rendering nothing
+        let empty_3mf = tmp_dir("empty-3mf");
+        std::fs::copy(fixture("handmade/empty.3mf"), empty_3mf.join("model.3mf")).unwrap();
+        assert_eq!(
+            parse_3mf(&std::fs::read(empty_3mf.join("model.3mf")).unwrap()).unwrap(),
+            Vec::<Part>::new(),
+            "fixture truth: the 3MF parses, to zero parts"
+        );
+        std::fs::copy(fixture("golden/model.stl"), empty_3mf.join("model.stl")).unwrap();
+        assert_eq!(
+            load_model_parts(&empty_3mf).unwrap().len(),
+            1,
+            "empty 3MF: the STL beside it loads"
+        );
 
         let stl_only = tmp_dir("stl");
         std::fs::copy(fixture("golden/model.stl"), stl_only.join("model.stl")).unwrap();
