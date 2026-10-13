@@ -456,3 +456,81 @@ async fn set_parameter_with_unreadable_script_returns_silently() {
     assert_eq!(bridge.set_parameter("wall", 3.0), Ok(()));
     assert_eq!(bridge.activity(), Activity::Idle);
 }
+
+/// Restore (M5 T7, Project.swift:308-321): the snapshot's files come back
+/// (model.py, chat.json), metadata points at the restored version with the
+/// snapshot's session id, and the compare picker's parameters parse from a
+/// version's stored model.py copy.
+#[tokio::test]
+async fn restore_returns_project_to_the_snapshot() {
+    let _guard = ENV_LOCK.lock().await; // sets CAD_FAKE_PY_* (MAJOR 4)
+    let root = project();
+    // SAFETY: fake-python env holds this suite's ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_FAKE_PY_MODE", "copy");
+        std::env::set_var("CAD_FAKE_PY_FIXTURES", golden_fixtures());
+    }
+    let (mut bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(Settings::default(), root.clone());
+    bridge.mark_python_ready_for_test();
+    bridge.set_parameter("wall", 3.0).unwrap();
+    run_until(&mut messages, |m| {
+        matches!(m, Message::BuildFinished { .. })
+    })
+    .await;
+    let sid_v1 = load_metadata(&root).unwrap().session_id.clone();
+    bridge.set_parameter("wall", 5.0).unwrap();
+    run_until(&mut messages, |m| {
+        matches!(m, Message::BuildFinished { .. })
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("model.py")).unwrap(),
+        "wall = 5\nheight = 10\n"
+    );
+    bridge.restore(1).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("model.py")).unwrap(),
+        "wall = 3\nheight = 10\n"
+    );
+    let metadata = load_metadata(&root).unwrap();
+    assert_eq!(metadata.current_version, Some(1));
+    assert_eq!(metadata.session_id, sid_v1);
+    // the chat transcript is the snapshot's (summary row of v1 is the last)
+    let chat = load_chat(&root).unwrap();
+    assert_eq!(chat.last().unwrap().detail.as_deref(), Some("1"));
+    // compare: previous parameter values are parsed from version 2's stored
+    // model.py copy (the slider rewrite landed there before the snapshot)
+    bridge.compare_with(Some(2));
+    assert_eq!(bridge.comparison_parameters().get("wall"), Some(&5.0));
+    bridge.compare_with(None);
+    assert!(bridge.comparison_parameters().is_empty());
+    unsafe {
+        std::env::remove_var("CAD_FAKE_PY_MODE");
+        std::env::remove_var("CAD_FAKE_PY_FIXTURES");
+    }
+}
+
+/// Restore refuses while a turn or build runs (upstream `guard !isBusy`).
+#[tokio::test]
+async fn restore_refused_while_busy() {
+    let _guard = ENV_LOCK.lock().await;
+    let root = project();
+    // SAFETY: fake-python env holds this suite's ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_FAKE_PY_MODE", "hang");
+    }
+    let (mut bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(Settings::default(), root.clone());
+    bridge.mark_python_ready_for_test();
+    bridge.start_build(None).unwrap();
+    assert_eq!(bridge.restore(1), Err(BuildRefusal::Busy));
+    bridge.cancel();
+    run_until(&mut messages, |m| {
+        matches!(m, Message::BuildFinished { .. })
+    })
+    .await;
+    unsafe {
+        std::env::remove_var("CAD_FAKE_PY_MODE");
+    }
+}

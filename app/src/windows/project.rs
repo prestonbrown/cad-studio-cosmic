@@ -8,11 +8,11 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (the M4 subset only): show-chat ⌘0, focus ⌘1/2/3, layout
-//! presets, viewer presets + fit, schematic zoom/fit, stop, reveal,
-//! open-in-slicer. No export/output command (M8), no Compila (M5), no
-//! params pane (M6). The keyboard bindings are one pure table,
-//! [`project_shortcut`]; the header's menu renders the same commands.
+//! Commands (the M4 subset plus Compila ⌘B): show-chat ⌘0, focus ⌘1/2/3,
+//! layout presets, viewer presets + fit, schematic zoom/fit, build, stop,
+//! reveal, open-in-slicer. No export/output command (M8). The keyboard
+//! bindings are one pure table, [`project_shortcut`]; the header's menu
+//! renders the same commands.
 //!
 //! User-visible strings follow the landed modules' convention: plain
 //! English values, each named for its en/main.ftl key, pending the
@@ -48,7 +48,9 @@ use crate::bridge::{self, Bridge};
 use crate::chat::ChatState;
 use crate::chat_view::{self, ChatPane, QueueItem};
 use crate::panes;
+use crate::parameters_view;
 use crate::schematic::SchematicPane;
+use crate::version_menu;
 use crate::viewer_pane::ViewerPane;
 
 /// Upstream's default project window size (the WindowGroup
@@ -66,7 +68,8 @@ const GRID_SPACING: f32 = 8.0;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// The commands the M4 project window exposes (upstream AppCommands +
-/// ProjectToolbar, M4 subset). Doubles as the menu action type.
+/// ProjectToolbar, M4 subset + M5's Compila). Doubles as the menu action
+/// type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     ShowChat,
@@ -82,6 +85,8 @@ pub enum Command {
     SchematicZoomIn,
     SchematicZoomOut,
     SchematicFit,
+    /// "Compila modello" ⌘B (Commands.swift:115-119): build model.py now.
+    Build,
     Stop,
     Reveal,
     OpenInSlicer,
@@ -133,6 +138,9 @@ pub enum Message {
     /// An app-level request bubbled from the File menu (the window cannot
     /// act on windows or portals itself).
     App(AppRequest),
+    /// A version menu entry was picked (VersionMenu.swift:14): restore that
+    /// snapshot.
+    Restore(i64),
 }
 
 /// App-level commands the project window's File menu bubbles up
@@ -342,12 +350,19 @@ impl ProjectWindow {
     }
 
     /// An established save point (upstream `save()`, Project.swift:429-433):
-    /// metadata with the current layout, timestamps bumped.
+    /// metadata with the current layout, timestamps bumped — written
+    /// THROUGH the disk copy (the bridge's load-fresh law,
+    /// [`bridge::fresh_metadata`]): the engine writes the session id into
+    /// project.json mid-turn and `record_version` the version pointer, both
+    /// behind the window's back, so those fields are re-read here, never
+    /// held from open.
     fn save_metadata(&mut self) {
-        self.metadata.layout = Some(self.layout.clone());
-        self.metadata.updated_at = OffsetDateTime::now_utc();
-        self.metadata.app_version = env!("CARGO_PKG_VERSION").to_string();
-        let _ = store::save_metadata(&self.root, &self.metadata);
+        let mut metadata = bridge::fresh_metadata(&self.root);
+        metadata.layout = Some(self.layout.clone());
+        metadata.updated_at = OffsetDateTime::now_utc();
+        metadata.app_version = env!("CARGO_PKG_VERSION").to_string();
+        self.metadata = metadata.clone();
+        let _ = store::save_metadata(&self.root, &metadata);
     }
 
     /// Upstream `activity`'s didSet (Project.swift:74-83): entering work
@@ -388,6 +403,14 @@ impl ProjectWindow {
             // the app layer owns the sheet's presentation — pass through
             Message::PresentSetupSheet => {
                 CosmicTask::future(async move { Message::PresentSetupSheet })
+            }
+            // the shell owns the compare state (parameters_view docs): the
+            // picker's report goes to the bridge, never the pane
+            Message::Viewer(crate::viewer_pane::Message::Parameters(
+                parameters_view::Message::Compare(number),
+            )) => {
+                self.bridge.compare_with(number);
+                Task::none()
             }
             Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
             Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
@@ -460,7 +483,35 @@ impl ProjectWindow {
                 Task::none()
             }
             Message::CloseRequested | Message::App(_) => Task::none(), // the app layer acts
+            Message::Restore(number) => self.restore(number),
         }
+    }
+
+    /// Restore a version snapshot (upstream `restore`, Project.swift:308-321,
+    /// the view half around the bridge's state half): the bridge swaps the
+    /// files and the metadata's version pointer; the window then reloads
+    /// what it mirrors from disk — the metadata pointer the menu label and
+    /// save points read, the chat transcript the snapshot saved — and
+    /// clears the missing-output list (upstream `missingOutputs = []`, not
+    /// a recompute; the output watch re-derives warnings from the restored
+    /// outputs on its own debounce). The overlay's rows follow the
+    /// parameters the bridge re-read from the restored manifest. A refusal
+    /// (busy) or an engine failure changed nothing observable, so there is
+    /// nothing to reload (upstream's catch skips the reloads too).
+    fn restore(&mut self, number: i64) -> Task<Message> {
+        if self.bridge.restore(number).is_err() || self.bridge.build_error().is_some() {
+            return Task::none();
+        }
+        // the layout stays the window's: only the fields the bridge's save
+        // owns cross over
+        let fresh = bridge::fresh_metadata(&self.root);
+        self.metadata.session_id = fresh.session_id;
+        self.metadata.current_version = fresh.current_version;
+        self.chat = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
+        self.missing_outputs.clear();
+        let parameters = self.bridge.parameters();
+        self.viewer.sync_parameters(&parameters);
+        ChatPane::scroll_to_bottom().map(Message::Chat)
     }
 
     /// The chat pane: shell-owned messages act first (the send flow takes
@@ -473,11 +524,11 @@ impl ProjectWindow {
                 // the pane keeps its buffer (sent() is skipped)
                 if let Some((text, attachments)) = self.chat.take_draft() {
                     self.chat_pane.sent();
-                    self.bridge.enqueue(text, attachments);
+                    let _ = self.bridge.enqueue(text, attachments);
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
-                self.bridge.enqueue(suggestion.clone(), Vec::new());
+                let _ = self.bridge.enqueue(suggestion.clone(), Vec::new());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
             chat_view::Message::RemoveQueued(id) => {
@@ -583,7 +634,10 @@ impl ProjectWindow {
             // The build pipeline's M5 wiring (outputs reload, version rows,
             // sheet presentation) is the vertical slice's to own; these arms
             // keep the shell compiling over the union with the pause/activity
-            // semantics that already hold.
+            // semantics that already hold. Carry-forward (T7): when the
+            // slice wires these arms, ParameterCommitted and BuildFinished
+            // are also the pane's sync_parameters triggers — the restore
+            // path already syncs.
             bridge::Message::ParameterCommitted { .. } => Task::none(),
             bridge::Message::BuildEventBridge(_) => Task::none(),
             bridge::Message::BuildFinished { .. } => {
@@ -663,6 +717,13 @@ impl ProjectWindow {
                 .map(Message::Schematic),
             Command::Stop => {
                 self.bridge.cancel();
+                Task::none()
+            }
+            Command::Build => {
+                // the menu entry is disabled while busy (upstream's guard);
+                // the shortcut can still land, where the bridge's own busy
+                // refusal is the guard
+                let _ = self.bridge.start_build(None);
                 Task::none()
             }
             Command::Reveal => {
@@ -749,7 +810,22 @@ impl ProjectWindow {
                     self.queue_paused,
                 )
                 .map(Message::Chat),
-                PaneKind::Model3D => self.viewer.view_model_3d(None).map(Message::Viewer),
+                PaneKind::Model3D => {
+                    // the compare wiring's shell half: the overlay's previous
+                    // values, gate, and picker inputs are what only the
+                    // bridge knows (the pane still gates visibility)
+                    let previous = self.bridge.comparison_parameters();
+                    let versions = self.bridge.versions();
+                    let overlay = parameters_view::OverlayContext {
+                        previous: &previous,
+                        busy: self.is_busy(),
+                        versions: &versions,
+                        compare: self.bridge.compare_version(),
+                    };
+                    self.viewer
+                        .view_model_3d(Some(overlay))
+                        .map(Message::Viewer)
+                }
                 PaneKind::Schematic => self.schematic.view().map(Message::Schematic),
             };
             // the focus command's one-second highlight (upstream
@@ -948,11 +1024,14 @@ impl ProjectWindow {
             .into()
     }
 
-    /// The commands menu bar (the M4 subset of upstream AppCommands): a
-    /// "File" root bubbling the app-level commands, and a "View" root over
-    /// the pane/layout/viewer/schematic commands.
+    /// The commands menu bar (the M4 subset of upstream AppCommands plus M5's
+    /// Model root and version menu): a "File" root bubbling the app-level
+    /// commands, a "View" root over the pane/layout/viewer/schematic
+    /// commands, a "Model" root (upstream "Modello": Compila + Stop), and
+    /// the version menu root (VersionMenu.swift) trailing before the reveal
+    /// and slicer buttons.
     fn view_menu(&self) -> Element<'static, Message> {
-        use cosmic::widget::menu::{Item, items, root};
+        use cosmic::widget::menu::{Item, ItemHeight, ItemWidth, items, root};
 
         let file_entries = vec![
             Item::Button("New Project…", None, AppRequest::NewProject),
@@ -968,6 +1047,36 @@ impl ProjectWindow {
                 root_button
             },
             items(&file_binds, file_entries),
+        );
+
+        // `compila-modello` (Commands.swift:115-119): disabled while busy,
+        // like upstream's `.disabled(project?.isBusy == true)`
+        let build_entry = if self.is_busy() {
+            Item::ButtonDisabled("Build Model", None, Command::Build)
+        } else {
+            Item::Button("Build Model", None, Command::Build)
+        };
+        let model_binds = std::collections::HashMap::new();
+        let model_tree = cosmic::widget::menu::Tree::with_children(
+            {
+                let root_button: Element<'_, Message> = root("Model").into();
+                root_button
+            },
+            items(
+                &model_binds,
+                vec![
+                    build_entry,
+                    Item::Divider,
+                    Item::Button("Stop", None, Command::Stop),
+                ],
+            ),
+        );
+
+        let version_tree = version_menu::version_tree(
+            &version_menu::menu_entries(&self.bridge.versions(), self.metadata.current_version),
+            self.metadata.current_version,
+            self.is_busy(),
+            Message::Restore,
         );
 
         let entries = vec![
@@ -1019,7 +1128,12 @@ impl ProjectWindow {
         let root_button: Element<'_, Message> = root("View").into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
-        cosmic::widget::menu::bar(vec![file_tree, tree]).into()
+        // Static/Dynamic sizing: the standard roots keep the 150 px default
+        // while the version menu's two-line leaves carry their own
+        cosmic::widget::menu::bar(vec![file_tree, tree, model_tree, version_tree])
+            .item_width(ItemWidth::Static(150))
+            .item_height(ItemHeight::Dynamic(30))
+            .into()
     }
 }
 
@@ -1152,6 +1266,8 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
         (true, false, false, "-") => Some(SchematicZoomOut),
         // ⌘. stop — the period key arrives as a character
         (true, false, false, ".") => Some(Stop),
+        // ⌘B build (Commands.swift:118-120)
+        (true, false, false, "b") => Some(Build),
         (true, false, true, "r") => Some(Reveal),
         _ => None,
     }
@@ -1161,9 +1277,9 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
 mod tests {
     use super::*;
 
-    /// Every shortcut in the table is a command the M4 window implements,
-    /// and the upstream bindings land on the expected commands
-    /// (Commands.swift:48-137); the M5/M8 bindings are deliberately
+    /// Every shortcut in the table is a command the window implements, and
+    /// the upstream bindings land on the expected commands
+    /// (Commands.swift:48-137); the M8 export binding is deliberately
     /// absent.
     #[test]
     fn shortcut_table_matches_upstream() {
@@ -1218,8 +1334,12 @@ mod tests {
             project_shortcut(&Key::Character("r".into()), &ctrl_shift),
             Some(Command::Reveal)
         );
-        // ⌘B (build, M5) and ⇧⌘E (export, M8) are deliberately absent
-        assert_eq!(project_shortcut(&Key::Character("b".into()), &ctrl), None);
+        // ⌘B builds the model (Commands.swift:118-120); ⇧⌘E (export, M8)
+        // is deliberately absent
+        assert_eq!(
+            project_shortcut(&Key::Character("b".into()), &ctrl),
+            Some(Command::Build)
+        );
         assert_eq!(
             project_shortcut(&Key::Character("e".into()), &ctrl_shift),
             None
@@ -1260,5 +1380,88 @@ mod tests {
             ],
             "schematic.svg leads, numbered pages sort numerically, non-pages excluded"
         );
+    }
+
+    /// The metadata-clobber pin (T7 review F1): the window's save points
+    /// (turn end, bookkeeping) must write project.json THROUGH the disk
+    /// copy. The engine writes the session id into the same file mid-turn
+    /// and `record_version` the version pointer — both BEHIND the window's
+    /// back — so a save from the window's open-time copy reverts them. The
+    /// restore-then-bookkeeping tail pins the same law after a restore
+    /// moves both fields.
+    #[tokio::test]
+    async fn bookkeeping_saves_through_the_bridge_s_metadata() {
+        use engine::agent::session::TurnOutcome;
+        use engine::project::versions;
+
+        let root = std::env::temp_dir().join(format!("cad-meta-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        let mut history = Vec::new();
+        versions::record(
+            &root,
+            &mut history,
+            "a 20 mm cube",
+            Some("session-v1"),
+            ::time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 5\n").unwrap();
+        // v1 is what the window opens on
+        let mut metadata = store::load_metadata(&root).unwrap();
+        metadata.session_id = Some("session-v1".into());
+        metadata.current_version = Some(1);
+        store::save_metadata(&root, &metadata).unwrap();
+
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+
+        // the driver's second record + the engine's mid-turn session write,
+        // landing straight on disk BEHIND the window's back: v2 current, a
+        // NEWER session id
+        metadata.session_id = Some("engine-session-2".into());
+        metadata.current_version = Some(2);
+        store::save_metadata(&root, &metadata).unwrap();
+
+        // the bookkeeping arms save — through the fresh copy, never the
+        // window's open-time hold (which would still say no session, v1)
+        let _ = window.update(Message::Bridge(bridge::Message::Event(
+            EngineEvent::TurnFinished(TurnOutcome::Success {
+                session_id: Some("engine-session-2".into()),
+                text: String::new(),
+            }),
+        )));
+        let _ = window.update(Message::Bridge(bridge::Message::TurnSuccessBookkeeping));
+        let saved = store::load_metadata(&root).unwrap();
+        assert_eq!(
+            saved.current_version,
+            Some(2),
+            "the driver's version pointer survives the window's save points"
+        );
+        assert_eq!(
+            saved.session_id.as_deref(),
+            Some("engine-session-2"),
+            "the engine's mid-turn session id survives the window's save points"
+        );
+        assert_eq!(
+            window.metadata.current_version,
+            Some(2),
+            "the window's copy (the version menu's checkmark source) is in step"
+        );
+
+        // the restore-then-bookkeeping tail: restore v1 (disk moves to v1's
+        // pointer and session), bookkeep again — both still standing
+        let _ = window.update(Message::Restore(1));
+        assert_eq!(
+            std::fs::read_to_string(root.join("model.py")).unwrap(),
+            "wall = 3\n"
+        );
+        let _ = window.update(Message::Bridge(bridge::Message::TurnSuccessBookkeeping));
+        let after = store::load_metadata(&root).unwrap();
+        assert_eq!(after.current_version, Some(1));
+        assert_eq!(after.session_id.as_deref(), Some("session-v1"));
     }
 }
