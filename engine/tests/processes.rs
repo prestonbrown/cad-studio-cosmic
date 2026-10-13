@@ -273,25 +273,28 @@ async fn orphan_reaping() {
         "reaped orphan is SIGTERMed"
     );
     assert!(alive(control.id()), "a live non-orphan child is untouched");
+    let control_line = std::fs::read_to_string(&registry).unwrap();
     assert!(
-        std::fs::read_to_string(&registry)
-            .unwrap()
-            .starts_with(&format!("{}:", control.id())),
+        control_line.starts_with(&format!("{}:", control.id())),
         "a live child of this process stays listed after the reap"
     );
 
     // Pid-recycling defense: a ppid-1 process whose registry line carries a
-    // start time that is not its own is not ours to kill.
+    // start time that is not its own is not ours to kill — and not ours to
+    // keep: the entry must drop, never heal to the pid's new occupant.
     assert!(eventually(|| ppid_of(forged) == Some(1), Duration::from_secs(2)).await);
     std::fs::write(&registry, format!("{forged}:WRONG-START")).unwrap();
     let reaped = reap_orphans_at(&registry);
     assert!(reaped.is_empty(), "starttime mismatch spares the process");
     assert!(alive(forged));
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        "",
+        "a mismatched entry is dropped, not healed"
+    );
     assert!(
-        std::fs::read_to_string(&registry)
-            .unwrap()
-            .starts_with(&format!("{}:", forged)),
-        "a spared entry that still resolves stays listed, its line re-derived from ps"
+        reap_orphans_at(&registry).is_empty(),
+        "a second reap still signals nothing"
     );
 
     control.kill().unwrap();
@@ -304,7 +307,8 @@ async fn orphan_reaping() {
         eventually(|| !alive(forged), Duration::from_secs(2)).await,
         "init reaps the SIGKILLed leftover before the final reap"
     );
-    // both entries now dead: persist drops pids ps no longer resolves
+    // a stale line for a now-dead pid: dropped, not resurrected
+    std::fs::write(&registry, &control_line).unwrap();
     assert!(reap_orphans_at(&registry).is_empty());
     assert_eq!(
         std::fs::read_to_string(&registry).unwrap(),

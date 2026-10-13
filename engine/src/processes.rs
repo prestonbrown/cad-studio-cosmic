@@ -14,9 +14,11 @@
 //!   `pbi_start_tvsec` (and of `/proc/<pid>/stat`'s starttime on Linux). A
 //!   pid whose current start time differs from the registry line is a
 //!   recycled pid, not our orphan. After a reap the entries that still
-//!   resolve and were not signalled stay listed — upstream persists `[]`
-//!   (ProcessRunner.swift:157), but a child this process cancelled that
-//!   outlives the app must stay known to a later launch's reap.
+//!   resolve with an unchanged start time and were not signalled stay
+//!   listed — mismatched recycled pids are dropped, never healed to the
+//!   pid's new occupant — where upstream persists `[]`
+//!   (ProcessRunner.swift:157), so a child this process cancelled that
+//!   outlives the app stays known to a later launch's reap.
 //! - Signals and process info go through `/bin/kill` and `/bin/ps` via
 //!   [`std::process::Command`] — no libc/nix dependency, and exactly what
 //!   reaches the child stays visible under `ps` while debugging. Unix only.
@@ -163,8 +165,8 @@ pub fn register(pid: u32) {
 
 /// Kill processes the registry still lists whose parent is now init and
 /// whose start time still matches the registered one, then rewrite the
-/// registry to the entries that still resolve and were not signalled.
-/// Returns the pids that were signalled.
+/// registry to the entries that still resolve with an unchanged start time
+/// and were not signalled. Returns the pids that were signalled.
 pub fn reap_orphans() -> Vec<u32> {
     let path = registry_path();
     reap_orphans_at(&path)
@@ -180,14 +182,15 @@ pub fn register_at(path: &Path, pid: u32) {
 
 /// [`reap_orphans`] against an explicit registry file. A missing file has
 /// nothing to reap and is left uncreated; a present file is rewritten to
-/// the still-resolving, un-signalled entries.
+/// the still-resolving, start-time-matching, un-signalled entries.
 pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
     let mut killed = Vec::new();
-    // what survives the reap: resolvable pids this pass did not signal
+    // what survives the reap: live pids whose start time still matches their
+    // line and that this pass did not signal
     let mut remaining = BTreeSet::new();
     for line in text.lines() {
         let Some((pid_text, started)) = line.split_once(':') else {
@@ -199,7 +202,14 @@ pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
         let Some((ppid, starts_now)) = ps(pid) else {
             continue;
         };
-        if ppid == 1 && starts_now == started {
+        if starts_now != started {
+            // a recycled pid: not ours to signal and not ours to keep —
+            // the line must drop, because persist re-derives start times
+            // from ps and would otherwise heal it to the new occupant,
+            // making a later reap adopt (and kill) that process
+            continue;
+        }
+        if ppid == 1 {
             let _ = signal(pid, "-TERM");
             killed.push(pid);
         } else {
