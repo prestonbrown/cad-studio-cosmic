@@ -430,7 +430,17 @@ async fn slice_offscreen_render() {
     });
     let view = target.create_view(&Default::default());
     // identity poses: the slice's final scene draws every part where it sits
-    let poses = vec![PartPose::None; scene.parts.len()];
+    // (None would draw-skip — visibility, not identity); the 4x4 identity in
+    // column-major [[f32; 4]; 4] form without a glam dependency here
+    let poses = vec![
+        Some([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        scene.parts.len()
+    ];
     let frame = Frame {
         camera: &camera,
         scene: &scene,
