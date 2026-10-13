@@ -13,6 +13,7 @@ use viewer::render::camera;
 use viewer::render::gpu;
 use viewer::render::grid;
 use viewer::render::lights;
+use viewer::render::markers;
 use viewer::render::{
     Camera, Frame, MeshPipeline, NEUTRAL, Options, PartPose, PartScene, default_camera,
     preset_camera, srgb_to_linear,
@@ -77,12 +78,13 @@ fn render_frame_opts(
 ) -> Vec<u8> {
     let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
     render_frame_with_poses(
-        device, queue, pipeline, scene, camera, w, h, grid, options, &poses,
+        device, queue, pipeline, scene, camera, w, h, grid, None, options, &poses,
     )
 }
 
-/// The harness core: [`render_frame_opts`] plus the per-part poses threaded
-/// into the `Frame` — every pose-path test renders through here.
+/// The harness core: [`render_frame_opts`] plus the per-part poses and the
+/// staged measure markers threaded into the `Frame` — every pose-path test
+/// renders through here.
 fn render_frame_with_poses(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -92,6 +94,7 @@ fn render_frame_with_poses(
     w: u32,
     h: u32,
     grid: Option<&grid::GridMesh>,
+    markers: Option<&markers::MarkerMesh>,
     options: &Options,
     poses: &[PartPose],
 ) -> Vec<u8> {
@@ -101,6 +104,7 @@ fn render_frame_with_poses(
         poses,
         effective_aabb: (scene.aabb_min, scene.aabb_max),
         grid,
+        markers,
         options: *options,
     };
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -219,6 +223,7 @@ fn render_frame_msaa(
         w,
         h,
         None,
+        None,
         &Options {
             msaa,
             ..Options::default()
@@ -249,6 +254,7 @@ fn render_frame_poses(
         &camera,
         w,
         h,
+        None,
         None,
         &Options::default(),
         poses,
@@ -1465,6 +1471,7 @@ fn orientation_pattern_matches_projection() {
         800,
         600,
         None,
+        None,
         &Options {
             msaa: 4,
             ..Options::default()
@@ -1581,5 +1588,91 @@ fn msaa_toggle_rebuilds_in_place() {
     assert_eq!(
         one, back,
         "flipping back to 1x must restore the single-sample frame exactly"
+    );
+}
+
+/// Measure markers (ModelViewer.swift:381-398): two MODEL points picked on
+/// the base's top face stage orange spheres and the connecting link in
+/// PINNED-SCENE coords; rendered on the unlit overlay pass, orange ink
+/// must appear at each point's projected pixel position — and none of it
+/// may exist before the markers are staged. The points sit on the top
+/// face OUTSIDE the lid's footprint, so nothing occludes them from the
+/// iso camera; at this framing a marker sphere projects to a ~7px-radius
+/// disc (radius = 3% of the ~44 framing radius, ~5.4 px/world unit at the
+/// marker depth), which the 12px window captures whole and the 50px floor
+/// clears with ~3x headroom.
+#[test]
+fn markers_render_orange_at_projected_points() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    // MODEL z=4 is the base's top face (base MODEL z in [-4,4], x/y within
+    // ±30); ±25 corners clear the lid's ±20 x/y footprint
+    let model_points = [[-25.0, -25.0, 4.0], [25.0, 25.0, 4.0]];
+    let scene_points: Vec<[f32; 3]> = model_points.iter().map(|p| scene.to_scene(*p)).collect();
+    let radius = markers::marker_radius(camera::framing_radius(scene.aabb_min, scene.aabb_max));
+    let mesh = markers::geometry(&scene_points, radius);
+    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    // orange-chroma ink within 12px of each point's projection
+    let orange_at = |px: &[u8]| -> [usize; 2] {
+        let mut counts = [0usize; 2];
+        for (i, point) in scene_points.iter().enumerate() {
+            let (cx, cy) = project_px(camera.view_proj, *point, 800.0, 600.0).unwrap();
+            for (j, c) in px.chunks(4).enumerate() {
+                if !is_ink(c, bg) {
+                    continue;
+                }
+                let (x, y) = (j % 800, j / 800);
+                let dist = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                if dist <= 12.0 && chroma_dist(chroma(decode_linear(c)), markers::ORANGE) < 0.15 {
+                    counts[i] += 1;
+                }
+            }
+        }
+        counts
+    };
+    let plain = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        None,
+        &Options::default(),
+        &poses,
+    );
+    assert_eq!(
+        orange_at(&plain),
+        [0, 0],
+        "no orange ink near the projections before markers are staged"
+    );
+    let marked = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        Some(&mesh),
+        &Options::default(),
+        &poses,
+    );
+    let counts = orange_at(&marked);
+    assert!(
+        counts[0] >= 50,
+        "first marker renders at its projection: {} orange px",
+        counts[0]
+    );
+    assert!(
+        counts[1] >= 50,
+        "second marker renders at its projection: {} orange px",
+        counts[1]
     );
 }

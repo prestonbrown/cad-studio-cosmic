@@ -10,7 +10,9 @@ use std::sync::Arc;
 use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 
-use super::{Camera, Frame, GridMesh, MeshPipeline, Options, PartPose, PartScene, camera, grid};
+use super::{
+    Camera, Frame, GridMesh, MarkerMesh, MeshPipeline, Options, PartPose, PartScene, camera, grid,
+};
 
 /// Identity poses for every slot of an n-part scene — the assembled
 /// default `new` starts at and `replace_scene` resets to.
@@ -41,6 +43,11 @@ pub struct ModelScene {
     /// update costs one refcount bump, never a mesh copy or re-stage.
     pub poses: Arc<[PartPose]>,
     pub grid: Arc<GridMesh>,
+    /// The staged measure markers, when a measurement is active — the
+    /// measure flow stages [`crate::render::markers::geometry`] of the
+    /// picked points here and clears it with the measurement; `None`
+    /// draws none.
+    pub markers: Option<Arc<MarkerMesh>>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
     pub show_grid: bool,
     /// Wireframe mode (upstream `showsWireframe` — facts #44).
@@ -70,6 +77,7 @@ impl ModelScene {
             poses: identity_poses(scene.parts.len()),
             scene,
             grid,
+            markers: None,
             show_grid: true,
             wireframe: false,
             msaa: 1,
@@ -133,6 +141,9 @@ impl ModelScene {
     /// through [`ModelScene::set_pose`].
     pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
         self.grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
+        // the measurement's points belong to the old model — a reload
+        // drops them with the markers they staged
+        self.markers = None;
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         self.poses = identity_poses(scene.parts.len());
@@ -167,6 +178,7 @@ impl<Message> shader::Program<Message> for ModelScene {
             scene: self.scene.clone(),
             poses: self.poses.clone(),
             grid: self.show_grid.then(|| self.grid.clone()),
+            markers: self.markers.clone(),
             camera: self.camera(aspect),
             options: Options {
                 wireframe: self.wireframe,
@@ -181,6 +193,7 @@ pub struct ModelPrimitive {
     scene: Arc<PartScene>,
     poses: Arc<[PartPose]>,
     grid: Option<Arc<GridMesh>>,
+    markers: Option<Arc<MarkerMesh>>,
     camera: Camera,
     options: Options,
 }
@@ -205,6 +218,7 @@ impl shader::Primitive for ModelPrimitive {
             poses: &self.poses,
             effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
             grid: self.grid.as_deref(),
+            markers: self.markers.as_deref(),
             options: self.options,
         };
         pipeline.prepare_parts(device, queue, (size.width, size.height), &frame);

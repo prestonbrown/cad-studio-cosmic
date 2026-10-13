@@ -117,27 +117,16 @@ fn line_quad(from: [f32; 3], to: [f32; 3], width: f32, color: [f32; 4], out: &mu
     push(from + side);
 }
 
-/// An axis-aligned box as 12 triangles, every face `color` — upstream's
-/// axisEntity box (facts #36): unlit and uncull, so a solid silhouette
-/// from any angle. Corners are indexed by a 3-bit mask (bit a set = +
-/// half-extent on axis a).
-fn box_triangles(center: [f32; 3], size: [f32; 3], color: [f32; 4], out: &mut Vec<GridVertex>) {
-    let half = [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0];
-    let corners: Vec<[f32; 3]> = (0..8u32)
-        .map(|mask| {
-            let mut p = center;
-            for a in 0..3 {
-                p[a] += if mask & (1 << a) != 0 {
-                    half[a]
-                } else {
-                    -half[a]
-                };
-            }
-            p
-        })
-        .collect();
+/// A closed box's 12 triangles over its 8 corners — the face topology
+/// every unlit box in the overlay family shares (the tripod axes here,
+/// the measure link in [`crate::render::markers`]). `corners` are
+/// mask-ordered (bit a set = + half-extent on axis a): the enumeration
+/// this table is written against — a reordered enumeration bowties it,
+/// which the headless suite's `box_scene` fixture pins with a
+/// signed-volume assert over the same topology.
+pub(crate) fn box_faces(corners: &[[f32; 3]; 8], color: [f32; 4], out: &mut Vec<GridVertex>) {
     let faces = [
-        [0u32, 2, 6, 4],
+        [0usize, 2, 6, 4],
         [1, 5, 7, 3],
         [0, 4, 5, 1],
         [2, 3, 7, 6],
@@ -147,11 +136,30 @@ fn box_triangles(center: [f32; 3], size: [f32; 3], color: [f32; 4], out: &mut Ve
     for &[a, b, c, d] in &faces {
         for &p in &[a, b, c, a, c, d] {
             out.push(GridVertex {
-                pos: corners[p as usize],
+                pos: corners[p],
                 color,
             });
         }
     }
+}
+
+/// An axis-aligned box as 12 triangles, every face `color` — upstream's
+/// axisEntity box (facts #36): unlit and uncull, so a solid silhouette
+/// from any angle.
+fn box_triangles(center: [f32; 3], size: [f32; 3], color: [f32; 4], out: &mut Vec<GridVertex>) {
+    let half = [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0];
+    let corners: [[f32; 3]; 8] = std::array::from_fn(|mask| {
+        let mut p = center;
+        for a in 0..3 {
+            p[a] += if mask & (1 << a) != 0 {
+                half[a]
+            } else {
+                -half[a]
+            };
+        }
+        p
+    });
+    box_faces(&corners, color, out);
 }
 
 /// Build the overlay for the pinned scene `aabb` and an optional bed
