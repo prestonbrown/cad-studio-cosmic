@@ -75,6 +75,30 @@ fn isolate_toggles_others_hidden() {
 }
 
 #[test]
+fn isolate_from_partial_state_assigns_others() {
+    // PartsOverlay.swift:145-148 is compare-and-assign, not a per-row
+    // toggle: from a partially populated hidden set, isolate assigns
+    // exactly the others — an eye-hidden part STAYS hidden and the target
+    // becomes visible — and a hidden target is revealed.
+    let mut t = ViewerTools::new(PL::Exploded, false);
+    let all = ["a".to_string(), "b".into(), "c".into()];
+    t.toggle_hidden("b");
+    t.isolate("a", &all);
+    assert_eq!(
+        t.hidden,
+        ["b", "c"].map(String::from).into_iter().collect(),
+        "eye-hidden stays hidden, target visible"
+    );
+    t.toggle_hidden("a");
+    t.isolate("a", &all);
+    assert_eq!(
+        t.hidden,
+        ["b", "c"].map(String::from).into_iter().collect(),
+        "target revealed even when it was hidden"
+    );
+}
+
+#[test]
 fn double_click_window() {
     let now = Instant::now();
     assert!(is_double_click(

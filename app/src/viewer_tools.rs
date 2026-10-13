@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use engine::settings::PartsLayout;
 use viewer::tools::section::SectionAxis;
 
-/// The explode slider's range (ModelViewerState.swift:29,
-/// `explodedAmount` 0...2): 0 assembled-in-place, 2 fully spread.
+/// The explode slider's range (PartsOverlay.swift:28, `Slider(…, in:
+/// 0...2)`): 0 assembled-in-place, 2 fully spread.
 pub const EXPLODE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
 /// The part-row double-click window: a documented stand-in for SwiftUI's
@@ -128,14 +128,23 @@ impl ViewerTools {
         }
     }
 
-    /// Double-click on a parts row (PartsOverlay.swift:145-148): toggle
-    /// every OTHER row's hidden flag — the first click isolates `group`
-    /// (all others hidden), the second restores them.
+    /// Double-click on a parts row (PartsOverlay.swift:145-148):
+    /// compare-and-assign — assign hidden to every OTHER row's set, unless
+    /// it already equals that set, in which case clear (second
+    /// double-click restores). After the call hidden is exactly-others or
+    /// empty, so the target always ends visible and a partially
+    /// eye-hidden state doesn't leak through (a per-row toggle would
+    /// resurrect an eye-hidden part).
     pub fn isolate(&mut self, group: &str, all: &[String]) {
-        for other in all {
-            if other != group {
-                self.toggle_hidden(other);
-            }
+        let others: BTreeSet<String> = all
+            .iter()
+            .filter(|n| n.as_str() != group)
+            .cloned()
+            .collect();
+        if self.hidden == others {
+            self.hidden.clear();
+        } else {
+            self.hidden = others;
         }
     }
 
