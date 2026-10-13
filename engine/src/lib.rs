@@ -12,6 +12,7 @@
 //! - [`parsing`] — STL/3MF mesh parts and animation studies
 //! - [`watch`] — output/ directory reload watching
 //! - [`processes`] — streamed child spawn, SIGINT→SIGTERM escalation, pid registry
+//! - [`python`] — venv install planning/check driver and (M5 T2) the model.py runner
 //!
 //! M4's app drives agent sessions only through that command/event pair,
 //! and drains [`agent::EngineEvent`]s for the whole turn: the engine acts
@@ -22,5 +23,6 @@ pub mod agent;
 pub mod parsing;
 pub mod processes;
 pub mod project;
+pub mod python;
 pub mod settings;
 pub mod watch;
