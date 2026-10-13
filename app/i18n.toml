@@ -2,3 +2,7 @@ fallback_language = "en"
 
 [fluent]
 assets_dir = "i18n"
+# The M0-extracted catalogs are <lang>/main.ftl (upstream's Swift module
+# name); without this the loader defaults to the crate name and looks for
+# en/app.ftl, which the embed never contains.
+domain = "main"

@@ -171,17 +171,49 @@ From the M5 T7 review (2026-10-13):
 - Overlay parameter rows must sync on `ParameterCommitted` and
   `BuildFinished` too (the in-code comment at the project-window arms names
   the triggers); restore already wires sync_parameters — the build/slider
-  paths need the same call when their full wiring lands (M6 T10 owns the
-  overlay refresh seam).
+  paths need the same call when their full wiring lands (M6 T10 was the
+  owner and landed the refresh seam WITHOUT these triggers — the arms still
+  `Task::none()` beside their naming comment; still owed).
 
-- Winding parity assumes consistently-wound closed meshes; real STL imports
-  with flipped facets will produce stray caps/holes — winding robustness needed.
-- No test pins the tripod corner's z placement (from M3's overlay work: the
+- ~~Winding parity assumes consistently-wound closed meshes; real STL imports
+  with flipped facets will produce stray caps/holes — winding robustness
+  needed.~~ (landed M6 — the section half is pinned: the discard tests the
+  fragment's world position alone, never winding
+  (`section_discard_is_winding_independent`); the stray-caps half is
+  upstream-inherited — upstream shows the same stray caps on
+  flipped-winding imports, so the port matches and nothing further is owed)
+- ~~No test pins the tripod corner's z placement (from M3's overlay work: the
   grid tests assert vertex counts and the line/bed blocks, not where the
-  corner sits).
-- msaa 4× composited over the alpha-blended grid is untested through the
+  corner sits).~~ (landed M6 — T7's rewritten test pins it: the z extent
+  asserts half-the-MODEL-y-span + margin against scene size, and the y pin
+  lands with the 0.05 literal written out)
+- ~~msaa 4× composited over the alpha-blended grid is untested through the
   resolve path — the 4× tests render the mesh alone, so a grid-alpha
-  regression there fails visually only (from M3).
+  regression there fails visually only (from M3).~~ (landed M6 — T7's
+  `msaa_resolves_keep_grid_alpha` pins both regression directions: vanished
+  lines fail the grid-ink count, lost alpha fails the no-opaque-white
+  assert)
+
+From the M6 T10 review (2026-10-13):
+
+- Fit frames the tracked framing reference; the `Fit` arm never re-points
+  it, so a reload while in a non-assembled layout leaves Fit framing the
+  staged assembled box (upstream's fitToView frames the CURRENT arranged
+  mesh, ModelViewer.swift:322-337). One-liner if parity is wanted:
+  `set_framing_reference(self.frame_aabb)` in the `Fit` arm (one line +
+  test update).
+- The frozen-grid stamp keys on scene Arc identity, so plate-view
+  hidden/isolate toggles MOVE the grid: the re-staged filtered plate is a
+  fresh Arc, the stamp moves, and the grid recaptures from the shrunken
+  plate box (upstream keys on mesh+layout+plateID, never the hidden set —
+  ModelViewerState.swift:88-91); observable only on a real multi-part
+  plate. `grid_bed` is fed LIVE rather than frozen with the stamp —
+  upstream-faithful (ModelPane.swift:96 re-sends the bed every update), a
+  deliberate split from the plan's literal "recomputed only on stamp
+  change".
+- The > 50 % reload gate frames the STAGED assembled box, not the arranged
+  one — pre-existing (the staged-box feed to `mesh_changed` is T7's rule;
+  T10 changed only the tracked reference, an improvement for the next Fit).
 
 ## M8 (parity tail)
 

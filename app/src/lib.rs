@@ -8,7 +8,9 @@
 //! Module map (M4 complete — the vertical slice
 //! `app/tests/vertical_slice.rs` drives one prompt through all of it; M5's
 //! wrap slice `app/tests/m5_slice.rs` adds the python check, slider
-//! rebuild, version restore, and compare picker on top):
+//! rebuild, version restore, and compare picker on top; M6's model tests
+//! `app/tests/viewer_tools_model.rs` + `app/tests/parts_overlay_model.rs`
+//! pin the viewer-tool state and the overlay's badge/section text):
 //!
 //! - [`activity`] — the header's ActivityViewer model + issue list (pure).
 //! - [`app`] — the `cosmic::Application`: windows, sheets, commands,
@@ -18,12 +20,18 @@
 //! - [`camera_input`] — the 3D camera state machine (orbit/pan/zoom/clamps).
 //! - [`chat`] — the chat-row reducer over engine events (pure).
 //! - [`chat_view`] — the chat pane widgets over [`chat`]'s state.
-//! - [`localize`] — the fluent scaffold (catalog unwired until M8).
+//! - [`compare_pane`] — the compare-ghost half of [`viewer_pane`]: staging
+//!   the chosen version's ghost mesh at the scene pin and re-staging on
+//!   reload (an impl extension — same crate, separate file) (M6).
+//! - [`localize`] — the fluent scaffold: catalogs + the `fl!` macro (the
+//!   full placeable migration is M8's).
 //! - [`markdown`] — inline markdown rendering for chat text.
 //! - [`motion_controls`] — the MotionControls port: the study-playback
 //!   capsule's Swift-parity formatting (time, values, speeds, collisions);
 //!   the widget rows mount with the pane's playback messages (M7).
 //! - [`panes`] — pane-grid ↔ layout-tree conversion + resize clamping.
+//! - [`parts_overlay`] — the parts panel, measure badge, and section
+//!   controls floating over the 3D canvas (M6).
 //! - [`parameters`] / [`parameters_view`] — the model-parameter panel the
 //!   bridge syncs and the overlay the 3D pane floats (M5).
 //! - [`recents`] — the recents store wrapping the engine's, via
@@ -32,26 +40,29 @@
 //! - [`sheets`] — the first-run setup, python setup (the PythonSetupSheet
 //!   port and its EnvEvent-to-state reduction), and agent-missing sheets.
 //! - [`viewer_pane`] — the embedded 3D viewer: scene reload from `output/`,
-//!   status bar, parameters overlay host.
+//!   status bar, parameters overlay host, and the M6 tool wiring
+//!   (arrangement poses, plate scene, frozen grid, section).
 //! - [`viewer_tools`] — the ModelViewerState port: the 3D pane's tool
 //!   state (grid/wireframe/measure/section/layout/explode/hidden) (M6).
 //! - [`windows`] — the welcome and project windows.
 //!
 //! The About and Settings windows are M8 (spec §4.4 packaging/Sys row);
-//! until then `fl!` strings and this crate's catalog ride along unwired.
-
+//! new modules read strings through `fl!` while the pre-M6 modules'
+//! constants await the swap.
 pub mod activity;
 pub mod app;
 pub mod bridge;
 pub mod camera_input;
 pub mod chat;
 pub mod chat_view;
+pub mod compare_pane;
 pub mod localize;
 pub mod markdown;
 pub mod motion_controls;
 pub mod panes;
 pub mod parameters;
 pub mod parameters_view;
+pub mod parts_overlay;
 pub mod recents;
 pub mod schematic;
 pub mod sheets;
