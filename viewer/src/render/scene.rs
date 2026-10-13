@@ -1,4 +1,4 @@
-//! iced adapter for the part-keyed renderer: [`SpikeScene`] is a
+//! iced adapter for the part-keyed renderer: [`ModelScene`] is a
 //! `shader::Program` whose primitive drives [`MeshPipeline`]'s viewer-owned
 //! render pass from `shader::Primitive::render()`. Mirrors iced's
 //! `custom_shader` example structure (scene + Primitive + Pipeline). The
@@ -12,14 +12,21 @@ use iced::{Rectangle, mouse};
 
 use super::{Camera, GridMesh, MeshPipeline, Options, PartScene, camera, grid};
 
-/// Interactive spike scene: fixed part scene, orbit camera state.
+/// The interactive model scene: part scene, orbit camera state.
 /// Framing (target + distance) comes from [`camera::frame`] at
 /// construction — aspect-free, against the pinned scene aabb — and the
-/// input methods ([`SpikeScene::orbit`], [`SpikeScene::zoom`],
-/// [`SpikeScene::pan`]) are the parity formulas over that state. The
+/// input methods ([`ModelScene::orbit`], [`ModelScene::zoom`],
+/// [`ModelScene::pan`]) are the parity formulas over that state. The
 /// overlay ([`grid::geometry`]) is built once alongside: it depends only
 /// on the scene aabb, never on the camera.
-pub struct SpikeScene {
+///
+/// Two owners drive the pose: the example mutates it through those input
+/// methods directly, while the app's pane keeps its own pure state machine
+/// (`app::camera_input::CameraInput`, which calls the same [`camera`]
+/// formulas) and pushes the settled pose in through [`ModelScene::set_pose`]
+/// after every event. The framing-derived fields stay private so both paths
+/// read one consistent camera.
+pub struct ModelScene {
     pub scene: Arc<PartScene>,
     pub grid: Arc<GridMesh>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
@@ -41,7 +48,7 @@ pub struct SpikeScene {
     radius: f32,
 }
 
-impl SpikeScene {
+impl ModelScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
@@ -75,8 +82,11 @@ impl SpikeScene {
         self.distance = camera::zoomed(self.distance, factor, self.radius);
     }
 
-    /// pan(by:viewHeight:) (facts #22) — the parity formula. The drag and
-    /// modifier-scroll WIRING is M4's; nothing calls this yet.
+    /// pan(by:viewHeight:) (facts #22) — the parity formula. The app's
+    /// input wiring lives in its own state machine
+    /// (`app::camera_input::CameraInput`), which calls [`camera::panned`]
+    /// directly; this method stays the adapter-local convenience for the
+    /// example.
     pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
         self.target = camera::panned(
             self.target,
@@ -89,14 +99,40 @@ impl SpikeScene {
         );
     }
 
+    /// Adopt a pose computed by an external owner (the app pane's
+    /// `CameraInput`): every field the draw reads, set atomically. The
+    /// framing-derived private fields are NOT touched — a re-frame arrives
+    /// through [`ModelScene::replace_scene`] or construction, and the
+    /// external state machine tracks its own framing radius.
+    pub fn set_pose(&mut self, yaw: f32, pitch: f32, distance: f32, target: [f32; 3]) {
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.distance = distance;
+        self.target = target;
+    }
+
+    /// Swap in a new part scene (an output reload): rebuilds the overlay
+    /// against the new pinned aabb and re-derives the framing fields so the
+    /// struct stays self-consistent; the caller decides whether the camera
+    /// actually re-frames (the > 50 % diagonal rule) and pushes the settled
+    /// pose through [`ModelScene::set_pose`].
+    pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
+        self.grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
+        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        self.scene = scene;
+        self.target = target;
+        self.distance = distance;
+    }
+
     fn camera(&self, aspect: f32) -> Camera {
         Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect)
     }
 }
 
-impl<Message> shader::Program<Message> for SpikeScene {
+impl<Message> shader::Program<Message> for ModelScene {
     type State = ();
-    type Primitive = SpikePrimitive;
+    type Primitive = ModelPrimitive;
 
     fn draw(
         &self,
@@ -111,7 +147,7 @@ impl<Message> shader::Program<Message> for SpikeScene {
         } else {
             16.0 / 9.0 // zero-size layout pass: nothing draws; any finite ratio
         };
-        SpikePrimitive {
+        ModelPrimitive {
             scene: self.scene.clone(),
             grid: self.show_grid.then(|| self.grid.clone()),
             camera: self.camera(aspect),
@@ -124,14 +160,14 @@ impl<Message> shader::Program<Message> for SpikeScene {
 }
 
 #[derive(Debug)]
-pub struct SpikePrimitive {
+pub struct ModelPrimitive {
     scene: Arc<PartScene>,
     grid: Option<Arc<GridMesh>>,
     camera: Camera,
     options: Options,
 }
 
-impl shader::Primitive for SpikePrimitive {
+impl shader::Primitive for ModelPrimitive {
     type Pipeline = MeshPipeline;
 
     fn prepare(
@@ -161,7 +197,7 @@ impl shader::Primitive for SpikePrimitive {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
-        // The load-bearing line of the spike: the mesh is drawn by a
+        // The load-bearing line of this adapter: the mesh is drawn by a
         // viewer-owned pass on top of iced's output, with the viewer's own
         // Depth24PlusStencil8 attachment — not by iced's compositor pass.
         pipeline.render(

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 libcosmic.workspace = true
 engine = { path = "../engine" }
+viewer = { path = "../viewer" }
 uuid.workspace = true
 time.workspace = true
 serde_json.workspace = true

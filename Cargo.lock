@@ -197,6 +197,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "viewer",
 ]
 
 [[package]]
