@@ -508,9 +508,11 @@ async fn cancel_mid_stream() {
 
 /// The app-wide venv interpreter the session names everywhere: the
 /// restricted-bash allowlist entry and the `{{PYTHON}}` substitution (the
-/// rendered system prompt) both carry `~/.local/share/cad-studio/venv/bin/
-/// python` — the venv M5 creates — and the child env carries
-/// ModelBuilder.toolEnvironment's pair over the login env.
+/// rendered system prompt) both carry python::env's canonical venv —
+/// `~/.local/share/cad-studio/venv/bin/python` on Linux, the venv M5
+/// creates there — and the child env carries ModelBuilder.toolEnvironment's
+/// pair over the login env. A spaced canonical path (macOS data dir) is
+/// quoted inside the entry and the prompt lines.
 #[tokio::test(flavor = "multi_thread")]
 async fn restricted_allowlist_and_child_env_name_the_app_venv() {
     let root = mk_project();
@@ -534,10 +536,13 @@ async fn restricted_allowlist_and_child_env_name_the_app_venv() {
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<String>>();
 
-    let home = std::env::var("HOME").unwrap();
-    let venv = format!("{home}/.local/share/cad-studio/venv/bin/python");
+    let venv = engine::python::env::interpreter_path(&engine::python::env::venv_dir())
+        .to_string_lossy()
+        .into_owned();
+    // the entry quotes a spaced path (claude.rs quoted_python), so the
+    // claim is "names the canonical venv", not byte-equality with it
     assert!(
-        argv.contains(&format!("Bash({venv}:*)")),
+        argv.iter().any(|a| a.starts_with("Bash(") && a.ends_with(":*)") && a.contains(&venv)),
         "restricted entry names the app-wide venv: {argv:?}"
     );
     let prompt_pos = argv

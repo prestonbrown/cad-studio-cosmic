@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use engine::python::env::{
-    self, CHECK_FAILED_MESSAGE, EnvEvent, PACKAGES, VERIFY_SCRIPT, VERSIONS_FALLBACK,
+    self, CHECK_FAILED_MESSAGE, EnvEvent, EnvFailure, PACKAGES, VERIFY_SCRIPT, VERSIONS_FALLBACK,
     is_supported_python, nudge_progress, parse_python_version, parse_verification,
     set_shared_versions, uv_install_plan, venv_install_plan, versions_display,
 };
@@ -115,6 +115,13 @@ fn verification_output_parses_into_versions_line() {
         one.as_ref().map(|(v, l)| (v.as_str(), l.as_str())),
         Some(("0.8.1", ""))
     );
+    // each line is trimmed before line 1/line 2 are taken; a padded or blank
+    // line between them shifts nothing
+    let padded = parse_verification("  0.8.1  \n\n  Python 3.12.4, build123d 0.8.1  \n");
+    assert_eq!(
+        padded.as_ref().map(|(v, l)| (v.as_str(), l.as_str())),
+        Some(("0.8.1", "Python 3.12.4, build123d 0.8.1"))
+    );
     assert_eq!(parse_verification(""), None);
 }
 
@@ -186,13 +193,10 @@ async fn check_missing_interpreter_reports_missing() {
     let dir = venv(); // never gets a bin/python
     let (spawn, _) = scripted_spawn(&dir, "exit 0\n");
     let events = drain(env::check(&dir, &spawn)).await;
-    // EnvEvent has no Missing variant; the brief's refinement pins the
-    // check-failed message as the terminal event for a missing venv (the
-    // behavior contract: no panic, no Ok).
-    match events.last() {
-        Some(EnvEvent::Finished(Err(message))) => assert_eq!(message, CHECK_FAILED_MESSAGE),
-        other => panic!("expected missing/failed, got {other:?}"),
-    }
+    // Missing is its own failure kind (upstream .missing gates the setup
+    // sheet's presentation); upstream has no display string for it.
+    assert_eq!(events.last(), Some(&EnvEvent::Finished(Err(EnvFailure::Missing))));
+    assert_eq!(EnvFailure::Missing.message(), "");
 }
 
 #[tokio::test]
@@ -217,6 +221,32 @@ async fn check_success_sets_shared_versions() {
     let events = drain(env::check(&dir, &spawn)).await;
     assert!(matches!(events.last(), Some(EnvEvent::Finished(Ok(_)))));
     assert_eq!(versions_display(), "Python 3.12.4, build123d 0.8.1");
+    set_shared_versions(None);
+}
+
+#[tokio::test]
+async fn check_failing_verification_reports_check_failed() {
+    let _cell = CELL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = venv();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let bin = dir.join("bin/python");
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    make_executable(&bin);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn: env::Spawn = Arc::new(move |argv, cwd| {
+        seen.lock().unwrap().push(argv.to_vec());
+        engine::processes::spawn_streaming(argv, cwd, &shell_env_vec())
+    });
+    set_shared_versions(Some("stale versions line".into()));
+    let events = drain(env::check(&dir, &spawn)).await;
+    match events.last() {
+        Some(EnvEvent::Finished(Err(f @ EnvFailure::CheckFailed(_)))) => {
+            assert_eq!(f.message(), CHECK_FAILED_MESSAGE);
+        }
+        other => panic!("expected check failure, got {other:?}"),
+    }
+    // a failed check clears the stale cell, so display falls back
+    assert_eq!(versions_display(), VERSIONS_FALLBACK);
     set_shared_versions(None);
 }
 
@@ -270,11 +300,8 @@ async fn install_failing_step_reports_command_name() {
     let probe: env::Probe = Arc::new(|_, _| Some((0, "uv 0.5".to_string())));
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(message))) => {
-            assert_eq!(
-                message,
-                "The command “uv” failed. Check the log for details."
-            );
+        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
+            assert_eq!(f.message(), "The command “uv” failed. Check the log for details.");
         }
         other => panic!("expected command failure, got {other:?}"),
     }
@@ -283,6 +310,9 @@ async fn install_failing_step_reports_command_name() {
             .iter()
             .any(|e| matches!(e, EnvEvent::Log(l) if l.contains("oops")))
     );
+    // upstream's catch sets the step label with the bar holding its place
+    assert!(events.iter().any(|e| matches!(e,
+        EnvEvent::Progress { value: 0.1, step } if step == "Installation failed")));
 }
 
 #[tokio::test]
@@ -292,9 +322,30 @@ async fn install_without_uv_or_python_reports_python_not_found() {
     let probe: env::Probe = Arc::new(|_, _| None); // uv absent, every python absent
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(m))) => {
-            assert!(m.starts_with("Neither uv nor Python 3.10–3.13"))
+        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
+            assert!(f.message().starts_with("Neither uv nor Python 3.10–3.13"))
         }
         other => panic!("expected pythonNotFound, got {other:?}"),
     }
+    // the search milestone (0.05) precedes the scan, so the failure label
+    // carries that position
+    assert!(events.iter().any(|e| matches!(e,
+        EnvEvent::Progress { value: 0.05, step } if step == "Installation failed")));
+}
+
+#[tokio::test]
+async fn install_rejects_candidates_whose_probe_fails() {
+    let dir = venv();
+    let (spawn, _) = scripted_spawn(&dir, "exit 0\n");
+    // every probe answers, but never with exit 0: uv is rejected and so is
+    // any located python — acceptance is exit 0 AND parses AND 3.10–3.13
+    let probe: env::Probe = Arc::new(|_, _| Some((1, "Python 3.12.4".to_string())));
+    let events = drain(env::install(&dir, &spawn, &probe)).await;
+    match events.last() {
+        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
+            assert!(f.message().starts_with("Neither uv nor Python 3.10–3.13"))
+        }
+        other => panic!("expected pythonNotFound, got {other:?}"),
+    }
+    assert!(!events.iter().any(|e| matches!(e, EnvEvent::Log(l) if l.starts_with("Found "))));
 }
