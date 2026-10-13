@@ -195,7 +195,9 @@ Modules mirror the upstream contract; public surface is
 - Section/cut plane: WGSL per-pixel `discard` against the plane equation; red
   cut face via stencil cross-section (inc/dec front/back faces in the clip
   region, one unlit red plane quad where stencil ≠ 0). No per-frame CPU
-  clipping. Sutherland–Hodgman retained only as fallback. Stencil requires the
+  clipping. Sutherland–Hodgman has NO v1 consumer — GL-less machines gate
+  the 3D pane off entirely (§4.1), so the CPU fallback is dropped from the
+  M6 scope (amended 2026-10-13, M6 plan review). Stencil requires the
   `Primitive::render()` path — iced's compositor pass carries no depth/stencil
   attachment, so the viewer owns a `Depth24PlusStencil8` texture (resized with
   the viewport, stencil cleared each frame); `Primitive::draw()` cannot be used
@@ -273,6 +275,13 @@ Divergences (intentional, not parity bugs):
    in-app page display uses the SVG/PNG sheets (same as upstream's page content).
 5. i18n source language inverted it → en; translations carried over by
    extractor; only en active in v1.
+6. Explode applies per-part offsets as per-frame model-uniform writes (GPU-first
+   law), not upstream's CPU mesh rebuild; the offset ARITHMETIC is verbatim —
+   only the application path differs (recorded 2026-10-13 so reviewers don't
+   read GPU-first as a parity bug).
+7. The 3D status bar's "volume" field does not exist upstream (info = extents
+   only; the 12-swatch legend is a controls-row element) — struck from the
+   parity inventory (amended 2026-10-13).
 
 Risks and mitigations (from research; top items):
 
