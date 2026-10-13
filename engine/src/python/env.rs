@@ -456,7 +456,7 @@ async fn install_run(
                         0.05,
                         EnvFailure::InstallFailed(PYTHON_NOT_FOUND_MESSAGE.to_string()),
                     )
-                    .await)
+                    .await);
                 }
             }
         }
@@ -496,13 +496,12 @@ async fn install_run(
 /// install died at (upstream's per-line nudges may have crept it slightly
 /// past), the error line lands in the log, and the failure travels on to
 /// the terminal event.
-async fn fail(
-    events: &mpsc::Sender<EnvEvent>,
-    progress: f64,
-    failure: EnvFailure,
-) -> EnvFailure {
+async fn fail(events: &mpsc::Sender<EnvEvent>, progress: f64, failure: EnvFailure) -> EnvFailure {
     let _ = events
-        .send(EnvEvent::Progress { value: progress, step: STEP_INSTALL_FAILED.to_string() })
+        .send(EnvEvent::Progress {
+            value: progress,
+            step: STEP_INSTALL_FAILED.to_string(),
+        })
         .await;
     let _ = events.send(EnvEvent::Log(failure.message())).await;
     failure
@@ -579,8 +578,8 @@ async fn run_step(
         .and_then(|program| Path::new(program).file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let process = spawn(argv, cwd)
-        .map_err(|e| EnvFailure::InstallFailed(format!("{name}: {e}")))?;
+    let process =
+        spawn(argv, cwd).map_err(|e| EnvFailure::InstallFailed(format!("{name}: {e}")))?;
     let RunningProcess {
         mut lines,
         exit_status,

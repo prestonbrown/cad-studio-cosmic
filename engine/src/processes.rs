@@ -86,7 +86,10 @@ pub fn spawn_streaming(
     env: &[(String, String)],
 ) -> io::Result<RunningProcess> {
     let Some((program, args)) = argv.split_first() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv needs at least the program"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "argv needs at least the program",
+        ));
     };
     let mut child = tokio::process::Command::new(program)
         .args(args)
@@ -129,7 +132,12 @@ pub fn spawn_streaming(
         // lines_tx dies here, so the lines channel closes only after every
         // forwarded line; the exit status was already delivered at reap time.
     });
-    Ok(RunningProcess { pid, lines, stderr_text, exit_status })
+    Ok(RunningProcess {
+        pid,
+        lines,
+        stderr_text,
+        exit_status,
+    })
 }
 
 /// The registry file: the `cad-studio` data dir (`~/.local/share` on Linux)
@@ -176,9 +184,15 @@ pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
     };
     let mut killed = Vec::new();
     for line in text.lines() {
-        let Some((pid_text, started)) = line.split_once(':') else { continue };
-        let Ok(pid) = pid_text.trim().parse::<u32>() else { continue };
-        let Some((ppid, starts_now)) = ps(pid) else { continue };
+        let Some((pid_text, started)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(pid) = pid_text.trim().parse::<u32>() else {
+            continue;
+        };
+        let Some((ppid, starts_now)) = ps(pid) else {
+            continue;
+        };
         if ppid == 1 && starts_now == started {
             let _ = signal(pid, "-TERM");
             killed.push(pid);

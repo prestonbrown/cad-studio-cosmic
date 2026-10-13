@@ -189,7 +189,11 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
 /// Run `--version`; the version is the whole trimmed stdout when the exit
 /// status is 0 (upstream `version(of:)`).
 fn validate(path: &Path, env: &HashMap<String, String>) -> Option<String> {
-    let out = Command::new(path).arg("--version").envs(env).output().ok()?;
+    let out = Command::new(path)
+        .arg("--version")
+        .envs(env)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

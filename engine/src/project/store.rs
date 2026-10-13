@@ -15,11 +15,14 @@ use crate::project::layout::LayoutNode;
 /// suffix; reads stay tolerant (time's Rfc3339 parser accepts fractions).
 pub mod iso8601_utc {
     use serde::{Deserialize, Deserializer, Serializer};
-    use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
     pub fn serialize<S: Serializer>(t: &OffsetDateTime, s: S) -> Result<S::Ok, S::Error> {
-        let t = t.to_utc().replace_nanosecond(0).map_err(serde::ser::Error::custom)?;
+        let t = t
+            .to_utc()
+            .replace_nanosecond(0)
+            .map_err(serde::ser::Error::custom)?;
         s.serialize_str(&t.format(&Rfc3339).map_err(serde::ser::Error::custom)?)
     }
 
@@ -154,7 +157,10 @@ pub fn save_metadata(
     metadata: &ProjectMetadata,
 ) -> Result<(), ProjectStoreError> {
     let json = serde_json::to_string_pretty(metadata)?;
-    atomic_write(&support_dir(project_root).join("project.json"), json.as_bytes())?;
+    atomic_write(
+        &support_dir(project_root).join("project.json"),
+        json.as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -165,7 +171,10 @@ pub fn load_metadata(project_root: &Path) -> Result<ProjectMetadata, ProjectStor
 
 pub fn save_chat(project_root: &Path, messages: &[ChatMessage]) -> Result<(), ProjectStoreError> {
     let json = serde_json::to_string_pretty(messages)?;
-    atomic_write(&support_dir(project_root).join("chat.json"), json.as_bytes())?;
+    atomic_write(
+        &support_dir(project_root).join("chat.json"),
+        json.as_bytes(),
+    )?;
     Ok(())
 }
 

@@ -4,7 +4,7 @@
 
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{
-    expected_outputs, missing_requirements, pdf_page_count, MissingCtx,
+    MissingCtx, expected_outputs, missing_requirements, pdf_page_count,
 };
 use std::path::PathBuf;
 
@@ -44,7 +44,10 @@ fn complete_project() -> Project {
     ] {
         std::fs::copy(golden().join(f), root.join("output").join(f)).unwrap();
     }
-    Project { output: root.join("output"), root }
+    Project {
+        output: root.join("output"),
+        root,
+    }
 }
 
 fn manifest_at(p: &Project) -> Manifest {
@@ -85,7 +88,10 @@ fn expected_outputs_list_matches_contract() {
 #[test]
 fn golden_pdf_has_two_pages_and_one_page_fixture_has_one() {
     assert_eq!(pdf_page_count(&golden().join("schematic.pdf")).unwrap(), 2);
-    assert_eq!(pdf_page_count(&fixture("../handmade/one-page.pdf")).unwrap(), 1);
+    assert_eq!(
+        pdf_page_count(&fixture("../handmade/one-page.pdf")).unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -104,7 +110,10 @@ fn no_model_py_means_no_note() {
         output: PathBuf::from("/nonexistent/output"),
     };
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), None));
-    assert!(missing.is_empty(), "no model.py -> no note, got: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "no model.py -> no note, got: {missing:?}"
+    );
 }
 
 #[test]
@@ -130,7 +139,10 @@ fn missing_expected_outputs_and_plate_are_bare_names() {
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert_eq!(
         missing,
-        ["model.step".to_string(), "plate.3mf (print plate)".to_string()]
+        [
+            "model.step".to_string(),
+            "plate.3mf (print plate)".to_string()
+        ]
     );
 }
 
@@ -144,12 +156,17 @@ fn per_piece_page_demanded_only_with_parts_and_only_page_two() {
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert_eq!(
         missing,
-        ["one drawing page per piece (schematic-2.svg, …) with the parts list on page 1"
-            .to_string()]
+        [
+            "one drawing page per piece (schematic-2.svg, …) with the parts list on page 1"
+                .to_string()
+        ]
     );
     // single piece -> not demanded
     let missing1 = missing_requirements(&ctx(&p, 1, Some("P1S"), Some(&man)));
-    assert!(missing1.is_empty(), "parts_count 1 -> no per-piece note, got: {missing1:?}");
+    assert!(
+        missing1.is_empty(),
+        "parts_count 1 -> no per-piece note, got: {missing1:?}"
+    );
 }
 
 #[test]
@@ -159,14 +176,18 @@ fn drawings_demanded_only_when_disk_has_multiple_pages_and_manifest_lacks_them()
     man.drawings.clear();
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert!(
-        missing.iter().any(|s| s.contains("`drawings` in manifest.json")),
+        missing
+            .iter()
+            .any(|s| s.contains("`drawings` in manifest.json")),
         "{missing:?}"
     );
     // single disk page -> not demanded even with empty manifest drawings
     std::fs::remove_file(p.output.join("schematic-2.svg")).unwrap();
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert!(
-        !missing.iter().any(|s| s.contains("`drawings` in manifest.json")),
+        !missing
+            .iter()
+            .any(|s| s.contains("`drawings` in manifest.json")),
         "{missing:?}"
     );
 }
@@ -177,19 +198,33 @@ fn bed_demanded_only_with_a_configured_printer() {
     let mut man = manifest_at(&p);
     man.bed = None;
     let with_printer = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
-    assert!(with_printer.iter().any(|s| s.contains("`bed` in manifest.json")));
+    assert!(
+        with_printer
+            .iter()
+            .any(|s| s.contains("`bed` in manifest.json"))
+    );
     let no_printer = missing_requirements(&ctx(&p, 2, None, Some(&man)));
-    assert!(!no_printer.iter().any(|s| s.contains("`bed` in manifest.json")));
+    assert!(
+        !no_printer
+            .iter()
+            .any(|s| s.contains("`bed` in manifest.json"))
+    );
 }
 
 #[test]
 fn pdf_demanded_when_fewer_pages_than_drawing_pages() {
     let p = complete_project(); // 2 drawing pages on disk
-    std::fs::copy(fixture("../handmade/one-page.pdf"), p.output.join("schematic.pdf")).unwrap();
+    std::fs::copy(
+        fixture("../handmade/one-page.pdf"),
+        p.output.join("schematic.pdf"),
+    )
+    .unwrap();
     let man = manifest_at(&p);
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert!(
-        missing.iter().any(|s| s.contains("schematic.pdf with all drawing pages")),
+        missing
+            .iter()
+            .any(|s| s.contains("schematic.pdf with all drawing pages")),
         "{missing:?}"
     );
 }
@@ -204,8 +239,13 @@ fn unreadable_pdf_counts_as_zero_pages() {
     let man = manifest_at(&p);
     let missing = missing_requirements(&ctx(&p, 2, Some("P1S"), Some(&man)));
     assert!(
-        missing.iter().any(|s| s.contains("schematic.pdf with all drawing pages")),
+        missing
+            .iter()
+            .any(|s| s.contains("schematic.pdf with all drawing pages")),
         "{missing:?}"
     );
-    assert!(missing.contains(&"schematic.pdf".to_string()), "{missing:?}");
+    assert!(
+        missing.contains(&"schematic.pdf".to_string()),
+        "{missing:?}"
+    );
 }

@@ -30,6 +30,8 @@
 
 use std::collections::HashSet;
 
+use cosmic::Element;
+use cosmic::Task;
 use cosmic::iced::font::{Style as FontStyle, Weight as FontWeight};
 use cosmic::iced::keyboard;
 use cosmic::iced::widget::container::Style as ContainerStyle;
@@ -37,9 +39,7 @@ use cosmic::iced::widget::text::{Span, Wrapping};
 use cosmic::iced::widget::{operation, rich_text};
 use cosmic::iced::{Color, Font, Length};
 use cosmic::widget::text_editor::{self, Binding, Content};
-use cosmic::widget::{button, container, Column, Row, Space};
-use cosmic::Element;
-use cosmic::Task;
+use cosmic::widget::{Column, Row, Space, button, container};
 use engine::project::store::{Action, ChatMessage, Role, ToolState};
 use uuid::Uuid;
 
@@ -92,8 +92,7 @@ const ACTION_CONFIGURE: &str = "Set up the agent…";
 /// `descrivi-l-oggetto-o-la-modifica`
 const PLACEHOLDER: &str = "Describe the object or the change…";
 /// `scrivi-il-prossimo-messaggio-partir-al-termine`
-const PLACEHOLDER_BUSY: &str =
-    "Write the next message: it goes out when this one finishes…";
+const PLACEHOLDER_BUSY: &str = "Write the next message: it goes out when this one finishes…";
 /// `invia`
 const SEND: &str = "Send";
 /// `invia-invio`
@@ -101,8 +100,7 @@ const SEND_TOOLTIP: &str = "Send (Return)";
 /// `aggiungi-alla-coda`
 const ADD_TO_QUEUE: &str = "Add to queue";
 /// `aggiungi-alla-coda-partir-al-termine-invio`
-const ADD_TO_QUEUE_TOOLTIP: &str =
-    "Add to queue: it goes out when this one finishes (Return)";
+const ADD_TO_QUEUE_TOOLTIP: &str = "Add to queue: it goes out when this one finishes (Return)";
 /// `stop`
 const STOP: &str = "Stop";
 /// `interrompi`
@@ -110,8 +108,7 @@ const STOP_TOOLTIP: &str = "Stop (⌘.)";
 /// `allega-file`
 const ATTACH: &str = "Attach files";
 /// `allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v`
-const ATTACH_TOOLTIP: &str =
-    "Attach reference images or files (you can also paste them with ⌘V)";
+const ATTACH_TOOLTIP: &str = "Attach reference images or files (you can also paste them with ⌘V)";
 /// `rimuovi`
 const REMOVE: &str = "Remove";
 /// `in-coda-partiranno-uno-alla-volta`
@@ -377,7 +374,9 @@ fn attachment_chips<'a>(paths: &'a [String], removable: bool) -> Element<'a, Mes
     let mut chips = Row::new().spacing(6);
     for path in paths {
         let name = path.rsplit('/').next().unwrap_or(path);
-        let mut chip = Row::new().spacing(4).push(secondary_text(name.to_string()).size(12));
+        let mut chip = Row::new()
+            .spacing(4)
+            .push(secondary_text(name.to_string()).size(12));
         if removable {
             chip = chip.push(
                 button::icon(icon_handle("window-close", 12))
@@ -386,7 +385,9 @@ fn attachment_chips<'a>(paths: &'a [String], removable: bool) -> Element<'a, Mes
             );
         }
         chips = chips.push(
-            container(chip).padding([2.0, 8.0]).class(subtle_style(6.0, 0.5)),
+            container(chip)
+                .padding([2.0, 8.0])
+                .class(subtle_style(6.0, 0.5)),
         );
     }
     chips.into()
@@ -438,7 +439,14 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     let warns = message.detail.is_some();
     let head = Row::new()
         .spacing(8)
-        .push(icon(if warns { "dialog-warning" } else { "dialog-information" }, 16))
+        .push(icon(
+            if warns {
+                "dialog-warning"
+            } else {
+                "dialog-information"
+            },
+            16,
+        ))
         .push(body_text(message.text.as_str()));
     stack = stack.push(head);
     if message.detail.is_some() {
@@ -487,7 +495,10 @@ fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a
     if active {
         line = line.push(cosmic::widget::progress_bar::indeterminate_circular());
     }
-    container(line).padding([2.0, 8.0]).width(Length::Fill).into()
+    container(line)
+        .padding([2.0, 8.0])
+        .width(Length::Fill)
+        .into()
 }
 
 /// Upstream's plain summary row (ChatView.swift:80-86): caption-size mono
@@ -568,9 +579,7 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
     // the tooltip carries upstream's stateDescription (the accessibility
     // label); iced's glyphs have no label of their own
     let mark = match state {
-        ToolState::Running => Element::from(
-            cosmic::widget::progress_bar::indeterminate_circular(),
-        ),
+        ToolState::Running => Element::from(cosmic::widget::progress_bar::indeterminate_circular()),
         ToolState::Succeeded => glyph("✓", STATE_OK),
         ToolState::Failed => glyph("✗", STATE_ERR),
     };
@@ -591,7 +600,9 @@ const STATE_OK: Color = Color::from_rgb(0.18, 0.66, 0.34);
 const STATE_ERR: Color = Color::from_rgb(0.90, 0.32, 0.32);
 
 fn glyph(ch: &str, color: Color) -> Element<'static, Message> {
-    body_text(ch.to_string()).class(cosmic::theme::Text::Color(color)).into()
+    body_text(ch.to_string())
+        .class(cosmic::theme::Text::Color(color))
+        .into()
 }
 
 /// Upstream `icon` (ToolActivityRow.swift:74-83): per-tool SF Symbol →
@@ -625,7 +636,11 @@ fn code_block<'a>(code: &str) -> Element<'a, Message> {
                 .name(COPY),
         )
         .spacing(8);
-    container(body).padding(8).width(Length::Fill).class(subtle_style(6.0, 1.0)).into()
+    container(body)
+        .padding(8)
+        .width(Length::Fill)
+        .class(subtle_style(6.0, 1.0))
+        .into()
 }
 
 /// Upstream ChatView.swift:50-54: a small busy marker while the agent works
@@ -638,7 +653,12 @@ fn streaming_indicator() -> Element<'static, Message> {
 
 /// Upstream `ChatEmptyState` (ChatView.swift:107-154).
 fn empty_state() -> Element<'static, Message> {
-    let suggestions = [SUGGESTION_BRACKET, SUGGESTION_BOX, SUGGESTION_SPACER, SUGGESTION_STAND];
+    let suggestions = [
+        SUGGESTION_BRACKET,
+        SUGGESTION_BOX,
+        SUGGESTION_SPACER,
+        SUGGESTION_STAND,
+    ];
     let mut list = Column::new().spacing(6);
     for suggestion in suggestions {
         list = list.push(
@@ -688,15 +708,30 @@ fn input_bar<'a>(
     }
     stack = stack.push(input_row(pane, chat, busy));
 
-    container(stack).width(Length::Fill).padding(10).class(subtle_style(8.0, 1.0)).into()
+    container(stack)
+        .width(Length::Fill)
+        .padding(10)
+        .class(subtle_style(8.0, 1.0))
+        .into()
 }
 
 /// Upstream `QueueList` (ChatInputView.swift:186-248).
 fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'a, Message> {
     let mut head = Row::new()
         .spacing(6)
-        .push(icon(if paused { "media-playback-pause" } else { "document-open-recent" }, 14))
-        .push(secondary_text(if paused { QUEUE_PAUSED } else { QUEUE_RUNNING }))
+        .push(icon(
+            if paused {
+                "media-playback-pause"
+            } else {
+                "document-open-recent"
+            },
+            14,
+        ))
+        .push(secondary_text(if paused {
+            QUEUE_PAUSED
+        } else {
+            QUEUE_RUNNING
+        }))
         .push(Space::new().width(Length::Fill));
     if paused && !busy {
         head = head.push(
@@ -708,8 +743,11 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
     let mut items = Column::new().spacing(4);
     for (index, item) in queue.iter().enumerate() {
         let mut body = Column::new().spacing(2);
-        let preview =
-            if item.text.is_empty() { IMAGES_ONLY.to_string() } else { item.text.clone() };
+        let preview = if item.text.is_empty() {
+            IMAGES_ONLY.to_string()
+        } else {
+            item.text.clone()
+        };
         body = body.push(body_text(preview));
         if item.images > 0 {
             body = body.push(secondary_text(format!("{} {}", item.images, IMAGES_COUNT)));
@@ -740,7 +778,9 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
 /// The editor row: attach · input · send (ChatInputView.swift:20-57) and the
 /// busy-state send area (ChatInputView.swift:116-153).
 fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
-    let mut line = Row::new().spacing(6).align_y(cosmic::iced::alignment::Alignment::End);
+    let mut line = Row::new()
+        .spacing(6)
+        .align_y(cosmic::iced::alignment::Alignment::End);
     line = line.push(
         button::icon(icon_handle("mail-attachment", 14))
             .on_press(Message::Attach)
@@ -755,10 +795,8 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
             // Return sends; shift/option+Return breaks the line
             // (ChatInputView.swift:39-47).
             .key_binding(|press| {
-                if matches!(
-                    press.key,
-                    keyboard::Key::Named(keyboard::key::Named::Enter)
-                ) && !press.modifiers.shift()
+                if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
+                    && !press.modifiers.shift()
                     && !press.modifiers.alt()
                 {
                     Some(Binding::Custom(Message::Send))
@@ -833,7 +871,10 @@ fn secondary_text_class() -> cosmic::theme::Text {
     cosmic::theme::Text::Custom(|theme| {
         let mut color = Color::from(theme.cosmic().background(false).on);
         color.a *= 0.65;
-        cosmic::iced::widget::text::Style { color: Some(color), ..Default::default() }
+        cosmic::iced::widget::text::Style {
+            color: Some(color),
+            ..Default::default()
+        }
     })
 }
 
@@ -971,8 +1012,16 @@ mod tests {
         assert_eq!(&with_thinking[..2], &opened[..]);
         chat.apply_at(&ts("fresh answer"), now);
         let streamed = ids(&chat);
-        assert_eq!(streamed.len(), with_thinking.len() + 1, "a new block opens a row");
-        assert_eq!(&streamed[..with_thinking.len()], &with_thinking[..], "appended at the tail");
+        assert_eq!(
+            streamed.len(),
+            with_thinking.len() + 1,
+            "a new block opens a row"
+        );
+        assert_eq!(
+            &streamed[..with_thinking.len()],
+            &with_thinking[..],
+            "appended at the tail"
+        );
     }
 
     /// The busy indicator shows only while busy AND the last row is the

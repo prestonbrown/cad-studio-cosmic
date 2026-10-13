@@ -11,8 +11,7 @@ use std::time::Duration;
 
 use engine::agent::claude::TurnRequest;
 use engine::agent::session::{
-    EngineEvent, Session, TurnOutcome, is_authentication_error, is_busy_session,
-    is_missing_session,
+    EngineEvent, Session, TurnOutcome, is_authentication_error, is_busy_session, is_missing_session,
 };
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
@@ -79,7 +78,10 @@ async fn run_fake_with(
     let mut session = Session::new(settings.clone()).with_system_template(system_template());
     let mut handle = session.run_turn(
         root,
-        &TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        &TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     );
     let events = collect_until_finished(&mut handle).await;
     drop(guard);
@@ -88,7 +90,9 @@ async fn run_fake_with(
 
 /// Drain the handle's events up to and including TurnFinished, bounded by the
 /// suite-wide 5 s margin (never a fixed sleep).
-async fn collect_until_finished(handle: &mut engine::agent::session::TurnHandle) -> Vec<EngineEvent> {
+async fn collect_until_finished(
+    handle: &mut engine::agent::session::TurnHandle,
+) -> Vec<EngineEvent> {
     let mut events = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -150,7 +154,8 @@ fn alive(pid: u32) -> bool {
 
 /// `argv` contains `flag` followed immediately by `value`.
 fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
-    argv.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
+    argv.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
 // ─── the seven-turn suite ───────────────────────────────────────────────────
@@ -158,37 +163,56 @@ fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn pong_turn_emits_full_event_sequence() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/pong.jsonl"), &Settings::default()).await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     // Started first, carrying the init session id
     assert_eq!(started_sid(&events[0]), Some(PONG_SID), "{events:?}");
     // thinking estimate flows through the thinking_tokens system events
     assert!(
-        events.contains(&EngineEvent::Thinking { estimated_tokens: 50 }),
+        events.contains(&EngineEvent::Thinking {
+            estimated_tokens: 50
+        }),
         "{events:?}"
     );
     // streamed text accumulates, then the assistant block confirms it
-    let streaming = positions(&events, |e| matches!(e, EngineEvent::TextStreaming { text } if text == "pong"));
-    let confirmed = positions(&events, |e| matches!(e, EngineEvent::TextConfirmed { text } if text == "pong"));
+    let streaming = positions(
+        &events,
+        |e| matches!(e, EngineEvent::TextStreaming { text } if text == "pong"),
+    );
+    let confirmed = positions(
+        &events,
+        |e| matches!(e, EngineEvent::TextConfirmed { text } if text == "pong"),
+    );
     assert_eq!(streaming.len(), 1, "{events:?}");
     assert_eq!(confirmed.len(), 1, "{events:?}");
     assert!(streaming[0] < confirmed[0], "{events:?}");
     // no tool rows in a text-only turn; the rate_limit_event is consumed silently
     assert!(
-        events
-            .iter()
-            .all(|e| !matches!(e, EngineEvent::ToolStarted { .. } | EngineEvent::ToolFinished { .. })),
+        events.iter().all(|e| !matches!(
+            e,
+            EngineEvent::ToolStarted { .. } | EngineEvent::ToolFinished { .. }
+        )),
         "{events:?}"
     );
     // Success carries the confirmed text (the hasText rule: the result text is
     // only used when no assistant text was confirmed this turn)
     assert_eq!(
         finished(&events),
-        &TurnOutcome::Success { session_id: Some(PONG_SID.into()), text: "pong".into() }
+        &TurnOutcome::Success {
+            session_id: Some(PONG_SID.into()),
+            text: "pong".into()
+        }
     );
     // the session id from init is persisted immediately
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
     // one tee log with every raw stdout line: the verbatim corpus is 19 lines
     let logs_dir = root.join(".cadstudio/logs");
     let mut logs: Vec<PathBuf> = std::fs::read_dir(&logs_dir)
@@ -205,16 +229,28 @@ async fn pong_turn_emits_full_event_sequence() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_turn_tracks_tool_rows() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/tool-use.jsonl"), &Settings::default()).await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/tool-use.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     // both tools open keyed by their tool_use ids, in stream order
     let started = positions(&events, |e| matches!(e, EngineEvent::ToolStarted { .. }));
     assert_eq!(started.len(), 2, "{events:?}");
     match (&events[started[0]], &events[started[1]]) {
         (
-            EngineEvent::ToolStarted { id: a, name: na, title: ta },
-            EngineEvent::ToolStarted { id: b, name: nb, title: tb },
+            EngineEvent::ToolStarted {
+                id: a,
+                name: na,
+                title: ta,
+            },
+            EngineEvent::ToolStarted {
+                id: b,
+                name: nb,
+                title: tb,
+            },
         ) => {
             assert_eq!(a, WRITE_ID);
             assert_eq!(b, READ_ID);
@@ -227,14 +263,18 @@ async fn tool_turn_tracks_tool_rows() {
     }
     // both rows complete with their outputs, none in error
     match tool_finished(&events, WRITE_ID) {
-        EngineEvent::ToolFinished { output, is_error, .. } => {
+        EngineEvent::ToolFinished {
+            output, is_error, ..
+        } => {
             assert!(output.contains("File created successfully"), "{output}");
             assert!(!is_error);
         }
         other => panic!("{other:?}"),
     }
     match tool_finished(&events, READ_ID) {
-        EngineEvent::ToolFinished { output, is_error, .. } => {
+        EngineEvent::ToolFinished {
+            output, is_error, ..
+        } => {
             assert!(output.contains("hi"), "{output}");
             assert!(!is_error);
         }
@@ -242,12 +282,14 @@ async fn tool_turn_tracks_tool_rows() {
     }
     // the interleaved mid-stream tool_result completes the Write row while
     // the Read row is still streaming its input
-    let write_done = positions(&events, |e| {
-        matches!(e, EngineEvent::ToolFinished { id, .. } if id == WRITE_ID)
-    })[0];
-    let read_inputs = positions(&events, |e| {
-        matches!(e, EngineEvent::ToolInput { id, .. } if id == READ_ID)
-    });
+    let write_done = positions(
+        &events,
+        |e| matches!(e, EngineEvent::ToolFinished { id, .. } if id == WRITE_ID),
+    )[0];
+    let read_inputs = positions(
+        &events,
+        |e| matches!(e, EngineEvent::ToolInput { id, .. } if id == READ_ID),
+    );
     assert!(!read_inputs.is_empty(), "{events:?}");
     assert!(
         read_inputs[0] < write_done && *read_inputs.last().unwrap() > write_done,
@@ -263,21 +305,37 @@ async fn tool_turn_tracks_tool_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn error_result_fails_turn() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/error-result.jsonl"), &Settings::default())
-            .await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/error-result.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     // the synthetic error assistant block is a TextConfirmed like any block
     assert!(
-        events.iter().any(|e| matches!(e, EngineEvent::TextConfirmed { text } if text.contains("selected model"))),
+        events.iter().any(
+            |e| matches!(e, EngineEvent::TextConfirmed { text } if text.contains("selected model"))
+        ),
         "{events:?}"
     );
     match finished(&events) {
-        TurnOutcome::Failed { error, auth, exit_code } => {
+        TurnOutcome::Failed {
+            error,
+            auth,
+            exit_code,
+        } => {
             assert!(!auth);
-            assert_eq!(exit_code, &Some(0), "the child exited clean; the result failed");
+            assert_eq!(
+                exit_code,
+                &Some(0),
+                "the child exited clean; the result failed"
+            );
             assert!(error.contains("no-such-model"), "{error}");
-            assert!(error.contains("404"), "the api error status rides along: {error}");
+            assert!(
+                error.contains("404"),
+                "the api error status rides along: {error}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -286,32 +344,45 @@ async fn error_result_fails_turn() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_failure_marks_row_failed() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/tool-failure.jsonl"), &Settings::default())
-            .await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/tool-failure.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     match tool_finished(&events, "toolu_fake_0001") {
-        EngineEvent::ToolFinished { output, is_error, .. } => {
+        EngineEvent::ToolFinished {
+            output, is_error, ..
+        } => {
             assert!(output.contains("Traceback"), "{output}");
             assert!(is_error);
         }
         other => panic!("{other:?}"),
     }
     // a failed tool does not fail the turn when the result line says success
-    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_events_do_not_break_turn() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/unknown-events.jsonl"), &Settings::default())
-            .await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/unknown-events.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     // this scenario has no init line, so no Started fires at all; the session
     // id is still learned from the result line
     assert!(
-        events.iter().all(|e| !matches!(e, EngineEvent::Started { .. })),
+        events
+            .iter()
+            .all(|e| !matches!(e, EngineEvent::Started { .. })),
         "{events:?}"
     );
     // no assistant text this turn, so the outcome text is the result text
@@ -340,7 +411,10 @@ async fn argv_dump_asserts_flags() {
         Some(&dump),
     )
     .await;
-    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
 
     let lines: Vec<String> = std::fs::read_to_string(&dump)
         .unwrap()
@@ -377,7 +451,10 @@ async fn argv_dump_asserts_flags() {
         .expect("append-system-prompt flag");
     let rendered = &argv[prompt_pos + 1];
     let project_name = root.file_name().unwrap().to_str().unwrap();
-    assert!(rendered.contains(project_name), "project name substituted: {rendered}");
+    assert!(
+        rendered.contains(project_name),
+        "project name substituted: {rendered}"
+    );
     assert!(!rendered.contains("{{"), "no placeholder left: {rendered}");
     assert!(!rendered.is_empty());
     assert!(argv.iter().any(|a| a == "--allowedTools"));
@@ -393,7 +470,13 @@ async fn argv_dump_asserts_flags() {
     off.isolates_claude = false;
     off.streaming_output = false;
     std::fs::remove_file(&dump).unwrap();
-    let events = run_fake_with(&root, &fixture_fake("scenarios/pong.jsonl"), &off, Some(&dump)).await;
+    let events = run_fake_with(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &off,
+        Some(&dump),
+    )
+    .await;
     assert!(matches!(finished(&events), TurnOutcome::Success { .. }));
     let plain: Vec<String> = std::fs::read_to_string(&dump)
         .unwrap()
@@ -402,13 +485,12 @@ async fn argv_dump_asserts_flags() {
         .map(str::to_string)
         .collect();
     assert_eq!(plain.len(), 1);
-    let argv: Vec<String> =
-        serde_json::from_str::<serde_json::Value>(&plain[0]).unwrap()["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
+    let argv: Vec<String> = serde_json::from_str::<serde_json::Value>(&plain[0]).unwrap()["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
     assert!(has_pair(&argv, "--output-format", "json"));
     assert!(!argv.iter().any(|a| a == "--strict-mcp-config"));
     assert!(!argv.iter().any(|a| a == "--setting-sources"));
@@ -420,15 +502,26 @@ async fn argv_dump_asserts_flags() {
 #[tokio::test(flavor = "multi_thread")]
 async fn forked_session_replaces_metadata_id() {
     let root = mk_project();
-    let first = run_fake(&root, &fixture_fake("scenarios/pong.jsonl"), &Settings::default()).await;
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    let first = run_fake(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &Settings::default(),
+    )
+    .await;
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
     let _ = first;
 
     // the second turn resumes (metadata has a session id) and the forked
     // init announces a NEW session id, which replaces the stored one
-    let second =
-        run_fake(&root, &fixture_fake("05-resume-fork-isolated.jsonl"), &Settings::default())
-            .await;
+    let second = run_fake(
+        &root,
+        &fixture_fake("05-resume-fork-isolated.jsonl"),
+        &Settings::default(),
+    )
+    .await;
     assert_eq!(started_sid(&second[0]), Some(FORK_SID), "{second:?}");
     let stored = load_metadata(&root).unwrap().session_id;
     assert_eq!(stored.as_deref(), Some(FORK_SID));
@@ -442,16 +535,21 @@ async fn cancel_mid_stream() {
     // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
     unsafe {
         std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
-        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/cancel-mid-stream.jsonl"));
+        std::env::set_var(
+            "CAD_FAKE_SCENARIO",
+            fixture_fake("scenarios/cancel-mid-stream.jsonl"),
+        );
         std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
         std::env::remove_var("CAD_FAKE_ARGV_OUT");
         std::env::remove_var("CAD_FAKE_STDERR");
     }
-    let mut session =
-        Session::new(Settings::default()).with_system_template(system_template());
+    let mut session = Session::new(Settings::default()).with_system_template(system_template());
     let mut handle = session.run_turn(
         &root,
-        &TurnRequest { prompt: "slow please".into(), attachments: Vec::new() },
+        &TurnRequest {
+            prompt: "slow please".into(),
+            attachments: Vec::new(),
+        },
     );
 
     // the init line arrives before the scenario's 5 s sleep, so Started is
@@ -470,7 +568,10 @@ async fn cancel_mid_stream() {
             other => panic!("Started never arrived: {other:?}, {before_cancel:?}"),
         }
     }
-    assert_eq!(started_sid(&before_cancel.last().unwrap()), Some("00000000-0000-0000-0000-00000000a002"));
+    assert_eq!(
+        started_sid(&before_cancel.last().unwrap()),
+        Some("00000000-0000-0000-0000-00000000a002")
+    );
 
     handle.cancel();
     // the interrupted turn ends as Cancelled well inside the fake's sleep
@@ -489,10 +590,15 @@ async fn cancel_mid_stream() {
             Err(_) => panic!("cancel did not end the turn within 2 s: {rest:?}"),
         }
     }
-    assert_eq!(rest.last(), Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled)));
+    assert_eq!(
+        rest.last(),
+        Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled))
+    );
     // the post-sleep text never streamed
     assert!(
-        !rest.iter().any(|e| matches!(e, EngineEvent::TextStreaming { .. })),
+        !rest
+            .iter()
+            .any(|e| matches!(e, EngineEvent::TextStreaming { .. })),
         "{rest:?}"
     );
     drop(guard);
@@ -501,7 +607,10 @@ async fn cancel_mid_stream() {
     let pid = handle.pid().expect("pid published after spawn");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while alive(pid) {
-        assert!(std::time::Instant::now() < deadline, "child {pid} survived cancellation");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child {pid} survived cancellation"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -516,11 +625,22 @@ async fn cancel_mid_stream() {
 #[tokio::test(flavor = "multi_thread")]
 async fn restricted_allowlist_and_child_env_name_the_app_venv() {
     let root = mk_project();
-    let settings = Settings { restricted_bash: true, ..Default::default() };
+    let settings = Settings {
+        restricted_bash: true,
+        ..Default::default()
+    };
     let dump = root.join("argv-dump.jsonl");
-    let events =
-        run_fake_with(&root, &fixture_fake("scenarios/pong.jsonl"), &settings, Some(&dump)).await;
-    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    let events = run_fake_with(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &settings,
+        Some(&dump),
+    )
+    .await;
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
 
     let line = std::fs::read_to_string(&dump)
         .unwrap()
@@ -542,7 +662,8 @@ async fn restricted_allowlist_and_child_env_name_the_app_venv() {
     // the entry quotes a spaced path (claude.rs quoted_python), so the
     // claim is "names the canonical venv", not byte-equality with it
     assert!(
-        argv.iter().any(|a| a.starts_with("Bash(") && a.ends_with(":*)") && a.contains(&venv)),
+        argv.iter()
+            .any(|a| a.starts_with("Bash(") && a.ends_with(":*)") && a.contains(&venv)),
         "restricted entry names the app-wide venv: {argv:?}"
     );
     let prompt_pos = argv
@@ -601,12 +722,20 @@ fn classification_helpers_are_case_insensitive() {
 #[tokio::test(flavor = "multi_thread")]
 async fn thinking_boundaries_emitted() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("02-minimal-session.jsonl"), &Settings::default()).await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("02-minimal-session.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     let started = positions(&events, |e| matches!(e, EngineEvent::ThinkingStarted));
     let finished_at = positions(&events, |e| matches!(e, EngineEvent::ThinkingFinished));
-    assert_eq!(started.len(), 1, "the thinking block opens one pair: {events:?}");
+    assert_eq!(
+        started.len(),
+        1,
+        "the thinking block opens one pair: {events:?}"
+    );
     assert_eq!(finished_at.len(), 1, "{events:?}");
     let first_text = positions(&events, |e| matches!(e, EngineEvent::TextStreaming { .. }));
     assert!(
@@ -637,7 +766,10 @@ async fn thinking_boundaries_emitted() {
         0,
         "no content_block_stop in this scenario: {events:?}"
     );
-    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
 }
 
 /// Both tool rows carry the tool_use block's name alongside the title — at
@@ -646,8 +778,12 @@ async fn thinking_boundaries_emitted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_started_carries_name() {
     let root = mk_project();
-    let events =
-        run_fake(&root, &fixture_fake("scenarios/tool-use.jsonl"), &Settings::default()).await;
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/tool-use.jsonl"),
+        &Settings::default(),
+    )
+    .await;
 
     let started = positions(&events, |e| matches!(e, EngineEvent::ToolStarted { .. }));
     assert_eq!(started.len(), 2, "{events:?}");
@@ -667,7 +803,10 @@ async fn tool_started_carries_name() {
         &Settings::default(),
     )
     .await;
-    match events.iter().find(|e| matches!(e, EngineEvent::ToolStarted { .. })) {
+    match events
+        .iter()
+        .find(|e| matches!(e, EngineEvent::ToolStarted { .. }))
+    {
         Some(EngineEvent::ToolStarted { id, name, .. }) => {
             assert_eq!(id, "toolu_fake_0001");
             assert_eq!(name, "Bash");
@@ -688,7 +827,11 @@ async fn failed_carries_exit_code() {
     )
     .await;
     match finished(&events) {
-        TurnOutcome::Failed { error, auth, exit_code } => {
+        TurnOutcome::Failed {
+            error,
+            auth,
+            exit_code,
+        } => {
             assert!(!auth, "{error}");
             assert_eq!(exit_code, &Some(3), "{error}");
             assert!(error.contains("the agent fell over"), "{error}");

@@ -16,8 +16,14 @@ fn bash_first_word_classes_in_upstream_order() {
         ("cd /root && python model.py", "Building the model"),
         ("python analyze.py", "Analyzing the model"),
         ("python -m build123d", "Analyzing the model"),
-        ("rsvg-convert -o out.png schematic.svg", "Preparing a preview"),
-        ("/usr/bin/qlmanage -t -s 512 -o . render.png", "Preparing a preview"),
+        (
+            "rsvg-convert -o out.png schematic.svg",
+            "Preparing a preview",
+        ),
+        (
+            "/usr/bin/qlmanage -t -s 512 -o . render.png",
+            "Preparing a preview",
+        ),
         ("magick convert x.heic x.png", "Preparing a preview"),
         ("ls -la output/", "Looking through files"),
         ("/bin/cat output/manifest.json", "Looking through files"),
@@ -48,7 +54,10 @@ fn bash_first_word_classes_in_upstream_order() {
 #[test]
 fn write_titles_key_off_the_basename() {
     assert_eq!(
-        summarize("Write", &json!({"file_path": "/w/model.py", "content": "x = 1"})),
+        summarize(
+            "Write",
+            &json!({"file_path": "/w/model.py", "content": "x = 1"})
+        ),
         "Writing the model"
     );
     // basename match, not suffix: nested model.py counts
@@ -57,9 +66,15 @@ fn write_titles_key_off_the_basename() {
         "Writing the model"
     );
     // the path-key fallback upstream's file() reads second
-    assert_eq!(summarize("Write", &json!({"path": "/w/model.py"})), "Writing the model");
     assert_eq!(
-        summarize("Write", &json!({"file_path": "/w/notes.txt", "content": "x"})),
+        summarize("Write", &json!({"path": "/w/model.py"})),
+        "Writing the model"
+    );
+    assert_eq!(
+        summarize(
+            "Write",
+            &json!({"file_path": "/w/notes.txt", "content": "x"})
+        ),
         "Preparing a helper file"
     );
     // no path at all
@@ -68,9 +83,15 @@ fn write_titles_key_off_the_basename() {
 
 #[test]
 fn edit_and_multiedit_share_the_model_case() {
-    assert_eq!(summarize("Edit", &json!({"file_path": "/w/model.py"})), "Editing the model");
     assert_eq!(
-        summarize("MultiEdit", &json!({"file_path": "/w/model.py", "edits": []})),
+        summarize("Edit", &json!({"file_path": "/w/model.py"})),
+        "Editing the model"
+    );
+    assert_eq!(
+        summarize(
+            "MultiEdit",
+            &json!({"file_path": "/w/model.py", "edits": []})
+        ),
         "Editing the model"
     );
     assert_eq!(
@@ -96,7 +117,10 @@ fn read_titles_follow_the_upstream_order() {
         summarize("Read", &json!({"file_path": "references/panel.png"})),
         "Studying the reference"
     );
-    assert_eq!(summarize("Read", &json!({"file_path": "/w/model.py"})), "Reviewing the model");
+    assert_eq!(
+        summarize("Read", &json!({"file_path": "/w/model.py"})),
+        "Reviewing the model"
+    );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/schematic-2.pdf"})),
         "Checking the drawing"
@@ -126,21 +150,39 @@ fn read_titles_follow_the_upstream_order() {
         summarize("Read", &json!({"file_path": "/w/output/render.webp"})),
         "Checking a preview"
     );
-    assert_eq!(summarize("Read", &json!({"file_path": "/w/README.md"})), "Reading a file");
+    assert_eq!(
+        summarize("Read", &json!({"file_path": "/w/README.md"})),
+        "Reading a file"
+    );
 }
 
 #[test]
 fn fixed_tool_names_need_no_input() {
-    assert_eq!(summarize("Glob", &json!({"pattern": "*.py"})), "Searching the project");
-    assert_eq!(summarize("Grep", &json!({"pattern": "build123d"})), "Searching the project");
-    assert_eq!(summarize("TodoWrite", &json!({"todos": []})), "Updates the task plan");
-    assert_eq!(summarize("WebSearch", &json!({"query": "build123d docs"})), "Searching the web");
+    assert_eq!(
+        summarize("Glob", &json!({"pattern": "*.py"})),
+        "Searching the project"
+    );
+    assert_eq!(
+        summarize("Grep", &json!({"pattern": "build123d"})),
+        "Searching the project"
+    );
+    assert_eq!(
+        summarize("TodoWrite", &json!({"todos": []})),
+        "Updates the task plan"
+    );
+    assert_eq!(
+        summarize("WebSearch", &json!({"query": "build123d docs"})),
+        "Searching the web"
+    );
     assert_eq!(
         summarize("WebFetch", &json!({"url": "https://example.com"})),
         "Searching the web"
     );
     // unknown tools fall through to the generic title
-    assert_eq!(summarize("NotebookEdit", &json!({})), "Working on the project");
+    assert_eq!(
+        summarize("NotebookEdit", &json!({})),
+        "Working on the project"
+    );
 }
 
 #[test]
@@ -152,12 +194,18 @@ fn live_title_marks_streaming_partials() {
     );
     // complete content value: line count, no ellipsis
     assert_eq!(
-        live_title("Write", r#"{"file_path": "/tmp/p/model.py", "content": "a\nb\nc"}"#),
+        live_title(
+            "Write",
+            r#"{"file_path": "/tmp/p/model.py", "content": "a\nb\nc"}"#
+        ),
         "Writing the model · 3 lines"
     );
     // content still streaming: lines so far plus the ellipsis
     assert_eq!(
-        live_title("Write", r#"{"file_path": "/tmp/p/model.py", "content": "a\nb"#),
+        live_title(
+            "Write",
+            r#"{"file_path": "/tmp/p/model.py", "content": "a\nb"#
+        ),
         "Writing the model · 2 lines…"
     );
     // bare prefix and garbage never panic: the tool's generic title comes back
@@ -165,11 +213,17 @@ fn live_title_marks_streaming_partials() {
     assert_eq!(live_title("Bash", "not json"), "Working on the project");
     // the line suffix is Write-only; Edit keeps its plain title
     assert_eq!(
-        live_title("Edit", r#"{"file_path": "/tmp/p/model.py", "new_string": "x = 1"#),
+        live_title(
+            "Edit",
+            r#"{"file_path": "/tmp/p/model.py", "new_string": "x = 1"#
+        ),
         "Editing the model…"
     );
     // command partials classify too
-    assert_eq!(live_title("Bash", r#"{"command": "python model.py"#), "Building the model…");
+    assert_eq!(
+        live_title("Bash", r#"{"command": "python model.py"#),
+        "Building the model…"
+    );
 }
 
 #[test]
@@ -196,7 +250,10 @@ fn live_preview_shows_last_four_nonempty_lines() {
     // key present with an empty value: empty preview, not None (upstream returns "")
     assert_eq!(live_preview(r#"{"content": ""}"#).as_deref(), Some(""));
     // content wins when both keys are present (Write carries content, Edit new_string)
-    assert_eq!(live_preview(r#"{"content": "c", "new_string": "n"}"#).as_deref(), Some("c"));
+    assert_eq!(
+        live_preview(r#"{"content": "c", "new_string": "n"}"#).as_deref(),
+        Some("c")
+    );
 }
 
 #[test]
@@ -212,8 +269,14 @@ fn rel_path_strips_only_the_root_prefix() {
 #[test]
 fn short_command_normalizes_venv_and_cd() {
     let py = "/root/.venv/bin/python";
-    assert_eq!(short_command("cd /root && python model.py", "/root", py), "python model.py");
-    assert_eq!(short_command("/root/.venv/bin/python model.py", "/root", py), "python model.py");
+    assert_eq!(
+        short_command("cd /root && python model.py", "/root", py),
+        "python model.py"
+    );
+    assert_eq!(
+        short_command("/root/.venv/bin/python model.py", "/root", py),
+        "python model.py"
+    );
     // replacement happens before the cd strip, like upstream
     assert_eq!(
         short_command("cd /root && /root/.venv/bin/python model.py", "/root", py),
@@ -221,7 +284,11 @@ fn short_command_normalizes_venv_and_cd() {
     );
     // quoted venv paths (spaces) are replaced first, then the bare path
     assert_eq!(
-        short_command("\"/opt/my venv/python\" model.py", "/w", "/opt/my venv/python"),
+        short_command(
+            "\"/opt/my venv/python\" model.py",
+            "/w",
+            "/opt/my venv/python"
+        ),
         "python model.py"
     );
     // only the first line counts
@@ -230,11 +297,17 @@ fn short_command_normalizes_venv_and_cd() {
         "python model.py"
     );
     // ';' separates when no "&&" is present
-    assert_eq!(short_command("cd /root; python x.py", "/root", py), "python x.py");
+    assert_eq!(
+        short_command("cd /root; python x.py", "/root", py),
+        "python x.py"
+    );
     // the cd target must contain the root, otherwise nothing is stripped
     assert_eq!(
         short_command("cd /elsewhere && python x.py", "/root", py),
         "cd /elsewhere && python x.py"
     );
-    assert_eq!(short_command("python model.py", "/root", py), "python model.py");
+    assert_eq!(
+        short_command("python model.py", "/root", py),
+        "python model.py"
+    );
 }

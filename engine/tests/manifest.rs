@@ -15,7 +15,14 @@ fn golden_manifest_decodes() {
     assert_eq!(m.bed, Some([220.0, 220.0]));
     assert_eq!(m.drawings.len(), 2);
     assert_eq!(m.drawings[1].file, "schematic-2.svg");
-    assert_eq!(m.bounding_box, Some(BBox { x: 60.0, y: 60.0, z: 26.0 }));
+    assert_eq!(
+        m.bounding_box,
+        Some(BBox {
+            x: 60.0,
+            y: 60.0,
+            z: 26.0
+        })
+    );
     assert_eq!(m.warnings, vec!["fixture warning".to_string()]);
 }
 
@@ -23,13 +30,16 @@ fn golden_manifest_decodes() {
 fn malformed_fields_drop_not_error() {
     // upstream wraps every field in try? ?? default (Manifest.swift):
     // a bad value kills the FIELD, never the file
-    let m: Manifest = serde_json::from_str(r#"{
+    let m: Manifest = serde_json::from_str(
+        r#"{
         "parameters": {"a": 1.5, "b": "not-a-number", "c": true},
         "bed": [220.0, "oops"],
         "warnings": null,
         "drawings": [{"file": 7, "title": "ok"}, {"file": "s.svg", "title": "fine"}],
         "bounding_box": {"x": "wide"}
-    }"#).unwrap();
+    }"#,
+    )
+    .unwrap();
     assert_eq!(m.parameters.get("a").copied(), Some(1.5));
     assert!(!m.parameters.contains_key("b"));
     assert!(!m.parameters.contains_key("c"));
@@ -42,7 +52,11 @@ fn malformed_fields_drop_not_error() {
 
 #[test]
 fn bed_arity_is_exactly_two_positive() {
-    for bad in [r#"{"bed": [220.0]}"#, r#"{"bed": [1.0, 2.0, 3.0]}"#, r#"{"bed": [220.0, 0.0]}"#] {
+    for bad in [
+        r#"{"bed": [220.0]}"#,
+        r#"{"bed": [1.0, 2.0, 3.0]}"#,
+        r#"{"bed": [220.0, 0.0]}"#,
+    ] {
         let m: Manifest = serde_json::from_str(bad).unwrap();
         assert_eq!(m.bed, None);
     }

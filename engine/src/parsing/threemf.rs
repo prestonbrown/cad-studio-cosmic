@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 use std::io::Read as _;
 
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 use super::{Part, TriangleColor};
 
@@ -157,14 +157,18 @@ fn collect(xml: &str) -> Result<Collected, ThreemfError> {
                     b"component" => {
                         if let Some(o) = cur.as_mut() {
                             o.components.push((
-                                attr(&e, b"objectid").and_then(|v| v.parse().ok()).unwrap_or(0),
+                                attr(&e, b"objectid")
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(0),
                                 parse_xf(attr(&e, b"transform")),
                             ));
                         }
                     }
                     b"item" => {
                         c.build.push((
-                            attr(&e, b"objectid").and_then(|v| v.parse().ok()).unwrap_or(0),
+                            attr(&e, b"objectid")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(0),
                             parse_xf(attr(&e, b"transform")),
                         ));
                     }
@@ -332,7 +336,10 @@ fn resolve(c: &Collected) -> Result<Vec<Part>, ThreemfError> {
         if !flat.has_mesh {
             continue; // dangling reference or component-only object: nothing to show
         }
-        let own = objects.get(&oid).map(|o| o.name.clone()).unwrap_or_default();
+        let own = objects
+            .get(&oid)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
         parts.push(Part {
             name: if !own.is_empty() {
                 own
@@ -387,13 +394,15 @@ fn flatten(
             // Triangle pid/p1, else the object's pid/pindex, else uncolored.
             let pid = t.pid.or(o.pid);
             let idx = t.p1.or(o.pindex);
-            flat.colors.push(match (pid.and_then(|p| tables.get(&p)), idx) {
-                (Some(table), Some(i)) => table.get(i).copied().flatten(),
-                _ => None,
-            });
+            flat.colors
+                .push(match (pid.and_then(|p| tables.get(&p)), idx) {
+                    (Some(table), Some(i)) => table.get(i).copied().flatten(),
+                    _ => None,
+                });
             for v in corners {
                 let q = apply(v, &m);
-                flat.positions.push([q[0] * unit_scale, q[1] * unit_scale, q[2] * unit_scale]);
+                flat.positions
+                    .push([q[0] * unit_scale, q[1] * unit_scale, q[2] * unit_scale]);
             }
         }
     }

@@ -31,7 +31,11 @@ pub fn parse_stl(bytes: &[u8]) -> Result<Part, StlError> {
 fn parse_binary(bytes: &[u8], n: usize) -> Result<Part, StlError> {
     let need = 84 + 50 * n;
     if bytes.len() < need {
-        return Err(StlError(format!("truncated: {}/{} bytes", bytes.len(), need)));
+        return Err(StlError(format!(
+            "truncated: {}/{} bytes",
+            bytes.len(),
+            need
+        )));
     }
     let mut positions = Vec::with_capacity(n * 3);
     for i in 0..n {
@@ -55,14 +59,21 @@ fn parse_ascii(bytes: &[u8]) -> Result<Part, StlError> {
     let text = std::str::from_utf8(bytes).map_err(|e| StlError(e.to_string()))?;
     let mut positions = Vec::new();
     for line in text.lines() {
-        let Some(rest) = line.trim().strip_prefix("vertex") else { continue };
-        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<f32>().ok());
+        let Some(rest) = line.trim().strip_prefix("vertex") else {
+            continue;
+        };
+        let mut it = rest
+            .split_whitespace()
+            .filter_map(|v| v.parse::<f32>().ok());
         if let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) {
             positions.push([x, y, z]);
         } // unparseable line: skipped (upstream behavior)
     }
     if positions.is_empty() || positions.len() % 3 != 0 {
-        return Err(StlError(format!("{} vertices do not form triangles", positions.len())));
+        return Err(StlError(format!(
+            "{} vertices do not form triangles",
+            positions.len()
+        )));
     }
     Ok(Part {
         name: "model".into(),

@@ -25,7 +25,9 @@ static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn fixture_fake(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent").join(p)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/fake-agent")
+        .join(p)
 }
 
 /// A temp project with the on-disk layout the session expects.
@@ -55,7 +57,10 @@ async fn replay(root: &Path, scenario: &Path, stderr: Option<&Path>) -> ChatStat
     let mut session = Session::new(Settings::default());
     let mut handle = session.run_turn(
         root,
-        &TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        &TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     );
     let mut state = ChatState::new(Vec::new());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -95,8 +100,11 @@ async fn tool_use_turn_builds_the_full_transcript() {
     let root = mk_project();
     let state = replay(&root, &fixture_fake("scenarios/tool-use.jsonl"), None).await;
 
-    let rows: Vec<(Role, &str)> =
-        state.messages.iter().map(|m| (m.role, m.text.as_str())).collect();
+    let rows: Vec<(Role, &str)> = state
+        .messages
+        .iter()
+        .map(|m| (m.role, m.text.as_str()))
+        .collect();
     assert_eq!(rows.len(), 4, "{:?}", state.messages);
     assert_eq!(rows[0].0, Role::Thinking);
     assert!(thought_for_seconds(rows[0].1) >= 1, "{}", rows[0].1);
@@ -108,7 +116,13 @@ async fn tool_use_turn_builds_the_full_transcript() {
     assert_eq!(state.messages[1].text, "Preparing a helper file · 2 lines");
     assert_eq!(write.name, "Write");
     assert_eq!(write.preview, None);
-    assert!(write.output.as_ref().unwrap().contains("File created successfully"));
+    assert!(
+        write
+            .output
+            .as_ref()
+            .unwrap()
+            .contains("File created successfully")
+    );
     assert_eq!(write.state, engine::project::store::ToolState::Succeeded);
 
     // the Read row, completed while it streamed and after its result landed
@@ -146,7 +160,10 @@ async fn auth_error_rows_open_terminal() {
         row.text,
         "Claude Code isn't signed in. Open Terminal and run `claude` to sign in."
     );
-    assert_eq!(row.action, Some(engine::project::store::Action::OpenTerminal));
+    assert_eq!(
+        row.action,
+        Some(engine::project::store::Action::OpenTerminal)
+    );
     assert!(row.detail.as_deref().unwrap().contains("Unauthorized"));
 }
 
@@ -154,13 +171,23 @@ async fn auth_error_rows_open_terminal() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_code_failure_names_code() {
     let root = mk_project();
-    let state = replay(&root, &fixture_fake("scenarios/exit-code-failure.jsonl"), None).await;
+    let state = replay(
+        &root,
+        &fixture_fake("scenarios/exit-code-failure.jsonl"),
+        None,
+    )
+    .await;
 
     assert_eq!(state.messages.len(), 1, "{:?}", state.messages);
     let row = &state.messages[0];
     assert_eq!(row.role, Role::System);
     assert_eq!(row.text, "Claude Code ended with an error (code 3).");
-    assert!(row.detail.as_deref().unwrap().contains("the agent fell over"));
+    assert!(
+        row.detail
+            .as_deref()
+            .unwrap()
+            .contains("the agent fell over")
+    );
     assert_eq!(row.action, None);
 }
 
@@ -173,7 +200,11 @@ async fn error_result_confirms_text_and_fails() {
 
     assert_eq!(state.messages.len(), 2, "{:?}", state.messages);
     assert_eq!(state.messages[0].role, Role::Assistant);
-    assert!(state.messages[0].text.starts_with("There's an issue with the selected model"));
+    assert!(
+        state.messages[0]
+            .text
+            .starts_with("There's an issue with the selected model")
+    );
     let row = &state.messages[1];
     assert_eq!(row.role, Role::System);
     assert_eq!(row.text, "Claude Code ended with an error (code 0).");
@@ -188,7 +219,12 @@ async fn error_result_confirms_text_and_fails() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redacted_thinking_row_stays_then_fallback_appends() {
     let root = mk_project();
-    let state = replay(&root, &fixture_fake("scenarios/redacted-thinking.jsonl"), None).await;
+    let state = replay(
+        &root,
+        &fixture_fake("scenarios/redacted-thinking.jsonl"),
+        None,
+    )
+    .await;
 
     assert_eq!(state.messages.len(), 2, "{:?}", state.messages);
     assert_eq!(state.messages[0].role, Role::Thinking);
@@ -212,7 +248,10 @@ async fn tool_failure_row_fails_without_failing_turn() {
     assert_eq!(tool.state, engine::project::store::ToolState::Failed);
     assert!(tool.output.as_deref().unwrap().contains("Traceback"));
     assert_eq!(state.messages[1].role, Role::Assistant);
-    assert_eq!(state.messages[1].text, "the tool failed but the turn completed");
+    assert_eq!(
+        state.messages[1].text,
+        "the tool failed but the turn completed"
+    );
 }
 
 /// The minimal success turn: a thinking row (whose token estimates rode

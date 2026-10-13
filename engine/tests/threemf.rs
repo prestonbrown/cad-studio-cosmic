@@ -1,8 +1,10 @@
-use engine::parsing::threemf::{parse_3mf, ThreemfError};
+use engine::parsing::threemf::{ThreemfError, parse_3mf};
 use std::path::PathBuf;
 
 fn fixture(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(p)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures")
+        .join(p)
 }
 fn parse(p: &str) -> Vec<engine::parsing::Part> {
     parse_3mf(&std::fs::read(fixture(p)).unwrap()).unwrap()
@@ -28,7 +30,10 @@ fn component_transform_spec_order() {
     let parts = parse("handmade/component.3mf");
     assert_eq!(parts.len(), 1);
     let (_, mx) = parts[0].aabb();
-    assert!((mx[0] - 11.0).abs() < 1e-4, "+10mm x translate at tokens 9-11");
+    assert!(
+        (mx[0] - 11.0).abs() < 1e-4,
+        "+10mm x translate at tokens 9-11"
+    );
 }
 
 #[test]
@@ -46,7 +51,10 @@ fn colorgroup_and_per_triangle_p1() {
     let p = &parts[0];
     assert_eq!(p.triangle_colors[0], Some([0, 255, 0]), "p1=0 -> green");
     assert_eq!(p.triangle_colors[1], Some([255, 0, 0]), "p1=1 -> red");
-    assert_eq!(p.triangle_colors[2], None, "no p1 and object has no pindex -> uncolored");
+    assert_eq!(
+        p.triangle_colors[2], None,
+        "no p1 and object has no pindex -> uncolored"
+    );
 }
 
 #[test]
@@ -63,7 +71,10 @@ fn nested_components_compose_and_name_falls_through() {
 fn no_build_items_sorts_object_ids_as_strings() {
     let parts = parse("handmade/nosort.3mf");
     assert_eq!(parts.len(), 2, "one per object id");
-    assert_eq!(parts[0].name, "ten", "id '10' sorts before id '2' as STRINGS");
+    assert_eq!(
+        parts[0].name, "ten",
+        "id '10' sorts before id '2' as STRINGS"
+    );
 }
 
 #[test]
@@ -76,7 +87,10 @@ fn depth_sixteen_parses_seventeen_errors() {
     assert_eq!(ok[0].name, "bottom", "the deepest object was reached");
     let bytes = std::fs::read(fixture("handmade/deep17.3mf")).unwrap();
     let err = parse_3mf(&bytes).unwrap_err();
-    assert!(matches!(err, ThreemfError::TooDeep), "17 levels -> TooDeep, got {err}");
+    assert!(
+        matches!(err, ThreemfError::TooDeep),
+        "17 levels -> TooDeep, got {err}"
+    );
 }
 
 #[test]
@@ -85,13 +99,19 @@ fn component_cycle_errors_not_stack_overflows() {
     // parse returns TooDeep rather than recursing forever.
     let bytes = std::fs::read(fixture("handmade/cycle.3mf")).unwrap();
     let err = parse_3mf(&bytes).unwrap_err();
-    assert!(matches!(err, ThreemfError::TooDeep), "cycle -> TooDeep, got {err}");
+    assert!(
+        matches!(err, ThreemfError::TooDeep),
+        "cycle -> TooDeep, got {err}"
+    );
 }
 
 #[test]
 fn unnamed_chain_gets_positional_part_names() {
     let parts = parse("handmade/nonames.3mf");
     assert_eq!(parts.len(), 2);
-    assert_eq!(parts[0].name, "part 1", "no name anywhere in the chain -> positional");
+    assert_eq!(
+        parts[0].name, "part 1",
+        "no name anywhere in the chain -> positional"
+    );
     assert_eq!(parts[1].name, "part 2");
 }

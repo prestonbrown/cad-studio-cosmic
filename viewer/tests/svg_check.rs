@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/golden")
+        .join(name)
 }
 
 fn render_ink_fraction(svg: &std::path::Path, width: u32) -> (u32, u32, f64) {
@@ -11,7 +13,11 @@ fn render_ink_fraction(svg: &std::path::Path, width: u32) -> (u32, u32, f64) {
     let size = tree.size();
     let height = ((width as f32) * size.height() / size.width()).max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).unwrap();
-    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     // A fresh pixmap is (0,0,0,0) and matplotlib SVGs paint no page background,
     // so transparent pixels are paper and must not count as ink.
     let ink = pixmap
@@ -26,7 +32,10 @@ fn png_ink_fraction(png: &std::path::Path, width: u32) -> f64 {
     let img = image::open(png).unwrap().to_rgb8();
     let h = ((width as f64) * img.height() as f64 / img.width() as f64) as u32;
     let img = image::imageops::resize(&img, width, h, image::imageops::FilterType::Nearest);
-    let ink = img.pixels().filter(|p| p.0[0] < 240 || p.0[1] < 240 || p.0[2] < 240).count();
+    let ink = img
+        .pixels()
+        .filter(|p| p.0[0] < 240 || p.0[1] < 240 || p.0[2] < 240)
+        .count();
     ink as f64 / (width as f64 * h as f64)
 }
 

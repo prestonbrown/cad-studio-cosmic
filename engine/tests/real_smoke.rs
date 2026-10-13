@@ -31,7 +31,10 @@ async fn real_agent_pong() {
     let mut running = None;
     EngineCommand::Send {
         root,
-        request: TurnRequest { prompt: "pong".into(), attachments: Vec::new() },
+        request: TurnRequest {
+            prompt: "pong".into(),
+            attachments: Vec::new(),
+        },
     }
     .apply(&mut session, &mut running);
     let handle = running.as_mut().expect("Send installs the running turn");

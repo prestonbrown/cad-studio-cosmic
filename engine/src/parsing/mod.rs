@@ -18,12 +18,17 @@ pub struct Part {
 }
 
 impl Part {
-    pub fn triangle_count(&self) -> usize { self.triangle_colors.len() }
+    pub fn triangle_count(&self) -> usize {
+        self.triangle_colors.len()
+    }
     pub fn aabb(&self) -> ([f32; 3], [f32; 3]) {
         let mut mn = [f32::MAX; 3];
         let mut mx = [f32::MIN; 3];
         for p in &self.positions {
-            for a in 0..3 { mn[a] = mn[a].min(p[a]); mx[a] = mx[a].max(p[a]); }
+            for a in 0..3 {
+                mn[a] = mn[a].min(p[a]);
+                mx[a] = mx[a].max(p[a]);
+            }
         }
         (mn, mx)
     }

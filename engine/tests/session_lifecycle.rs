@@ -115,7 +115,10 @@ async fn run_dance(
         .with_retry_delay(retry_delay);
     let mut handle = session.send(
         root,
-        &TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        &TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     );
     let events = collect_until_finished(&mut handle).await;
     drop(guard);
@@ -172,13 +175,15 @@ fn finished<'a>(events: &'a [EngineEvent]) -> &'a TurnOutcome {
 
 /// `argv` contains `flag` followed immediately by `value`.
 fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
-    argv.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
+    argv.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
 fn system_rows(events: &[EngineEvent], message: &str) -> Vec<usize> {
-    positions(events, |event| {
-        matches!(event, EngineEvent::System { text } if text == message)
-    })
+    positions(
+        events,
+        |event| matches!(event, EngineEvent::System { text } if text == message),
+    )
 }
 
 // ─── the dance ───────────────────────────────────────────────────────────────
@@ -207,19 +212,33 @@ async fn busy_retries_once_then_fresh() {
     // classify; run 3's success ends the dance
     assert_eq!(
         finished(&events),
-        &TurnOutcome::Success { session_id: Some(PONG_SID.into()), text: "pong".into() }
+        &TurnOutcome::Success {
+            session_id: Some(PONG_SID.into()),
+            text: "pong".into()
+        }
     );
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
 
     // exactly three spawns: resume, resume retry, fresh
     let argv = dump_argv(&dump);
     assert_eq!(argv.len(), 3, "busy → retry → fresh is three spawns");
-    assert!(has_pair(&argv[0], "--resume", "seed-sid"), "run 1 resumes the stored id");
-    assert!(has_pair(&argv[1], "--resume", BUSY_SID), "run 1's init updated the stored id");
+    assert!(
+        has_pair(&argv[0], "--resume", "seed-sid"),
+        "run 1 resumes the stored id"
+    );
+    assert!(
+        has_pair(&argv[1], "--resume", BUSY_SID),
+        "run 1's init updated the stored id"
+    );
     assert!(argv[0].iter().any(|a| a == "--fork-session"));
     assert!(argv[1].iter().any(|a| a == "--fork-session"));
     assert!(
-        !argv[2].iter().any(|a| a == "--resume" || a == "--fork-session"),
+        !argv[2]
+            .iter()
+            .any(|a| a == "--resume" || a == "--fork-session"),
         "the post-collision run is fresh"
     );
 
@@ -228,15 +247,23 @@ async fn busy_retries_once_then_fresh() {
     let system = system_rows(&events, BUSY_FRESH_MESSAGE);
     assert_eq!(system.len(), 1, "{events:?}");
     let started = positions(&events, |e| matches!(e, EngineEvent::Started { .. }));
-    assert_eq!(started_sids(&events), vec![Some(BUSY_SID), Some(BUSY_SID), Some(PONG_SID)]);
-    assert!(started[1] < system[0] && system[0] < started[2], "{events:?}");
+    assert_eq!(
+        started_sids(&events),
+        vec![Some(BUSY_SID), Some(BUSY_SID), Some(PONG_SID)]
+    );
+    assert!(
+        started[1] < system[0] && system[0] < started[2],
+        "{events:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn busy_retry_succeeds_second_time() {
     let root = mk_project();
-    let scenario =
-        scenario_dir("busy2", &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"]);
+    let scenario = scenario_dir(
+        "busy2",
+        &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"],
+    );
     let (events, dump) = run_dance(
         &root,
         &scenario,
@@ -248,7 +275,10 @@ async fn busy_retry_succeeds_second_time() {
 
     assert_eq!(
         finished(&events),
-        &TurnOutcome::Success { session_id: Some(PONG_SID.into()), text: "pong".into() }
+        &TurnOutcome::Success {
+            session_id: Some(PONG_SID.into()),
+            text: "pong".into()
+        }
     );
     // busy once, resume retry succeeds — two spawns, both resuming, no
     // system row (no fresh fallback happened)
@@ -256,19 +286,29 @@ async fn busy_retry_succeeds_second_time() {
     assert_eq!(argv.len(), 2);
     assert!(has_pair(&argv[0], "--resume", "seed-sid"));
     assert!(has_pair(&argv[1], "--resume", BUSY_SID));
-    assert!(argv.iter().all(|run| run.iter().any(|a| a == "--fork-session")));
     assert!(
-        events.iter().all(|e| !matches!(e, EngineEvent::System { .. })),
+        argv.iter()
+            .all(|run| run.iter().any(|a| a == "--fork-session"))
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, EngineEvent::System { .. })),
         "no fallback explanation: {events:?}"
     );
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_session_falls_back_fresh() {
     let root = mk_project();
-    let scenario =
-        scenario_dir("missing", &["scenarios/missing-session.jsonl", "scenarios/pong.jsonl"]);
+    let scenario = scenario_dir(
+        "missing",
+        &["scenarios/missing-session.jsonl", "scenarios/pong.jsonl"],
+    );
     let (events, dump) = run_dance(
         &root,
         &scenario,
@@ -281,22 +321,37 @@ async fn missing_session_falls_back_fresh() {
     // the stale id is explained away and replaced by the fresh run's id
     assert_eq!(
         finished(&events),
-        &TurnOutcome::Success { session_id: Some(PONG_SID.into()), text: "pong".into() }
+        &TurnOutcome::Success {
+            session_id: Some(PONG_SID.into()),
+            text: "pong".into()
+        }
     );
     let system = system_rows(&events, MISSING_MESSAGE);
     assert_eq!(system.len(), 1, "{events:?}");
     let started = positions(&events, |e| matches!(e, EngineEvent::Started { .. }));
-    assert_eq!(started_sids(&events), vec![Some(PONG_SID)], "only the fresh run starts");
-    assert!(system[0] < started[0], "the explanation precedes the fresh run: {events:?}");
+    assert_eq!(
+        started_sids(&events),
+        vec![Some(PONG_SID)],
+        "only the fresh run starts"
+    );
+    assert!(
+        system[0] < started[0],
+        "the explanation precedes the fresh run: {events:?}"
+    );
 
     let argv = dump_argv(&dump);
     assert_eq!(argv.len(), 2);
     assert!(has_pair(&argv[0], "--resume", "stale-sid"));
     assert!(
-        !argv[1].iter().any(|a| a == "--resume" || a == "--fork-session"),
+        !argv[1]
+            .iter()
+            .any(|a| a == "--resume" || a == "--fork-session"),
         "the fallback run is fresh"
     );
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -323,7 +378,9 @@ async fn auth_error_no_retry() {
     let argv = dump_argv(&dump);
     assert_eq!(argv.len(), 1, "no retry, no fresh run: {argv:?}");
     assert!(
-        events.iter().all(|e| !matches!(e, EngineEvent::System { .. })),
+        events
+            .iter()
+            .all(|e| !matches!(e, EngineEvent::System { .. })),
         "{events:?}"
     );
 }
@@ -356,7 +413,10 @@ async fn cancelled_turn_ends_cleanly() {
         .with_retry_delay(Duration::from_secs(2));
     let mut handle = session.send(
         &root,
-        &TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        &TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     );
 
     // the busy attempt announces itself, then exits almost immediately;
@@ -387,11 +447,18 @@ async fn cancelled_turn_ends_cleanly() {
             Err(_) => panic!("cancel did not end the dance within 2 s: {rest:?}"),
         }
     }
-    assert_eq!(rest.last(), Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled)));
+    assert_eq!(
+        rest.last(),
+        Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled))
+    );
     drop(guard);
 
     // the retry wait absorbed the cancel: no second spawn ever happened
-    assert_eq!(dump_argv(&dump).len(), 1, "no spawn after a cancelled retry wait");
+    assert_eq!(
+        dump_argv(&dump).len(),
+        1,
+        "no spawn after a cancelled retry wait"
+    );
 }
 
 // ─── the command surface (task 9) ────────────────────────────────────────────
@@ -406,8 +473,10 @@ async fn cancelled_turn_ends_cleanly() {
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_command_drives_the_dance() {
     let root = mk_project();
-    let scenario =
-        scenario_dir("cmd", &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"]);
+    let scenario = scenario_dir(
+        "cmd",
+        &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"],
+    );
 
     let guard = ENV_LOCK.lock().await;
     let mut metadata = ProjectMetadata::new("test");
@@ -436,7 +505,10 @@ async fn engine_command_drives_the_dance() {
     // the 2 s retry wait
     EngineCommand::Send {
         root: root.clone(),
-        request: TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        request: TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     }
     .apply(&mut session, &mut running);
     {
@@ -445,7 +517,11 @@ async fn engine_command_drives_the_dance() {
         loop {
             match tokio::time::timeout_at(deadline, handle.events.recv()).await {
                 Ok(Some(EngineEvent::Started { session_id })) => {
-                    assert_eq!(session_id.as_deref(), Some(BUSY_SID), "the busy attempt starts");
+                    assert_eq!(
+                        session_id.as_deref(),
+                        Some(BUSY_SID),
+                        "the busy attempt starts"
+                    );
                     break;
                 }
                 Ok(other) => panic!("expected the busy attempt's Started first: {other:?}"),
@@ -459,27 +535,47 @@ async fn engine_command_drives_the_dance() {
     // cancelled with no respawn
     EngineCommand::Cancel.apply(&mut session, &mut running);
     let tail = collect_until_finished(running.as_mut().unwrap()).await;
-    assert_eq!(tail.last(), Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled)));
-    assert_eq!(dump_argv(&dump).len(), 1, "no spawn after a cancelled retry wait");
+    assert_eq!(
+        tail.last(),
+        Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled))
+    );
+    assert_eq!(
+        dump_argv(&dump).len(),
+        1,
+        "no spawn after a cancelled retry wait"
+    );
 
     // Send again: replaces the finished turn; run 2 resumes the id run
     // 1's init persisted and replays the pong scenario verbatim
     EngineCommand::Send {
         root: root.clone(),
-        request: TurnRequest { prompt: "please respond".into(), attachments: Vec::new() },
+        request: TurnRequest {
+            prompt: "please respond".into(),
+            attachments: Vec::new(),
+        },
     }
     .apply(&mut session, &mut running);
     let events = collect_until_finished(running.as_mut().unwrap()).await;
     assert_eq!(
         events,
         vec![
-            EngineEvent::Started { session_id: Some(PONG_SID.into()) },
+            EngineEvent::Started {
+                session_id: Some(PONG_SID.into())
+            },
             EngineEvent::ThinkingStarted,
-            EngineEvent::Thinking { estimated_tokens: 50 },
-            EngineEvent::Thinking { estimated_tokens: 192 },
+            EngineEvent::Thinking {
+                estimated_tokens: 50
+            },
+            EngineEvent::Thinking {
+                estimated_tokens: 192
+            },
             EngineEvent::ThinkingFinished,
-            EngineEvent::TextStreaming { text: "pong".into() },
-            EngineEvent::TextConfirmed { text: "pong".into() },
+            EngineEvent::TextStreaming {
+                text: "pong".into()
+            },
+            EngineEvent::TextConfirmed {
+                text: "pong".into()
+            },
             EngineEvent::TurnFinished(TurnOutcome::Success {
                 session_id: Some(PONG_SID.into()),
                 text: "pong".into(),
@@ -488,9 +584,19 @@ async fn engine_command_drives_the_dance() {
         "{events:?}"
     );
     let argv = dump_argv(&dump);
-    assert_eq!(argv.len(), 2, "the cancelled dance left one spawn, the replay another");
-    assert!(has_pair(&argv[1], "--resume", BUSY_SID), "run 2 resumes the persisted id");
-    assert_eq!(load_metadata(&root).unwrap().session_id.as_deref(), Some(PONG_SID));
+    assert_eq!(
+        argv.len(),
+        2,
+        "the cancelled dance left one spawn, the replay another"
+    );
+    assert!(
+        has_pair(&argv[1], "--resume", BUSY_SID),
+        "run 2 resumes the persisted id"
+    );
+    assert_eq!(
+        load_metadata(&root).unwrap().session_id.as_deref(),
+        Some(PONG_SID)
+    );
 
     // Shutdown: interrupts the (finished) running turn and reaps the
     // registry — both of this test's spawns exited and unregistered, so
@@ -527,11 +633,17 @@ async fn send_copies_attachments_into_the_prompt() {
     let mut running: Option<TurnHandle> = None;
     EngineCommand::Send {
         root: root.clone(),
-        request: TurnRequest { prompt: String::new(), attachments: vec![source] },
+        request: TurnRequest {
+            prompt: String::new(),
+            attachments: vec![source],
+        },
     }
     .apply(&mut session, &mut running);
     let events = collect_until_finished(running.as_mut().unwrap()).await;
-    assert!(matches!(finished(&events), TurnOutcome::Success { .. }), "{events:?}");
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
     drop(guard);
 
     // the copy landed in references/ as <stamp>-1-<name> (numbered from 1,
@@ -548,6 +660,12 @@ async fn send_copies_attachments_into_the_prompt() {
     let argv = dump_argv(&dump).into_iter().next().expect("one dump line");
     assert_eq!(argv[0], "-p");
     let prompt = &argv[1];
-    assert!(prompt.starts_with("Create a model based on the attached files."), "{prompt}");
-    assert!(prompt.contains(&format!("references/{}", names[0])), "{prompt}");
+    assert!(
+        prompt.starts_with("Create a model based on the attached files."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("references/{}", names[0])),
+        "{prompt}"
+    );
 }

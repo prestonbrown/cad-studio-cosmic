@@ -197,7 +197,9 @@ impl Default for Settings {
 }
 
 fn documents_dir() -> Option<PathBuf> {
-    directories::UserDirs::new()?.document_dir().map(Path::to_path_buf)
+    directories::UserDirs::new()?
+        .document_dir()
+        .map(Path::to_path_buf)
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -125,7 +125,11 @@ impl ChatState {
             EngineEvent::TextConfirmed { text } => self.text_confirmed(text),
             EngineEvent::ToolStarted { id, name, title } => self.tool_started(id, name, title),
             EngineEvent::ToolInput { id, partial } => self.tool_input(id, partial, now),
-            EngineEvent::ToolFinished { id, output, is_error } => {
+            EngineEvent::ToolFinished {
+                id,
+                output,
+                is_error,
+            } => {
                 self.complete_tool(id, output, *is_error);
             }
             EngineEvent::System { text } => {
@@ -199,14 +203,19 @@ impl ChatState {
     /// Upstream `updateThinking` (AgentSession.swift:188-191).
     fn thinking_tokens(&mut self, estimated_tokens: i64) {
         if let Some(id) = self.active_thinking_id {
-            self.set_text(id, THINKING_TOKENS.replace("{tokens}", &estimated_tokens.to_string()));
+            self.set_text(
+                id,
+                THINKING_TOKENS.replace("{tokens}", &estimated_tokens.to_string()),
+            );
         }
     }
 
     /// Upstream `stopBlock`'s thinking case (AgentSession.swift:165-170):
     /// `max(1, round(interval))`, the row id and start both cleared.
     fn thinking_finished(&mut self, now: Instant) {
-        let Some(id) = self.active_thinking_id.take() else { return };
+        let Some(id) = self.active_thinking_id.take() else {
+            return;
+        };
         let seconds = match self.thinking_started_at.take() {
             Some(start) => (now - start).as_secs_f64().round().max(1.0) as i64,
             None => 1,
@@ -276,15 +285,22 @@ impl ChatState {
     /// always accumulates; the title/preview recompute only past the
     /// throttle window.
     fn tool_input(&mut self, id: &str, partial: &str, now: Instant) {
-        let Some(at) = self.last_tool_row(id) else { return };
-        let Some(tool) = self.messages[at].tool.as_mut() else { return };
+        let Some(at) = self.last_tool_row(id) else {
+            return;
+        };
+        let Some(tool) = self.messages[at].tool.as_mut() else {
+            return;
+        };
         tool.input.push_str(partial);
         if !should_emit_preview(self.tool_last_emit.get(id).copied(), now) {
             return;
         }
         self.tool_last_emit.insert(id.to_string(), now);
         let (title, preview) = match self.messages[at].tool.as_ref() {
-            Some(tool) => (live_title(&tool.name, &tool.input), live_preview(&tool.input)),
+            Some(tool) => (
+                live_title(&tool.name, &tool.input),
+                live_preview(&tool.input),
+            ),
             None => return,
         };
         self.messages[at].text = title;
@@ -305,7 +321,9 @@ impl ChatState {
     /// for stream-announced tools (`liveTools[index]`), and recomputing over
     /// an empty accumulation would clobber it with the generic fallback.
     fn complete_tool(&mut self, id: &str, output: &str, failed: bool) {
-        let Some(at) = self.last_tool_row(id) else { return };
+        let Some(at) = self.last_tool_row(id) else {
+            return;
+        };
         self.tool_last_emit.remove(id);
         let streamed = self.messages[at]
             .tool
@@ -318,10 +336,16 @@ impl ChatState {
             };
             self.messages[at].text = title;
         }
-        let Some(tool) = self.messages[at].tool.as_mut() else { return };
+        let Some(tool) = self.messages[at].tool.as_mut() else {
+            return;
+        };
         tool.preview = None;
         tool.output = Some(output.to_string());
-        tool.state = if failed { ToolState::Failed } else { ToolState::Succeeded };
+        tool.state = if failed {
+            ToolState::Failed
+        } else {
+            ToolState::Succeeded
+        };
     }
 
     /// Upstream `finish`/`reportFailure` (AgentSession.swift:264-303).
@@ -334,7 +358,11 @@ impl ChatState {
                     self.append_row(Role::Assistant, text.clone());
                 }
             }
-            TurnOutcome::Failed { error, auth, exit_code } => {
+            TurnOutcome::Failed {
+                error,
+                auth,
+                exit_code,
+            } => {
                 let text = if *auth {
                     AUTH_ROW.replace("{command}", LOGIN_COMMAND)
                 } else {
@@ -352,7 +380,11 @@ impl ChatState {
                     tool: None,
                     // upstream's auth row keeps the detail unconditionally;
                     // the error row only when non-empty
-                    detail: if *auth || !error.is_empty() { Some(error.clone()) } else { None },
+                    detail: if *auth || !error.is_empty() {
+                        Some(error.clone())
+                    } else {
+                        None
+                    },
                     action: auth.then_some(Action::OpenTerminal),
                     attachments: Vec::new(),
                 });
@@ -426,19 +458,33 @@ mod tests {
     }
 
     fn tool_started(id: &str, name: &str) -> EngineEvent {
-        EngineEvent::ToolStarted { id: id.into(), name: name.into(), title: live_title(name, "") }
+        EngineEvent::ToolStarted {
+            id: id.into(),
+            name: name.into(),
+            title: live_title(name, ""),
+        }
     }
 
     fn tool_input(id: &str, partial: &str) -> EngineEvent {
-        EngineEvent::ToolInput { id: id.into(), partial: partial.into() }
+        EngineEvent::ToolInput {
+            id: id.into(),
+            partial: partial.into(),
+        }
     }
 
     fn tool_finished(id: &str, output: &str, is_error: bool) -> EngineEvent {
-        EngineEvent::ToolFinished { id: id.into(), output: output.into(), is_error }
+        EngineEvent::ToolFinished {
+            id: id.into(),
+            output: output.into(),
+            is_error,
+        }
     }
 
     fn success(text: &str) -> EngineEvent {
-        EngineEvent::TurnFinished(TurnOutcome::Success { session_id: None, text: text.into() })
+        EngineEvent::TurnFinished(TurnOutcome::Success {
+            session_id: None,
+            text: text.into(),
+        })
     }
 
     fn failed(error: &str, auth: bool, exit_code: Option<i32>) -> EngineEvent {
@@ -540,11 +586,19 @@ mod tests {
         assert_eq!(state.active_thinking_id, Some(thinking_id));
         assert_eq!(state.thinking_started_at, Some(t0));
 
-        state.apply_at(&EngineEvent::Thinking { estimated_tokens: 50 }, t0);
+        state.apply_at(
+            &EngineEvent::Thinking {
+                estimated_tokens: 50,
+            },
+            t0,
+        );
         assert_eq!(row_text(&state), ["Thinking · about 50 tokens"]);
 
         // 2.3 s of open interval rounds to 2
-        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(2300));
+        state.apply_at(
+            &EngineEvent::ThinkingFinished,
+            t0 + Duration::from_millis(2300),
+        );
         assert_eq!(row_text(&state), ["Thought for 2 s"]);
         assert_eq!(state.active_thinking_id, None);
         assert_eq!(state.thinking_started_at, None);
@@ -552,10 +606,16 @@ mod tests {
         // sub-second intervals clamp up to 1 s (upstream max(1, …))
         let t0 = Instant::now();
         state.apply_at(&EngineEvent::ThinkingStarted, t0);
-        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(200));
+        state.apply_at(
+            &EngineEvent::ThinkingFinished,
+            t0 + Duration::from_millis(200),
+        );
         assert_eq!(state.messages.last().unwrap().text, "Thought for 1 s");
         state.apply_at(&EngineEvent::ThinkingStarted, t0);
-        state.apply_at(&EngineEvent::ThinkingFinished, t0 + Duration::from_millis(600));
+        state.apply_at(
+            &EngineEvent::ThinkingFinished,
+            t0 + Duration::from_millis(600),
+        );
         assert_eq!(state.messages.last().unwrap().text, "Thought for 1 s");
     }
 
@@ -567,7 +627,12 @@ mod tests {
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&started(), now);
-        state.apply_at(&EngineEvent::Thinking { estimated_tokens: 50 }, now);
+        state.apply_at(
+            &EngineEvent::Thinking {
+                estimated_tokens: 50,
+            },
+            now,
+        );
         state.apply_at(&EngineEvent::ThinkingFinished, now);
         assert!(state.messages.is_empty());
 
@@ -603,7 +668,10 @@ mod tests {
         assert_eq!(tool.output, None);
 
         // first delta emits immediately (never emitted before)
-        state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"alpha"#), t0);
+        state.apply_at(
+            &tool_input("t1", r#"{"file_path":"model.py","content":"alpha"#),
+            t0,
+        );
         let tool = state.messages[0].tool.as_ref().unwrap();
         assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
         assert_eq!(tool.input, r#"{"file_path":"model.py","content":"alpha"#);
@@ -611,16 +679,24 @@ mod tests {
 
         // the tail lands 10 ms later — INSIDE the 0.15 s window, so no
         // recompute even though the input keeps accumulating
-        state.apply_at(&tool_input("t1", r#"\nbeta"}"#), t0 + Duration::from_millis(10));
+        state.apply_at(
+            &tool_input("t1", r#"\nbeta"}"#),
+            t0 + Duration::from_millis(10),
+        );
         assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
-        assert_eq!(state.messages[0].tool.as_ref().unwrap().input,
-            r#"{"file_path":"model.py","content":"alpha\nbeta"}"#);
+        assert_eq!(
+            state.messages[0].tool.as_ref().unwrap().input,
+            r#"{"file_path":"model.py","content":"alpha\nbeta"}"#
+        );
 
         // completion recomputes over the ACCUMULATED input: the line count
         // now reflects both fragments, the unterminated-string ellipsis is
         // gone, the preview CLEARS (upstream's block stop nils it before the
         // result lands), and output/state land after the title
-        state.apply_at(&tool_finished("t1", "wrote it", false), t0 + Duration::from_millis(20));
+        state.apply_at(
+            &tool_finished("t1", "wrote it", false),
+            t0 + Duration::from_millis(20),
+        );
         assert_eq!(state.messages[0].text, "Writing the model · 2 lines");
         let tool = state.messages[0].tool.as_ref().unwrap();
         assert_eq!(tool.preview, None, "completion clears the preview");
@@ -631,7 +707,10 @@ mod tests {
         // an errored tool lands failed
         state.apply_at(&tool_started("t2", "Bash"), t0);
         state.apply_at(&tool_finished("t2", "Traceback", true), t0);
-        assert_eq!(state.messages[1].tool.as_ref().unwrap().state, ToolState::Failed);
+        assert_eq!(
+            state.messages[1].tool.as_ref().unwrap().state,
+            ToolState::Failed
+        );
 
         // input for an unknown row is dropped
         state.apply_at(&tool_input("ghost", "{}"), t0);
@@ -645,7 +724,10 @@ mod tests {
         let t0 = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&tool_started("t1", "Write"), t0);
-        state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"a"#), t0);
+        state.apply_at(
+            &tool_input("t1", r#"{"file_path":"model.py","content":"a"#),
+            t0,
+        );
         assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
         // 10 ms later, inside the window: the input accumulates but the title
         // stays at the first fragment's form
@@ -653,9 +735,15 @@ mod tests {
         assert_eq!(state.messages[0].text, "Writing the model · 1 lines…");
         // 151 ms after the emit, past the window: the recompute sees both
         // fragments plus its own
-        state.apply_at(&tool_input("t1", r#"\nc"}"#), t0 + PREVIEW_THROTTLE + Duration::from_millis(1));
+        state.apply_at(
+            &tool_input("t1", r#"\nc"}"#),
+            t0 + PREVIEW_THROTTLE + Duration::from_millis(1),
+        );
         assert_eq!(state.messages[0].text, "Writing the model · 3 lines");
-        assert_eq!(state.messages[0].tool.as_ref().unwrap().preview.as_deref(), Some("a\nb\nc"));
+        assert_eq!(
+            state.messages[0].tool.as_ref().unwrap().preview.as_deref(),
+            Some("a\nb\nc")
+        );
     }
 
     /// Exactly the boundary: strictly older emits, equal does not (upstream's
@@ -666,7 +754,10 @@ mod tests {
         assert!(should_emit_preview(None, t0));
         assert!(!should_emit_preview(Some(t0), t0));
         assert!(!should_emit_preview(Some(t0), t0 + PREVIEW_THROTTLE));
-        assert!(should_emit_preview(Some(t0), t0 + PREVIEW_THROTTLE + Duration::from_nanos(1)));
+        assert!(should_emit_preview(
+            Some(t0),
+            t0 + PREVIEW_THROTTLE + Duration::from_nanos(1)
+        ));
     }
 
     /// A tool the engine opened at an assistant snapshot (no streamed input)
@@ -710,7 +801,10 @@ mod tests {
             let mut state = ChatState::new(Vec::new());
             state.apply_at(&started(), t0);
             state.apply_at(&tool_started("t1", "Write"), t0);
-            state.apply_at(&tool_input("t1", r#"{"file_path":"model.py","content":"x"#), t0);
+            state.apply_at(
+                &tool_input("t1", r#"{"file_path":"model.py","content":"x"#),
+                t0,
+            );
             state.apply_at(&EngineEvent::ThinkingStarted, t0);
             state.apply_at(&outcome, t0);
             let tool = state.messages[0].tool.as_ref().unwrap();
@@ -735,7 +829,11 @@ mod tests {
         state.apply_at(&ts("Hi"), t0);
         state.apply_at(&tc("Hi there"), t0);
         state.apply_at(&success("Hi there"), t0);
-        assert_eq!(row_text(&state), ["Hi there"], "no duplicate of the outcome text");
+        assert_eq!(
+            row_text(&state),
+            ["Hi there"],
+            "no duplicate of the outcome text"
+        );
 
         // turn 2: no text at all — the fallback still fires
         state.apply_at(&started(), t0);
@@ -756,8 +854,10 @@ mod tests {
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&failed("api error status 401", true, Some(1)), now);
-        assert_eq!(row_text(&state),
-            ["Claude Code isn't signed in. Open Terminal and run `claude` to sign in."]);
+        assert_eq!(
+            row_text(&state),
+            ["Claude Code isn't signed in. Open Terminal and run `claude` to sign in."]
+        );
         let row = &state.messages[0];
         assert_eq!(row.role, Role::System);
         assert_eq!(row.action, Some(Action::OpenTerminal));
@@ -784,7 +884,10 @@ mod tests {
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&failed("the agent fell over", false, Some(3)), now);
-        assert_eq!(row_text(&state), ["Claude Code ended with an error (code 3)."]);
+        assert_eq!(
+            row_text(&state),
+            ["Claude Code ended with an error (code 3)."]
+        );
         let row = &state.messages[0];
         assert_eq!(row.role, Role::System);
         assert_eq!(row.action, None);
@@ -818,7 +921,12 @@ mod tests {
     #[test]
     fn system_event_appends_row() {
         let mut state = ChatState::new(Vec::new());
-        state.apply_at(&EngineEvent::System { text: "context reset".into() }, Instant::now());
+        state.apply_at(
+            &EngineEvent::System {
+                text: "context reset".into(),
+            },
+            Instant::now(),
+        );
         assert_eq!(row_text(&state), ["context reset"]);
         assert_eq!(state.messages[0].role, Role::System);
         assert_eq!(state.messages[0].action, None);
@@ -839,7 +947,8 @@ mod tests {
 
         let absent = std::env::temp_dir().join(format!("cad-chat-absent-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&absent).unwrap();
-        let mut state = ChatState::new(engine::project::store::load_chat(&absent).unwrap_or_default());
+        let mut state =
+            ChatState::new(engine::project::store::load_chat(&absent).unwrap_or_default());
         assert!(state.messages.is_empty());
 
         // and a re-save over the corrupt file rewrites it valid
@@ -891,7 +1000,10 @@ mod tests {
 
         state.draft = "  make a bracket  ".into();
         assert!(state.can_send());
-        assert_eq!(state.take_draft(), Some(("make a bracket".into(), Vec::new())));
+        assert_eq!(
+            state.take_draft(),
+            Some(("make a bracket".into(), Vec::new()))
+        );
         assert_eq!(state.draft, "");
         assert!(!state.can_send());
 

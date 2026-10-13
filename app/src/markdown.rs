@@ -39,7 +39,9 @@ pub enum MdStyle {
     Emphasis,
     Code,
     /// Upstream attaches `link` to the run; the label is the span text.
-    Link { url: String },
+    Link {
+        url: String,
+    },
 }
 
 /// One styled fragment of a message. Adjacent fragments of equal style are
@@ -116,7 +118,11 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
                     start: range.start,
                     end: range.end,
                 }),
-                pulldown_cmark::Tag::Link { link_type, dest_url, .. } => match link_type {
+                pulldown_cmark::Tag::Link {
+                    link_type,
+                    dest_url,
+                    ..
+                } => match link_type {
                     // Reference-style links never resolve inline-only: Apple's
                     // parser sees no definitions, so `[label][1]` (and the
                     // `[shortcut]` form) stays literal text (probe
@@ -140,7 +146,9 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
                         });
                     }
                     _ => stack.push(Open {
-                        style: MdStyle::Link { url: dest_url.into_string() },
+                        style: MdStyle::Link {
+                            url: dest_url.into_string(),
+                        },
                         start: range.start,
                         end: range.end,
                     }),
@@ -167,14 +175,26 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
             }
             pulldown_cmark::Event::Text(text) => {
                 if range.start >= cursor {
-                    emit_gap(spans, source, cursor, range.start, marker_floor(&stack, cursor));
+                    emit_gap(
+                        spans,
+                        source,
+                        cursor,
+                        range.start,
+                        marker_floor(&stack, cursor),
+                    );
                     push_merged(spans, text.into_string(), current_style(&stack));
                     cursor = range.end;
                 }
             }
             pulldown_cmark::Event::Code(code) => {
                 if range.start >= cursor {
-                    emit_gap(spans, source, cursor, range.start, marker_floor(&stack, cursor));
+                    emit_gap(
+                        spans,
+                        source,
+                        cursor,
+                        range.start,
+                        marker_floor(&stack, cursor),
+                    );
                     push_merged(spans, code.into_string(), MdStyle::Code);
                     cursor = range.end;
                 }
@@ -196,7 +216,11 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
 /// floor, which keeps REAL text between sibling elements
 /// (`**[a](u) [b](v)**`) out of the clamp.
 fn marker_floor(stack: &[Open], cursor: usize) -> Option<usize> {
-    stack.iter().map(|o| o.start).filter(|&start| start >= cursor).min()
+    stack
+        .iter()
+        .map(|o| o.start)
+        .filter(|&start| start >= cursor)
+        .min()
 }
 
 /// The style a text run carries. A link's URL is semantic, so a link
@@ -210,7 +234,10 @@ fn current_style(stack: &[Open]) -> MdStyle {
             return open.style.clone();
         }
     }
-    stack.last().map(|o| o.style.clone()).unwrap_or(MdStyle::Plain)
+    stack
+        .last()
+        .map(|o| o.style.clone())
+        .unwrap_or(MdStyle::Plain)
 }
 
 /// Emit `source[cursor..end]` as a plain span, clamped at `floor` — the
@@ -283,14 +310,24 @@ mod tests {
             spans("see [docs](https://example.com/x) ok"),
             vec![
                 (Plain, "see ".into()),
-                (Link { url: "https://example.com/x".into() }, "docs".into()),
+                (
+                    Link {
+                        url: "https://example.com/x".into()
+                    },
+                    "docs".into()
+                ),
                 (Plain, " ok".into()),
             ]
         );
         // autolinks label with the URL itself
         assert_eq!(
             spans("<https://auto.example>"),
-            vec![(Link { url: "https://auto.example".into() }, "https://auto.example".into())]
+            vec![(
+                Link {
+                    url: "https://auto.example".into()
+                },
+                "https://auto.example".into()
+            )]
         );
     }
 
@@ -298,10 +335,16 @@ mod tests {
     /// parsing (Swift probe: "## Heading line" as one unstyled run).
     #[test]
     fn heading_marker_stays_literal() {
-        assert_eq!(spans("## Heading line"), vec![(Plain, "## Heading line".into())]);
+        assert_eq!(
+            spans("## Heading line"),
+            vec![(Plain, "## Heading line".into())]
+        );
         assert_eq!(spans("#H no-space"), vec![(Plain, "#H no-space".into())]);
         // mid-text hash is just text
-        assert_eq!(spans("after text ## H line"), vec![(Plain, "after text ## H line".into())]);
+        assert_eq!(
+            spans("after text ## H line"),
+            vec![(Plain, "after text ## H line".into())]
+        );
     }
 
     /// Lists, ordered lists and block quotes are literal text with markers
@@ -310,10 +353,19 @@ mod tests {
     fn list_and_quote_markers_stay_literal() {
         assert_eq!(spans("- one\n- two"), vec![(Plain, "- one\n- two".into())]);
         assert_eq!(spans("* a\n+ b"), vec![(Plain, "* a\n+ b".into())]);
-        assert_eq!(spans("1. first\n2. second"), vec![(Plain, "1. first\n2. second".into())]);
-        assert_eq!(spans("> quoted line"), vec![(Plain, "> quoted line".into())]);
+        assert_eq!(
+            spans("1. first\n2. second"),
+            vec![(Plain, "1. first\n2. second".into())]
+        );
+        assert_eq!(
+            spans("> quoted line"),
+            vec![(Plain, "> quoted line".into())]
+        );
         // GFM tables are off: pipes stay literal
-        assert_eq!(spans("a | b\n--- | ---"), vec![(Plain, "a | b\n--- | ---".into())]);
+        assert_eq!(
+            spans("a | b\n--- | ---"),
+            vec![(Plain, "a | b\n--- | ---".into())]
+        );
     }
 
     /// Smart punctuation is OFF upstream: ASCII apostrophes stay ASCII and
@@ -324,7 +376,10 @@ mod tests {
     fn apostrophes_pass_through_unsmartened() {
         assert_eq!(spans("isn't"), vec![(Plain, "isn't".into())]);
         assert_eq!(spans("l’oggetto"), vec![(Plain, "l’oggetto".into())]);
-        assert_eq!(spans("\"quoted\" — dash"), vec![(Plain, "\"quoted\" — dash".into())]);
+        assert_eq!(
+            spans("\"quoted\" — dash"),
+            vec![(Plain, "\"quoted\" — dash".into())]
+        );
     }
 
     /// A fence flattens to code-styled paragraph text: the info-string line
@@ -371,7 +426,10 @@ mod tests {
             vec![(Plain, "text with 2  \nhard break and\nsoft break".into())]
         );
         // indented code is not a block here: the leading spaces survive
-        assert_eq!(spans("    indented code"), vec![(Plain, "    indented code".into())]);
+        assert_eq!(
+            spans("    indented code"),
+            vec![(Plain, "    indented code".into())]
+        );
     }
 
     /// Nested inline markup keeps per-run styles; markers never leak.
@@ -453,7 +511,10 @@ mod tests {
     /// the markers drop and the text folds to plain (documented deviation).
     #[test]
     fn strikethrough_folds_to_plain() {
-        assert_eq!(spans("strike ~~x~~ tail"), vec![(Plain, "strike x tail".into())]);
+        assert_eq!(
+            spans("strike ~~x~~ tail"),
+            vec![(Plain, "strike x tail".into())]
+        );
     }
 
     /// Entities and backslash escapes decode to their characters (both
@@ -485,8 +546,12 @@ mod tests {
         // inline links still resolve
         assert_eq!(
             spans("[a](https://x.example)"),
-            vec![(Link { url: "https://x.example".into() }, "a".into())]
+            vec![(
+                Link {
+                    url: "https://x.example".into()
+                },
+                "a".into()
+            )]
         );
     }
 }
-
