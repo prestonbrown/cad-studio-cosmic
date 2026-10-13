@@ -91,6 +91,7 @@ use viewer::tools::section::{self, SectionAxis};
 use crate::camera_input::CameraInput;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
+use crate::parts_overlay;
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
@@ -394,6 +395,22 @@ impl ViewerPane {
         pane
     }
 
+    /// Upstream's overlay gates (ModelPane.swift:21-45): every one needs a
+    /// model rendering; the parts panel also needs more than one part or
+    /// plate parts to speak of.
+    fn shows_measure_badge(&self) -> bool {
+        self.tools.measuring && !self.scene.scene.parts.is_empty()
+    }
+
+    fn shows_parts_panel(&self) -> bool {
+        !self.scene.scene.parts.is_empty()
+            && (self.model_parts.len() > 1 || !self.plate_parts.is_empty())
+    }
+
+    fn shows_section_controls(&self) -> bool {
+        self.tools.sectioning && !self.scene.scene.parts.is_empty()
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Pressed => {
@@ -655,9 +672,9 @@ impl ViewerPane {
         self.commit_parameter(name)
     }
 
-    /// The 3D pane's element: the shader canvas in a mouse area over the
-    /// status bar (upstream ModelPane's VStack: content then
-    /// PaneStatusBar).
+    /// The 3D pane's element: the shader canvas in a mouse area with the
+    /// overlay family stacked over it, over the status bar (upstream
+    /// ModelPane's VStack: content then PaneStatusBar, ModelPane.swift:17-49).
     pub fn view_model_3d(&self, overlay: Option<OverlayContext<'_>>) -> Element<'_, Message> {
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
             Column::new()
@@ -671,34 +688,55 @@ impl ViewerPane {
         } else {
             self.view_canvas()
         };
-        // The overlay floats over the canvas, top-trailing with 10 px of
-        // padding (ModelPane.swift:41-44). `None` (or upstream's gate — no
-        // model, no parameters, hidden) skips the layer entirely.
-        let content: Element<'_, Message> = match overlay.filter(|_| self.show_parameters_overlay())
-        {
-            Some(ctx) => {
-                let parameters = parameters_view::view_parameters(
-                    &self.parameters,
-                    &self.parameter_drafts,
-                    &self.committed_parameters,
-                    &ctx,
-                )
-                .map(Message::Parameters);
-                let positioned = Row::new()
+        // The overlay stack, in upstream's z-order: measure badge top,
+        // parts panel top-leading, parameters top-trailing, section bottom.
+        let mut stack = Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(content);
+        if self.shows_measure_badge() {
+            let badge = parts_overlay::view_measure_badge(&self.tools.measure_points, self.unit);
+            stack = stack.push(top_center(container(badge).padding(10)));
+        }
+        if self.shows_parts_panel() {
+            let groups = arrangement::groups(&self.model_parts);
+            let effective = self
+                .tools
+                .effective_layout(self.model_parts.len(), self.comparing);
+            let panel = parts_overlay::view_parts_panel(
+                &self.tools,
+                &groups,
+                effective,
+                !self.plate_parts.is_empty(),
+                self.comparing,
+            );
+            stack = stack.push(
+                Row::new()
+                    .push(container(panel).padding([32.0, 0.0, 0.0, 10.0]))
                     .push(Space::new().width(Length::Fill))
-                    .push(container(parameters).padding(10))
-                    .width(Length::Fill);
-                Stack::new()
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .push(content)
-                    .push(positioned)
-                    .into()
-            }
-            None => content,
-        };
+                    .width(Length::Fill),
+            );
+        }
+        if let Some(ctx) = overlay.filter(|_| self.show_parameters_overlay()) {
+            let parameters = parameters_view::view_parameters(
+                &self.parameters,
+                &self.parameter_drafts,
+                &self.committed_parameters,
+                &ctx,
+            )
+            .map(Message::Parameters);
+            let positioned = Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(container(parameters).padding(10))
+                .width(Length::Fill);
+            stack = stack.push(positioned);
+        }
+        if self.shows_section_controls() {
+            let controls = parts_overlay::view_section_controls(&self.tools);
+            stack = stack.push(bottom_center(container(controls).padding(10)));
+        }
         Column::new()
-            .push(content)
+            .push(stack)
             .push(self.view_status_bar())
             .into()
     }
@@ -1323,6 +1361,26 @@ pub(crate) fn stl_of_box(bounds: [[f64; 3]; 2]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// A Stack layer pinned top-center: the element between fill spacers.
+fn top_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Row::new()
+        .push(Space::new().width(Length::Fill))
+        .push(layer.into())
+        .push(Space::new().width(Length::Fill))
+        .width(Length::Fill)
+        .into()
+}
+
+/// A Stack layer pinned bottom-center: fill space above a centered row.
+fn bottom_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Column::new()
+        .push(Space::new().height(Length::Fill))
+        .push(top_center(layer))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]
