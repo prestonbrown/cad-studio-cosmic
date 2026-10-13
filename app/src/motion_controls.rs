@@ -1,8 +1,8 @@
-//! Motion controls — the pure halves of upstream
+//! Motion controls — the port of upstream
 //! `Viewer3D/MotionControls.swift`, the capsule that plays, scrubs, and
-//! loops a motion study over the 3D pane. Everything here is the number
-//! and text formatting SwiftUI does through `formatted(...)`, pinned by
-//! test against the two shapes upstream renders:
+//! loops a motion study over the 3D pane: [`view_motion_controls`]
+//! renders it and the number/text helpers below are the SwiftUI
+//! `formatted(...)` shapes it fills, pinned by test:
 //!
 //! - [`time_readout`] — the `time / duration s` readout
 //!   (MotionControls.swift:31, `fractionLength(2)`).
@@ -13,11 +13,23 @@
 //! - [`collision_text`] — the collision pairs line (:81-89); the `↔`,
 //!   `mm³`, and separators are upstream's literals.
 //!
-//! The widget half — `view_motion_controls`, the rows those formatters
-//! fill — joins this module with the pane's playback messages
-//! (`viewer_pane::Message`'s `TogglePlayback`/`Scrub`/`SetSpeed`/
-//! `ToggleLoops`) and the M6-T9 `fl!` scaffold it renders through; until
-//! then the pane mounts nothing from here.
+//! The pane floats the capsule bottom-center while animating (T7's
+//! mount, where the section controls mount); this module returns the
+//! capsule itself. Divergences from upstream, all cosmetic or
+//! plan-ruled:
+//!
+//! - Upstream nests the speed picker and the Ripeti toggle in ONE menu
+//!   (:35-49); the port shows the speed dropdown with an adjacent loop
+//!   button — one menu's worth of popover machinery for a two-item menu.
+//! - iced sliders and cosmic dropdowns carry no accessibility text at the
+//!   pinned rev, so their descriptions render as tooltips (the parts
+//!   overlay's slider pattern); buttons get real descriptions.
+//! - The phase label's `.fontWeight(.medium)` maps to cosmic's
+//!   `semibold` — the pinned rev has no medium font helper (its own
+//!   caption-heading preset makes the same step).
+//! - The warning glyph is `dialog-warning`, the freedesktop stand-in for
+//!   `exclamationmark.triangle.fill`; the icon theme decides its tint —
+//!   the text beside it carries the red.
 //!
 //! Ordering law for the values row (the milestone's sixth review focus):
 //! `StudyState.values` is a `BTreeMap` and iterates sorted, while
@@ -27,7 +39,27 @@
 //! `values_render_in_first_appearance_order` pins the seam this module
 //! owns.
 
-use engine::parsing::animation::Collision;
+use cosmic::Element;
+use cosmic::iced::widget::slider;
+use cosmic::iced::{Color, Length};
+use cosmic::widget::{Column, Row, button, container, dropdown, text, tooltip};
+use engine::parsing::animation::{Collision, MotionStudy, StudyState};
+use viewer::playback::{MotionPlayer, SCRUB_FLOOR, SPEEDS};
+
+use crate::fl;
+use crate::viewer_pane::Message;
+
+/// This module's text widget, pinned to cosmic's theme/renderer (the
+/// chat pane's invariance note).
+type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
+
+/// Upstream's warning triangle (`exclamationmark.triangle.fill`,
+/// MotionControls.swift:63) — freedesktop stand-in.
+const WARNING_ICON: &str = "dialog-warning";
+
+/// Upstream `.foregroundStyle(.red)` (:63) — systemRed, sRGB
+/// (255, 59, 48)/255.
+const RED: Color = Color::from_rgb(1.0, 59.0 / 255.0, 48.0 / 255.0);
 
 /// The readout beside the scrub slider: both times at exactly two
 /// fraction digits, separated by upstream's literal `" / "` and `" s"`
@@ -127,4 +159,165 @@ pub fn collision_text(collisions: &[Collision]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// ─── view ──────────────────────────────────────────────────────────────────
+
+/// The whole capsule (MotionControls.swift:9-79): row 1 carries play or
+/// pause, the scrub slider, the time readout, the speed dropdown, and the
+/// loop toggle; row 2 appears only when the state at `player.time` has a
+/// label, values, or collisions (:51). Everything rendered is copied or
+/// formatted into owned strings, so the element's lifetime is free of
+/// the references passed in (the parameters overlay's rule).
+pub fn view_motion_controls<'a>(
+    player: &MotionPlayer,
+    study: &MotionStudy,
+) -> Element<'a, Message> {
+    let state = study.state_at(player.time);
+    let mut capsule = Column::new().spacing(6).push(controls_row(player, study));
+    if state.label.is_some() || !state.values.is_empty() || !state.collisions.is_empty() {
+        capsule = capsule.push(state_row(study, &state));
+    }
+    container(capsule)
+        .padding([8.0, 12.0]) // vertical 8, horizontal 12 (:74-75)
+        .max_width(560.0) // .frame(maxWidth: 560) (:76)
+        .class(panel_style(10.0)) // RoundedRectangle(cornerRadius: 10) (:77)
+        .into()
+}
+
+/// Row 1 (MotionControls.swift:12-50), spacing 10: the play/pause button
+/// (16 px icon, `.frame(width: 16)`), the scrub slider over
+/// `0..=max(duration, 0.001)` (:23), the mono readout, the speed
+/// dropdown, and the loop toggle.
+fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, Message> {
+    let (icon_name, help) = if player.is_playing {
+        ("media-playback-pause", fl!("pausa"))
+    } else {
+        ("media-playback-start", fl!("riproduci"))
+    };
+    let play = button::icon(icon_handle(icon_name, 16))
+        .on_press(Message::TogglePlayback)
+        .description(help);
+    let scrub = tooltip(
+        slider(
+            0.0..=study.duration().max(SCRUB_FLOOR),
+            player.time,
+            Message::Scrub,
+        )
+        .width(Length::Fill),
+        text(fl!("tempo-dell-animazione")),
+        tooltip::Position::FollowCursor,
+    );
+    let readout = mono_dim(time_readout(player.time, study.duration())).size(12);
+    // The closed dropdown shows the selected entry's label, which is
+    // exactly speed_label(player.speed) for every speed the menu can set.
+    let speeds: Vec<String> = SPEEDS.iter().map(|speed| speed_label(*speed)).collect();
+    let selected = SPEEDS.iter().position(|speed| *speed == player.speed);
+    let speed = tooltip(
+        dropdown(speeds, selected, |index| Message::SetSpeed(SPEEDS[index])),
+        text(fl!("velocit")), // upstream's menu title (:36)
+        tooltip::Position::FollowCursor,
+    );
+    // The on-state shows through the class (the parts picker's idiom):
+    // cosmic's builder buttons carry no selected flag at this pin.
+    let loop_toggle = button::text(fl!("ripeti"))
+        .class(if player.loops {
+            cosmic::theme::Button::Suggested
+        } else {
+            cosmic::theme::Button::Standard
+        })
+        .on_press(Message::ToggleLoops);
+    Row::new()
+        .spacing(10)
+        .push(play)
+        .push(scrub)
+        .push(readout)
+        .push(speed)
+        .push(loop_toggle)
+        .into()
+}
+
+/// Row 2 (MotionControls.swift:51-70), spacing 12: the phase label at
+/// medium weight, each value as `name formatted` in mono dim — iterated
+/// in `value_names()` order, never the BTreeMap's (the module's ordering
+/// law) — and, when the state carries collisions, the warning glyph and
+/// the joined pairs in red.
+fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(12);
+    if let Some(label) = &state.label {
+        row = row.push(text(label.clone()).size(12).font(cosmic::font::semibold()));
+    }
+    for name in study.value_names() {
+        if let Some(value) = state.values.get(name) {
+            row =
+                row.push(mono_dim(format!("{name} {}", format_significant(*value, 1, 3))).size(12));
+        }
+    }
+    if !state.collisions.is_empty() {
+        row = row.push(
+            Row::new().spacing(4).push(icon(WARNING_ICON, 14)).push(
+                text(collision_text(&state.collisions))
+                    .size(12)
+                    .class(red_class()),
+            ),
+        );
+    }
+    row.into()
+}
+
+// ─── shared bits (private twins; modules stay self-contained — the chat
+// pane's convention) ─────────────────────────────────────────────────────────
+
+/// The readout and the values row's dim monospace (upstream's caption
+/// `.monospacedDigit().foregroundStyle(.secondary)`).
+fn mono_dim(body: String) -> Text<'static> {
+    text(body)
+        .font(cosmic::font::mono())
+        .class(secondary_text_class())
+}
+
+fn secondary_text_class() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|theme| {
+        let mut color = Color::from(theme.cosmic().background(false).on);
+        color.a *= 0.65;
+        cosmic::iced::widget::text::Style {
+            color: Some(color),
+            ..Default::default()
+        }
+    })
+}
+
+fn red_class() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|_theme| cosmic::iced::widget::text::Style {
+        color: Some(RED),
+        ..Default::default()
+    })
+}
+
+/// A solid theme-base surface with a hairline border (the parts panel's
+/// style; upstream `.regularMaterial` + the corner radius — the drop
+/// shadow has no iced port).
+fn panel_style(radius: f32) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let base = Color::from(theme.cosmic().background(false).base);
+        let mut border = Color::from(theme.cosmic().background(false).on);
+        border.a = 0.15;
+        cosmic::iced::widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(base)),
+            border: cosmic::iced::Border {
+                color: border,
+                width: 1.0,
+                radius: radius.into(),
+            },
+            ..Default::default()
+        }
+    })
+}
+
+fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
+    cosmic::widget::icon::from_name(name).size(size).icon()
+}
+
+fn icon_handle(name: &str, size: u16) -> cosmic::widget::icon::Handle {
+    cosmic::widget::icon::from_name(name).size(size).handle()
 }
