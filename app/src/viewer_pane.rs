@@ -89,9 +89,9 @@ use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::section::{self, SectionAxis};
 
 use crate::camera_input::CameraInput;
+use crate::fl;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
-use crate::fl;
 use crate::parts_overlay;
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
@@ -910,7 +910,7 @@ impl ViewerPane {
             // is not a mesh reload; no >50 % gate applies).
             self.input.set_framing_reference(self.frame_aabb);
             self.sync_pose();
-        self.restage_ghost();
+            self.restage_ghost();
         }
 
         // The frozen grid stamp — upstream's sceneID (mesh + layout + plate
@@ -1273,7 +1273,6 @@ pub fn scenes_differ(current: &PartScene, next: &PartScene) -> bool {
                 || a.aabb_min != b.aabb_min
                 || a.aabb_max != b.aabb_max
         })
-
 }
 
 /// The relay stream: one thread draining the std event channel into the
