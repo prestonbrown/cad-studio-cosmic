@@ -511,7 +511,23 @@ impl ProjectWindow {
 
     fn update_bridge(&mut self, msg: bridge::Message) -> Task<Message> {
         match msg {
-            bridge::Message::TurnStarted { .. } => {
+            bridge::Message::TurnStarted {
+                prompt,
+                attachments,
+            } => {
+                // the user row joins the visible transcript when the send
+                // actually starts (upstream appends it in `send`, before
+                // the agent runs — the bridge message's contract)
+                self.chat.append(store::ChatMessage {
+                    id: uuid::Uuid::new_v4(),
+                    role: store::Role::User,
+                    text: prompt,
+                    date: OffsetDateTime::now_utc(),
+                    tool: None,
+                    detail: None,
+                    action: None,
+                    attachments,
+                });
                 self.set_activity(activity::next(activity::Signal::TurnStarted, false));
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }

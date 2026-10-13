@@ -39,3 +39,8 @@ ashpd = "0.12"
 zbus = { version = "5.15", default-features = false, features = ["tokio"] }
 i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
 rust-embed = "8.11.0"
+
+[dev-dependencies]
+# the slice's offscreen screenshot test drives the viewer's surfaceless
+# harness directly (render_headless.rs pattern)
+wgpu.workspace = true
