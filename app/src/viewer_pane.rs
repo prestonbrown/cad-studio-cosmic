@@ -357,6 +357,13 @@ impl ViewerPane {
     /// (clearing any draft whose value changed — upstream's bound field
     /// text follows `parameter.value`), and the panel rows sync (keeping
     /// mid-drag edits, re-fitting only escaped ranges).
+    /// Seed the overlay's collapse state from the persisted setting —
+    /// the window hands it in at open ([`Settings::parameters_collapsed`];
+    /// the field's own doc). `sync` preserves it across parameter refreshes.
+    pub fn set_parameters_collapsed(&mut self, collapsed: bool) {
+        self.parameters.collapsed = collapsed;
+    }
+
     pub fn sync_parameters(&mut self, params: &[ModelParameter]) {
         for param in params {
             if self.committed_parameters.get(&param.name) != Some(&param.value) {

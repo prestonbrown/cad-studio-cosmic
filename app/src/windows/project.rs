@@ -321,11 +321,17 @@ impl ProjectWindow {
             size: DEFAULT_SIZE,
             chat: ChatState::new(store::load_chat(&root).unwrap_or_default()),
             chat_pane: ChatPane::new(),
-            viewer: ViewerPane::new(
-                &root,
-                settings.measurement_unit,
-                settings.printer_model.clone(),
-            ),
+            viewer: {
+                let mut pane = ViewerPane::new(
+                    &root,
+                    settings.measurement_unit,
+                    settings.printer_model.clone(),
+                );
+                // the overlay's collapse state survives launches
+                // (Settings.parameters_collapsed — the pane's field docs)
+                pane.set_parameters_collapsed(settings.parameters_collapsed);
+                pane
+            },
             schematic: SchematicPane::new(&files, manifest.as_ref()),
             bridge,
             queue: Vec::new(),
@@ -349,6 +355,12 @@ impl ProjectWindow {
     /// Whether a turn is running (upstream `isBusy`).
     pub fn is_busy(&self) -> bool {
         self.activity.is_working()
+    }
+
+    /// Test seam: point the settings writer somewhere disposable — the
+    /// default is the user's real settings file.
+    pub fn set_settings_path_for_test(&mut self, path: PathBuf) {
+        self.settings_path = path;
     }
 
     fn output_dir(&self) -> PathBuf {
@@ -396,6 +408,18 @@ impl ProjectWindow {
         self.chat.reload_rows(rows);
     }
 
+    /// Apply `edit` to the engine settings file, load-fresh then save —
+    /// the ONE-writer law's one sanctioned window path (the app itself
+    /// saves the engine settings; the AgentMissingSheet custom-path
+    /// precedent).
+    fn persist_settings(&mut self, edit: impl FnOnce(&mut Settings)) {
+        let mut settings = Settings::load(&self.settings_path).unwrap_or_default();
+        edit(&mut settings);
+        if let Err(why) = settings.save(&self.settings_path) {
+            eprintln!("cad-studio: settings save failed: {why}");
+        }
+    }
+
     /// Apply a structure change (preset switch, pane move): the grid
     /// rebuilds and both the project manifest and the global default
     /// layout persist eagerly (upstream `setLayout` → `persistLayout`).
@@ -435,6 +459,20 @@ impl ProjectWindow {
                 let _ = self.bridge.set_parameter(&name, value);
                 self.set_activity(self.bridge.activity().into());
                 Task::none()
+            }
+            // the overlay's collapse toggle persists through the engine
+            // settings (parameters_view's documented contract: the shell
+            // intercepts, persists, then forwards — the ONE-writer law's
+            // sanctioned path, the AgentMissingSheet custom-path precedent)
+            Message::Viewer(crate::viewer_pane::Message::Parameters(
+                crate::parameters_view::Message::Collapse(collapsed),
+            )) => {
+                self.persist_settings(|settings| settings.parameters_collapsed = collapsed);
+                self.viewer
+                    .update(crate::viewer_pane::Message::Parameters(
+                        crate::parameters_view::Message::Collapse(collapsed),
+                    ))
+                    .map(Message::Viewer)
             }
             Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
             Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
@@ -547,8 +585,19 @@ impl ProjectWindow {
                 // take_draft FIRST; a None draft means nothing was sent and
                 // the pane keeps its buffer (sent() is skipped)
                 if let Some((text, attachments)) = self.chat.take_draft() {
-                    self.chat_pane.sent();
-                    let _ = self.bridge.enqueue(text, attachments);
+                    match self.bridge.enqueue(text, attachments.clone()) {
+                        Ok(()) => self.chat_pane.sent(),
+                        // a refused send keeps the draft in the input bar
+                        // (upstream chat.draft IS the bar's): the pane still
+                        // holds the text — sent() is skipped and the tail
+                        // sync re-mirrors it — the attachments go back, and
+                        // the bridge's parked copy clears so the text has
+                        // exactly one home
+                        Err(_refused) => {
+                            self.chat.draft_attachments = attachments;
+                            self.bridge.clear_parked_draft();
+                        }
+                    }
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
@@ -682,6 +731,14 @@ impl ProjectWindow {
             bridge::Message::BuildFinished { .. } => {
                 self.refresh_missing_outputs();
                 self.reload_chat_rows();
+                // the driver's record_version moved current_version on
+                // disk; the version menu's checkmark and the root's label
+                // read the window's copy — refresh from the fresh metadata
+                // exactly as restore does (display currency only; the
+                // load-fresh law already protects the file)
+                let fresh = bridge::fresh_metadata(&self.root);
+                self.metadata.session_id = fresh.session_id;
+                self.metadata.current_version = fresh.current_version;
                 self.set_activity(self.bridge.activity().into());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
