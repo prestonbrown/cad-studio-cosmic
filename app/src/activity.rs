@@ -6,14 +6,18 @@
 //!
 //! The build error rides the FIRST issue slot from the live pipeline
 //! (`Bridge::build_error`, wired M5 T8); the missing-output warning is
-//! the upstream home of output warnings. The manifest-warning,
-//! motion-error and collision issues join at M6.
+//! the upstream home of output warnings. The motion-error and collision
+//! warnings joined at M7 (the pane-derived pair); the manifest warnings
+//! remain M8's (the ActivityViewer full port).
 
 use std::path::Path;
 
 use engine::agent::session::TurnOutcome;
 #[cfg(test)]
 use engine::project::outputs::expected_outputs;
+
+use crate::fl;
+use crate::localize::substitute_placeholders;
 
 /// The engine display name (AgentLocator.swift:12 — upstream "Claude Code").
 pub const ENGINE_NAME: &str = "Claude Code";
@@ -61,9 +65,17 @@ pub struct Issue {
     pub message: String,
 }
 
-/// The issue list (Project.swift:113-130's first two branches): the build
-/// error first, then one warning naming the missing output files.
-pub fn issues(build_error: Option<&str>, missing_outputs: &[String]) -> Vec<Issue> {
+/// The issue list (Project.swift:113-130): the build error first, one
+/// warning naming the missing output files, then the two motion branches —
+/// `motion_error` arrives already localized and substituted (the pane's
+/// reload), the collision count substitutes into the fl! text. The
+/// manifest warnings join at M8.
+pub fn issues(
+    build_error: Option<&str>,
+    missing_outputs: &[String],
+    motion_error: Option<&str>,
+    collision_frames: usize,
+) -> Vec<Issue> {
     let mut out = Vec::new();
     if let Some(error) = build_error {
         out.push(Issue {
@@ -75,6 +87,21 @@ pub fn issues(build_error: Option<&str>, missing_outputs: &[String]) -> Vec<Issu
         out.push(Issue {
             kind: IssueKind::Warning,
             message: format!("Missing output files: {}", missing_outputs.join(", ")),
+        });
+    }
+    if let Some(error) = motion_error {
+        out.push(Issue {
+            kind: IssueKind::Warning,
+            message: error.to_string(),
+        });
+    }
+    if collision_frames > 0 {
+        out.push(Issue {
+            kind: IssueKind::Warning,
+            message: substitute_placeholders(
+                &fl!("l-animazione-ha-collisioni-tra-parti-in-lld-fotogrammi"),
+                &[&collision_frames.to_string()],
+            ),
         });
     }
     out
@@ -240,13 +267,13 @@ mod tests {
         }
         assert!(missing_output_files(&dir).is_empty());
 
-        let all_present = issues(None, &missing_output_files(&dir));
+        let all_present = issues(None, &missing_output_files(&dir), None, 0);
         assert!(all_present.is_empty());
 
         std::fs::remove_file(dir.join("model.3mf")).unwrap();
         let missing = missing_output_files(&dir);
         assert_eq!(missing, vec!["model.3mf".to_string()]);
-        let warnings_only = issues(None, &missing);
+        let warnings_only = issues(None, &missing, None, 0);
         assert_eq!(warnings_only.len(), 1);
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);
         assert_eq!(warnings_only[0].message, "Missing output files: model.3mf");
@@ -260,8 +287,39 @@ mod tests {
             "the app twin delegates to the engine twin"
         );
 
-        let both = issues(Some("SyntaxError: invalid syntax"), &missing);
+        let both = issues(Some("SyntaxError: invalid syntax"), &missing, None, 0);
         assert_eq!(both[0].kind, IssueKind::Error, "the build error leads");
         assert_eq!(both.len(), 2);
+    }
+
+    /// The motion branches (Project.swift:123-127, appended after the two
+    /// M5 ones): the pane's already-substituted error text rides one
+    /// warning; a colliding study rides one warning with the frame count
+    /// substituted into the fl! text; a clean study stays silent.
+    #[test]
+    fn motion_issues_render_both_upstream_branches() {
+        crate::localize::select("en");
+        let issues = crate::activity::issues(
+            None,
+            &[],
+            Some("animation.json is not valid: expected a comma"),
+            0,
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, IssueKind::Warning);
+        assert_eq!(
+            issues[0].message,
+            "animation.json is not valid: expected a comma"
+        );
+        let issues = crate::activity::issues(None, &[], None, 2);
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].message.contains("2 frames"),
+            "count substituted into the fl! text: {}",
+            issues[0].message
+        );
+        assert!(!issues[0].message.contains("%lld"), "placeholder gone");
+        // zero-collision and no-error studies stay silent
+        assert!(crate::activity::issues(None, &[], None, 0).is_empty());
     }
 }

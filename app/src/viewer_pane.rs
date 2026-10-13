@@ -27,9 +27,10 @@
 //! M5: the pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
 //! `topTrailing` ParametersOverlay, ModelPane.swift:41-44) over the canvas
 //! through a `stack`, showing it only while a model exists, parameters
-//! exist, and `parameters_visible` holds (⌥⌘I toggles it — the keyboard
-//! shortcut lives in this pane's subscription until the shell owns
-//! commands). The pane owns the overlay's widget state ([`parameters`]
+//! exist, and `parameters_visible` holds (⌥⌘I toggles it — the app's key
+//! router owns the binding app-wide, Commands.swift:69-73, delivering the
+//! pane's [`Message::ToggleParameters`] through the window's command
+//! table). The pane owns the overlay's widget state ([`parameters`]
 //! rows, field drafts, the committed values commits round against); the
 //! SHELL owns everything the bridge knows — it feeds
 //! [`ViewerPane::sync_parameters`] on every parameter refresh and
@@ -186,8 +187,9 @@ pub enum Message {
     /// draft clear — already applied when it was emitted).
     ParameterCommit(String, f64),
     /// ⌥⌘I — toggles the parameters overlay's visibility
-    /// (Commands.swift:69-73); the pane's subscription reports it until the
-    /// shell owns menu commands.
+    /// (Commands.swift:69-73); the app's key router delivers it through the
+    /// window's command table (the app-wide binding, no longer this pane's
+    /// subscription).
     ToggleParameters,
     /// A measure pick settled (the viewer-pick thread → relay): the
     /// MODEL-space hit, or `None` when the ray missed everything.
@@ -781,12 +783,26 @@ impl ViewerPane {
             && self.study.as_ref().is_some_and(|s| s.is_active())
     }
 
+    /// The localized, already-substituted motion error for the header's
+    /// issue list (upstream `output.motionError`, Project.swift:123-125) —
+    /// the pane's reload owns the substitution.
+    pub fn motion_error(&self) -> Option<&str> {
+        self.motion_error.as_deref()
+    }
+
+    /// The study's collision frame count (upstream `study.collisionCount`,
+    /// Project.swift:126-128) — zero with no study.
+    pub fn collision_frames(&self) -> usize {
+        self.study.as_ref().map_or(0, MotionStudy::collision_count)
+    }
+
     /// The pane's subscriptions: the output-event relay plus keyboard
     /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag),
-    /// the parameters overlay's ⌥⌘I toggle, Space while animating, and the
-    /// playback clock while [`Self::wants_tick`].
-    /// the parameters overlay's ⌥⌘I toggle, and Esc (clears an in-flight
-    /// measurement, ModelPane.swift:54-58).
+    /// Space while animating, Esc (clears an in-flight measurement,
+    /// ModelPane.swift:54-58), and the playback clock while
+    /// [`Self::wants_tick`]. The ⌥⌘I parameters toggle is NOT here — the
+    /// app's key router owns it app-wide (Commands.swift:69-73), routed
+    /// through the window's command table.
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
         // The filter closure must stay NON-CAPTURING: iced's filter_map
@@ -807,16 +823,6 @@ impl ViewerPane {
                 modifiers,
                 ..
             } if modifiers.is_empty() && c.as_str() == " " => Some(Message::TogglePlayback),
-            // ⌥⌘I (Commands.swift:69-73); the character form matches the
-            // logical key with option held (macOS composes ⌥I — the
-            // ignoring-modifiers key stays "i").
-            keyboard::Event::KeyPressed { key, modifiers, .. }
-                if modifiers.alt()
-                    && modifiers.logo()
-                    && matches!(&key, keyboard::Key::Character(c) if c.eq_ignore_ascii_case("i")) =>
-            {
-                Some(Message::ToggleParameters)
-            }
             keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..

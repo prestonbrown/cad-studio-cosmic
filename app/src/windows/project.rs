@@ -8,15 +8,17 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (the M4 subset plus Compila ⌘B): show-chat ⌘0, focus ⌘1/2/3,
-//! layout presets, viewer presets + fit, schematic zoom/fit, build, stop,
-//! reveal, open-in-slicer. No export/output command (M8). The keyboard
-//! bindings are one pure table, [`project_shortcut`]; the header's menu
-//! renders the same commands.
+//! Commands (the M4 subset plus Compila ⌘B and M7's parameters ⌥⌘I):
+//! show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout presets, viewer
+//! presets + fit, schematic zoom/fit, build, stop, reveal, open-in-slicer.
+//! No export/output command (M8). The keyboard bindings are one pure
+//! table, [`project_shortcut`]; the header's menu renders the same
+//! commands.
 //!
 //! User-visible strings follow the landed modules' convention: plain
 //! English values, each named for its en/main.ftl key, pending the
-//! repo-wide `fl!()` swap.
+//! repo-wide `fl!()` swap — the M7 motion strings already read through
+//! `fl!()` (the placeholder-bearing catalog values).
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -47,6 +49,7 @@ use crate::activity::{self, Activity, IssueKind};
 use crate::bridge::{self, Bridge};
 use crate::chat::ChatState;
 use crate::chat_view::{self, ChatPane, QueueItem};
+use crate::fl;
 use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
@@ -68,14 +71,18 @@ const GRID_SPACING: f32 = 8.0;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// The commands the M4 project window exposes (upstream AppCommands +
-/// ProjectToolbar, M4 subset + M5's Compila). Doubles as the menu action
-/// type.
+/// ProjectToolbar, M4 subset + M5's Compila + M7's parameters toggle).
+/// Doubles as the menu action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     ShowChat,
     FocusChat,
     FocusModel,
     FocusSchematic,
+    /// "Mostra/Nascondi parametri" ⌥⌘I (Commands.swift:69-73): flip the
+    /// parameters overlay's visibility — the app-wide binding (upstream
+    /// hangs it off the project, disabled with none open).
+    ToggleParameters,
     LayoutChatLeading,
     LayoutChatTrailing,
     LayoutChatBottom,
@@ -439,10 +446,6 @@ impl ProjectWindow {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Chat(msg) => self.update_chat(msg),
-            // the app layer owns the sheet's presentation — pass through
-            Message::PresentSetupSheet => {
-                CosmicTask::future(async move { Message::PresentSetupSheet })
-            }
             // the shell owns the compare state (parameters_view docs): the
             // picker's report reaches BOTH halves — the bridge stores the
             // selection (and parses the version's parameter values), and
@@ -469,6 +472,20 @@ impl ProjectWindow {
             Message::Viewer(crate::viewer_pane::Message::ParameterCommit(name, value)) => {
                 let _ = self.bridge.set_parameter(&name, value);
                 self.set_activity(self.bridge.activity().into());
+                Task::none()
+            }
+            // the ask-the-agent "Crea animazione" button
+            // (ModelPane.swift:138-146): one ordinary turn carrying the
+            // localized prompt — the button is disabled while busy
+            // (upstream `.disabled(project.isBusy)`); this guard is the
+            // belt over the bridge's own busy refusal
+            Message::Viewer(crate::viewer_pane::Message::RequestMotionStudy) => {
+                if !self.is_busy() {
+                    let _ = self.bridge.enqueue(
+                        fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
+                        Vec::new(),
+                    );
+                }
                 Task::none()
             }
             // the overlay's collapse toggle persists through the engine
@@ -555,7 +572,10 @@ impl ProjectWindow {
                 self.shown_issues = kind;
                 Task::none()
             }
-            Message::CloseRequested | Message::App(_) => Task::none(), // the app layer acts
+            // the app layer acts (PresentSetupSheet's one producer — the
+            // bridge's PythonSheetRequested forward — already lands there;
+            // re-emitting it here would loop the variant back into itself)
+            Message::CloseRequested | Message::App(_) | Message::PresentSetupSheet => Task::none(),
             Message::Restore(number) => self.restore(number),
         }
     }
@@ -791,6 +811,10 @@ impl ProjectWindow {
                 self.focus_flash = Some(PaneKind::Schematic);
                 Task::none()
             }
+            Command::ToggleParameters => self
+                .viewer
+                .update(crate::viewer_pane::Message::ToggleParameters)
+                .map(Message::Viewer),
             Command::LayoutChatLeading => {
                 self.apply_layout_persist(LayoutNode::chat_leading());
                 Task::none()
@@ -1009,8 +1033,9 @@ impl ProjectWindow {
 
     /// The minimal ActivityViewer port (Shared/ActivityViewer.swift):
     /// project name, status icon + text, elapsed, and the error/warning
-    /// issue buttons — the upstream home of output warnings. The full port
-    /// (manifest warnings, motion issues) is M6.
+    /// issue buttons — the upstream home of output warnings, plus M7's
+    /// motion error and collision warnings from the viewer pane. The full
+    /// port's manifest warnings are M8's.
     fn view_activity(&self) -> Element<'_, Message> {
         let mut row = Row::new()
             .spacing(6)
@@ -1058,7 +1083,12 @@ impl ProjectWindow {
         }
         row = row.push(Space::new().width(Length::Fill));
 
-        let issues = activity::issues(self.bridge.build_error().as_deref(), &self.missing_outputs);
+        let issues = activity::issues(
+            self.bridge.build_error().as_deref(),
+            &self.missing_outputs,
+            self.viewer.motion_error(),
+            self.viewer.collision_frames(),
+        );
         for kind in [IssueKind::Error, IssueKind::Warning] {
             let matching: Vec<_> = issues.iter().filter(|i| i.kind == kind).collect();
             if matching.is_empty() {
@@ -1093,7 +1123,12 @@ impl ProjectWindow {
 
     /// The issue list popover (upstream `IssueList`).
     fn view_issue_list(&self, kind: IssueKind) -> Element<'_, Message> {
-        let issues = activity::issues(self.bridge.build_error().as_deref(), &self.missing_outputs);
+        let issues = activity::issues(
+            self.bridge.build_error().as_deref(),
+            &self.missing_outputs,
+            self.viewer.motion_error(),
+            self.viewer.collision_frames(),
+        );
         let mut list = Column::new()
             .spacing(8)
             .padding(12)
@@ -1377,6 +1412,9 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
         (true, true, false, "3") => Some(ViewerPreset(Preset::Top)),
         (true, true, false, "4") => Some(ViewerPreset(Preset::Right)),
         (true, true, false, "0") => Some(ViewerFit),
+        // ⌥⌘I parameters (Commands.swift:69-73) — the app-wide arm (the
+        // viewer pane's subscription no longer carries it)
+        (true, true, false, "i") => Some(ToggleParameters),
         (true, false, false, "+") | (true, false, false, "=") => Some(SchematicZoomIn),
         (true, false, false, "-") => Some(SchematicZoomOut),
         // ⌘. stop — the period key arrives as a character
@@ -1431,6 +1469,16 @@ mod tests {
         assert_eq!(
             project_shortcut(&Key::Character("0".into()), &ctrl_alt),
             Some(Command::ViewerFit)
+        );
+        assert_eq!(
+            project_shortcut(&Key::Character("i".into()), &ctrl_alt),
+            Some(Command::ToggleParameters),
+            "⌥⌘I toggles the parameters overlay (Commands.swift:69-73)"
+        );
+        assert_eq!(
+            project_shortcut(&Key::Character("i".into()), &ctrl),
+            None,
+            "no parameters binding without ⌥"
         );
         assert_eq!(
             project_shortcut(&Key::Character("=".into()), &ctrl),
