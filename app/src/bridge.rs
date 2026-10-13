@@ -693,6 +693,14 @@ impl Bridge {
         self.pipeline().sheet_requested
     }
 
+    /// Drop the draft a refused send parked here — the input bar re-staged
+    /// the text (upstream's `chat.draft` IS the input bar's; the window
+    /// owns the one live copy, so the parked one must not linger where a
+    /// later refusal could resurrect stale text).
+    pub fn clear_parked_draft(&mut self) {
+        self.pipeline().draft = None;
+    }
+
     /// Test seam: the draft a refused send kept (upstream `chat.draft`).
     pub fn draft_text_for_test(&self) -> Option<String> {
         self.pipeline().draft.clone()
