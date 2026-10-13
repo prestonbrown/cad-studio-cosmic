@@ -76,8 +76,11 @@ pub enum Message {
     /// the running tools have been failed open and saved; leave the
     /// running state.
     Closed,
-    /// The queue's depth and pause state after a change.
-    QueueChanged { queued: usize, paused: bool },
+    /// The queue's contents and pause state after a change.
+    QueueChanged {
+        queue: Vec<QueuedItem>,
+        paused: bool,
+    },
 }
 
 /// One command from the app layer to the driver.
@@ -89,14 +92,40 @@ enum Command {
     },
     Cancel,
     ResumeQueue,
+    /// Drop one queued send by id (upstream `removeQueued`,
+    /// Project.swift:278-283): the queue un-pauses when this empties it.
+    RemoveQueued(Uuid),
 }
 
 /// A queued send (upstream `QueuedMessage`): the FIFO entry the queue holds
-/// while a turn runs.
+/// while a turn runs. The id is the identity the queue list renders and
+/// [`Bridge::remove_queued`] addresses (upstream's items are full
+/// `ChatMessage`s with UUIDs).
 #[derive(Debug, Clone, PartialEq)]
 struct QueuedSend {
+    id: Uuid,
     prompt: String,
     attachments: Vec<String>,
+}
+
+/// A queued send as the app layer sees the queue (upstream exposes the full
+/// `ChatMessage` items; the shell needs identity, preview text and the image
+/// count).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedItem {
+    pub id: Uuid,
+    pub text: String,
+    pub images: usize,
+}
+
+impl From<&QueuedSend> for QueuedItem {
+    fn from(send: &QueuedSend) -> Self {
+        Self {
+            id: send.id,
+            text: send.prompt.clone(),
+            images: crate::chat::image_attachments(&send.attachments),
+        }
+    }
 }
 
 /// The app layer's handle onto the driver: clone-free by design, so dropping
@@ -138,6 +167,13 @@ impl Bridge {
             prompt,
             attachments,
         });
+    }
+
+    /// Drop one queued send (upstream `removeQueued`, Project.swift:278-283):
+    /// the running turn is untouched; the queue un-pauses when this empties
+    /// it.
+    pub fn remove_queued(&self, id: Uuid) {
+        let _ = self.commands.send(Command::RemoveQueued(id));
     }
 
     /// Interrupt the running turn (SIGINT now, SIGTERM after 3 s). The
@@ -214,12 +250,19 @@ impl Drive {
                     }) => self.start_turn(
                         &mut session,
                         QueuedSend {
+                            id: Uuid::new_v4(),
                             prompt,
                             attachments,
                         },
                     ),
                     // nothing is running: upstream's stop is a no-op
                     Some(Command::Cancel) => Phase::Idle,
+                    // removing from an empty-idle queue can only un-pause
+                    Some(Command::RemoveQueued(_)) => {
+                        self.paused = false;
+                        self.notify_queue();
+                        Phase::Idle
+                    }
                     Some(Command::ResumeQueue) => {
                         self.paused = false;
                         self.notify_queue();
@@ -259,10 +302,29 @@ impl Drive {
                         // and eats the pending delay: its own turn end
                         // re-arms the queue's next step instead
                         Some(Command::Enqueue { prompt, attachments }) => {
-                            self.start_turn(&mut session, QueuedSend { prompt, attachments })
+                            self.start_turn(
+                                &mut session,
+                                QueuedSend {
+                                    id: Uuid::new_v4(),
+                                    prompt,
+                                    attachments,
+                                },
+                            )
                         }
                         // nothing to interrupt; the gap keeps running
                         Some(Command::Cancel) => Phase::Delay { auto_at },
+                        // an emptied queue un-pauses and ends the gap
+                        Some(Command::RemoveQueued(id)) => {
+                            self.queue.retain(|send| send.id != id);
+                            if self.queue.is_empty() {
+                                self.paused = false;
+                                self.notify_queue();
+                                Phase::Idle
+                            } else {
+                                self.notify_queue();
+                                Phase::Delay { auto_at }
+                            }
+                        }
                         Some(Command::ResumeQueue) => {
                             self.paused = false;
                             self.notify_queue();
@@ -289,6 +351,7 @@ impl Drive {
                 attachments,
             } => {
                 self.queue.push_back(QueuedSend {
+                    id: Uuid::new_v4(),
                     prompt,
                     attachments,
                 });
@@ -298,6 +361,15 @@ impl Drive {
             // the queue moves at this turn's end
             Command::ResumeQueue => {
                 self.paused = false;
+                self.notify_queue();
+            }
+            // upstream `removeQueued`: drop the entry, and an emptied queue
+            // loses its pause (Project.swift:278-283)
+            Command::RemoveQueued(id) => {
+                self.queue.retain(|send| send.id != id);
+                if self.queue.is_empty() {
+                    self.paused = false;
+                }
                 self.notify_queue();
             }
         }
@@ -373,7 +445,7 @@ impl Drive {
     /// from the app, so changes travel as messages).
     fn notify_queue(&self) {
         let _ = self.out.unbounded_send(Message::QueueChanged {
-            queued: self.queue.len(),
+            queue: self.queue.iter().map(QueuedItem::from).collect(),
             paused: self.paused,
         });
     }
@@ -533,6 +605,7 @@ mod tests {
         let end = drive.drain_turn(&mut ev_rx, || {}, transcript).await;
         assert_eq!(end, TurnEnd::Closed);
         drive.queue.push_back(QueuedSend {
+            id: Uuid::new_v4(),
             prompt: "next".into(),
             attachments: Vec::new(),
         });
@@ -602,5 +675,61 @@ mod tests {
             messages.next().await,
             Some(Message::Event(EngineEvent::ThinkingStarted))
         );
+    }
+
+    /// `remove_queued` drops the addressed entry mid-drain and un-pauses an
+    /// emptied queue (upstream `removeQueued`, Project.swift:278-283); the
+    /// queue's observable contents travel with the change.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_queued_drops_entry_and_unpauses_when_empty() {
+        let root = std::env::temp_dir().join(format!("cad-bridge-remove-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut drive, cmd_tx, mut messages) = harness(&root);
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        drive.queue.push_back(QueuedSend {
+            id: first,
+            prompt: "first".into(),
+            attachments: vec!["shot.png".into()],
+        });
+        drive.queue.push_back(QueuedSend {
+            id: second,
+            prompt: "second".into(),
+            attachments: Vec::new(),
+        });
+        drive.paused = true;
+        drive.notify_queue();
+
+        drive.absorb(Command::RemoveQueued(first), &|| {});
+        assert_eq!(drive.queue.len(), 1, "the addressed entry is gone");
+        assert_eq!(drive.queue.front().unwrap().id, second);
+        assert!(
+            drive.paused,
+            "a queue that still holds items keeps its pause"
+        );
+
+        drive.absorb(Command::RemoveQueued(second), &|| {});
+        assert!(drive.queue.is_empty());
+        assert!(!drive.paused, "emptying the queue clears the pause");
+
+        let mut seen = Vec::new();
+        while let Ok(m) = messages.try_recv() {
+            if let Message::QueueChanged { queue, paused } = m {
+                seen.push((queue, paused));
+            }
+        }
+        assert_eq!(
+            seen.last().map(|(queue, paused)| (queue.len(), *paused)),
+            Some((0, false)),
+            "the final announcement carries the emptied, un-paused queue"
+        );
+        // the item view carries the image count the queue list renders
+        let before_removal = seen.first().and_then(|(queue, _)| queue.first().cloned());
+        assert_eq!(
+            before_removal.map(|item| (item.text, item.images)),
+            Some(("first".to_string(), 1)),
+            "queued items expose preview text and the image count"
+        );
+        drop(cmd_tx);
     }
 }

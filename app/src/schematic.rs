@@ -763,6 +763,22 @@ impl SchematicPane {
         self.request_current_page();
     }
 
+    /// The shell's output-watch handoff (upstream `output.reload()`'s page
+    /// re-discovery plus the revision bump): pages re-derive from the files
+    /// on disk and the manifest's titles, the current page stays selected
+    /// when it survives, and content revisions advance so stale cached
+    /// rasters stop matching.
+    pub fn reload(&mut self, files: &[PathBuf], manifest: Option<&Manifest>) {
+        let selected = self.tabs.current().map(|page| page.file.clone());
+        self.tabs = PageTabs::from_parts(files, manifest);
+        if let Some(file) = selected {
+            if let Some(index) = files.iter().position(|f| *f == file) {
+                self.tabs.select(index);
+            }
+        }
+        self.set_revision(self.revision.wrapping_add(1));
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Wheel(delta) => {

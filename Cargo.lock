@@ -187,17 +187,21 @@ dependencies = [
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "ashpd 0.12.3",
  "engine",
+ "i18n-embed",
  "image",
  "libcosmic",
  "pulldown-cmark",
  "resvg",
+ "rust-embed",
  "serde_json",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "uuid",
  "viewer",
+ "zbus",
 ]
 
 [[package]]

@@ -208,21 +208,32 @@ pub fn validate_project_name(name: &str) -> Result<(), ProjectNameError> {
     }
 }
 
+/// Ensure an EXISTING project's scaffolding is complete (upstream
+/// `ProjectStore.prepare`, ProjectStore.swift:46-57 — called by `Project`
+/// on open, not only at create): `output/`, `.cadstudio/logs/`, and a
+/// default `project.json` when none is present.
+pub fn prepare(project_root: &Path) -> Result<(), ProjectStoreError> {
+    std::fs::create_dir_all(project_root.join("output"))?;
+    std::fs::create_dir_all(project_root.join(".cadstudio").join("logs"))?;
+    if !support_dir(project_root).join("project.json").exists() {
+        save_metadata(
+            project_root,
+            &ProjectMetadata::new(env!("CARGO_PKG_VERSION")),
+        )?;
+    }
+    Ok(())
+}
+
 /// Scaffold a new project (upstream `ProjectStore.create` + `prepare`,
 /// contract §4:126): validate the name, create the root as a LEAF directory
 /// (the parent must already exist and the root must not — a collision
-/// surfaces as the io `AlreadyExists` error), then `output/`,
-/// `.cadstudio/logs/`, and a default `project.json` when none is present.
+/// surfaces as the io `AlreadyExists` error), then [`prepare`].
 /// Returns the project root.
 pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf, ProjectStoreError> {
     validate_project_name(name)?;
     let root = parent.join(name);
     std::fs::create_dir(&root)?;
-    std::fs::create_dir_all(root.join("output"))?;
-    std::fs::create_dir_all(root.join(".cadstudio").join("logs"))?;
-    if !support_dir(&root).join("project.json").exists() {
-        save_metadata(&root, &ProjectMetadata::new(env!("CARGO_PKG_VERSION")))?;
-    }
+    prepare(&root)?;
     Ok(root)
 }
 
@@ -246,5 +257,19 @@ impl RecentProjects {
 
     pub fn filter_existing(self) -> Self {
         Self(self.0.into_iter().filter(|p| p.exists()).collect())
+    }
+
+    /// Drop one entry (upstream `remove`, RecentProjects.swift:25-28). The
+    /// comparison canonicalizes so a different spelling of the same project
+    /// still hits.
+    pub fn remove(&mut self, path: impl AsRef<Path>) {
+        let canonical =
+            std::fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
+        self.0.retain(|p| *p != canonical);
+    }
+
+    /// Empty the list (upstream `clear`, RecentProjects.swift:30-33).
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
