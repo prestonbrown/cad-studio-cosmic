@@ -156,6 +156,16 @@ Source of record: `.superpowers/sdd/m3-viewer-facts.md` — it moves to
 
 ## M6 (viewer tools)
 
+From the M4 whole-branch review's minors (2026-10-13, ownerless until now):
+
+- `PresentSetupSheet` self-loop: the project window's update returns the
+  variant to itself — route it to the app layer (or confirm the
+  pass-through is the intended shell seam) when M6's app wave touches the
+  window message flow.
+- Global ⌥⌘I: the parameters toggle is viewer-pane-local; upstream binds it
+  app-wide (Commands.swift:69-73). Move the match arm to the app layer when
+  the toolbar/command surface is next touched.
+
 From the M5 T7 review (2026-10-13):
 
 - Overlay parameter rows must sync on `ParameterCommitted` and
