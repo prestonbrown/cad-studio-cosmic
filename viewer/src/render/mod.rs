@@ -804,7 +804,15 @@ impl MeshPipeline {
                 })],
                 compilation_options: Default::default(),
             }),
+            // The quad is 4 Z-ordered vertices drawn 0..4 (see `cap_quad`) —
+            // a STRIP, so both halves rasterize. The topology must say so:
+            // PrimitiveState's TriangleList default renders only the first
+            // 3 of the 4 vertices, HALF the quad, with the cut-face center
+            // landing on the unrendered diagonal (the cap-color test's
+            // sample point; through M3 this half-quad was invisible — the
+            // red-pixel tests counted area, not shape).
             primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
                 cull_mode: None,
                 ..Default::default()
             },
