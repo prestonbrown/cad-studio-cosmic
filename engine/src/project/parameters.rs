@@ -1,8 +1,9 @@
 //! Parameter panel model (upstream Project.swift `setParameter` +
 //! ProjectOutput.swift `orderedParameters`): the manifest's `parameters`
-//! map ordered by first appearance in model.py, and the surgical rewrite
-//! of one parameter's numeric literal in the script, written back with
-//! [`super::store::atomic_write`].
+//! map ordered by first appearance in model.py, the surgical rewrite
+//! of one parameter's numeric literal in the script (written back with
+//! [`super::store::atomic_write`]), and [`scan`] — the value extraction
+//! from the script itself.
 //!
 //! One deliberate divergence from Swift's `String(Double)`: beyond ~1e16
 //! Swift switches to exponent notation ("1e+16") while Rust's `{}` always
@@ -28,13 +29,13 @@ pub struct ModelParameter {
 /// Manifest parameters ordered by the first index of the name as a plain
 /// substring in model.py (missing → end of script, i.e. last), ties broken
 /// alphabetically — the order the parameters appear in the user's script.
-pub fn ordered_parameters(
-    manifest: &BTreeMap<String, f64>,
-    script: &str,
-) -> Vec<ModelParameter> {
+pub fn ordered_parameters(manifest: &BTreeMap<String, f64>, script: &str) -> Vec<ModelParameter> {
     let mut rows: Vec<ModelParameter> = manifest
         .iter()
-        .map(|(name, value)| ModelParameter { name: name.clone(), value: *value })
+        .map(|(name, value)| ModelParameter {
+            name: name.clone(),
+            value: *value,
+        })
         .collect();
     rows.sort_by(|a, b| {
         let a_at = script.find(a.name.as_str()).unwrap_or(script.len());
@@ -42,6 +43,29 @@ pub fn ordered_parameters(
         a_at.cmp(&b_at).then_with(|| a.name.cmp(&b.name))
     });
     rows
+}
+
+/// The `name = <number>` assignments a model.py carries, last write per
+/// name (Python rebinding). Targets the same assignment grammar
+/// [`rewrite_value`] rewrites — typed, indented, spaced, exponent forms
+/// included; comparisons, comments, augmented assigns, and non-numeric
+/// right-hand sides never match. This is the value source for version
+/// comparison: the output manifest goes stale the moment a slider
+/// rewrites the script, so the script is the only truthful record of
+/// what a version was recorded with.
+pub fn scan(script: &str) -> BTreeMap<String, f64> {
+    // The literal pattern cannot fail to compile (nothing is interpolated,
+    // unlike [`rewrite_value`]'s escaped-name form).
+    let re = Regex::new(
+        r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)",
+    )
+    .expect("static scan pattern compiles");
+    re.captures_iter(script)
+        .filter_map(|caps| {
+            let value = caps[2].parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((caps[1].to_owned(), value))
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,22 +109,33 @@ pub fn rewrite_value(script: &str, name: &str, value: f64) -> Result<Rewrite, Pa
     // Escaping makes every name a valid pattern, so construction failure is
     // as unreachable as upstream's `try?` path — and lands the same way:
     // the parameter reads as not found.
-    let re = Regex::new(&pattern).map_err(|_| ParameterError::NotFound { name: name.to_owned() })?;
+    let re = Regex::new(&pattern).map_err(|_| ParameterError::NotFound {
+        name: name.to_owned(),
+    })?;
     let number = re
         .captures(script)
         .and_then(|caps| caps.get(1))
-        .ok_or_else(|| ParameterError::NotFound { name: name.to_owned() })?;
+        .ok_or_else(|| ParameterError::NotFound {
+            name: name.to_owned(),
+        })?;
     let literal = format_number(value, number.as_str());
     let mut rewritten = String::with_capacity(script.len() + literal.len());
     rewritten.push_str(&script[..number.start()]);
     rewritten.push_str(&literal);
     rewritten.push_str(&script[number.end()..]);
-    Ok(Rewrite { script: rewritten, literal })
+    Ok(Rewrite {
+        script: rewritten,
+        literal,
+    })
 }
 
 /// Read model.py, rewrite one parameter, and write the script back
 /// atomically. Nothing is written when the parameter is not found.
-pub fn set_parameter(project_root: &Path, name: &str, value: f64) -> Result<Rewrite, ParameterError> {
+pub fn set_parameter(
+    project_root: &Path,
+    name: &str,
+    value: f64,
+) -> Result<Rewrite, ParameterError> {
     let script = std::fs::read_to_string(project_root.join("model.py"))?;
     let rewrite = rewrite_value(&script, name, value)?;
     super::store::atomic_write(&project_root.join("model.py"), rewrite.script.as_bytes())?;

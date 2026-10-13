@@ -50,8 +50,7 @@ pub fn load_versions(project_root: &Path) -> Vec<ProjectVersion> {
     let mut versions: Vec<ProjectVersion> = entries
         .flatten()
         .filter_map(|entry| {
-            let json =
-                std::fs::read_to_string(entry.path().join("version.json")).ok()?;
+            let json = std::fs::read_to_string(entry.path().join("version.json")).ok()?;
             serde_json::from_str(&json).ok()
         })
         .collect();
@@ -67,11 +66,7 @@ pub fn next_number(versions: &[ProjectVersion]) -> i64 {
 /// Whether model.py drifted from the current version's copy. Unknown or
 /// absent `current` means changed; both sides missing compares equal
 /// (upstream `try? Data` nils, VersionHistory.swift:37-42).
-pub fn has_changes(
-    project_root: &Path,
-    versions: &[ProjectVersion],
-    current: Option<i64>,
-) -> bool {
+pub fn has_changes(project_root: &Path, versions: &[ProjectVersion], current: Option<i64>) -> bool {
     let Some(version) = versions.iter().find(|v| Some(v.number) == current) else {
         return true;
     };
@@ -142,19 +137,16 @@ pub fn restore(project_root: &Path, version: &ProjectVersion) -> Result<(), Vers
 }
 
 /// The parameter values a version was recorded with, keyed for the
-/// comparison picker: the version's stored model.py copy parsed by the
-/// parameter scan. Empty when `number` is None, names no stored model, or
-/// the copy is unreadable.
-pub fn comparison_parameters(
-    project_root: &Path,
-    number: Option<i64>,
-) -> BTreeMap<String, f64> {
+/// comparison picker: the version's stored model.py copy parsed by
+/// [`crate::project::parameters::scan`]. Empty when `number` is None,
+/// names no stored model, or the copy is unreadable.
+pub fn comparison_parameters(project_root: &Path, number: Option<i64>) -> BTreeMap<String, f64> {
     let Some(number) = number else {
         return BTreeMap::new();
     };
     let model = std::fs::read_to_string(version_dir(project_root, number).join("model.py"))
         .unwrap_or_default();
-    scan_parameters(&model)
+    crate::project::parameters::scan(&model)
 }
 
 fn copy_if_present(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -204,34 +196,4 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)?;
     }
     Ok(())
-}
-
-/// Stand-in for `crate::project::parameters::scan` until that module (M5
-/// T1, parallel branch) merges: the `name = <number>` assignments of a
-/// model.py, last write per name. The merge swaps the single call in
-/// [`comparison_parameters`] for the real scan.
-fn scan_parameters(script: &str) -> BTreeMap<String, f64> {
-    let mut values = BTreeMap::new();
-    for line in script.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((left, right)) = line.split_once('=') else {
-            continue;
-        };
-        // `total == 3` lands here as right = "= 3"; `x += 1` fails the
-        // identifier check on "x +"
-        let name = left.split(':').next().unwrap_or_default().trim();
-        let plain_assignment = !right.starts_with('=')
-            && !name.is_empty()
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !name.starts_with(|c: char| c.is_ascii_digit());
-        if plain_assignment
-            && let Some(value) = right.trim().parse::<f64>().ok().filter(|v| v.is_finite())
-        {
-            values.insert(name.to_owned(), value);
-        }
-    }
-    values
 }
