@@ -441,6 +441,23 @@ pub fn should_emit_preview(last_emit: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// How many of a send's attachments are images — the queue list's image
+/// count (ChatInputView.swift:230-236 counts `UTType.image`-conforming
+/// URLs). Extension-based, the only signal a path carries.
+pub fn image_attachments(paths: &[String]) -> usize {
+    paths
+        .iter()
+        .filter(|p| {
+            p.rsplit('.').next().is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "heic"
+                )
+            })
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

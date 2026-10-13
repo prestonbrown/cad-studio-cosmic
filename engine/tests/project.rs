@@ -131,6 +131,39 @@ fn project_name_validation_rules() {
     assert!(validate_project_name("plain-name 123").is_ok());
 }
 
+/// Upstream RecentProjects.remove (RecentProjects.swift:25-28): the entry
+/// leaves the list; everything else keeps its order. Canonicalized removal
+/// so a different spelling of the same project still hits.
+#[test]
+fn recents_remove_drops_only_the_named_entry() {
+    let d = tmp();
+    let mut r = RecentProjects::default();
+    for name in ["a", "b", "c"] {
+        let p = d.join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        r.add(p.clone());
+    }
+    let b = d.join("b").canonicalize().unwrap();
+    r.remove(d.join("b"));
+    assert!(!r.0.contains(&b), "the named entry is gone");
+    assert_eq!(r.0.len(), 2, "only that entry leaves");
+    assert_eq!(r.0[0], d.join("c").canonicalize().unwrap(), "order kept");
+    r.remove(d.join("not-in-the-list"));
+    assert_eq!(r.0.len(), 2, "removing an absent entry is a no-op");
+}
+
+/// Upstream RecentProjects.clear (RecentProjects.swift:30-33).
+#[test]
+fn recents_clear_empties_the_list() {
+    let d = tmp();
+    let mut r = RecentProjects::default();
+    let p = d.join("a");
+    std::fs::create_dir_all(&p).unwrap();
+    r.add(p);
+    r.clear();
+    assert!(r.0.is_empty());
+}
+
 #[test]
 fn recents_dedupe_evict_and_filter_missing() {
     let d = tmp();
@@ -202,5 +235,51 @@ fn create_project_rejects_invalid_name() {
         std::fs::read_dir(&parent).unwrap().count(),
         0,
         "nothing scaffolded for an invalid name"
+    );
+}
+
+/// Upstream `ProjectStore.prepare` (ProjectStore.swift:46-57): opening a
+/// project re-creates any missing scaffolding and leaves a present
+/// project.json untouched.
+#[test]
+fn prepare_restores_scaffolding_without_clobbering_metadata() {
+    let d = tmp();
+    let root = d.join("opened");
+    std::fs::create_dir_all(&root).unwrap();
+    prepare(&root).unwrap();
+    for path in ["output", ".cadstudio/logs"] {
+        assert!(root.join(path).is_dir(), "{path} exists after prepare");
+    }
+    assert!(root.join(".cadstudio/project.json").is_file());
+
+    // a second prepare over an already-prepared project changes nothing
+    let before = std::fs::read_to_string(root.join(".cadstudio/project.json")).unwrap();
+    prepare(&root).unwrap();
+    let after = std::fs::read_to_string(root.join(".cadstudio/project.json")).unwrap();
+    assert_eq!(before, after, "an existing manifest is never rewritten");
+}
+
+/// Upstream prepare's `notAFolder` guard (ProjectStore.swift:47-50): a
+/// missing path or a plain FILE never gets a project tree scaffolded
+/// around it.
+#[test]
+fn prepare_rejects_non_folders() {
+    let d = tmp();
+    let missing = d.join("no-such-project");
+    match prepare(&missing) {
+        Err(ProjectStoreError::NotAFolder(path)) => assert_eq!(path, missing),
+        other => panic!("a missing path is NotAFolder, got {other:?}"),
+    }
+    assert!(!missing.exists(), "nothing was scaffolded");
+
+    let file = d.join("a-file");
+    std::fs::write(&file, b"not a project").unwrap();
+    assert!(matches!(
+        prepare(&file),
+        Err(ProjectStoreError::NotAFolder(_))
+    ));
+    assert!(
+        !file.join("output").exists(),
+        "no scaffolding beside a file path"
     );
 }

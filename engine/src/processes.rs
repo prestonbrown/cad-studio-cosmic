@@ -172,6 +172,31 @@ pub fn reap_orphans() -> Vec<u32> {
     reap_orphans_at(&path)
 }
 
+/// Signal EVERY registered pid with SIGTERM — orphan or not — then empty the
+/// registry (upstream `RunningProcesses.terminateAll`, run on SIGTERM and at
+/// app termination; the reap's ppid/starttime guards are crash recovery and
+/// do not apply to an orderly shutdown). Returns the pids that were
+/// signalled.
+pub fn terminate_all() -> Vec<u32> {
+    let path = registry_path();
+    terminate_all_at(&path)
+}
+
+/// [`terminate_all`] against an explicit registry file.
+pub fn terminate_all_at(path: &Path) -> Vec<u32> {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let killed = registered_pids(path)
+        .into_iter()
+        .filter(|&pid| ps(pid).is_some())
+        .map(|pid| {
+            let _ = signal(pid, "-TERM");
+            pid
+        })
+        .collect();
+    persist(path, &BTreeSet::new());
+    killed
+}
+
 /// [`register`] against an explicit registry file.
 pub fn register_at(path: &Path, pid: u32) {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());

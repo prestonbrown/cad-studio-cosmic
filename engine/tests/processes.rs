@@ -377,3 +377,50 @@ async fn registry_survives_and_deduplicates() {
         );
     }
 }
+
+/// Upstream `RunningProcesses.terminateAll` (CADStudioApp.swift:45,57): every
+/// registered pid is signalled — orphan or not — and the registry empties.
+/// Unlike the orphan reap, a live child whose parent is still us dies too:
+/// that is the SIGTERM-exit path, not crash recovery.
+#[tokio::test(flavor = "multi_thread")]
+async fn terminate_all_signals_live_children_too() {
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    // A plain child of THIS test process: ppid is us, not init, so the
+    // orphan reap would spare it — terminate_all must not.
+    let script = write_script(&dir, "live.sh", "sleep 5\n");
+    let child = Command::new("/bin/sh")
+        .arg(script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    register_at(&registry, child.id());
+
+    let killed = engine::processes::terminate_all_at(&registry);
+    assert_eq!(killed, vec![child.id()], "the live child is signalled");
+    // The child is ours, so death is observable as a SIGTERM exit status —
+    // stronger than `kill -0`, which keeps succeeding on a zombie.
+    let cell = std::sync::Mutex::new(child);
+    let died_by_term = eventually(
+        || {
+            let mut child = cell.lock().unwrap();
+            matches!(child.try_wait(), Ok(Some(status)) if status.signal() == Some(TERM_SIG))
+        },
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        died_by_term,
+        "a non-orphan child is SIGTERMed by terminate_all"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        "",
+        "registry cleared after terminate_all"
+    );
+}
+
+/// SIGTERM's signal number without a libc dependency (the tests otherwise
+/// avoid one, matching the engine's `/bin/kill` approach).
+const TERM_SIG: i32 = 15;

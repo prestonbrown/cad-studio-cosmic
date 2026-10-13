@@ -30,6 +30,122 @@ pub fn stored_layout(settings: &Settings) -> LayoutNode {
         .unwrap_or_else(LayoutNode::chat_leading)
 }
 
+/// Upstream `LayoutNode.removing(_:)` (PanelLayout.swift:74-82): the tree
+/// without `pane`. A split whose child vanishes collapses to its other side;
+/// `None` only when the whole tree was that pane (the caller keeps the full
+/// layout then — upstream `displayedLayout`'s `?? layout`).
+pub fn removing(node: &LayoutNode, pane: PaneKind) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Pane(current) => {
+            if *current == pane {
+                None
+            } else {
+                Some(node.clone())
+            }
+        }
+        LayoutNode::Split {
+            axis,
+            first,
+            second,
+            fraction,
+        } => match (removing(first, pane), removing(second, pane)) {
+            (Some(first), Some(second)) => Some(LayoutNode::Split {
+                axis: *axis,
+                first: Box::new(first),
+                second: Box::new(second),
+                fraction: *fraction,
+            }),
+            (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+            (None, None) => None,
+        },
+    }
+}
+
+/// Upstream `LayoutNode.replacing(_:with:)` (PanelLayout.swift:117-126).
+fn replacing(node: &LayoutNode, target: PaneKind, with: &LayoutNode) -> LayoutNode {
+    match node {
+        LayoutNode::Pane(current) => {
+            if *current == target {
+                with.clone()
+            } else {
+                node.clone()
+            }
+        }
+        LayoutNode::Split {
+            axis,
+            first,
+            second,
+            fraction,
+        } => LayoutNode::Split {
+            axis: *axis,
+            first: Box::new(replacing(first, target, with)),
+            second: Box::new(replacing(second, target, with)),
+            fraction: *fraction,
+        },
+    }
+}
+
+/// Where a dragged pane can land relative to a target (upstream `DropEdge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropEdge {
+    Leading,
+    Trailing,
+    Top,
+    Bottom,
+}
+
+/// Upstream `LayoutNode.moving(_:to:of:)` (PanelLayout.swift:84-98): pull
+/// `pane` out, then re-insert it on `edge` of `target` — the dragged chat
+/// pane takes a 0.34 share, anything else 0.5.
+pub fn moving(node: &LayoutNode, pane: PaneKind, edge: DropEdge, target: PaneKind) -> LayoutNode {
+    if pane == target {
+        return node.clone();
+    }
+    let Some(remaining) = removing(node, pane) else {
+        return node.clone();
+    };
+    let places_first = matches!(edge, DropEdge::Leading | DropEdge::Top);
+    let axis = match edge {
+        DropEdge::Leading | DropEdge::Trailing => Axis::Row,
+        DropEdge::Top | DropEdge::Bottom => Axis::Column,
+    };
+    let moved = LayoutNode::Pane(pane);
+    let stays = LayoutNode::Pane(target);
+    let moved_share = if pane == PaneKind::Chat { 0.34 } else { 0.5 };
+    let split = LayoutNode::Split {
+        axis,
+        first: Box::new(if places_first {
+            moved.clone()
+        } else {
+            stays.clone()
+        }),
+        second: Box::new(if places_first {
+            stays.clone()
+        } else {
+            moved.clone()
+        }),
+        fraction: if places_first {
+            moved_share
+        } else {
+            1.0 - moved_share
+        },
+    };
+    replacing(&remaining, target, &split)
+}
+
+/// The tree the grid shows (upstream `displayedLayout`,
+/// Project.swift:132-134): the full layout, minus the chat pane while it is
+/// hidden — falling back to the full layout when chat is the only pane
+/// left, which cannot happen with the three-pane presets but keeps the
+/// invariant total.
+pub fn displayed(node: &LayoutNode, chat_visible: bool) -> LayoutNode {
+    if chat_visible {
+        node.clone()
+    } else {
+        removing(node, PaneKind::Chat).unwrap_or_else(|| node.clone())
+    }
+}
+
 /// Clamp a drag ratio so both sides of `split` keep their upstream minimum
 /// thickness (PaneSplitViewController.swift:71-76). `width`/`height` are the
 /// PaneGrid's pixel size and `spacing` its divider thickness. A region too
@@ -236,6 +352,86 @@ mod tests {
         let d = std::env::temp_dir().join(format!("cad-panes-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Hiding chat collapses the tree to the 3D-over-schematic split with
+    /// the stored fraction (upstream `removing(.chat)` +
+    /// `displayedLayout`); re-showing restores the full layout untouched.
+    #[test]
+    fn hiding_chat_collapses_the_tree() {
+        let layout = LayoutNode::chat_leading();
+        let shown = displayed(&layout, true);
+        assert_eq!(shown, layout);
+
+        let hidden = displayed(&layout, false);
+        assert_eq!(
+            hidden,
+            LayoutNode::Split {
+                axis: Axis::Column,
+                first: Box::new(LayoutNode::Pane(PaneKind::Model3D)),
+                second: Box::new(LayoutNode::Pane(PaneKind::Schematic)),
+                fraction: 0.6,
+            }
+        );
+        // a bare chat pane has nothing to fall back to: the full layout stays
+        let only = LayoutNode::Pane(PaneKind::Chat);
+        assert_eq!(displayed(&only, false), only);
+    }
+
+    /// A pane move pulls the pane out and re-inserts it against its target
+    /// with the moved share (0.34 for chat, 0.5 otherwise), placing it
+    /// first on leading/top edges (upstream `moving`, PanelLayout.swift:84-98).
+    #[test]
+    fn moving_reinserts_on_the_target_edge() {
+        let layout = LayoutNode::chat_leading();
+
+        // schematic to the chat pane's leading edge: row split, schematic
+        // first with the non-chat 0.5 share
+        let moved = moving(
+            &layout,
+            PaneKind::Schematic,
+            DropEdge::Leading,
+            PaneKind::Chat,
+        );
+        assert_eq!(
+            moved,
+            LayoutNode::Split {
+                axis: Axis::Row,
+                first: Box::new(LayoutNode::Split {
+                    axis: Axis::Row,
+                    first: Box::new(LayoutNode::Pane(PaneKind::Schematic)),
+                    second: Box::new(LayoutNode::Pane(PaneKind::Chat)),
+                    fraction: 0.5,
+                }),
+                second: Box::new(LayoutNode::Pane(PaneKind::Model3D)),
+                fraction: 0.34,
+            }
+        );
+
+        // chat under the 3D pane: the new column split REPLACES the 3D pane
+        // where it stood, nested under the old 3D-over-schematic split
+        // (upstream does not flatten), chat last with the 0.66 tail
+        let moved = moving(&layout, PaneKind::Chat, DropEdge::Bottom, PaneKind::Model3D);
+        assert_eq!(
+            moved,
+            LayoutNode::Split {
+                axis: Axis::Column,
+                first: Box::new(LayoutNode::Split {
+                    axis: Axis::Column,
+                    first: Box::new(LayoutNode::Pane(PaneKind::Model3D)),
+                    second: Box::new(LayoutNode::Pane(PaneKind::Chat)),
+                    fraction: 1.0 - 0.34,
+                }),
+                second: Box::new(LayoutNode::Pane(PaneKind::Schematic)),
+                fraction: 0.6,
+            }
+        );
+
+        // dropping a pane on itself is a no-op
+        assert_eq!(
+            moving(&layout, PaneKind::Chat, DropEdge::Top, PaneKind::Chat),
+            layout
+        );
     }
 
     #[test]

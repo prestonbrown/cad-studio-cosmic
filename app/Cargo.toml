@@ -24,10 +24,18 @@ thiserror.workspace = true
 # the engine bridge drives tokio channels (TurnHandle.events is a tokio
 # receiver) and spawns its driver on the runtime cosmic runs on; libcosmic
 # already links tokio (iced/tokio), so this adds no new copy.
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 # resvg matches the iced fork's own pin (0.45) so the tree carries one copy;
 # image (png) decodes the schematic.png fallback raster.
 resvg = "0.45"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Inline-only markdown for the chat pane; parser only — no html/escape/cli.
 pulldown-cmark = { version = "0.13.4", default-features = false }
+
+# The shell task: portal choosers (ashpd), DBus reveal (zbus), and the
+# fluent scaffold (i18n-embed/rust-embed at libcosmic's own pins so the
+# tree keeps one copy of each). ashpd's default feature set is tokio.
+ashpd = "0.12"
+zbus = { version = "5.15", default-features = false, features = ["tokio"] }
+i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
+rust-embed = "8.11.0"
