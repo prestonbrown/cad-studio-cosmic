@@ -5,5 +5,7 @@
 //! files are thin mapping layers and register here as their tasks land.
 
 pub mod chat;
+pub mod chat_view;
+pub mod markdown;
 pub mod panes;
 pub mod schematic;
