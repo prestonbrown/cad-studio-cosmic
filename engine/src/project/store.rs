@@ -134,7 +134,7 @@ fn support_dir(project_root: &Path) -> PathBuf {
 
 /// Write via temp-file + rename so a reader never sees a torn file; the temp
 /// name must keep the file extension so tooling still recognizes it.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
