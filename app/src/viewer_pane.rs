@@ -367,6 +367,9 @@ impl ViewerPane {
             .iter()
             .map(|param| (param.name.clone(), param.value))
             .collect();
+        // a removed parameter's row is gone; its draft goes with it
+        self.parameter_drafts
+            .retain(|name, _| self.committed_parameters.contains_key(name));
         self.parameters.sync(params);
     }
 
@@ -1154,6 +1157,19 @@ mod tests {
             "changed → cleared"
         );
         assert!(pane.parameter_drafts.contains_key("height"), "kept");
+
+        // a REMOVED parameter drops its draft with its row (a fresh draft,
+        // so the value-change rule alone would keep it)
+        pane.parameter_drafts.insert("wall".into(), "3".into());
+        pane.sync_parameters(&[ModelParameter {
+            name: "height".into(),
+            value: 10.0,
+        }]);
+        assert!(
+            !pane.parameter_drafts.contains_key("wall"),
+            "removed → dropped"
+        );
+        assert!(pane.parameter_drafts.contains_key("height"));
 
         // collapse and close round-trip through the overlay messages
         let _ = pane.update(Message::Parameters(parameters_view::Message::Collapse(

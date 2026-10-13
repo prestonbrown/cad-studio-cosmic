@@ -448,6 +448,7 @@ fn panel_style() -> cosmic::theme::Container<'static> {
 
 fn rich_text_element(span: Span<'_, String>) -> Element<'_, Message> {
     cosmic::iced::widget::rich_text([span])
+        .size(10) // upstream's caption2
         .font(cosmic::font::default())
         .wrapping(Wrapping::Word)
         .into()
