@@ -458,6 +458,7 @@ async fn slice_offscreen_render() {
         effective_aabb: (scene.aabb_min, scene.aabb_max),
         grid: Some(overlay.as_ref()),
         markers: None,
+        ghost: None,
         options: Options::default(),
     };
     pipeline.prepare_parts(device, queue, (w, h), &frame);

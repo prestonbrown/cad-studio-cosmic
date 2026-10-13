@@ -15,8 +15,8 @@ use viewer::render::grid;
 use viewer::render::lights;
 use viewer::render::markers;
 use viewer::render::{
-    Camera, Frame, MeshPipeline, NEUTRAL, Options, PartPose, PartScene, default_camera,
-    preset_camera, srgb_to_linear,
+    Camera, Frame, GHOST_ALPHA, MeshPipeline, NEUTRAL, Options, PartPose, PartScene,
+    default_camera, preset_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -25,13 +25,30 @@ fn fixture(rel: &str) -> PathBuf {
         .join(rel)
 }
 
-/// The golden model through the production parse path: model.3mf is two
-/// parts (base + lid) of 12 triangles each.
-fn golden_scene() -> PartScene {
+/// The golden model's parts through the production parse path: model.3mf
+/// is two parts (base + lid) of 12 triangles each.
+fn golden_parts() -> Vec<engine::parsing::Part> {
     let bytes = std::fs::read(fixture("model.3mf"))
         .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
-    let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
-    PartScene::from_parts(&parts, NEUTRAL)
+    parse_3mf(&bytes).expect("golden model.3mf parses")
+}
+
+fn golden_scene() -> PartScene {
+    PartScene::from_parts(&golden_parts(), NEUTRAL)
+}
+
+/// The golden parts with `dx` baked into every MODEL x coordinate — the
+/// comparison version's mesh stand-in: same geometry, translated so a
+/// screen region beyond the model's projected extent holds only ghost
+/// ink.
+fn ghost_parts_shifted_x(dx: f32) -> Vec<engine::parsing::Part> {
+    let mut parts = golden_parts();
+    for part in &mut parts {
+        for p in &mut part.positions {
+            p[0] += dx;
+        }
+    }
+    parts
 }
 
 /// One frame at `w` x `h`: `prepare_parts` the pipeline, clear the target to
@@ -78,13 +95,13 @@ fn render_frame_opts(
 ) -> Vec<u8> {
     let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
     render_frame_with_poses(
-        device, queue, pipeline, scene, camera, w, h, grid, None, options, &poses,
+        device, queue, pipeline, scene, camera, w, h, grid, None, None, options, &poses,
     )
 }
 
-/// The harness core: [`render_frame_opts`] plus the per-part poses and the
-/// staged measure markers threaded into the `Frame` — every pose-path test
-/// renders through here.
+/// The harness core: [`render_frame_opts`] plus the per-part poses, the
+/// staged measure markers, and the compare ghost threaded into the
+/// `Frame` — every pose-path test renders through here.
 fn render_frame_with_poses(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -95,6 +112,7 @@ fn render_frame_with_poses(
     h: u32,
     grid: Option<&grid::GridMesh>,
     markers: Option<&markers::MarkerMesh>,
+    ghost: Option<&PartScene>,
     options: &Options,
     poses: &[PartPose],
 ) -> Vec<u8> {
@@ -105,6 +123,7 @@ fn render_frame_with_poses(
         effective_aabb: (scene.aabb_min, scene.aabb_max),
         grid,
         markers,
+        ghost,
         options: *options,
     };
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -224,6 +243,7 @@ fn render_frame_msaa(
         h,
         None,
         None,
+        None,
         &Options {
             msaa,
             ..Options::default()
@@ -256,8 +276,40 @@ fn render_frame_poses(
         h,
         None,
         None,
+        None,
         &Options::default(),
         poses,
+    )
+}
+
+/// The compare ghost's render entry: the harness core with the ghost
+/// scene threaded into the `Frame` — default camera for the viewport
+/// (deterministic in the scene, so a test's own `default_camera` call
+/// reproduces it), identity poses, no overlay or markers.
+fn render_frame_ghost(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    ghost: &PartScene,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let camera = default_camera(scene, w as f32 / h as f32);
+    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    render_frame_with_poses(
+        device,
+        queue,
+        pipeline,
+        scene,
+        &camera,
+        w,
+        h,
+        None,
+        None,
+        Some(ghost),
+        &Options::default(),
+        &poses,
     )
 }
 
@@ -428,13 +480,12 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     );
 }
 
-/// A MODEL-space box `[min, max]` as one 12-triangle closed solid, staged
-/// with the IDENTITY pin: the staged coordinates are exactly the raw
-/// `(x, z, -y)` remap — the frame `tools::section::scene_plane` states its
-/// planes in, with no floor-pin offset for the test to fold in (the pane
-/// adds the live pin through `to_scene`; here pin 0 makes raw and staged
-/// coincide).
-fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
+/// A MODEL-space box `[min, max]` as one 12-triangle closed solid.
+/// The winding/volume contract every consumer leans on (picking, parity,
+/// cap area, the ghost's pin staging): a closed, consistently wound box
+/// encloses exactly its volume — bowties/self-intersections read 0,
+/// flipped faces read negative — asserted here once.
+fn parts_box_model(bounds: [[f32; 3]; 2]) -> engine::parsing::Part {
     let (mn, mx) = (bounds[0], bounds[1]);
     // perimeter-ordered corners: 0-3 walk the z=min slice's x/y perimeter,
     // 4-7 the same walk at z=max — the enumeration the face table below is
@@ -464,9 +515,6 @@ fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     for &(a, b, c, d) in &faces {
         quad(&mut positions, v[a], v[b], v[c], v[d]);
     }
-    // pin the fixture's contract for every consumer (picking, parity, cap
-    // area): a closed, consistently wound box encloses exactly its volume —
-    // bowties/self-intersections read 0, flipped faces read negative
     let signed_volume = positions.chunks_exact(3).fold(0.0f32, |acc, t| {
         let (a, b, c) = (
             glam::Vec3::from_array(t[0]),
@@ -478,13 +526,22 @@ fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     let expected = (mx[0] - mn[0]) * (mx[1] - mn[1]) * (mx[2] - mn[2]);
     assert!(
         (signed_volume - expected).abs() < 1e-3 * expected,
-        "box_scene must enclose its volume: {signed_volume} vs {expected}"
+        "parts_box_model must enclose its volume: {signed_volume} vs {expected}"
     );
-    let part = engine::parsing::Part {
+    engine::parsing::Part {
         name: "box".into(),
         positions,
         triangle_colors: vec![None; 12],
-    };
+    }
+}
+
+/// [`parts_box_model`] staged with the IDENTITY pin: the staged
+/// coordinates are exactly the raw `(x, z, -y)` remap — the frame
+/// `tools::section::scene_plane` states its planes in, with no floor-pin
+/// offset for the test to fold in (the pane adds the live pin through
+/// `to_scene`; here pin 0 makes raw and staged coincide).
+fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
+    let part = parts_box_model(bounds);
     PartScene::from_parts_with_pin(std::slice::from_ref(&part), NEUTRAL, [0.0; 3])
 }
 
@@ -1283,6 +1340,63 @@ fn project_px(vp: [[f32; 4]; 4], p: [f32; 3], w: f32, h: f32) -> Option<(f32, f3
     Some(((nx * 0.5 + 0.5) * w, (0.5 - ny * 0.5) * h))
 }
 
+/// The pixel-space bbox of a scene-space aabb's projection: all 8 corners
+/// through the camera, extremized. Screen position is fractional-linear
+/// in world position, and a linear-fractional function attains its extrema
+/// over a convex set at extreme points — so the corners bound the
+/// projection of anything the box contains (the argument
+/// `ink_row_extent`'s doc makes; the ghost tests lean on it twice).
+fn projected_aabb_bbox(
+    aabb: ([f32; 3], [f32; 3]),
+    camera: &Camera,
+    w: f32,
+    h: f32,
+) -> ((f32, f32), (f32, f32)) {
+    let (mut mn, mut mx) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for a in [aabb.0[0], aabb.1[0]] {
+        for b in [aabb.0[1], aabb.1[1]] {
+            for c in [aabb.0[2], aabb.1[2]] {
+                if let Some(p) = project_px(camera.view_proj, [a, b, c], w, h) {
+                    mn[0] = mn[0].min(p.0);
+                    mn[1] = mn[1].min(p.1);
+                    mx[0] = mx[0].max(p.0);
+                    mx[1] = mx[1].max(p.1);
+                }
+            }
+        }
+    }
+    ((mn[0], mn[1]), (mx[0], mx[1]))
+}
+
+/// The probe pixel for "lines, not faces": the ghost aabb's 3D midpoint
+/// projected. For the ghost fixture (the golden two-box stack shifted in
+/// x) the midpoint lands in the 8mm air gap between the boxes, and the
+/// probe ray enters the ghost lid above it and the ghost base below it —
+/// the pixel is interior to the ghost's silhouette, so a filled ghost
+/// paints it — while the nearest staged edge (counting BOTH triangulation
+/// diagonals of every face, a superset of what draws) projects 5.8px away
+/// and the model's nearest ink 9.8px: a 1px hairline cannot reach the
+/// pixel. (NOT the projected bbox's center: that point lands 0.6px from
+/// the lid-bottom diagonal — edges of the two boxes cross in projection,
+/// so planar-graph clearance arguments stop at one box.)
+fn projected_ghost_center(ghost: &PartScene, camera: &Camera, w: f32, h: f32) -> (f32, f32) {
+    let mid = [
+        (ghost.aabb_min[0] + ghost.aabb_max[0]) / 2.0,
+        (ghost.aabb_min[1] + ghost.aabb_max[1]) / 2.0,
+        (ghost.aabb_min[2] + ghost.aabb_max[2]) / 2.0,
+    ];
+    project_px(camera.view_proj, mid, w, h).expect("probe in front of the camera")
+}
+
+/// The 4 readback bytes at projected point `p`, rounded and clamped into
+/// the `w`-wide frame.
+fn px_at(px: &[u8], p: (f32, f32), w: u32) -> [u8; 4] {
+    let h = px.len() / (w as usize * 4);
+    let x = p.0.round().clamp(0.0, w as f32 - 1.0) as usize;
+    let y = p.1.round().clamp(0.0, h as f32 - 1.0) as usize;
+    px[(y * w as usize + x) * 4..][..4].try_into().unwrap()
+}
+
 /// Does triangle `t` overlap the axis-aligned rect [x0, x1] x [y0, y1]?
 /// SAT over the rect's two axes and the triangle's three edge normals —
 /// exact area overlap, so the grid marks a cell even when only a corner
@@ -1472,6 +1586,7 @@ fn orientation_pattern_matches_projection() {
         600,
         None,
         None,
+        None,
         &Options {
             msaa: 4,
             ..Options::default()
@@ -1643,6 +1758,7 @@ fn markers_render_orange_at_projected_points() {
         600,
         None,
         None,
+        None,
         &Options::default(),
         &poses,
     );
@@ -1661,6 +1777,7 @@ fn markers_render_orange_at_projected_points() {
         600,
         None,
         Some(&mesh),
+        None,
         &Options::default(),
         &poses,
     );
@@ -1674,5 +1791,97 @@ fn markers_render_orange_at_projected_points() {
         counts[1] >= 50,
         "second marker renders at its projection: {} orange px",
         counts[1]
+    );
+}
+
+/// The compare ghost (ModelViewer.swift:371-378): orange wireframe at 0.6
+/// over the background, drawn from the ghost scene's EDGE list in the
+/// current scene's pin. The ghost is the golden model shifted +40mm in
+/// MODEL x, so beyond the model's projected extent only the ghost draws:
+/// there its hairlines must read as the exact straight-alpha blend of
+/// linear systemOrange over the background (the pass loaded the app
+/// background; wgpu blends sRGB targets in linear space), while the
+/// projected center of the ghost's aabb — interior to the silhouette, off
+/// every staged edge, clear of the model's ink — stays pure background
+/// (lines, not faces).
+#[test]
+fn ghost_renders_orange_wireframe_blended() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let bg_linear = decode_linear(&bg);
+    let ghost = PartScene::from_parts_with_pin(&ghost_parts_shifted_x(40.0), NEUTRAL, scene.pin);
+    let px = render_frame_ghost(device, queue, &mut pipeline, &scene, &ghost, 800, 600);
+    // ghost-only ink: right of the model's projected max x (the scene
+    // aabb's corner bound — the model is inside it) plus 2px of raster
+    // clearance; the +40mm shift puts the ghost's right face well past it
+    let model_max_x = projected_aabb_bbox((scene.aabb_min, scene.aabb_max), &camera, 800.0, 600.0)
+        .1
+        .0;
+    let ghost_only: Vec<usize> = (0..px.len() / 4)
+        .filter(|&i| is_ink(&px[i * 4..i * 4 + 4], bg) && (i % 800) as f32 > model_max_x + 2.0)
+        .collect();
+    assert!(
+        ghost_only.len() > 20,
+        "ghost edges present right of the model: {}",
+        ghost_only.len()
+    );
+    // nearly every ghost-only pixel is one fragment blended over clear
+    // background. A single box's 1-skeleton projects planar (no edge
+    // crossings), but the ghost is TWO boxes whose projected edges can
+    // cross — a crossed pixel blends twice and misses the band — so the
+    // bar is 90%, well above the handful of crossings this geometry has;
+    // the 0.06 band absorbs u8 storage rounding on both endpoint colors
+    let mixed = |c: usize| GHOST_ALPHA * markers::ORANGE[c] + (1.0 - GHOST_ALPHA) * bg_linear[c];
+    let exact = ghost_only
+        .iter()
+        .filter(|&&i| {
+            let lin = decode_linear(&px[i * 4..i * 4 + 4]);
+            (0..3).all(|c| (lin[c] - mixed(c)).abs() < 0.06)
+        })
+        .count();
+    assert!(
+        exact * 10 >= ghost_only.len() * 9,
+        "only {exact}/{} ghost-only pixels read the 0.6 systemOrange-over-background blend",
+        ghost_only.len()
+    );
+    // lines, not faces: a filled ghost would paint the interior probe
+    // (see projected_ghost_center) orange; the line pass leaves it pure
+    // background
+    let center = projected_ghost_center(&ghost, &camera, 800.0, 600.0);
+    assert!(
+        chroma_dist(decode_linear(&px_at(&px, center, 800)), bg_linear) < 0.1,
+        "ghost interior must stay background (lines, not faces)"
+    );
+}
+
+/// The ghost shares the CURRENT scene's pin (ModelViewer.swift:135,
+/// 176-179: ghostEntity hangs under `content`, whose position is the
+/// current mesh's floor/center pin — staging the old mesh at its own pin
+/// would re-floor it instead, floating it off the floor the user sees).
+/// A MODEL-space box floating at model z 40..60 keeps its height through
+/// the current pin and re-floors to 0 under its own — the discriminating
+/// pair. Pure staging, no GPU.
+#[test]
+fn ghost_uses_the_current_scene_pin() {
+    let scene = golden_scene();
+    // fixture truth: the golden pin floors the model z-min (-4) to scene
+    // y 0, so the pin's own y is +4 — the lift the assert below must see
+    assert!((scene.pin[1] - 4.0).abs() < 1e-6, "pin {:?}", scene.pin);
+    let ghost_parts = vec![parts_box_model([[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]])];
+    let ghost = PartScene::from_parts_with_pin(&ghost_parts, NEUTRAL, scene.pin);
+    // MODEL z 40..60 remaps to scene y 40..60, lifted by the pin's +4
+    assert!(
+        (ghost.aabb_min[1] - (40.0 + scene.pin[1])).abs() < 1e-3,
+        "current pin kept: aabb {:?}, pin {:?}",
+        ghost.aabb_min,
+        scene.pin
+    );
+    let own = PartScene::from_parts(&ghost_parts, NEUTRAL);
+    assert!(
+        (own.aabb_min[1] - 0.0).abs() < 1e-3,
+        "control: own pin re-floors"
     );
 }

@@ -51,6 +51,15 @@
 //! first, then the measure markers ([`markers::geometry`]) — orange
 //! spheres at the picked points plus the two-point link. Both are
 //! depth-tested so the model occludes them, but neither writes depth.
+//!
+//! The compare ghost (M5's comparison split — this port owns the render
+//! half): a second [`PartScene`] staged from the comparison version in
+//! the CURRENT scene's pin (`PartScene::from_parts_with_pin`,
+//! ModelViewer.swift:135 — ghostEntity hangs under `content`) draws as
+//! an unlit systemOrange wireframe at [`GHOST_ALPHA`] through its own
+//! LINE pipeline over the ghost scene's edge lists, between the cap and
+//! the overlays — depth-tested so the mesh occludes it, never writing
+//! depth so it occludes nothing after it.
 
 pub mod gpu;
 pub mod grid;
@@ -62,6 +71,8 @@ pub use grid::{GridMesh, GridVertex};
 pub use markers::{MarkerMesh, ORANGE};
 pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear, srgb_to_linear_f};
 pub use scene::{ModelPrimitive, ModelScene};
+
+use std::hash::Hasher;
 
 use wgpu::util::DeviceExt;
 
@@ -141,6 +152,12 @@ pub struct Frame<'a> {
     /// The staged measure markers, when a measurement is active — drawn
     /// after the grid on the same unlit overlay pass.
     pub markers: Option<&'a MarkerMesh>,
+    /// The compare ghost, when a comparison is active — a PartScene staged
+    /// from the comparison version WITH THIS SCENE'S PIN
+    /// (`PartScene::from_parts_with_pin(.., scene.pin)`): drawn after the
+    /// cap, before the overlays, as an unlit orange wireframe over its
+    /// edge lists.
+    pub ghost: Option<&'a PartScene>,
     pub options: Options,
 }
 
@@ -168,6 +185,12 @@ struct CapVertex {
 /// constant is the one definition: `cap_wgsl_source` substitutes it into
 /// cap.wgsl, and the cap-color test reads it back against this value.
 pub const CUT_FACE_LINEAR: [f32; 3] = [0.6920, 0.0321, 0.0220];
+
+/// The compare ghost's straight alpha (ModelViewer.swift:375):
+/// `blending = .transparent(opacity: 0.6)` over the unlit systemOrange
+/// rgb ([`markers::ORANGE`]) — the value `ghost_wgsl_source` substitutes
+/// into ghost.wgsl and the blend test reads pixels back against.
+pub const GHOST_ALPHA: f32 = 0.6;
 
 /// World-space quad on the section plane: the effective scene aabb
 /// cross-section at `frame.camera.section_pos`, grown 10% on the two
@@ -531,6 +554,31 @@ fn stage_overlay(
     }
 }
 
+/// A ghost part's GPU residency — [`ResidentPart`] minus the model
+/// uniform: the ghost draws through the camera-only layout (upstream
+/// parents ghostEntity straight under `content`, so there is no per-part
+/// pose to carry). The vertex buffer holds the ghost scene's staged
+/// bytes; the edge index buffer is the line list this part draws.
+struct ResidentGhostPart {
+    vertex_buf: wgpu::Buffer,
+    edge_buf: wgpu::Buffer,
+    edge_count: u32,
+}
+
+/// Whole-scene identity of a ghost [`PartScene`]: the part count and every
+/// part's content hash — the key that stands in for upstream's ghostID
+/// swap (ModelViewer.swift:171-174 restages the ghost when ghostID or the
+/// mesh changes). The per-part identities are already computed at staging
+/// (pin included), so this is O(parts), not O(vertices).
+fn ghost_identity(scene: &PartScene) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write_usize(scene.parts.len());
+    for part in &scene.parts {
+        h.write_u64(part.content_hash);
+    }
+    h.finish()
+}
+
 pub struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
     cap_pipeline: wgpu::RenderPipeline,
@@ -539,6 +587,9 @@ pub struct MeshPipeline {
     line_pipeline: wgpu::RenderPipeline,
     /// Unlit grid/bed/tripod overlay (facts #34/#37).
     grid_pipeline: wgpu::RenderPipeline,
+    /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
+    /// 371-378): LINE topology over the ghost scene's edge lists.
+    ghost_pipeline: wgpu::RenderPipeline,
     /// Part-draw pipeline layout (camera + per-part model groups): the mesh
     /// and line pipelines; rebuilt pipelines keep using this object so the
     /// resident bind groups stay compatible.
@@ -562,6 +613,13 @@ pub struct MeshPipeline {
     /// The resident measure markers, when the last prepared frame carried
     /// any — the same content-identity contract as `grid`.
     marker: Option<ResidentGrid>,
+    /// The resident compare ghost, when the last prepared frame carried
+    /// one — whole-scene keyed on [`ghost_identity`] (a compare-version
+    /// swap rebuilds every buffer; anything else touches none).
+    ghost_residents: Vec<ResidentGhostPart>,
+    /// The whole-scene identity currently resident in `ghost_residents`
+    /// (`None` = the slot is empty).
+    ghost_identity: Option<u64>,
     cap_buf: wgpu::Buffer,
     draw_cap: bool,
     size: (u32, u32),
@@ -586,6 +644,10 @@ pub struct MeshPipeline {
     /// only by the `*_count_for_tests` accessors.
     #[cfg_attr(not(test), allow(dead_code))]
     alloc_count: u32,
+    /// Ghost vertex+edge uploads since creation — one per ghost part
+    /// restage. Read only by `ghost_upload_count_for_tests`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ghost_upload_count: u32,
 }
 
 /// mesh.wgsl with the lighting constants substituted from [`lights`] —
@@ -615,6 +677,19 @@ fn cap_wgsl_source() -> String {
         .replace("@CAP_B@", &CUT_FACE_LINEAR[2].to_string())
 }
 
+/// ghost.wgsl with the ghost color substituted from [`markers::ORANGE`]
+/// and [`GHOST_ALPHA`] — the mesh_wgsl_source pattern: the @GHOST_@
+/// markers are not valid WGSL, so a missed substitution breaks shader
+/// compilation instead of silently rendering a color the tests do not
+/// assert against.
+fn ghost_wgsl_source() -> String {
+    include_str!("ghost.wgsl")
+        .replace("@GHOST_R@", &markers::ORANGE[0].to_string())
+        .replace("@GHOST_G@", &markers::ORANGE[1].to_string())
+        .replace("@GHOST_B@", &markers::ORANGE[2].to_string())
+        .replace("@GHOST_ALPHA@", &GHOST_ALPHA.to_string())
+}
+
 /// The sample-count-dependent render pipelines, rebuilt as a set by
 /// [`MeshPipeline::make_pipelines`] at creation and on every
 /// [`Options::msaa`] flip in `prepare_parts`.
@@ -623,6 +698,7 @@ struct Pipelines {
     cap: wgpu::RenderPipeline,
     line: wgpu::RenderPipeline,
     grid: wgpu::RenderPipeline,
+    ghost: wgpu::RenderPipeline,
 }
 
 impl MeshPipeline {
@@ -731,6 +807,7 @@ impl MeshPipeline {
             cap_pipeline: pipelines.cap,
             line_pipeline: pipelines.line,
             grid_pipeline: pipelines.grid,
+            ghost_pipeline: pipelines.ghost,
             part_pass_layout,
             camera_pass_layout,
             bind_group,
@@ -742,6 +819,8 @@ impl MeshPipeline {
             drawn: Vec::new(),
             grid: None,
             marker: None,
+            ghost_residents: Vec::new(),
+            ghost_identity: None,
             cap_buf,
             draw_cap: false,
             size: (1, 1),
@@ -752,6 +831,7 @@ impl MeshPipeline {
             wireframe: false,
             upload_count: 0,
             alloc_count: 0,
+            ghost_upload_count: 0,
         }
     }
 
@@ -1072,11 +1152,88 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
+        // The compare ghost (ModelViewer.swift:371-378): unlit systemOrange
+        // wireframe at 0.6 — LINE topology like the wireframe pass but its
+        // OWN unlit shader and blend (upstream's ghost is a different
+        // material than the shaded wireframe: UnlitMaterial + transparent
+        // blending). Camera-only (camera_layout): upstream parents
+        // ghostEntity straight under `content`, so the ghost carries no
+        // per-part pose. Depth ON / write OFF — the grid overlay contract:
+        // the mesh occludes the ghost, the ghost occludes nothing after it.
+        let ghost_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ghost.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(ghost_wgsl_source().into()),
+        });
+        let ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("compare ghost"),
+            layout: Some(camera_layout),
+            vertex: wgpu::VertexState {
+                module: &ghost_shader,
+                entry_point: Some("vs_ghost"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    // the staged part vertex (pos/normal/color, 36 B) with
+                    // only the position attribute read
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ghost_shader,
+                entry_point: Some("fs_ghost"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::Always,
+                        fail_op: wgpu::StencilOperation::Keep,
+                        depth_fail_op: wgpu::StencilOperation::Keep,
+                        pass_op: wgpu::StencilOperation::Keep,
+                    },
+                    read_mask: 0xFF,
+                    write_mask: 0xFF,
+                },
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
         Pipelines {
             mesh: pipeline,
             cap: cap_pipeline,
             line: line_pipeline,
             grid: grid_pipeline,
+            ghost: ghost_pipeline,
         }
     }
 
@@ -1098,6 +1255,7 @@ impl MeshPipeline {
         self.cap_pipeline = pipelines.cap;
         self.line_pipeline = pipelines.line;
         self.grid_pipeline = pipelines.grid;
+        self.ghost_pipeline = pipelines.ghost;
         self.blit = (count > 1).then(|| Self::make_blit(device, self.format));
         let (depth_tex, depth) = Self::make_depth(device, self.size, count);
         self.depth_tex = depth_tex;
@@ -1278,9 +1436,10 @@ impl MeshPipeline {
     /// unchanged scene costs zero mesh uploads however the camera or the
     /// poses move. `frame.grid` (when `Some`) is the overlay
     /// [`grid::geometry`] built — its residency follows the same
-    /// content-identity contract; `frame.options` picks the frame's mode,
-    /// and an `options.msaa` flip triggers the in-place rebuild
-    /// ([`Self::set_msaa`]) before anything else.
+    /// content-identity contract; `frame.ghost` follows it too,
+    /// whole-scene keyed (see [`ghost_identity`]); `frame.options` picks
+    /// the frame's mode, and an `options.msaa` flip triggers the in-place
+    /// rebuild ([`Self::set_msaa`]) before anything else.
     pub fn prepare_parts(
         &mut self,
         device: &wgpu::Device,
@@ -1288,11 +1447,12 @@ impl MeshPipeline {
         size: (u32, u32),
         frame: &Frame<'_>,
     ) {
-        let (camera, scene, grid, markers, options) = (
+        let (camera, scene, grid, markers, ghost, options) = (
             frame.camera,
             frame.scene,
             frame.grid,
             frame.markers,
+            frame.ghost,
             frame.options,
         );
         assert_eq!(
@@ -1426,6 +1586,46 @@ impl MeshPipeline {
             device,
             markers.map(|m| (m.content_hash, &m.vertices[..], "measure marker")),
         );
+        // Ghost residency — the same content-identity contract, whole-scene
+        // keyed: every ghost buffer rebuilds when the ghost scene's
+        // identity changes (a compare-version swap, upstream's ghostID),
+        // and nothing is touched while it holds — a moved camera or an
+        // unchanged comparison never re-uploads ghost bytes.
+        let ghost_id = ghost.map(ghost_identity);
+        if ghost_id != self.ghost_identity {
+            self.ghost_residents = ghost
+                .map(|ghost| {
+                    ghost
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let label = &part.name;
+                            let vertex_buf =
+                                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some(&format!("ghost {label} vertices")),
+                                    contents: bytemuck::cast_slice(&part.vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+                            let edge_indices: Vec<u32> =
+                                part.edges.iter().flat_map(|&[a, b]| [a, b]).collect();
+                            let edge_buf =
+                                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some(&format!("ghost {label} edges")),
+                                    contents: bytemuck::cast_slice(&edge_indices),
+                                    usage: wgpu::BufferUsages::INDEX,
+                                });
+                            self.ghost_upload_count += 1;
+                            ResidentGhostPart {
+                                vertex_buf,
+                                edge_buf,
+                                edge_count: edge_indices.len() as u32,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.ghost_identity = ghost_id;
+        }
     }
 
     /// Vertex uploads since pipeline creation (test visibility): counts
@@ -1440,6 +1640,14 @@ impl MeshPipeline {
     #[cfg(test)]
     pub(crate) fn alloc_count_for_tests(&self) -> u32 {
         self.alloc_count
+    }
+
+    /// Ghost vertex+edge uploads since pipeline creation (test
+    /// visibility): counts one per ghost part restage — an unchanged
+    /// ghost never re-uploads however the camera moves.
+    #[cfg(test)]
+    pub(crate) fn ghost_upload_count_for_tests(&self) -> u32 {
+        self.ghost_upload_count
     }
 
     /// Parts the last prepared frame poses visibly — the slots the draw
@@ -1462,9 +1670,9 @@ impl MeshPipeline {
 
     /// Renders the parts (filled, or the wireframe hairlines when the last
     /// prepared `Options` set it) — the red cap quad when the camera
-    /// sections, then the unlit overlays (grid first, measure markers
-    /// after it) — into `target` (the iced surface view) inside a
-    /// viewer-owned pass. Color attachment:
+    /// sections, then the compare ghost, then the unlit overlays (grid
+    /// first, measure markers after it) — into `target` (the iced surface
+    /// view) inside a viewer-owned pass. Color attachment:
     /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
     /// cleared. `viewport` is `[x, y, width, height]` in physical pixels.
     ///
@@ -1484,7 +1692,11 @@ impl MeshPipeline {
         target: &wgpu::TextureView,
         viewport: [f32; 4],
     ) {
-        if self.drawn.is_empty() && self.grid.is_none() && self.marker.is_none() {
+        if self.drawn.is_empty()
+            && self.grid.is_none()
+            && self.marker.is_none()
+            && self.ghost_residents.is_empty()
+        {
             return; // nothing visible was prepared
         }
         let set_vp = |pass: &mut wgpu::RenderPass| {
@@ -1589,10 +1801,10 @@ impl MeshPipeline {
     /// Part draws — one bind group + vertex buffer + draw per DRAWN part
     /// (the last prepared frame's visible slots; hidden parts are absent),
     /// filled triangles or the wireframe hairline list — then, when the
-    /// camera sections, the cap quad, and last the unlit overlays (grid,
-    /// then measure markers) — into the pass's color attachment (msaa or
-    /// single-sample alike: everything here inherits the pass attachment
-    /// and matches its sample count).
+    /// camera sections, the cap quad, then the compare ghost, and last the
+    /// unlit overlays (grid, then measure markers) — into the pass's color
+    /// attachment (msaa or single-sample alike: everything here inherits
+    /// the pass attachment and matches its sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
@@ -1623,6 +1835,21 @@ impl MeshPipeline {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.cap_buf.slice(..));
             pass.draw(0..4, 0..1);
+        }
+        // The compare ghost between the cap and the overlays: depth-tested
+        // against the opaque mesh (a ghost behind the model hides) but never
+        // writing depth, so it cannot occlude the grid or markers after it.
+        // Drawn in wireframe mode too — upstream's ghost is independent of
+        // the wireframe toggle (facts #44/#45 disable the interior shell,
+        // not the ghost).
+        if !self.ghost_residents.is_empty() {
+            pass.set_pipeline(&self.ghost_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            for resident in &self.ghost_residents {
+                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+            }
         }
         // Overlays last, painter-ordered (they write no depth): the grid,
         // then the measure markers after it — both unlit vertex-colored,
@@ -1946,6 +2173,16 @@ mod tests {
     /// The Frame every upload-once test shares: default options, no overlay,
     /// effective_aabb at the staged scene's own (T10 replaces that input).
     fn frame<'a>(camera: &'a Camera, scene: &'a PartScene, poses: &'a [PartPose]) -> Frame<'a> {
+        frame_ghost(camera, scene, poses, None)
+    }
+
+    /// [`frame`] plus the compare ghost scene.
+    fn frame_ghost<'a>(
+        camera: &'a Camera,
+        scene: &'a PartScene,
+        poses: &'a [PartPose],
+        ghost: Option<&'a PartScene>,
+    ) -> Frame<'a> {
         Frame {
             camera,
             scene,
@@ -1953,6 +2190,7 @@ mod tests {
             effective_aabb: (scene.aabb_min, scene.aabb_max),
             grid: None,
             markers: None,
+            ghost,
             options: Options::default(),
         }
     }
@@ -2380,6 +2618,73 @@ mod tests {
         // out-of-range inputs keep the formula's shape (callers clamp)
         assert_eq!(parts::srgb_to_linear_f(0.0), 0.0);
         assert!((parts::srgb_to_linear_f(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// Ghost residency (the GPU-first law's ghost clause): the whole ghost
+    /// scene restages only when its content identity changes — the same
+    /// ghost under a moved camera uploads zero ghost bytes, a dropped ghost
+    /// (compare turned off) uploads none, and a compare-version swap
+    /// restages every part. Upstream keys this on ghostID
+    /// (ModelViewer.swift:171-174); the port keys it on the ghost scene's
+    /// whole-content identity.
+    #[test]
+    fn ghost_reuploads_only_on_content_change() {
+        let (device, queue) = gpu::device_queue();
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        let camera = default_camera(&scene, 4.0 / 3.0);
+        let poses = identity_poses(&scene);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let shifted = |dx: f32| {
+            let mut parts = golden_3mf_parts();
+            for part in &mut parts {
+                for p in &mut part.positions {
+                    p[0] += dx;
+                }
+            }
+            PartScene::from_parts_with_pin(&parts, NEUTRAL, scene.pin)
+        };
+        let ghost = shifted(40.0);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame_ghost(&camera, &scene, &poses, Some(&ghost)),
+        );
+        let u1 = pipeline.ghost_upload_count_for_tests();
+        assert_eq!(u1, 2, "one upload per ghost part on residency");
+        // moved camera, same ghost: zero ghost bytes
+        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame_ghost(&moved, &scene, &poses, Some(&ghost)),
+        );
+        assert_eq!(
+            pipeline.ghost_upload_count_for_tests(),
+            u1,
+            "an unchanged ghost must not reupload on a moved camera"
+        );
+        // compare off: the slot empties without restaging
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        assert_eq!(
+            pipeline.ghost_upload_count_for_tests(),
+            u1,
+            "dropping the ghost uploads nothing"
+        );
+        // a compare-version swap restages wholesale
+        let other = shifted(80.0);
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame_ghost(&camera, &scene, &poses, Some(&other)),
+        );
+        assert!(
+            pipeline.ghost_upload_count_for_tests() > u1,
+            "new ghost content restages"
+        );
     }
 
     /// `to_scene` is exactly the staging map (remap + the struct's pin), and

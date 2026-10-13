@@ -48,6 +48,13 @@ pub struct ModelScene {
     /// picked points here and clears it with the measurement; `None`
     /// draws none.
     pub markers: Option<Arc<MarkerMesh>>,
+    /// The staged compare ghost, when a comparison is active — a
+    /// `PartScene` built from the comparison version WITH THIS SCENE'S
+    /// PIN (`PartScene::from_parts_with_pin(.., self.scene.pin)`,
+    /// ModelViewer.swift:135: ghostEntity under `content`). The app layer
+    /// owns the comparison state (M5's `comparison_parameters`) and swaps
+    /// the scene here on a version change; `None` draws none.
+    pub ghost: Option<Arc<PartScene>>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
     pub show_grid: bool,
     /// Wireframe mode (upstream `showsWireframe` — facts #44).
@@ -78,6 +85,7 @@ impl ModelScene {
             scene,
             grid,
             markers: None,
+            ghost: None,
             show_grid: true,
             wireframe: false,
             msaa: 1,
@@ -144,6 +152,10 @@ impl ModelScene {
         // the measurement's points belong to the old model — a reload
         // drops them with the markers they staged
         self.markers = None;
+        // and the ghost is staged in the OLD scene's pin (the whole point
+        // of from_parts_with_pin), so it cannot survive the pin change —
+        // the app re-stages it if the comparison is still active
+        self.ghost = None;
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         self.poses = identity_poses(scene.parts.len());
@@ -179,6 +191,7 @@ impl<Message> shader::Program<Message> for ModelScene {
             poses: self.poses.clone(),
             grid: self.show_grid.then(|| self.grid.clone()),
             markers: self.markers.clone(),
+            ghost: self.ghost.clone(),
             camera: self.camera(aspect),
             options: Options {
                 wireframe: self.wireframe,
@@ -194,6 +207,7 @@ pub struct ModelPrimitive {
     poses: Arc<[PartPose]>,
     grid: Option<Arc<GridMesh>>,
     markers: Option<Arc<MarkerMesh>>,
+    ghost: Option<Arc<PartScene>>,
     camera: Camera,
     options: Options,
 }
@@ -219,6 +233,7 @@ impl shader::Primitive for ModelPrimitive {
             effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
             grid: self.grid.as_deref(),
             markers: self.markers.as_deref(),
+            ghost: self.ghost.as_deref(),
             options: self.options,
         };
         pipeline.prepare_parts(device, queue, (size.width, size.height), &frame);
