@@ -404,7 +404,7 @@ async fn prompt_to_rendered_model() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "thelio-only: surfaceless GPU render, writes the screenshot PNG"]
 async fn slice_offscreen_render() {
-    use viewer::render::{MeshPipeline, Options, default_camera};
+    use viewer::render::{Frame, MeshPipeline, Options, PartPose, default_camera};
 
     let SliceRun { window, .. } = run_slice().await;
     let scene = window.viewer.scene.scene.clone();
@@ -429,15 +429,17 @@ async fn slice_offscreen_render() {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare_parts(
-        device,
-        queue,
-        (w, h),
-        &camera,
-        &scene,
-        Some(overlay.as_ref()),
-        &Options::default(),
-    );
+    // identity poses: the slice's final scene draws every part where it sits
+    let poses = vec![PartPose::None; scene.parts.len()];
+    let frame = Frame {
+        camera: &camera,
+        scene: &scene,
+        poses: &poses,
+        effective_aabb: (scene.aabb_min, scene.aabb_max),
+        grid: Some(overlay.as_ref()),
+        options: Options::default(),
+    };
+    pipeline.prepare_parts(device, queue, (w, h), &frame);
     let mut encoder = device.create_command_encoder(&Default::default());
     {
         let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
