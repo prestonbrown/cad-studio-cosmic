@@ -10,7 +10,13 @@ use std::sync::Arc;
 use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 
-use super::{Camera, GridMesh, MeshPipeline, Options, PartScene, camera, grid};
+use super::{Camera, Frame, GridMesh, MeshPipeline, Options, PartPose, PartScene, camera, grid};
+
+/// Identity poses for every slot of an n-part scene — the assembled
+/// default `new` starts at and `replace_scene` resets to.
+fn identity_poses(n: usize) -> Arc<[PartPose]> {
+    Arc::from(vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); n])
+}
 
 /// The interactive model scene: part scene, orbit camera state.
 /// Framing (target + distance) comes from [`camera::frame`] at
@@ -28,6 +34,12 @@ use super::{Camera, GridMesh, MeshPipeline, Options, PartScene, camera, grid};
 /// read one consistent camera.
 pub struct ModelScene {
     pub scene: Arc<PartScene>,
+    /// Per-part poses for the next frame — `Some(matrix)` draws the part
+    /// transformed, `None` hides it. Identity here means assembled; the
+    /// app's arrangement wiring (explode/visibility) writes real poses.
+    /// Arc-shared with the per-frame primitive like `scene`, so a pose
+    /// update costs one refcount bump, never a mesh copy or re-stage.
+    pub poses: Arc<[PartPose]>,
     pub grid: Arc<GridMesh>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
     pub show_grid: bool,
@@ -55,6 +67,7 @@ impl ModelScene {
         let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
         let grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
         Self {
+            poses: identity_poses(scene.parts.len()),
             scene,
             grid,
             show_grid: true,
@@ -112,14 +125,17 @@ impl ModelScene {
     }
 
     /// Swap in a new part scene (an output reload): rebuilds the overlay
-    /// against the new pinned aabb and re-derives the framing fields so the
-    /// struct stays self-consistent; the caller decides whether the camera
-    /// actually re-frames (the > 50 % diagonal rule) and pushes the settled
-    /// pose through [`ModelScene::set_pose`].
+    /// against the new pinned aabb, resets the poses to the new scene's
+    /// assembled identities (a new model has no carried explode offsets),
+    /// and re-derives the framing fields so the struct stays
+    /// self-consistent; the caller decides whether the camera actually
+    /// re-frames (the > 50 % diagonal rule) and pushes the settled pose
+    /// through [`ModelScene::set_pose`].
     pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
         self.grid = Arc::new(grid::geometry((scene.aabb_min, scene.aabb_max), None));
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        self.poses = identity_poses(scene.parts.len());
         self.scene = scene;
         self.target = target;
         self.distance = distance;
@@ -149,6 +165,7 @@ impl<Message> shader::Program<Message> for ModelScene {
         };
         ModelPrimitive {
             scene: self.scene.clone(),
+            poses: self.poses.clone(),
             grid: self.show_grid.then(|| self.grid.clone()),
             camera: self.camera(aspect),
             options: Options {
@@ -162,6 +179,7 @@ impl<Message> shader::Program<Message> for ModelScene {
 #[derive(Debug)]
 pub struct ModelPrimitive {
     scene: Arc<PartScene>,
+    poses: Arc<[PartPose]>,
     grid: Option<Arc<GridMesh>>,
     camera: Camera,
     options: Options,
@@ -179,15 +197,17 @@ impl shader::Primitive for ModelPrimitive {
         viewport: &Viewport,
     ) {
         let size = viewport.physical_size();
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (size.width, size.height),
-            &self.camera,
-            &self.scene,
-            self.grid.as_deref(),
-            &self.options,
-        );
+        // effective_aabb defaults to the staged scene's own — the
+        // arrangement wiring replaces it with the arranged/plate-aware box
+        let frame = Frame {
+            camera: &self.camera,
+            scene: &self.scene,
+            poses: &self.poses,
+            effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
+            grid: self.grid.as_deref(),
+            options: self.options,
+        };
+        pipeline.prepare_parts(device, queue, (size.width, size.height), &frame);
     }
 
     fn render(

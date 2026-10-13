@@ -728,15 +728,15 @@ pub fn load_model_parts(output_dir: &Path) -> Option<Vec<Part>> {
 }
 
 /// Whether two staged scenes differ in content: part count, or any part's
-/// name, staged-vertex identity, transform, or aabb. The content hash
-/// covers every staged byte (colors, normals, the floor pin), so equal
-/// parts mean an identical upload — the reload's short-circuit.
+/// name, staged-vertex identity, or aabb. The content hash covers every
+/// staged byte (colors, normals, the floor pin), so equal parts mean an
+/// identical upload — the reload's short-circuit. Poses are per-frame
+/// uniforms, not content, and do not belong here.
 pub fn scenes_differ(current: &PartScene, next: &PartScene) -> bool {
     current.parts.len() != next.parts.len()
         || current.parts.iter().zip(&next.parts).any(|(a, b)| {
             a.name != b.name
                 || a.content_hash != b.content_hash
-                || a.transform != b.transform
                 || a.aabb_min != b.aabb_min
                 || a.aabb_max != b.aabb_max
         })

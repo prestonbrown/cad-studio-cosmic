@@ -4,9 +4,10 @@
 //! `(x, z, -y)` — a proper rotation, applied once here at scene build —
 //! then the whole scene is translated by the floor pin (ModelViewer.swift:
 //! 167-168): `(-center.x, -min.y, -center.z)`, putting the model floor at
-//! scene y=0 and centering x/z. The grid, bed outline, and tripod (Task 5)
-//! and `camera::frame`'s `(0, size.y/2, 0)` target are all stated against
-//! this pinned frame.
+//! scene y=0 and centering x/z. The pin is recorded on the struct and
+//! [`PartScene::to_scene`]/[`PartScene::to_model`] are its public crossing
+//! — the grid, bed outline, and tripod (Task 5) and `camera::frame`'s
+//! `(0, size.y/2, 0)` target are all stated against this pinned frame.
 //!
 //! Per-triangle colors stage here too: `TriangleColor::Some` is u8 sRGB
 //! and crosses [`srgb_to_linear`] exactly once, at build; `None` paints
@@ -19,7 +20,8 @@
 //! Each part carries a full-content hash over its staged vertices, so the
 //! pipeline's upload-once check (`MeshPipeline::prepare_parts`) rewrites a
 //! part's vertex buffer only when that staged content — including the pin
-//! offset — changes; camera motion writes uniforms, never mesh bytes.
+//! offset — changes; camera motion and per-part poses write uniforms,
+//! never mesh bytes.
 
 use std::hash::Hasher;
 
@@ -36,17 +38,24 @@ use super::Vertex;
 /// take its place.
 pub const NEUTRAL: [f32; 3] = [0.62, 0.70, 0.80];
 
-/// Exact piecewise sRGB EOTF (IEC 61966-2-2): u8 sRGB -> scene-linear f32.
-/// The linear segment below 0.04045 is not negotiable — a single 2.2 power
-/// reads the golden base's own blue R (31) as 0.0097 instead of 0.0137,
-/// 29% dark, and drifts worst exactly where dark colors live.
-pub fn srgb_to_linear(c: u8) -> f32 {
-    let c = c as f32 / 255.0;
+/// Exact piecewise sRGB EOTF (IEC 61966-2-2) on the f32 unit scale, where
+/// 0.0 is black and 1.0 is white. The linear segment below 0.04045 is not
+/// negotiable — a single 2.2 power reads the golden base's own blue R (31)
+/// as 0.0097 instead of 0.0137, 29% dark, and drifts worst exactly where
+/// dark colors live. The u8 form below delegates to this one, so every
+/// caller (staged triangle colors, cap and marker constants) crosses the
+/// same curve.
+pub fn srgb_to_linear_f(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
         ((c + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// u8 sRGB -> scene-linear f32: [`srgb_to_linear_f`] over `c / 255`.
+pub fn srgb_to_linear(c: u8) -> f32 {
+    srgb_to_linear_f(c as f32 / 255.0)
 }
 
 /// A triangle's u8 sRGB color -> linear; `None` paints the `neutral`.
@@ -61,7 +70,10 @@ fn stage_color(color: TriangleColor, neutral: [f32; 3]) -> [f32; 3] {
 }
 
 /// One engine part staged for upload: scene-space per-corner vertices, its
-/// aabb, and the content identity the upload-once check compares.
+/// aabb, and the content identity the upload-once check compares. The
+/// per-part transform is NOT here — poses arrive per frame through the
+/// renderer's model uniforms (the GPU-first split), so this struct is pure
+/// geometry and paint.
 #[derive(Clone, Debug)]
 pub struct GpuPart {
     pub name: String,
@@ -73,12 +85,6 @@ pub struct GpuPart {
     /// dedup, so a quad-faced cube stages its 12 polygon edges plus the 6
     /// face diagonals = 18.
     pub edges: Vec<[u32; 2]>,
-    /// The part's model transform (group 1) — identity from `from_parts`.
-    /// A changed transform re-stages the part today (the residency check
-    /// covers it alongside the content hash); M7's playback writes the
-    /// per-part transform uniform per frame without vertex rewrites
-    /// (spec §5).
-    pub transform: [[f32; 4]; 4],
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
     /// Full-content identity over the STAGED vertices: a moved corner, a
@@ -94,6 +100,12 @@ pub struct PartScene {
     pub parts: Vec<GpuPart>,
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
+    /// The floor translation baked into every staged vertex — what
+    /// [`PartScene::to_scene`] adds and [`PartScene::to_model`] removes.
+    /// Recorded so MODEL-space callers can cross over, and so a second
+    /// scene can share this one's frame ([`PartScene::from_parts_with_pin`],
+    /// the comparison ghost's staging).
+    pub pin: [f32; 3],
 }
 
 /// Content identity of one part: every staged vertex byte feeds the hash
@@ -163,11 +175,21 @@ fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
 }
 
 impl PartScene {
-    /// Stage engine parts for rendering: remap to scene space, paint each
+    /// Stage engine parts for rendering at their own floor pin (computed
+    /// over the remapped union aabb): remap to scene space, paint each
     /// triangle's color (sRGB -> linear, or the neutral), pin the floor,
     /// hash each part's staged content. Parts keep engine order; slot `i`
-    /// in the scene is slot `i` at residency.
+    /// in the scene is slot `i` at residency and in the frame's poses.
     pub fn from_parts(parts: &[Part], neutral: [f32; 3]) -> Self {
+        Self::from_parts_with_pin(parts, neutral, floor_pin(parts))
+    }
+
+    /// [`PartScene::from_parts`] staged against a caller-chosen `pin`
+    /// instead of the computed one — how a second scene shares this one's
+    /// frame: the comparison ghost stages the OLD model in the CURRENT
+    /// scene's pinned frame (ModelViewer.swift:135, ghost under `content`),
+    /// where its own pin would float it off the floor.
+    pub fn from_parts_with_pin(parts: &[Part], neutral: [f32; 3], pin: [f32; 3]) -> Self {
         let mut staged = Vec::with_capacity(parts.len());
         for part in parts {
             assert_eq!(
@@ -209,7 +231,6 @@ impl PartScene {
                 name: part.name.clone(),
                 vertices,
                 edges: Vec::new(), // set after the pin below
-                transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 aabb_min: mn,
                 aabb_max: mx,
                 content_hash: 0, // set after the pin below
@@ -229,19 +250,13 @@ impl PartScene {
                 parts: staged,
                 aabb_min: [0.0; 3],
                 aabb_max: [0.0; 3],
+                pin,
             };
         }
-        // Floor pin (ModelViewer.swift:167-168): translate the remapped
-        // scene so the model floor sits at y=0 and x/z center on the
-        // origin. Baked into the staged vertices — a later part growing
-        // past the union aabb moves this offset, and the content hashes
-        // (computed after) pick that up so residency never serves a part
-        // at a stale pin.
-        let mut pin = [0.0f32; 3];
-        for a in 0..3 {
-            pin[a] = -(scene_min[a] + scene_max[a]) / 2.0;
-        }
-        pin[1] = -scene_min[1];
+        // The pin is baked into the staged vertices — a later part growing
+        // past the union aabb moves `from_parts`'s pin, and the content
+        // hashes (computed after) pick that up so residency never serves a
+        // part at a stale pin.
         for part in &mut staged {
             for v in &mut part.vertices {
                 for a in 0..3 {
@@ -265,6 +280,51 @@ impl PartScene {
             parts: staged,
             aabb_min: scene_min,
             aabb_max: scene_max,
+            pin,
         }
     }
+
+    /// MODEL -> this scene's pinned SCENE: the remap plus the recorded
+    /// floor pin — exactly the map the staged vertices crossed.
+    pub fn to_scene(&self, model: [f32; 3]) -> [f32; 3] {
+        let s = remap(model);
+        [s[0] + self.pin[0], s[1] + self.pin[1], s[2] + self.pin[2]]
+    }
+
+    /// Pinned SCENE -> MODEL: the inverse of [`PartScene::to_scene`].
+    pub fn to_model(&self, scene: [f32; 3]) -> [f32; 3] {
+        let s = [
+            scene[0] - self.pin[0],
+            scene[1] - self.pin[1],
+            scene[2] - self.pin[2],
+        ];
+        [s[0], -s[2], s[1]]
+    }
+}
+
+/// The floor pin (ModelViewer.swift:167-168) over the remapped union aabb:
+/// `(-center.x, -min.y, -center.z)` — the model floor at scene y=0, x/z
+/// centered on the origin. Zero for an empty scene.
+fn floor_pin(parts: &[Part]) -> [f32; 3] {
+    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut any = false;
+    for part in parts {
+        for &p in &part.positions {
+            let p = remap(p);
+            any = true;
+            for a in 0..3 {
+                mn[a] = mn[a].min(p[a]);
+                mx[a] = mx[a].max(p[a]);
+            }
+        }
+    }
+    if !any {
+        return [0.0; 3];
+    }
+    let mut pin = [0.0f32; 3];
+    for a in 0..3 {
+        pin[a] = -(mn[a] + mx[a]) / 2.0;
+    }
+    pin[1] = -mn[1];
+    pin
 }

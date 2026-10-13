@@ -14,7 +14,8 @@ use viewer::render::gpu;
 use viewer::render::grid;
 use viewer::render::lights;
 use viewer::render::{
-    Camera, MeshPipeline, NEUTRAL, Options, PartScene, default_camera, srgb_to_linear,
+    Camera, Frame, MeshPipeline, NEUTRAL, Options, PartPose, PartScene, default_camera,
+    srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -62,6 +63,7 @@ fn render_frame(
 
 /// [`render_frame`] with the overlay and render mode: `grid` (when `Some`)
 /// is prepared and drawn after the parts, `options` picks e.g. wireframe.
+/// Poses are identity — the pose-carrying entry is [`render_frame_poses`].
 fn render_frame_opts(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -73,6 +75,34 @@ fn render_frame_opts(
     grid: Option<&grid::GridMesh>,
     options: &Options,
 ) -> Vec<u8> {
+    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    render_frame_with_poses(
+        device, queue, pipeline, scene, camera, w, h, grid, options, &poses,
+    )
+}
+
+/// The harness core: [`render_frame_opts`] plus the per-part poses threaded
+/// into the `Frame` — every pose-path test renders through here.
+fn render_frame_with_poses(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+    grid: Option<&grid::GridMesh>,
+    options: &Options,
+    poses: &[PartPose],
+) -> Vec<u8> {
+    let frame = Frame {
+        camera,
+        scene,
+        poses,
+        effective_aabb: (scene.aabb_min, scene.aabb_max),
+        grid,
+        options: *options,
+    };
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless target"),
         size: wgpu::Extent3d {
@@ -88,7 +118,7 @@ fn render_frame_opts(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare_parts(device, queue, (w, h), camera, scene, grid, options);
+    pipeline.prepare_parts(device, queue, (w, h), &frame);
     let mut encoder = device.create_command_encoder(&Default::default());
     // clear to the app background first, then viewer pass loads on top
     // (mirrors iced underlay)
@@ -179,7 +209,8 @@ fn render_frame_msaa(
 ) -> Vec<u8> {
     let mut pipeline =
         MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, msaa);
-    render_frame_opts(
+    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    render_frame_with_poses(
         device,
         queue,
         &mut pipeline,
@@ -192,6 +223,35 @@ fn render_frame_msaa(
             msaa,
             ..Options::default()
         },
+        &poses,
+    )
+}
+
+/// The pose path's render entry — the common case with explicit per-part
+/// poses: default camera for the viewport, no overlay, solid mode. (The
+/// upload-count half of the pose law is asserted in-crate, where the
+/// counter accessors are visible.)
+fn render_frame_poses(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    poses: &[PartPose],
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let camera = default_camera(scene, w as f32 / h as f32);
+    render_frame_with_poses(
+        device,
+        queue,
+        pipeline,
+        scene,
+        &camera,
+        w,
+        h,
+        None,
+        &Options::default(),
+        poses,
     )
 }
 
@@ -923,24 +983,23 @@ fn bed_rectangle_present() {
 
 // --- blit orientation: CPU-rasterized ground truth (pure; no GPU) ---
 
-/// The golden model with its lid translated through the per-part transform
-/// slot (the group-1 model binding the mesh shader already multiplies in —
-/// identity until now). Two offset boxes make an L: asymmetric left-right
-/// AND top-bottom on screen, so a horizontal mirror, a vertical flip, or a
-/// 180° all move ink the CPU grid did not expect.
-fn l_shaped_scene() -> PartScene {
-    let bytes = std::fs::read(fixture("model.3mf"))
-        .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
-    let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
-    assert_eq!(parts.len(), 2);
-    assert_eq!(parts[1].name, "lid");
-    let mut scene = PartScene::from_parts(&parts, NEUTRAL);
-    // MODEL +x by 60: the lid (x in [-20, 20]) moves to [40, 60], clear of
-    // the base's footprint (x in [-30, 30]) — an overhang to screen-right
-    // at the iso yaw, still inside the framing headroom
-    scene.parts[1].transform =
-        glam::Mat4::from_translation(glam::Vec3::new(60.0, 0.0, 0.0)).to_cols_array_2d();
-    scene
+/// The golden model with its lid translated through the pose path (the
+/// group-1 model binding the mesh shader multiplies in — a per-frame
+/// uniform since the GPU-first split). Two offset boxes make an L:
+/// asymmetric left-right AND top-bottom on screen, so a horizontal mirror,
+/// a vertical flip, or a 180° all move ink the CPU grid did not expect.
+fn l_shaped() -> (PartScene, Vec<PartPose>) {
+    let scene = golden_scene();
+    assert_eq!(scene.parts.len(), 2);
+    assert_eq!(scene.parts[1].name, "lid");
+    // SCENE +x by 60: the lid (staged x in [-20, 20]) moves to [40, 60],
+    // clear of the base's footprint (x in [-30, 30]) — an overhang to
+    // screen-right at the iso yaw, still inside the framing headroom
+    let poses = vec![
+        Some(glam::Mat4::IDENTITY.to_cols_array_2d()),
+        Some(glam::Mat4::from_translation(glam::Vec3::new(60.0, 0.0, 0.0)).to_cols_array_2d()),
+    ];
+    (scene, poses)
 }
 
 /// Project a scene-space point through `vp` to pixel coordinates, row 0 at
@@ -991,14 +1050,15 @@ fn tri_overlaps_rect(t: [(f32, f32); 3], x0: f32, y0: f32, x1: f32, y1: f32) -> 
 }
 
 /// Coarse occupancy grid of `scene` under `vp`: cell (x, y) is set when any
-/// staged triangle — carried through its part's transform, exactly as the
-/// mesh shader's group-1 multiply does — overlaps the cell's pixel rect.
-/// Returns the grid width and the row-major cells. Pure CPU geometry: the
-/// same triangles the GPU rasterizes, projected by the same view_proj, so
-/// agreement between this grid and the readback cannot be a
-/// re-implementation accident.
+/// staged triangle — carried through its part's pose, exactly as the mesh
+/// shader's group-1 multiply does — overlaps the cell's pixel rect. `None`
+/// poses skip their part, as the draw path does. Returns the grid width
+/// and the row-major cells. Pure CPU geometry: the same triangles the GPU
+/// rasterizes, projected by the same view_proj, so agreement between this
+/// grid and the readback cannot be a re-implementation accident.
 fn occupancy_grid(
     scene: &PartScene,
+    poses: &[PartPose],
     vp: [[f32; 4]; 4],
     w: u32,
     h: u32,
@@ -1006,8 +1066,11 @@ fn occupancy_grid(
 ) -> (usize, Vec<bool>) {
     let (gw, gh) = ((w / cell) as usize, (h / cell) as usize);
     let mut grid = vec![false; gw * gh];
-    for part in &scene.parts {
-        let model = glam::Mat4::from_cols_array_2d(&part.transform);
+    for (part, pose) in scene.parts.iter().zip(poses) {
+        let model = match pose {
+            Some(m) => glam::Mat4::from_cols_array_2d(m),
+            None => continue,
+        };
         for tri in part.vertices.chunks_exact(3) {
             let projected: Option<Vec<(f32, f32)>> = tri
                 .iter()
@@ -1052,10 +1115,10 @@ fn occupied_cells(grid: &[bool]) -> usize {
 /// passes vacuously and a flipped blit ships. Pure CPU: runs without a GPU.
 #[test]
 fn orientation_grid_discriminates_mirrors() {
-    let scene = l_shaped_scene();
+    let (scene, poses) = l_shaped();
     let camera = default_camera(&scene, 800.0 / 600.0);
     const CELL: u32 = 25;
-    let (gw, grid) = occupancy_grid(&scene, camera.view_proj, 800, 600, CELL);
+    let (gw, grid) = occupancy_grid(&scene, &poses, camera.view_proj, 800, 600, CELL);
     let (gh, n) = (grid.len() / gw, occupied_cells(&grid));
     assert!(
         n >= gw * gh / 8,
@@ -1091,18 +1154,18 @@ fn orientation_grid_discriminates_mirrors() {
 #[test]
 fn orientation_pattern_matches_projection() {
     let (device, queue) = gpu::device_queue();
-    let scene = l_shaped_scene();
+    let (scene, poses) = l_shaped();
     let camera = default_camera(&scene, 800.0 / 600.0);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
-    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
+    let px = render_frame_poses(device, queue, &mut pipeline, &scene, &poses, 800, 600);
     assert!(
         ink_pixels(&px, bg) > 5_000,
         "the L must cover a healthy area: {}",
         ink_pixels(&px, bg)
     );
     const CELL: u32 = 25;
-    let (gw, cpu) = occupancy_grid(&scene, camera.view_proj, 800, 600, CELL);
+    let (gw, cpu) = occupancy_grid(&scene, &poses, camera.view_proj, 800, 600, CELL);
     let gh = cpu.len() / gw;
     let n = occupied_cells(&cpu);
     assert!(
@@ -1131,13 +1194,65 @@ fn orientation_pattern_matches_projection() {
     assert_grid_agrees(&px, "1x");
     // and through the resolve+blit path, where a UV flip in the blit would
     // mirror the composited frame — the M0 obligation's actual subject
-    let px4 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 4);
+    let mut p4 = MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
+    let px4 = render_frame_with_poses(
+        device,
+        queue,
+        &mut p4,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        &Options {
+            msaa: 4,
+            ..Options::default()
+        },
+        &poses,
+    );
     assert!(
         ink_pixels(&px4, bg) > 5_000,
         "the L must cover a healthy area at 4x: {}",
         ink_pixels(&px4, bg)
     );
     assert_grid_agrees(&px4, "4x blit");
+}
+
+/// The pose path at render scope: translating one part 60mm along scene +x
+/// must displace its projected ink. (The upload-count half of the law is
+/// asserted in-crate, where the test accessor is visible.)
+#[test]
+fn pose_translation_displaces_ink() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let id = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let poses: Vec<PartPose> = vec![Some(id); scene.parts.len()];
+    let px = render_frame_poses(device, queue, &mut pipeline, &scene, &poses, 800, 600);
+    let mut moved = poses.clone();
+    moved[1] =
+        Some(glam::Mat4::from_translation(glam::Vec3::new(60.0, 0.0, 0.0)).to_cols_array_2d());
+    let px2 = render_frame_poses(device, queue, &mut pipeline, &scene, &moved, 800, 600);
+    // centroid of ink: mean (x, y) over pixels differing from the background
+    let centroid = |px: &[u8]| -> (f32, f32) {
+        let (mut sx, mut sy, mut n) = (0u64, 0u64, 0u64);
+        for (i, c) in px.chunks(4).enumerate() {
+            if is_ink(c, bg) {
+                sx += (i % 800) as u64;
+                sy += (i / 800) as u64;
+                n += 1;
+            }
+        }
+        (sx as f32 / n as f32, sy as f32 / n as f32)
+    };
+    let (c1, c2) = (centroid(&px), centroid(&px2));
+    assert!(c2.0 > c1.0 + 20.0, "lid ink moved right: {c1:?} -> {c2:?}");
+    assert!(
+        c2.0 < c1.0 + 200.0,
+        "and the base stayed put (mixed centroid)"
+    );
 }
 
 /// The example's msaa toggle is an internal rebuild: ONE MeshPipeline
