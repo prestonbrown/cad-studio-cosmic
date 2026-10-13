@@ -386,7 +386,9 @@ impl ProjectWindow {
         match message {
             Message::Chat(msg) => self.update_chat(msg),
             // the app layer owns the sheet's presentation — pass through
-            Message::PresentSetupSheet => CosmicTask::future(async move { Message::PresentSetupSheet }),
+            Message::PresentSetupSheet => {
+                CosmicTask::future(async move { Message::PresentSetupSheet })
+            }
             Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
             Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
             Message::Bridge(msg) => self.update_bridge(msg),
@@ -577,7 +579,9 @@ impl ProjectWindow {
                 self.save_metadata();
                 Task::none()
             }
-            bridge::Message::PythonSheetRequested => CosmicTask::future(async move { Message::PresentSetupSheet }),
+            bridge::Message::PythonSheetRequested => {
+                CosmicTask::future(async move { Message::PresentSetupSheet })
+            }
         }
     }
 
