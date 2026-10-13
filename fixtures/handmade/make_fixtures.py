@@ -164,6 +164,16 @@ NONAMES = model(
     "  </resources>\n"
     '  <build><item objectid="1"/><item objectid="2"/></build>'
 )
+# empty: well-formed (OPC + model parse) but ZERO parts — resources hold no
+# object and the build is empty, the shape a truncated write can leave. The
+# consumer-side rule (M4 T8's carry-forward strike): reload falls back to the
+# STL beside it rather than rendering nothing.
+EMPTY = model(
+    "  <resources>\n"
+    "  </resources>\n"
+    '  <build></build>'
+)
+
 
 if __name__ == "__main__":
     write_3mf("colorgroup.3mf", COLORGROUP)
@@ -174,3 +184,4 @@ if __name__ == "__main__":
     write_3mf("deep17.3mf", deep_chain(17))
     write_3mf("cycle.3mf", CYCLE)
     write_3mf("nonames.3mf", NONAMES)
+    write_3mf("empty.3mf", EMPTY)

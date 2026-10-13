@@ -26,13 +26,16 @@ The M1+ plans must absorb their sections; strike lines as landed.
 
 From M1's reviews, for later milestones:
 
-- M4: mesh reload prefers 3MF, falls back to STL with parts `[]` — consumer-side,
-  per upstream parseMesh.
-- M4: project-folder scaffolding (`output/`, `.cadstudio/logs`, default
+- ~~M4: mesh reload prefers 3MF, falls back to STL with parts `[]` — consumer-side,
+  per upstream parseMesh.~~ (landed M4 — `viewer_pane::load_model_parts`, empty-parts
+  fallback closed at T8 with the handmade `empty.3mf` fixture)
+- ~~M4: project-folder scaffolding (`output/`, `.cadstudio/logs`, default
   `project.json`) must exist BEFORE `watch_directory` starts (it errors on a
   missing dir) — upstream ProjectStore.prepare/create, deliberately deferred
-  from M1.
-- M4: watcher wiring passes ~300 ms debounce (upstream 0.3 s).
+  from M1.~~ (landed M4 — T0's `create_project`/`prepare`, the T7 window and
+  both pane watchers open over it)
+- ~~M4: watcher wiring passes ~300 ms debounce (upstream 0.3 s).~~ (landed M4 —
+  `WATCH_DEBOUNCE` in `viewer_pane` and the project window)
 - M8: `AppleLanguages` setting intentionally omitted in M1 (language override
   lands with i18n).
 
@@ -49,13 +52,15 @@ From the M4 T5 3D-pane review cycle (2026-10-13):
 
 From the M3 whole-branch review (2026-10-12):
 
-- Pinch/magnify zoom (trackpad gesture) is in the viewer facts' M3 input
+- ~~Pinch/magnify zoom (trackpad gesture) is in the viewer facts' M3 input
   list (#116) but never got an implementation, owner, or carry-forward:
   M4 Task 5's `camera_input` OWNS it alongside the parity input wiring
-  (zoom clamp [0.1r, 200r] applies).
-- The "re-frame on size change > 50 % diagonal" behavior slid from M3 T2
+  (zoom clamp [0.1r, 200r] applies).~~ (landed M4 — T5's pure layer, clamped
+  and tested; only the toolkit-blocked DELIVERY note above remains)
+- ~~The "re-frame on size change > 50 % diagonal" behavior slid from M3 T2
   to M4 (the M4 plan's Task 5 owns it explicitly) — noted here so the
-  deferral is visible where deferrals live, matching its siblings.
+  deferral is visible where deferrals live, matching its siblings.~~
+  (landed M4 — T5)
 
 From M2's agent-lifecycle work (task 9 wrap):
 
@@ -176,4 +181,4 @@ From the M4 T3 bridge review (2026-10-13):
 
 - Visual gates honestly unclosed by M0: Preston's eyeball verdict on
   shots/ PNGs still pending; window smoke-run of the scaffold app deferred.
-- M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.
+- ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
