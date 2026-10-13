@@ -1,9 +1,11 @@
 //! Project types (spec §4.2): the manifest decoder lives in [`manifest`],
-//! the pane layout tree in [`layout`], persistence in [`store`].
+//! the pane layout tree in [`layout`], persistence in [`store`], the
+//! parameter panel's model.py rewrite in [`parameters`].
 
 pub mod layout;
 pub mod manifest;
 pub mod outputs;
+pub mod parameters;
 pub mod store;
 
 pub use manifest::{BBox, Drawing, Manifest, PartRef};
