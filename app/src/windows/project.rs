@@ -110,6 +110,9 @@ pub enum Message {
     Viewer(crate::viewer_pane::Message),
     Schematic(crate::schematic::Message),
     Bridge(bridge::Message),
+    /// A bridge refusal asked for the Python setup sheet — the app layer
+    /// owns the sheet's presentation (it overlays whichever window shows).
+    PresentSetupSheet,
     /// The shell's output watcher saw a settled change.
     OutputReload(ReloadKind),
     /// The pane grid's laid-out size (the resize clamp's input).
@@ -382,6 +385,8 @@ impl ProjectWindow {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Chat(msg) => self.update_chat(msg),
+            // the app layer owns the sheet's presentation — pass through
+            Message::PresentSetupSheet => CosmicTask::future(async move { Message::PresentSetupSheet }),
             Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
             Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
             Message::Bridge(msg) => self.update_bridge(msg),
@@ -557,6 +562,22 @@ impl ProjectWindow {
                 self.queue_paused = paused;
                 Task::none()
             }
+            // The build pipeline's M5 wiring (outputs reload, version rows,
+            // sheet presentation) is the vertical slice's to own; these arms
+            // keep the shell compiling over the union with the pause/activity
+            // semantics that already hold.
+            bridge::Message::ParameterCommitted { .. } => Task::none(),
+            bridge::Message::BuildEventBridge(_) => Task::none(),
+            bridge::Message::BuildFinished { .. } => {
+                self.refresh_missing_outputs();
+                Task::none()
+            }
+            bridge::Message::TurnSuccessBookkeeping => {
+                self.refresh_missing_outputs();
+                self.save_metadata();
+                Task::none()
+            }
+            bridge::Message::PythonSheetRequested => CosmicTask::future(async move { Message::PresentSetupSheet }),
         }
     }
 

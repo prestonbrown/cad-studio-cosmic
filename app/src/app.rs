@@ -378,6 +378,13 @@ impl CadStudio {
         if matches!(msg, project::Message::CloseRequested) {
             return self.close_window(id);
         }
+        if matches!(msg, project::Message::PresentSetupSheet) {
+            // a python-readiness refusal presents the sheet over whatever
+            // window is up (the sheet lives at app level)
+            let settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
+            self.setup = Some(sheets::Setup::from_settings(&settings));
+            return Task::none();
+        }
         if let project::Message::App(request) = msg {
             let translated = match request {
                 project::AppRequest::NewProject => welcome::Message::NewProject,

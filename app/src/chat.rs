@@ -51,8 +51,9 @@ const THINKING_PLACEHOLDER: &str = "Claude Code is thinking…";
 const THINKING_TOKENS: &str = "Thinking · about {tokens} tokens";
 /// `ha-ragionato-per-lld-s`
 const THOUGHT_FOR: &str = "Thought for {seconds} s";
-/// `interrotto`
-const INTERRUPTED: &str = "Stopped";
+/// `interrotto` — the cancelled turn's summary row and failure activity
+/// (the bridge's [`crate::bridge`] turn-terminal reuses it).
+pub const INTERRUPTED: &str = "Stopped";
 /// `non-autenticato-apri-il-terminale-ed-esegui-per-effettuare-l-accesso`
 /// (the en catalog's apostrophe is ASCII).
 const AUTH_ROW: &str = "Claude Code isn't signed in. Open Terminal and run `{command}` to sign in.";
