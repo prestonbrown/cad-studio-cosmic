@@ -402,8 +402,12 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     let base = cap_at(4.0 / 26.0); // pinned y=4: middle of the 60mm base box
     let lid = cap_at(21.0 / 26.0); // pinned y=21: middle of the 40mm lid box
     let gap = cap_at(0.5); // pinned y=13: the air gap between the two parts
-    // re-measured after T2 (pin + diagonal framing, camera at distance
-    // ~170 vs ~115 before): base-mid 26450 red px, lid-mid 12374, gap 0
+    // The bounds are generous lower bounds and ratios, justified by the
+    // geometry rather than a measured constant: a mid-base cut paints the
+    // 60mm box's whole cross-section (thousands of red px at this framing),
+    // the 40mm lid's cross-section is (40/60)² ≈ 4/9 of the base's, and a
+    // plane through the air gap leaves the stencil empty everywhere — the
+    // cap has no solid to open.
     assert!(
         base > 2_000,
         "cap must be visible at mid-plane, got {base} red px"
