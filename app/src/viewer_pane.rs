@@ -25,11 +25,28 @@
 //! before the scene `Arc` (and its GPU residency) is touched, so a burst
 //! rebuilds once. 3MF is preferred, STL is the fallback.
 //!
+//! M5: the pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
+//! `topTrailing` ParametersOverlay, ModelPane.swift:41-44) over the canvas
+//! through a `stack`, showing it only while a model exists, parameters
+//! exist, and `parameters_visible` holds (⌥⌘I toggles it — the keyboard
+//! shortcut lives in this pane's subscription until the shell owns
+//! commands). The pane owns the overlay's widget state ([`parameters`]
+//! rows, field drafts, the committed values commits round against); the
+//! SHELL owns everything the bridge knows — it feeds
+//! [`ViewerPane::sync_parameters`] on every parameter refresh and
+//! intercepts [`Message::ParameterCommit`] (→ `Bridge::set_parameter`),
+//! `Message::Parameters(parameters_view::Message::Collapse)` (persist
+//! `Settings.parameters_collapsed`, then forward), and `…::Compare` (the
+//! compare wiring). The shell passes the rest — comparison values, busy,
+//! versions, compare selection — at view time via
+//! [`parameters_view::OverlayContext`].
+//!
 //! M4 status: this module is the pane model + view; the shell task wires it
 //! into a window (pane focus commands, i18n via the extracted ftl keys all
 //! land there). User-visible strings are plain English pending that wiring,
 //! matching the schematic pane's documented M4 state.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -42,7 +59,7 @@ use cosmic::iced::futures::stream::BoxStream;
 use cosmic::iced::keyboard::{self, Modifiers};
 use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::stream;
-use cosmic::iced::widget::{responsive, shader};
+use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
 use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text};
 use engine::parsing::Part;
@@ -50,11 +67,14 @@ use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
+use engine::project::parameters::ModelParameter;
 use engine::settings::MeasurementUnit;
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::{ModelScene, NEUTRAL, PartScene, camera::Preset};
 
 use crate::camera_input::CameraInput;
+use crate::parameters::ParametersPanel;
+use crate::parameters_view::{self, OverlayContext};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -95,6 +115,19 @@ pub enum Message {
     /// The canvas area's size, reported from layout — iced has no resize
     /// event for panes.
     Resized(Size),
+    /// A parameters-overlay interaction (see [`parameters_view`]): the pane
+    /// owns the widget state; the SHELL intercepts `Collapse` (persist, then
+    /// forward) and `Compare` (the bridge wiring) before these arrive.
+    Parameters(parameters_view::Message),
+    /// A parameter commit settled — delivered via `Task` from the overlay's
+    /// release/submit path. The SHELL drives `Bridge::set_parameter` from
+    /// it; the pane's own arm is a no-op (the local half — value snap,
+    /// draft clear — already applied when it was emitted).
+    ParameterCommit(String, f64),
+    /// ⌥⌘I — toggles the parameters overlay's visibility
+    /// (Commands.swift:69-73); the pane's subscription reports it until the
+    /// shell owns menu commands.
+    ToggleParameters,
 }
 
 /// Events crossing the pane's std channel into the subscription: watcher
@@ -142,6 +175,21 @@ pub struct ViewerPane {
     /// Missing-output notes count for the status bar (from
     /// [`outputs::missing_requirements`], refreshed on every reload).
     pub warnings: usize,
+    /// The parameters overlay's row state (upstream `project.parameters` →
+    /// sliders). Synced from the bridge's parameters via
+    /// [`ViewerPane::sync_parameters`]; `collapsed` initializes from
+    /// `Settings.parameters_collapsed`.
+    pub parameters: ParametersPanel,
+    /// Live text-field drafts, one per parameter name (the field commits on
+    /// submit; the raw text needs to survive between frames).
+    pub parameter_drafts: HashMap<String, String>,
+    /// The last-synced committed parameter values — what `commit` rounds
+    /// against and what the previous-value comparison reads.
+    committed_parameters: BTreeMap<String, f64>,
+    /// Whether the parameters overlay shows at all (upstream
+    /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
+    /// toggles).
+    pub parameters_visible: bool,
     project_root: PathBuf,
     output_dir: PathBuf,
     printer_model: Option<String>,
@@ -192,6 +240,10 @@ impl ViewerPane {
             msaa: false,
             unit,
             warnings: 0,
+            parameters: ParametersPanel::from_parameters(&[], false),
+            parameter_drafts: HashMap::new(),
+            committed_parameters: BTreeMap::new(),
+            parameters_visible: true,
             project_root: project_root.to_path_buf(),
             output_dir,
             printer_model,
@@ -264,27 +316,140 @@ impl ViewerPane {
                 ReloadKind::Motion | ReloadKind::Schematic => {}
             },
             Message::Resized(size) => self.input.set_view_height(size.height),
+            Message::ToggleParameters => {
+                self.parameters_visible = !self.parameters_visible;
+            }
+            // The shell acts on commits; the pane's local half (value snap,
+            // draft clear) was applied when the message was emitted.
+            Message::ParameterCommit(_, _) => {}
+            Message::Parameters(message) => return self.update_parameters(message),
         }
         Task::none()
     }
 
     /// The pane's subscriptions: the output-event relay plus keyboard
-    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag).
+    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag)
+    /// and the parameters overlay's ⌥⌘I toggle.
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
         let modifiers = keyboard::listen().filter_map(|event| match event {
             keyboard::Event::ModifiersChanged(modifiers) => {
                 Some(Message::ModifiersChanged(modifiers))
             }
+            // ⌥⌘I (Commands.swift:69-73); the character form matches the
+            // logical key with option held (macOS composes ⌥I — the
+            // ignoring-modifiers key stays "i").
+            keyboard::Event::KeyPressed { key, modifiers, .. }
+                if modifiers.alt()
+                    && modifiers.logo()
+                    && matches!(&key, keyboard::Key::Character(c) if c.eq_ignore_ascii_case("i")) =>
+            {
+                Some(Message::ToggleParameters)
+            }
             _ => None,
         });
         Subscription::batch([relay, modifiers])
     }
 
+    // ── parameters overlay (M5) ──────────────────────────────────────────
+
+    /// Follow the bridge's parameter refresh: committed values update
+    /// (clearing any draft whose value changed — upstream's bound field
+    /// text follows `parameter.value`), and the panel rows sync (keeping
+    /// mid-drag edits, re-fitting only escaped ranges).
+    pub fn sync_parameters(&mut self, params: &[ModelParameter]) {
+        for param in params {
+            if self.committed_parameters.get(&param.name) != Some(&param.value) {
+                self.parameter_drafts.remove(&param.name);
+            }
+        }
+        self.committed_parameters = params
+            .iter()
+            .map(|param| (param.name.clone(), param.value))
+            .collect();
+        self.parameters.sync(params);
+    }
+
+    /// One overlay message. `Release`/`Submit` return the settled commit
+    /// (if any) as a [`Message::ParameterCommit`] task for the shell to
+    /// intercept.
+    fn update_parameters(&mut self, message: parameters_view::Message) -> Task<Message> {
+        match message {
+            parameters_view::Message::Drag(name, value) => {
+                if let Some((_, state)) = self.slider_mut(&name) {
+                    state.value = value;
+                    state.editing = true;
+                }
+            }
+            parameters_view::Message::Release(name) => {
+                if let Some((name, value)) = self.commit_parameter(&name) {
+                    return Task::done(Message::ParameterCommit(name, value));
+                }
+            }
+            parameters_view::Message::Draft(name, text) => {
+                // The thumb follows valid field text live (upstream's
+                // binding); the raw string stages until submit.
+                if let Ok(value) = text.parse::<f64>() {
+                    if let Some((_, state)) = self.slider_mut(&name) {
+                        state.value = value;
+                    }
+                }
+                self.parameter_drafts.insert(name, text);
+            }
+            parameters_view::Message::Submit(name) => {
+                if let Some((name, value)) = self.submit_parameter(&name) {
+                    return Task::done(Message::ParameterCommit(name, value));
+                }
+            }
+            parameters_view::Message::Collapse(collapsed) => {
+                self.parameters.collapsed = collapsed;
+            }
+            parameters_view::Message::Close => self.parameters_visible = false,
+            // The shell owns compare state; the picker's report stops here.
+            parameters_view::Message::Compare(_) => {}
+            // The busy-gated slider's placeholder (parameters_view docs).
+            parameters_view::Message::Inert => {}
+        }
+        Task::none()
+    }
+
+    fn slider_mut(&mut self, name: &str) -> Option<&mut (String, crate::parameters::SliderState)> {
+        self.parameters.sliders.iter_mut().find(|(n, _)| n == name)
+    }
+
+    /// The release path: end the drag, commit against the parameter's
+    /// committed value, and apply the local half (the value snaps and the
+    /// range re-fits when the commit escaped it — together the round-trip
+    /// of upstream's in-commit refit plus onChange). The returned pair is
+    /// what the shell forwards to the bridge.
+    fn commit_parameter(&mut self, name: &str) -> Option<(String, f64)> {
+        let current = *self.committed_parameters.get(name)?;
+        let (_, state) = self.slider_mut(name)?;
+        state.editing = false;
+        let value = state.commit(current)?;
+        state.sync_from(value);
+        Some((name.to_string(), value))
+    }
+
+    /// The field's submit path: stage the draft's value (an unparseable
+    /// one just clears — upstream's numeric formatter never stages one),
+    /// then the release path's commit. A submit with NO draft commits the
+    /// live value, like upstream's field bound to `$value`.
+    fn submit_parameter(&mut self, name: &str) -> Option<(String, f64)> {
+        if let Some(draft) = self.parameter_drafts.remove(name) {
+            if let Some(value) = draft.parse::<f64>().ok().filter(|value| value.is_finite()) {
+                if let Some((_, state)) = self.slider_mut(name) {
+                    state.value = value;
+                }
+            }
+        }
+        self.commit_parameter(name)
+    }
+
     /// The 3D pane's element: the shader canvas in a mouse area over the
     /// status bar (upstream ModelPane's VStack: content then
     /// PaneStatusBar).
-    pub fn view_model_3d(&self) -> Element<'_, Message> {
+    pub fn view_model_3d(&self, overlay: Option<OverlayContext<'_>>) -> Element<'_, Message> {
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
             Column::new()
                 .push(text("No model").size(18))
@@ -297,10 +462,44 @@ impl ViewerPane {
         } else {
             self.view_canvas()
         };
+        // The overlay floats over the canvas, top-trailing with 10 px of
+        // padding (ModelPane.swift:41-44). `None` (or upstream's gate — no
+        // model, no parameters, hidden) skips the layer entirely.
+        let content: Element<'_, Message> = match overlay.filter(|_| self.show_parameters_overlay())
+        {
+            Some(ctx) => {
+                let parameters = parameters_view::view_parameters(
+                    &self.parameters,
+                    &self.parameter_drafts,
+                    &self.committed_parameters,
+                    &ctx,
+                )
+                .map(Message::Parameters);
+                let positioned = Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(container(parameters).padding(10))
+                    .width(Length::Fill);
+                Stack::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .push(content)
+                    .push(positioned)
+                    .into()
+            }
+            None => content,
+        };
         Column::new()
             .push(content)
             .push(self.view_status_bar())
             .into()
+    }
+
+    /// Upstream's overlay gate: visible AND parameters exist AND a model
+    /// renders (ModelPane.swift:41-44).
+    fn show_parameters_overlay(&self) -> bool {
+        self.parameters_visible
+            && !self.parameters.sliders.is_empty()
+            && !self.scene.scene.parts.is_empty()
     }
 
     /// Re-read everything model-shaped from `output/` and replace the
@@ -593,6 +792,7 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
 mod tests {
     use super::*;
     use cosmic::iced::mouse::ScrollDelta;
+    use engine::project::versions::ProjectVersion;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d =
@@ -836,9 +1036,180 @@ mod tests {
         // Element construction is pure — the shader program only reaches
         // the GPU at draw time.
         let (_, pane_empty) = pane("view-empty", &[], &[]);
-        let _ = pane_empty.view_model_3d();
+        let _ = pane_empty.view_model_3d(None);
 
         let (_, pane_full) = pane("view-full", &[], &["golden/model.3mf"]);
-        let _ = pane_full.view_model_3d();
+        let _ = pane_full.view_model_3d(None);
+    }
+
+    #[test]
+    fn parameters_visible_by_default_and_option_command_i_toggles() {
+        // areParametersVisible default true (Project.swift:71); ⌥⌘I flips
+        // it (Commands.swift:69-73).
+        let (_, mut pane) = pane("opt-cmd-i", &[], &["golden/model.3mf"]);
+        assert!(pane.parameters_visible);
+        let _ = pane.update(Message::ToggleParameters);
+        assert!(!pane.parameters_visible);
+        let _ = pane.update(Message::ToggleParameters);
+        assert!(pane.parameters_visible);
+    }
+
+    #[test]
+    fn drag_then_release_commits_against_the_committed_value() {
+        // The full release path: drag (live, editing), release → commit
+        // computed against the SYNCED committed value, the local half
+        // applied (editing cleared, value snapped to the commit).
+        let (_, mut pane) = pane("drag-release", &[], &["golden/model.3mf"]);
+        pane.sync_parameters(&[ModelParameter {
+            name: "wall".into(),
+            value: 3.0,
+        }]);
+
+        let _ = pane.update(Message::Parameters(parameters_view::Message::Drag(
+            "wall".into(),
+            4.4,
+        )));
+        let (state_value, editing) = {
+            let (_, state) = &pane.parameters.sliders[0];
+            (state.value, state.editing)
+        };
+        assert_eq!((state_value, editing), (4.4, true), "drag is live");
+
+        let commit = pane.commit_parameter("wall");
+        assert_eq!(commit, Some(("wall".to_string(), 4.0)), "integer rule");
+        let (_, state) = &pane.parameters.sliders[0];
+        assert_eq!(
+            (state.value, state.editing),
+            (4.0, false),
+            "snapped, settled"
+        );
+    }
+
+    #[test]
+    fn typed_draft_follows_the_thumb_and_submits() {
+        let (_, mut pane) = pane("draft-submit", &[], &["golden/model.3mf"]);
+        pane.sync_parameters(&[ModelParameter {
+            name: "wall".into(),
+            value: 0.5,
+        }]);
+
+        let _ = pane.update(Message::Parameters(parameters_view::Message::Draft(
+            "wall".into(),
+            "30".into(),
+        )));
+        assert!(pane.parameter_drafts.contains_key("wall"));
+        assert_eq!(pane.parameters.sliders[0].1.value, 30.0, "thumb follows");
+
+        let commit = pane.submit_parameter("wall");
+        assert_eq!(commit, Some(("wall".to_string(), 30.0)), "3-decimal rule");
+        assert!(
+            !pane.parameter_drafts.contains_key("wall"),
+            "draft consumed"
+        );
+        let (_, state) = &pane.parameters.sliders[0];
+        assert_eq!((state.min, state.max), (0.0, 60.0), "escaped range re-fit");
+
+        // an unparseable draft clears without moving the commit: the field
+        // falls back to the live value (still 30; the committed map stays
+        // at 0.5 until the shell syncs the refresh)
+        pane.parameter_drafts.insert("wall".into(), "-".into());
+        let commit = pane.submit_parameter("wall");
+        assert_eq!(
+            commit,
+            Some(("wall".to_string(), 30.0)),
+            "garbage draft falls back to the live value"
+        );
+    }
+
+    #[test]
+    fn sync_clears_drafts_whose_value_changed() {
+        let (_, mut pane) = pane("sync-drafts", &[], &["golden/model.3mf"]);
+        pane.sync_parameters(&[
+            ModelParameter {
+                name: "wall".into(),
+                value: 2.0,
+            },
+            ModelParameter {
+                name: "height".into(),
+                value: 10.0,
+            },
+        ]);
+        pane.parameter_drafts.insert("wall".into(), "2.5".into());
+        pane.parameter_drafts.insert("height".into(), "12".into());
+
+        // wall changed externally (a refused build left it rewritten);
+        // height did not
+        pane.sync_parameters(&[
+            ModelParameter {
+                name: "wall".into(),
+                value: 2.5,
+            },
+            ModelParameter {
+                name: "height".into(),
+                value: 10.0,
+            },
+        ]);
+        assert!(
+            !pane.parameter_drafts.contains_key("wall"),
+            "changed → cleared"
+        );
+        assert!(pane.parameter_drafts.contains_key("height"), "kept");
+
+        // collapse and close round-trip through the overlay messages
+        let _ = pane.update(Message::Parameters(parameters_view::Message::Collapse(
+            true,
+        )));
+        assert!(pane.parameters.collapsed);
+        let _ = pane.update(Message::Parameters(parameters_view::Message::Collapse(
+            false,
+        )));
+        assert!(!pane.parameters.collapsed);
+        let _ = pane.update(Message::Parameters(parameters_view::Message::Close));
+        assert!(!pane.parameters_visible);
+    }
+
+    #[test]
+    fn overlay_view_builds_in_every_shape() {
+        // Element construction is pure; the shapes: collapsed, comparing
+        // with versions, busy, and an empty previous map.
+        let (_, mut pane) = pane("overlay-view", &[], &["golden/model.3mf"]);
+        pane.sync_parameters(&[
+            ModelParameter {
+                name: "wall".into(),
+                value: 2.0,
+            },
+            ModelParameter {
+                name: "height".into(),
+                value: 10.0,
+            },
+        ]);
+        let previous = BTreeMap::from([("wall".to_string(), 1.5)]);
+        let versions = vec![ProjectVersion {
+            number: 1,
+            created_at: time::OffsetDateTime::now_utc(),
+            prompt: "a bracket".into(),
+            session_id: None,
+        }];
+        for collapsed in [false, true] {
+            pane.parameters.collapsed = collapsed;
+            for busy in [false, true] {
+                let ctx = OverlayContext {
+                    previous: &previous,
+                    busy,
+                    versions: &versions,
+                    compare: Some(1),
+                };
+                let _ = pane.view_model_3d(Some(ctx));
+            }
+        }
+        // hidden → the overlay layer never mounts
+        pane.parameters_visible = false;
+        let ctx = OverlayContext {
+            previous: &previous,
+            busy: false,
+            versions: &versions,
+            compare: None,
+        };
+        let _ = pane.view_model_3d(Some(ctx));
     }
 }
