@@ -1286,6 +1286,45 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
     .boxed()
 }
 
+pub(crate) fn stl_of_box(bounds: [[f64; 3]; 2]) -> Vec<u8> {
+    fn push_f32s(out: &mut Vec<u8>, fs: &[f32]) {
+        for f in fs {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    let mn = bounds[0].map(|c| c as f32);
+    let mx = bounds[1].map(|c| c as f32);
+    // corner (i, j, k) picks min/max per axis; the six faces as quads
+    let corner = |i: u8, j: u8, k: u8| {
+        [
+            [mn[0], mx[0]][i as usize],
+            [mn[1], mx[1]][j as usize],
+            [mn[2], mx[2]][k as usize],
+        ]
+    };
+    let quads: [[(u8, u8, u8); 4]; 6] = [
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], // z = min
+        [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], // z = max
+        [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)], // y = min
+        [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], // y = max
+        [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], // x = min
+        [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], // x = max
+    ];
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0u8; 80]);
+    out.extend_from_slice(&12u32.to_le_bytes());
+    for quad in quads {
+        for tri in [(0usize, 1, 2), (0, 2, 3)] {
+            push_f32s(&mut out, &[0.0; 3]); // normal: unused by the parser
+            for idx in [tri.0, tri.1, tri.2] {
+                push_f32s(&mut out, &corner(quad[idx].0, quad[idx].1, quad[idx].2));
+            }
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
