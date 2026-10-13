@@ -1519,22 +1519,33 @@ mod tests {
     #[test]
     fn drag_is_not_a_click() {
         let (_, mut pane) = pane("drag", &[], &["golden/model.3mf"]);
+        // a real viewport, so a gate removal actually spawns (pick_pending
+        // is the observable) instead of dying at spawn_pick's 0x0 early-out
+        let _ = pane.update(Message::Resized(Size::new(800.0, 600.0)));
         let _ = pane.update(Message::ToggleMeasure);
         let _ = pane.update(Message::Moved(Point::new(100.0, 100.0)));
         let _ = pane.update(Message::Pressed);
+        // the first post-press move only anchors; the second accumulates
+        // the travel (CameraInput.move_to) — 199 px is a drag, not a click
+        let _ = pane.update(Message::Moved(Point::new(101.0, 100.0)));
         let _ = pane.update(Message::Moved(Point::new(200.0, 200.0)));
         let _ = pane.update(Message::Released);
-        assert!(pane.tools.measure_points.is_empty(), "drag never picks");
-        // a stationary non-primary release is not a pick either: mirror a right
-        // press through the recorded press kind (upstream: left mouseUp only)
-        pane.last_press_primary = false; // test seam
+        assert!(
+            !pane.pick_pending,
+            "199 px of travel is a drag — the was_click gate must hold the pick"
+        );
+        // a stationary NON-primary release is not a pick either: the right
+        // press is the production path that records the press kind (the pane
+        // funnels right releases into Released; upstream picks on left
+        // mouseUp only, CameraInputView.swift:50-53)
         let _ = pane.update(Message::Moved(Point::new(400.0, 300.0)));
-        let _ = pane.update(Message::Pressed);
+        let _ = pane.update(Message::RightPressed);
         let _ = pane.update(Message::Released);
         assert!(
-            pane.tools.measure_points.is_empty(),
-            "non-primary release never picks"
+            !pane.pick_pending,
+            "stationary right release never spawns a pick"
         );
+        assert!(pane.tools.measure_points.is_empty());
     }
 
     #[test]
