@@ -1,0 +1,94 @@
+use app::motion_controls::{collision_text, format_significant, speed_label, time_readout};
+use engine::parsing::animation::Collision;
+
+#[test]
+fn time_readout_is_two_fraction_digits() {
+    assert_eq!(time_readout(0.0, 2.0), "0.00 / 2.00 s");
+    assert_eq!(time_readout(1.25, 2.0), "1.25 / 2.00 s");
+}
+
+#[test]
+fn significant_digits_match_the_two_swift_shapes() {
+    // values row (1...3): MotionControls.swift:58
+    assert_eq!(format_significant(10.0, 1, 3), "10");
+    assert_eq!(format_significant(0.5, 1, 3), "0.5");
+    assert_eq!(format_significant(3.14159, 1, 3), "3.14");
+    assert_eq!(format_significant(1234.5, 1, 3), "1,230", "grouped, 3 sig");
+    assert_eq!(format_significant(0.0, 1, 3), "0");
+    // volume (1...2): MotionControls.swift:86
+    assert_eq!(format_significant(0.5, 1, 2), "0.5");
+    assert_eq!(format_significant(12.345, 1, 2), "12");
+    assert_eq!(
+        format_significant(1.0, 2, 2),
+        "1.0",
+        "min binds: keep the .0"
+    );
+}
+
+#[test]
+fn speed_labels_are_shortest_display() {
+    for (speed, label) in [
+        (0.1, "0.1×"),
+        (0.25, "0.25×"),
+        (0.5, "0.5×"),
+        (1.0, "1×"),
+        (2.0, "2×"),
+    ] {
+        assert_eq!(speed_label(speed), label);
+    }
+}
+
+#[test]
+fn collision_text_pairs_volumes_and_joins() {
+    let one = Collision {
+        parts: vec!["base".into(), "lid".into()],
+        volume: Some(0.5),
+    };
+    assert_eq!(collision_text(&[one.clone()]), "base ↔ lid 0.5 mm³");
+    let unmeasured = Collision {
+        parts: vec!["cam".into(), "lid".into()],
+        volume: None,
+    };
+    assert_eq!(
+        collision_text(&[unmeasured.clone()]),
+        "cam ↔ lid",
+        "no volume: the pair alone"
+    );
+    assert_eq!(
+        collision_text(&[one, unmeasured]),
+        "base ↔ lid 0.5 mm³, cam ↔ lid"
+    );
+}
+
+#[test]
+fn values_render_in_first_appearance_order() {
+    // a synthetic study whose total order is NOT alphabetical: within a
+    // frame the engine iterates a sorted BTreeMap, then appends each
+    // frame's new names — so Mid (frame 2; sorts before Zed) trails Zed
+    let study = engine::parsing::animation::MotionStudy::parse(
+        br#"{"frames":[
+            {"t":0,"values":{"Zed":1.0,"Alpha":2.0}},
+            {"t":1,"values":{"Mid":3.0,"Alpha":2.5}}
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        study.value_names(),
+        ["Alpha", "Zed", "Mid"],
+        "engine order: sorted within a frame, first-appearance across frames"
+    );
+    // at t=0.5 every name is interpolated into the state: value_names order
+    // (Alpha, Zed, Mid) and BTreeMap order (Alpha, Mid, Zed) differ exactly
+    // here — at t=0 Mid is absent and the two orders coincide
+    let state = study.state_at(0.5);
+    let rendered: Vec<&str> = study
+        .value_names()
+        .iter()
+        .filter_map(|n| state.values.get(*n).map(|_| *n))
+        .collect();
+    assert_eq!(
+        rendered,
+        ["Alpha", "Zed", "Mid"],
+        "the controls must iterate value_names(), never the BTreeMap"
+    );
+}

@@ -20,6 +20,9 @@
 //! - [`chat_view`] — the chat pane widgets over [`chat`]'s state.
 //! - [`localize`] — the fluent scaffold (catalog unwired until M8).
 //! - [`markdown`] — inline markdown rendering for chat text.
+//! - [`motion_controls`] — the MotionControls port: the study-playback
+//!   capsule's Swift-parity formatting (time, values, speeds, collisions);
+//!   the widget rows mount with the pane's playback messages (M7).
 //! - [`panes`] — pane-grid ↔ layout-tree conversion + resize clamping.
 //! - [`parameters`] / [`parameters_view`] — the model-parameter panel the
 //!   bridge syncs and the overlay the 3D pane floats (M5).
@@ -45,6 +48,7 @@ pub mod chat;
 pub mod chat_view;
 pub mod localize;
 pub mod markdown;
+pub mod motion_controls;
 pub mod panes;
 pub mod parameters;
 pub mod parameters_view;
