@@ -1,10 +1,10 @@
 //! Viewer tool state — the port of upstream `ModelViewerState.swift` plus
 //! the parts-overlay rules it feeds: one struct holding the toolbar/
 //! overlay state behind the 3D pane (grid, wireframe, measure, section,
-//! layout, explode, hidden/attached part sets, parts drawer collapse) and
-//! the small decision rules that don't need the scene: which layout is
-//! effective, which layouts the picker offers, and the double-click decode
-//! for part rows.
+//! layout, explode, hidden/attached part sets, parts drawer collapse,
+//! motion playback) and the small decision rules that don't need the
+//! scene: which layout is effective, which layouts the picker offers,
+//! whether motion is offered, and the double-click decode for part rows.
 //!
 //! Pure: no cosmic/iced types, no I/O, part-name keyed (`BTreeSet<String>`)
 //! so the pane resolves T1's `groups` to names at the call site. Layout and
@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use engine::settings::PartsLayout;
+use viewer::playback::MotionPlayer;
 use viewer::tools::section::SectionAxis;
 
 /// The explode slider's range (PartsOverlay.swift:28, `Slider(…, in:
@@ -31,9 +32,10 @@ pub const EXPLODE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
 /// The `ModelViewerState` port. Field defaults per
-/// ModelViewerState.swift:21-47: grid on, wireframe/measure/section off,
-/// axis X, position mid, explode 1.0, sets empty; `layout` and `collapsed`
-/// come from settings (upstream defaults Exploded / not collapsed).
+/// ModelViewerState.swift:21-47: grid on, wireframe/measure/section/
+/// animation off, axis X, position mid, explode 1.0, sets empty, player
+/// idle; `layout` and `collapsed` come from settings (upstream defaults
+/// Exploded / not collapsed).
 #[derive(Debug, Clone)]
 pub struct ViewerTools {
     pub shows_grid: bool,
@@ -51,6 +53,13 @@ pub struct ViewerTools {
     pub attached: BTreeSet<String>,
     pub measure_points: Vec<[f32; 3]>,
     pub collapsed: bool,
+    /// Animation running (`isAnimating`): sectioning/measuring are
+    /// excluded and the layout is forced Assembled while it is on —
+    /// set through [`Self::set_animating`], which owns the side effects.
+    pub animating: bool,
+    /// Motion playback state (MotionPlayer.swift:6-9): time, play flag,
+    /// speed, loop. Idle at 0, not playing, 1×, looping.
+    pub player: MotionPlayer,
 }
 
 impl ViewerTools {
@@ -70,6 +79,8 @@ impl ViewerTools {
             attached: BTreeSet::new(),
             measure_points: Vec::new(),
             collapsed,
+            animating: false,
+            player: MotionPlayer::default(),
         }
     }
 
@@ -92,6 +103,21 @@ impl ViewerTools {
     /// is the pane's job (it owns the scene pipeline).
     pub fn set_sectioning(&mut self, on: bool) {
         self.sectioning = on;
+    }
+
+    /// Animation toggle (ModelViewerState.swift:28-38, `isAnimating`
+    /// didSet, verbatim): every toggle — on or off — restarts the clock
+    /// at 0 and sets playback to match; turning it ON also drops
+    /// sectioning and measuring. Turning it OFF leaves those two alone:
+    /// they were already cleared when it went on.
+    pub fn set_animating(&mut self, on: bool) {
+        self.animating = on;
+        self.player.time = 0.0;
+        self.player.is_playing = on;
+        if on {
+            self.sectioning = false;
+            self.measuring = false;
+        }
     }
 
     /// Record a measure click (ModelViewerState.swift:67-72): two points
@@ -149,12 +175,12 @@ impl ViewerTools {
     }
 
     /// The layout the renderer should use (ModelViewerState.swift:78-86):
-    /// comparing forces Assembled, and Exploded needs at least 2 parts —
-    /// one part has nothing to explode away from. Upstream also forces
-    /// Assembled while `isAnimating` (:79); deliberately omitted — M6 has
-    /// no animation, and M7's animation work will add it load-bearing.
+    /// animating ([`Self::set_animating`]) or comparing forces Assembled,
+    /// and Exploded needs at least 2 parts — one part has nothing to
+    /// explode away from.
     pub fn effective_layout(&self, parts_count: usize, comparing: bool) -> PartsLayout {
-        if comparing || (self.layout == PartsLayout::Exploded && parts_count < 2) {
+        if self.animating || comparing || (self.layout == PartsLayout::Exploded && parts_count < 2)
+        {
             PartsLayout::Assembled
         } else {
             self.layout
@@ -173,6 +199,14 @@ impl ViewerTools {
         } else {
             vec![PartsLayout::Assembled, PartsLayout::Plate]
         }
+    }
+
+    /// The Animazione toggle's gate (ModelPane.swift:13-15, :136): motion
+    /// is offered iff a study is present AND the model has more than one
+    /// part; otherwise the pane shows the ask-the-agent button instead
+    /// (:137-144).
+    pub fn motion_available(&self, parts_count: usize, study_present: bool) -> bool {
+        study_present && parts_count > 1
     }
 }
 
