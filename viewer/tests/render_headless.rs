@@ -211,10 +211,25 @@ fn render_frame_msaa(
     h: u32,
     msaa: u32,
 ) -> Vec<u8> {
+    render_frame_msaa_with_grid(device, queue, scene, None, camera, w, h, msaa)
+}
+
+/// [`render_frame_msaa`] with the overlay threaded through the Frame: the
+/// grid runs INSIDE the multisample pass, and its straight-alpha blend must
+/// survive the resolve+blit composite — the msaa grid-alpha test's subject.
+fn render_frame_msaa_with_grid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &PartScene,
+    grid: Option<&grid::GridMesh>,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+    msaa: u32,
+) -> Vec<u8> {
     let mut pipeline =
         MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, msaa);
-    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
-    render_frame_with_poses(
+    render_frame_opts(
         device,
         queue,
         &mut pipeline,
@@ -222,13 +237,11 @@ fn render_frame_msaa(
         camera,
         w,
         h,
-        None,
-        None,
+        grid,
         &Options {
             msaa,
             ..Options::default()
         },
-        &poses,
     )
 }
 
@@ -838,6 +851,50 @@ fn msaa_smooths_a_diagonal_edge() {
         cap_red_pixels(&cut) > 2_000,
         "section cap must render through the 4x path: {} red px",
         cap_red_pixels(&cut)
+    );
+}
+
+/// Carry-forward strike (M6 T7): the alpha-blended grid survives the 4x
+/// MSAA resolve path. The grid pipeline runs INSIDE the multisample pass,
+/// so its straight-alpha lines blend onto the transparent-cleared
+/// attachment and the resolve+blit composite carries them back over the
+/// app background: grid-colored ink must be present after the blit, at
+/// pixel values consistent with straight-alpha compositing. Grid ink on
+/// the dark background reads ≈ `alpha·white + (1−alpha)·bg` — whitish
+/// chroma well away from the model's blue/red faces and the tripod's
+/// saturated RGB boxes (all > 0.4 chroma-distance from white). A resolve
+/// that drops the coverage alpha yields either full-white lines or
+/// background: the count catches the second, the no-white assert the
+/// first.
+#[test]
+fn msaa_resolves_keep_grid_alpha() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut bg_pipe = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut bg_pipe, &camera, 800, 600);
+    let g = grid::geometry((scene.aabb_min, scene.aabb_max), None);
+    let px = render_frame_msaa_with_grid(device, queue, &scene, Some(&g), &camera, 800, 600, 4);
+    // the blit's premultiplied composite over the a=1 clear keeps the
+    // target alpha at 255 — pinned so a blit regression cannot ship a
+    // half-transparent frame
+    assert!(px.chunks(4).all(|c| c[3] == 255), "target stays opaque");
+    let grid_ink = px
+        .chunks(4)
+        .filter(|c| is_ink(c, bg))
+        .filter(|c| chroma_dist(chroma(decode_linear(c)), [1.0, 1.0, 1.0]) < 0.4)
+        .count();
+    assert!(
+        grid_ink > 300,
+        "grid lines visible through the resolve: {grid_ink}px"
+    );
+    // the alpha-lost regression reads OPAQUE white lines (alpha 0.10/0.28
+    // read as 1): the frame's only white source is the sub-unit-alpha
+    // lines — bed is None, markers None, the model blue/red — so no
+    // fully-white pixel may exist
+    assert!(
+        !px.chunks(4).any(|c| c[0] > 250 && c[1] > 250 && c[2] > 250),
+        "alpha preserved: no fully-white pixel may exist"
     );
 }
 

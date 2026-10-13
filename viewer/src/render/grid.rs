@@ -14,8 +14,8 @@
 //! The scene frame these coordinates assume is the pinned one `from_parts`
 //! produces: model floor at scene y=0, x/z centered. The grid plane sits
 //! just below the floor at y = −0.05, the bed just above it at y = 0.06
-//! (both absolute, facts #34/#37); the tripod rises from y=0 at the
-//! footprint corner.
+//! (both absolute, facts #34/#37); the tripod's corner sits at y = 0.05
+//! (facts #36), its axis boxes centering their thickness there.
 //!
 //! The bed outline is M6 scope pulled in early: the geometry primitive
 //! lives here with the grid, while its plate-view integration — feeding
@@ -49,6 +49,10 @@ const MINOR_ALPHA: f32 = 0.10;
 const MAJOR_ALPHA: f32 = 0.28;
 /// Dark-mode grid color (facts #34; light-mode black comes with theming).
 const LINE_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
+/// The tripod corner's height (facts #36, ModelViewer.swift:451: the corner
+/// SIMD3's y literal 0.05 — the axis boxes CENTER their thickness band here,
+/// so they legitimately dip to TRIPOD_Y − thickness/2 below the floor).
+const TRIPOD_Y: f32 = 0.05;
 
 /// One unlit overlay vertex: world position plus linear rgba.
 #[repr(C)]
@@ -224,9 +228,10 @@ pub fn geometry(aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) -> GridMesh {
     // Axis tripod (facts #36): RGB boxes at the footprint corner + 15%
     // margin, each axis `max(all-spans·0.3, 5)` long. Swift's corner z is
     // `|sceneVector(size).z|/2 + margin` = half the MODEL y extent (a
-    // ground-plane span; MODEL is Z-up) — the scene-z extent, size[2].
+    // ground-plane span; MODEL is Z-up) — the scene-z extent, size[2] —
+    // and its corner y is the 0.05 literal (ModelViewer.swift:451).
     let margin = (footprint * 0.15).max(3.0);
-    let corner = [-size[0] / 2.0 - margin, 0.0, size[2] / 2.0 + margin];
+    let corner = [-size[0] / 2.0 - margin, TRIPOD_Y, size[2] / 2.0 + margin];
     let axis_length = (size[0].max(size[1]).max(size[2]) * 0.3).max(5.0);
     let thickness = (axis_length / 40.0).max(0.6);
     // Apple systemRed/Green/Blue sRGB triples — the same u8-sRGB→linear
@@ -278,6 +283,86 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5)
+    }
+
+    /// Grid-line vertex count of a bed-less `geometry` build — the offset
+    /// where the tripod's box vertices start.
+    fn n_lines_of(g: &GridMesh) -> usize {
+        g.steps.len() * 2 * 6
+    }
+
+    /// The tripod corner (facts #36, ModelViewer.swift:449-455): x at half
+    /// the MODEL x span + margin, z at half the MODEL y span (a GROUND-plane
+    /// span — the remap puts model y on scene z) + margin, y pinned at
+    /// 0.05. The +X (red) box pins all three axes: it grows corner ->
+    /// corner+len in x, centers its thickness band on TRIPOD_Y, and sits at
+    /// the corner's z.
+    #[test]
+    fn tripod_corner_pinned_at_model_y_half_extent() {
+        // scene aabb: x span 40, y span 20 (model height), z span 60 (model y)
+        let g = geometry(([-20.0, 0.0, -30.0], [20.0, 20.0, 30.0]), None);
+        let margin = (60.0f32 * 0.15).max(3.0); // footprint = max(40, 60) = 60
+        let len = (60.0f32 * 0.3).max(5.0); // longest span (60) drives the axes
+        let thickness = (len / 40.0f32).max(0.6);
+        // upstream's corner literal (ModelViewer.swift:451) — 0.05 written
+        // OUT, not read back through TRIPOD_Y, or the assert could never
+        // catch a wrong constant
+        let pinned_y = 0.05f32;
+        let corner = [-20.0 - margin, pinned_y, 30.0 + margin];
+        // the +X (red) box's color: sRGB systemRed (255, 59, 48) through the
+        // shared EOTF
+        let red = [
+            crate::render::parts::srgb_to_linear(255),
+            crate::render::parts::srgb_to_linear(59),
+            crate::render::parts::srgb_to_linear(48),
+        ];
+        let tripod = &g.vertices[n_lines_of(&g)..];
+        let reds: Vec<[f32; 3]> = tripod
+            .iter()
+            .filter(|v| v.color[..3] == red)
+            .map(|v| v.pos)
+            .collect();
+        assert_eq!(reds.len(), 36, "one box: 12 triangles x 3 corners");
+        let extent = |axis: usize| {
+            let mut col: Vec<f32> = reds.iter().map(|p| p[axis]).collect();
+            col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (col[0], col[col.len() - 1])
+        };
+        // x: the box grows from the pinned corner out to corner + len
+        let (x0, x1) = extent(0);
+        assert!((x0 - corner[0]).abs() < 1e-4, "starts at the corner: {x0}");
+        assert!(
+            (x1 - corner[0] - len).abs() < 1e-4,
+            "spans the axis len: {x1}"
+        );
+        // y: the box centers its thickness on the 0.05 pin — a y=0 port
+        // reads 0.05 low on both ends
+        let (y0, y1) = extent(1);
+        assert!(
+            (y0 - (pinned_y - thickness / 2.0)).abs() < 1e-4,
+            "bottom at 0.05 - thickness/2: {y0}"
+        );
+        assert!(
+            (y1 - (pinned_y + thickness / 2.0)).abs() < 1e-4,
+            "top at 0.05 + thickness/2: {y1}"
+        );
+        // z: the corner's ground-plane pin — half the MODEL y span + margin
+        let (z0, z1) = extent(2);
+        assert!(
+            (z0 - (corner[2] - thickness / 2.0)).abs() < 1e-4,
+            "z band at the corner: {z0}"
+        );
+        assert!(
+            (z1 - (corner[2] + thickness / 2.0)).abs() < 1e-4,
+            "z band at the corner: {z1}"
+        );
+        // and every tripod box rides the same band: the +Y blue box rises
+        // FROM the 0.05 pin, nothing dips below the centered thickness
+        assert!(
+            tripod
+                .iter()
+                .all(|v| v.pos[1] >= pinned_y - thickness / 2.0 - 1e-6)
+        );
     }
 
     /// The extents formula and the major/minor step layout, pure: footprint
