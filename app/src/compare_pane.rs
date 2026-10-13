@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::viewer_pane::ViewerPane;
 use crate::viewer_pane::load_model_parts;
-use viewer::render::{PartScene, NEUTRAL};
+use viewer::render::{NEUTRAL, PartScene};
 
 impl ViewerPane {
     /// Stage or clear the compared version's ghost mesh at the CURRENT
@@ -20,7 +20,11 @@ impl ViewerPane {
                 self.scene.ghost = load_model_parts(&dir.join("output"))
                     .map(|parts| Arc::new(PartScene::from_parts_with_pin(&parts, NEUTRAL, pin)));
                 self.comparing = self.scene.ghost.is_some();
-                self.ghost_version = if self.comparing { Some((number, dir)) } else { None };
+                self.ghost_version = if self.comparing {
+                    Some((number, dir))
+                } else {
+                    None
+                };
             }
             None => {
                 self.scene.ghost = None;
