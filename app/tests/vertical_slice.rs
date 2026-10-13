@@ -125,7 +125,7 @@ async fn run_slice() -> SliceRun {
     // pattern, over the whole window)
     let _ = window.view();
 
-    bridge.enqueue(PROMPT.to_string(), Vec::new());
+    let _ = bridge.enqueue(PROMPT.to_string(), Vec::new());
 
     // one turn, every message folded into the window as it arrives
     let mut events = Vec::new();
@@ -414,7 +414,7 @@ async fn prompt_to_rendered_model() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "thelio-only: surfaceless GPU render, writes the screenshot PNG"]
 async fn slice_offscreen_render() {
-    use viewer::render::{Frame, MeshPipeline, Options, PartAppearance, PartPose, default_camera};
+    use viewer::render::{Frame, MeshPipeline, Options, PartAppearance, default_camera};
 
     let SliceRun { window, .. } = run_slice().await;
     let scene = window.viewer.scene.scene.clone();
