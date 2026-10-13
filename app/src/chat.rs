@@ -115,6 +115,21 @@ impl ChatState {
         }
     }
 
+    /// Swap the transcript for the freshly loaded rows, keeping the input
+    /// bar's draft and attachments — the driver's bookkeeping appends rows
+    /// behind the window's back mid-conversation (upstream appends to the
+    /// same live model), so the reload must not eat what the user is
+    /// typing. Loaded rows are all closed, like [`ChatState::new`].
+    pub fn reload_rows(&mut self, persisted: Vec<ChatMessage>) {
+        self.messages = persisted;
+        self.active_thinking_id = None;
+        self.streaming_id = None;
+        self.thinking_started_at = None;
+        self.unconfirmed.clear();
+        self.turn_had_confirmed_text = false;
+        self.tool_last_emit.clear();
+    }
+
     /// Translate one engine event at wall time `now`.
     pub fn apply_at(&mut self, event: &EngineEvent, now: Instant) {
         match event {
@@ -1032,6 +1047,36 @@ mod tests {
             Some(("".into(), vec!["references/bracket.png".into()]))
         );
         assert!(state.draft_attachments.is_empty());
+    }
+
+    /// reload_rows swaps the transcript but keeps the input bar's draft
+    /// and attachments: the driver's bookkeeping appends rows mid-
+    /// conversation, and a reload that ate the typing draft would make
+    /// the next Send a silent no-op.
+    #[test]
+    fn reload_rows_keeps_the_draft() {
+        let mut state = ChatState::new(Vec::new());
+        state.draft = "thicken the walls".into();
+        state.draft_attachments = vec!["references/bracket.png".into()];
+        let reloaded = vec![ChatMessage {
+            id: Uuid::new_v4(),
+            role: Role::Summary,
+            text: "Version 1".into(),
+            date: OffsetDateTime::now_utc(),
+            tool: None,
+            detail: Some("1".into()),
+            action: None,
+            attachments: Vec::new(),
+        }];
+        state.reload_rows(reloaded);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].text, "Version 1");
+        assert_eq!(state.draft, "thicken the walls");
+        assert_eq!(state.draft_attachments, vec!["references/bracket.png"]);
+        assert!(state.can_send(), "the draft still sends after the reload");
+        // the loaded rows are all closed, like a fresh construction
+        assert_eq!(state.streaming_id, None);
+        assert!(state.unconfirmed.is_empty());
     }
 
     /// append returns the row's id and appends in order.

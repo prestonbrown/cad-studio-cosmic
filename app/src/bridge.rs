@@ -127,6 +127,21 @@ impl Activity {
     }
 }
 
+/// The bridge's activity classification, as the header's pure model sees
+/// it — two enums of the same upstream shape (the pipeline's actor-side
+/// field, [`crate::activity::Activity`] the ActivityViewer's model); the
+/// window folds terminal/build states across through this.
+impl From<Activity> for crate::activity::Activity {
+    fn from(activity: Activity) -> Self {
+        match activity {
+            Activity::Idle => Self::Idle,
+            Activity::Working(text) => Self::Working(text),
+            Activity::Succeeded(text) => Self::Succeeded(text),
+            Activity::Failed(text) => Self::Failed(text),
+        }
+    }
+}
+
 /// Why a pipeline command refused (upstream's guard branches in
 /// `setParameter`/`build`/`send`, Project.swift:343-362 and 373-391).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

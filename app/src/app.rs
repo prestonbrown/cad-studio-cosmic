@@ -800,12 +800,23 @@ async fn locate_agent(custom_path: Option<String>) -> bool {
 /// [`EnvEvent`] in arrival order (the drain law), so the log and the
 /// progress bar move live through an install.
 fn python_events(handle: EnvHandle) -> Task<Action<Message>> {
+    use cosmic::iced::futures::SinkExt;
     Task::stream(cosmic::iced::stream::channel(
         16,
         move |mut output: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
             let EnvHandle { mut events } = handle;
             while let Some(event) = events.recv().await {
-                let _ = output.try_send(Message::PythonSheet(sheets::PythonMessage::Event(event)));
+                // the terminal must land: a dropped Finished would leave
+                // the sheet stuck Installing, so it sends awaited
+                // (backpressure, the Sink trait) where the streaming body
+                // merely tries
+                let terminal = matches!(event, EnvEvent::Finished(_));
+                let message = Message::PythonSheet(sheets::PythonMessage::Event(event));
+                if terminal {
+                    let _ = output.send(message).await;
+                } else {
+                    let _ = output.try_send(message);
+                }
             }
         },
     ))

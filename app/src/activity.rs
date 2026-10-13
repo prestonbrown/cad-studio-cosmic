@@ -4,10 +4,10 @@
 //! folds bridge messages into an [`Activity`] through [`next`] and renders
 //! [`issues`] in the issue buttons.
 //!
-//! M4 scope binding: `buildError` never exists yet (no Compila until M5),
-//! so the error button is wired but always empty; the missing-output
-//! warning is the upstream home of output warnings and IS live. The
-//! manifest-warning, motion-error and collision issues join at M6.
+//! The build error rides the FIRST issue slot from the live pipeline
+//! (`Bridge::build_error`, wired M5 T8); the missing-output warning is
+//! the upstream home of output warnings. The manifest-warning,
+//! motion-error and collision issues join at M6.
 
 use std::path::Path;
 

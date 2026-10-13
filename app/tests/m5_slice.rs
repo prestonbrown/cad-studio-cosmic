@@ -3,30 +3,42 @@
 //! folded into the sheet state, the Ready terminal mirrored into the
 //! bridge's readiness guards), one fake-agent turn landing the golden
 //! outputs through the engine watcher and recording version 1 (the
-//! agent-turn outputs gate), a slider commit rewriting model.py and
-//! rebuilding through the fake interpreter (the watcher-driven reload
-//! rebuilding the scene) for version 2, a second commit recording version
-//! 3, `restore(2)` returning model.py/chat/output to the first slider's
-//! snapshot, and the compare picker parsing version 3's parameters from
-//! its stored model.py copy.
+//! agent-turn outputs gate), a slider commit through the WINDOW's
+//! interception (`viewer_pane::Message::ParameterCommit` → the bridge)
+//! rewriting model.py and rebuilding through the fake interpreter (the
+//! watcher-driven reload rebuilding the scene) for version 2, a second
+//! commit recording version 3, `restore(2)` returning
+//! model.py/chat/output to the first slider's snapshot, and the compare
+//! picker parsing version 3's parameters from its stored model.py copy.
+//! The driver-appended version rows must render LIVE in the window's
+//! chat, and the build activity must reach the window (the header's
+//! stop-button/elapsed consequence).
 //!
-//! Asserted against the bridge and the pure models (disk + sheet
-//! reducer); the window folds every message exactly as the app layer maps
-//! them, minus the iced runtime (the M4 vertical slice's harness). One
-//! test holds the whole story — the CAD_* env is per-spawn, so the phases
-//! share one ENV_LOCK window.
+//! The failure-path companion (`failed_build_renders_row_activity_and_fix_action`):
+//! a failed Compila renders the "model.py failed to build." system row
+//! with its AskClaudeToFix action live in the window, the activity and
+//! `build_error` reach the header's issue-button sources, and the action
+//! button drives `ask_agent_to_fix` as a real turn.
+//!
+//! The window rides ONE bridge — the tapped `Bridge::launch` handle
+//! injected through `ProjectWindow::with_bridge` (a cosmic Task's stream
+//! is private to the iced runtime, so the harness folds the messages by
+//! hand exactly as the app maps them; the window then reads the same
+//! pipeline the live app reads). The CAD_* env is per-spawn: both tests
+//! serialize on one ENV_LOCK.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use app::activity::Activity;
 use app::bridge::{Bridge, Message as BridgeMessage};
 use app::sheets::SetupSheetState;
 use app::windows::project::{Message, ProjectWindow};
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::channel::mpsc::UnboundedReceiver;
 use engine::agent::session::EngineEvent;
-use engine::project::store::{self, Role, load_chat, load_metadata};
+use engine::project::store::{self, Action, Role, load_metadata};
 use engine::python::env::{self, EnvEvent, EnvState};
 use engine::settings::Settings;
 use engine::watch::{ReloadKind, watch_directory};
@@ -50,6 +62,15 @@ fn fixture_golden() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden")
 }
 
+/// A fresh project with a slider-compatible model.py.
+fn project_with_script() -> PathBuf {
+    let parent = std::env::temp_dir().join(format!("cad-m5-slice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = store::create_project(&parent, "M5Slice").expect("create_project scaffolds");
+    std::fs::write(root.join("model.py"), "wall = 2\nheight = 10\n").unwrap();
+    root
+}
+
 /// A venv whose `bin/python` verifies: the two VERIFY_SCRIPT lines.
 fn scripted_venv() -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -69,12 +90,26 @@ fn shell_env_vec() -> Vec<(String, String)> {
     engine::agent::locator::shell_env().into_iter().collect()
 }
 
-/// One message, bounded — never a fixed sleep.
-async fn recv(messages: &mut UnboundedReceiver<BridgeMessage>, what: &str) -> BridgeMessage {
-    match tokio::time::timeout(Duration::from_secs(5), messages.next()).await {
-        Ok(Some(message)) => message,
-        Ok(None) => panic!("message stream ended while waiting for {what}"),
-        Err(_) => panic!("timed out waiting for {what}"),
+/// Drain the check driver's events into the sheet state, bounded.
+async fn run_check(venv: &Path) -> SetupSheetState {
+    let spawn: env::Spawn = Arc::new(|argv: &[String], cwd: &Path| {
+        engine::processes::spawn_streaming(argv, cwd, &shell_env_vec())
+    });
+    let mut sheet = SetupSheetState::new();
+    sheet.begin_checking();
+    assert_eq!(sheet.state, EnvState::Checking);
+    let mut handle = env::check(venv, &spawn);
+    loop {
+        let event = match tokio::time::timeout(Duration::from_secs(5), handle.events.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => panic!("check stream ended without a terminal"),
+            Err(_) => panic!("timed out waiting for the check terminal"),
+        };
+        let terminal = matches!(event, EnvEvent::Finished(_));
+        sheet.apply(&event);
+        if terminal {
+            return sheet;
+        }
     }
 }
 
@@ -97,29 +132,6 @@ async fn run_until(
         let _ = window.update(Message::Bridge(message));
         if hit {
             return;
-        }
-    }
-}
-
-/// Drain the check driver's events into the sheet state, bounded.
-async fn run_check(venv: &Path) -> SetupSheetState {
-    let spawn: env::Spawn = Arc::new(|argv: &[String], cwd: &Path| {
-        engine::processes::spawn_streaming(argv, cwd, &shell_env_vec())
-    });
-    let mut sheet = SetupSheetState::new();
-    sheet.begin_checking();
-    assert_eq!(sheet.state, EnvState::Checking);
-    let mut handle = env::check(venv, &spawn);
-    loop {
-        let event = match tokio::time::timeout(Duration::from_secs(5), handle.events.recv()).await {
-            Ok(Some(event)) => event,
-            Ok(None) => panic!("check stream ended without a terminal"),
-            Err(_) => panic!("timed out waiting for the check terminal"),
-        };
-        let terminal = matches!(event, EnvEvent::Finished(_));
-        sheet.apply(&event);
-        if terminal {
-            return sheet;
         }
     }
 }
@@ -162,17 +174,20 @@ fn forward_reloads(window: &mut ProjectWindow, kinds: &[ReloadKind]) {
     }
 }
 
+/// The window's chat transcript holds a row with this shape.
+fn chat_has_row(window: &ProjectWindow, role: Role, text: &str) -> bool {
+    window
+        .chat
+        .messages
+        .iter()
+        .any(|row| row.role == role && row.text == text)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_check_through_slider_to_restore() {
     let guard = ENV_LOCK.lock().await;
 
-    // ── the project, with a slider-compatible model.py (the fake agent's
-    // #copy-outputs writes model.py only when absent, so this one survives
-    // the turn — the script the agent "wrote", single assignments)
-    let parent = std::env::temp_dir().join(format!("cad-m5-slice-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&parent).unwrap();
-    let root = store::create_project(&parent, "M5Slice").expect("create_project scaffolds");
-    std::fs::write(root.join("model.py"), "wall = 2\nheight = 10\n").unwrap();
+    let root = project_with_script();
 
     // the platform watch over output/ — the same engine call the window's
     // two watchers make
@@ -202,44 +217,54 @@ async fn startup_check_through_slider_to_restore() {
         }
     );
 
+    // the window over ONE tapped bridge — the harness's stand-in for the
+    // app's mapping of the window's own bridge stream
     let settings = Settings::default();
-    let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &settings);
+    let (bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
+    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
     let _ = window.view(); // the empty-project frame builds
-    let (mut bridge, mut messages) =
-        Bridge::with_interpreter(fake_python()).launch(settings, root.clone());
     assert!(
-        !bridge.python_ready(),
+        !window.bridge.python_ready(),
         "the bridge starts Unknown, guards closed"
     );
-    bridge.set_python_state(sheet.state.clone());
+    window.bridge.set_python_state(sheet.state.clone());
     assert!(
-        bridge.python_ready(),
+        window.bridge.python_ready(),
         "the sheet's Ready terminal unblocks the guards"
     );
 
     // ── the fake agent's first turn: outputs land, the watcher sees them,
-    // the scene rebuilds (the M4 slice's ground)
-    bridge
+    // the scene rebuilds, and the bookkeeping's version row renders LIVE
+    window
+        .bridge
         .enqueue("Make a box with a lid".into(), Vec::new())
         .unwrap();
-    loop {
-        match recv(&mut messages, "the slice turn").await {
-            BridgeMessage::Event(event) => {
-                let finished = matches!(event, EngineEvent::TurnFinished(_));
-                let _ = window.update(Message::Bridge(BridgeMessage::Event(event)));
-                if finished {
-                    break;
-                }
-            }
-            BridgeMessage::Closed => panic!("the turn closed without a terminal"),
-            BridgeMessage::PythonSheetRequested => {
-                panic!("the send was refused: python not verified")
-            }
-            other => {
-                let _ = window.update(Message::Bridge(other));
-            }
-        }
-    }
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::Event(EngineEvent::TurnFinished(_))),
+        "the slice turn",
+    )
+    .await;
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::TurnSuccessBookkeeping),
+        "the turn's bookkeeping",
+    )
+    .await;
+    assert_eq!(load_metadata(&root).unwrap().current_version, Some(1));
+    assert!(
+        chat_has_row(&window, Role::Summary, "Version 1"),
+        "the driver-appended version row renders live: {:?}",
+        window.chat.messages.last()
+    );
+    assert_eq!(
+        window.activity,
+        Activity::Succeeded("Model generated".into())
+    );
+
     let turn_kinds = collect_reloads(
         &reloads,
         &[
@@ -258,20 +283,13 @@ async fn startup_check_through_slider_to_restore() {
     forward_reloads(&mut window, &turn_kinds);
     assert_eq!(window.viewer.scene.scene.parts.len(), 2);
 
-    // the TURN recorded version 1 — the agent-turn outputs gate
-    // (agentDidFinish: complete outputs + a changed model.py), so the
-    // slider versions start at 2
-    assert_eq!(load_metadata(&root).unwrap().current_version, Some(1));
-    let chat = load_chat(&root).unwrap();
-    assert_eq!(chat.last().unwrap().role, Role::Summary);
-    assert_eq!(chat.last().unwrap().text, "Version 1");
-    assert_eq!(chat.last().unwrap().detail.as_deref(), Some("1"));
-
-    // ── the slider commit: the rewrite lands, the fake build copies the
-    // outputs back, the watcher-driven reload rebuilds the scene. The
-    // fake's copy mode skips EXISTING files, so model.3mf comes out first
-    // to make the rebuild observable: a corrupt 3MF (fresh mtime — the
-    // watch's change-detection boundary) reloads the scene to the STL's
+    // ── the slider commit through the WINDOW's interception (the pane
+    // emits ParameterCommit; the shell forwards to the bridge): the
+    // rewrite lands, the fake build copies the outputs back, and the
+    // watcher-driven reload rebuilds the scene. The fake's copy mode
+    // skips EXISTING files, so model.3mf comes out first to make the
+    // rebuild observable: a corrupt 3MF (fresh mtime — the watch's
+    // change-detection boundary) reloads the scene to the STL's
     // single-part fallback (the M0 carry-forward's documented shape), and
     // the rebuild's re-copy brings the 2-part model back through a real
     // watcher event. Deletes emit nothing (watch.rs: a vanished file has
@@ -288,7 +306,14 @@ async fn startup_check_through_slider_to_restore() {
     );
     std::fs::remove_file(root.join("output/model.3mf")).unwrap();
 
-    bridge.set_parameter("wall", 3.0).unwrap();
+    let _ = window.update(Message::Viewer(app::viewer_pane::Message::ParameterCommit(
+        "wall".into(),
+        3.0,
+    )));
+    assert!(
+        window.is_busy(),
+        "the build's Working activity reaches the window (stop button, timer)"
+    );
     run_until(
         &mut window,
         &mut messages,
@@ -304,6 +329,7 @@ async fn startup_check_through_slider_to_restore() {
         root.join("output/model.3mf").is_file(),
         "the fake build re-copied the outputs"
     );
+    assert!(!window.is_busy(), "the build ended");
     let build_kinds = collect_reloads(&reloads, &[ReloadKind::Mesh]);
     assert!(build_kinds.contains(&ReloadKind::Mesh), "{build_kinds:?}");
     forward_reloads(&mut window, &build_kinds);
@@ -313,15 +339,24 @@ async fn startup_check_through_slider_to_restore() {
         "the watcher-driven reload rebuilt the 2-part scene"
     );
 
-    // the slider build recorded version 2, with its summary row
+    // version 2 recorded, its row rendered live, the activity classified
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(2));
-    let chat = load_chat(&root).unwrap();
-    assert_eq!(chat.last().unwrap().role, Role::Summary);
-    assert_eq!(chat.last().unwrap().text, "Version 2");
-    assert_eq!(chat.last().unwrap().detail.as_deref(), Some("2"));
+    assert!(
+        chat_has_row(&window, Role::Summary, "Version 2"),
+        "the slider build's version row renders live: {:?}",
+        window.chat.messages.last()
+    );
+    assert_eq!(
+        window.activity,
+        Activity::Succeeded("Model generated".into())
+    );
+    assert_eq!(window.bridge.build_error(), None);
 
     // ── the second commit records the next version
-    bridge.set_parameter("height", 12.0).unwrap();
+    let _ = window.update(Message::Viewer(app::viewer_pane::Message::ParameterCommit(
+        "height".into(),
+        12.0,
+    )));
     run_until(
         &mut window,
         &mut messages,
@@ -336,17 +371,20 @@ async fn startup_check_through_slider_to_restore() {
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(3));
     let _ = collect_reloads(&reloads, &[ReloadKind::Mesh]); // drain the burst
 
-    // ── restore(2), the first slider's snapshot: model.py, chat and
-    // output return to it
+    // ── restore(2) through the window's own message: model.py, chat and
+    // output return to the first slider's snapshot
     std::fs::write(root.join("output/sentinel.txt"), b"post-v3").unwrap();
-    bridge.restore(2).unwrap();
+    let _ = window.update(Message::Restore(2));
     assert_eq!(
         std::fs::read_to_string(root.join("model.py")).unwrap(),
         "wall = 3\nheight = 10\n"
     );
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(2));
-    let chat = load_chat(&root).unwrap();
-    assert_eq!(chat.last().unwrap().detail.as_deref(), Some("2"));
+    assert_eq!(
+        window.chat.messages.last().unwrap().detail.as_deref(),
+        Some("2"),
+        "the window's transcript is the restored snapshot's"
+    );
     assert!(
         !root.join("output/sentinel.txt").exists(),
         "the output dir is the snapshot's, not v3's"
@@ -358,12 +396,12 @@ async fn startup_check_through_slider_to_restore() {
 
     // ── the compare picker: version 3's parameters, parsed from its
     // stored model.py copy
-    bridge.compare_with(Some(3));
-    let compared = bridge.comparison_parameters();
+    window.bridge.compare_with(Some(3));
+    let compared = window.bridge.comparison_parameters();
     assert_eq!(compared.get("wall"), Some(&3.0));
     assert_eq!(compared.get("height"), Some(&12.0));
-    bridge.compare_with(None);
-    assert!(bridge.comparison_parameters().is_empty());
+    window.bridge.compare_with(None);
+    assert!(window.bridge.comparison_parameters().is_empty());
 
     // SAFETY: env cleanup still inside the ENV_LOCK window.
     unsafe {
@@ -375,7 +413,105 @@ async fn startup_check_through_slider_to_restore() {
         std::env::remove_var("CAD_FAKE_PY_MODE");
         std::env::remove_var("CAD_FAKE_PY_FIXTURES");
     }
-    drop(bridge);
-    drop(guard);
+    drop(messages);
     let _ = window.view(); // the restored shape builds a frame
+    drop(guard);
+}
+
+/// The failure path (M4 whole-branch review MAJOR 2, fix round): a failed
+/// Compila renders the build-failure row with its AskClaudeToFix action
+/// live in the window's chat, the failed activity and `build_error`
+/// reach the header's sources, and the row's action button drives
+/// `ask_agent_to_fix` as a real turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_build_renders_row_activity_and_fix_action() {
+    let guard = ENV_LOCK.lock().await;
+
+    let root = project_with_script();
+    // SAFETY: fake env holds this suite's ENV_LOCK for the whole test.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
+        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/slice.jsonl"));
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        std::env::set_var("CAD_FAKE_PY_MODE", "fail");
+    }
+
+    let settings = Settings::default();
+    let (bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
+    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    window.bridge.set_python_state(EnvState::Ready {
+        build123d_version: "0.8.1".into(),
+    });
+
+    // the menu's Compila command: the build fails in the fake interpreter
+    let _ = window.update(Message::Command(app::windows::project::Command::Build));
+    assert!(
+        window.is_busy(),
+        "the build's Working activity reaches the window"
+    );
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::BuildFinished { .. }),
+        "the failed build",
+    )
+    .await;
+
+    // the failure surfaces in the window: the row, the activity, the
+    // issue-button source
+    let row = window
+        .chat
+        .messages
+        .iter()
+        .find(|row| row.role == Role::System && row.text == "model.py failed to build.")
+        .expect("the build-failure row renders live")
+        .clone();
+    assert_eq!(row.action, Some(Action::AskClaudeToFix));
+    assert!(row.detail.as_deref().unwrap().contains("Traceback"));
+    assert_eq!(window.activity, Activity::Failed("Script error".into()));
+    assert!(!window.is_busy());
+    assert_eq!(
+        window.bridge.build_error().as_deref(),
+        Some("ValueError: bad shape"),
+        "the header's issue-button source carries the build error"
+    );
+
+    // the row's action button: the traceback goes back to the agent as a
+    // turn (upstream askClaudeToFix, Project.swift:258-260)
+    let _ = window.update(Message::Chat(app::chat_view::Message::RowAction(
+        row.id,
+        Action::AskClaudeToFix,
+    )));
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| {
+            matches!(
+                m,
+                BridgeMessage::TurnStarted { prompt, .. }
+                    if prompt.starts_with("Running model.py fails with this error")
+            )
+        },
+        "the ask-claude-to-fix turn",
+    )
+    .await;
+    // the turn must land before the env clears (the fake is mid-scenario)
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::Event(EngineEvent::TurnFinished(_))),
+        "the fix turn's terminal",
+    )
+    .await;
+
+    // SAFETY: env cleanup still inside the ENV_LOCK window.
+    unsafe {
+        std::env::remove_var("CAD_TEST_CLAUDE");
+        std::env::remove_var("CAD_FAKE_SCENARIO");
+        std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        std::env::remove_var("CAD_FAKE_PY_MODE");
+    }
+    drop(messages);
+    drop(guard);
 }
