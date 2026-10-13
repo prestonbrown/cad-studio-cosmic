@@ -1862,6 +1862,9 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
     .boxed()
 }
 
+/// Test-only STL fixture writer, shared with the project window's test
+/// module — every caller sits behind `cfg(test)`.
+#[cfg(test)]
 pub(crate) fn stl_of_box(bounds: [[f64; 3]; 2]) -> Vec<u8> {
     fn push_f32s(out: &mut Vec<u8>, fs: &[f32]) {
         for f in fs {
