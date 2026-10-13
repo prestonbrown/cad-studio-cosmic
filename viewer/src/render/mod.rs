@@ -11,8 +11,11 @@
 //! parts carry full-content identities; [`MeshPipeline::prepare_parts`]
 //! uploads a part's vertices only when that identity differs from what is
 //! resident, so an unchanged scene costs zero mesh bytes however the
-//! camera moves. Camera and section-cap uniforms legitimately write per
-//! frame.
+//! camera moves. What legitimately writes per frame: the camera uniform,
+//! the section-cap quad, and each visible part's model uniform — the
+//! [`Frame`] pose path moves and hides parts (64 B/part, draw-skip on
+//! `None`) without touching a vertex, and M7's playback rides the same
+//! binding.
 //!
 //! The camera is split the same way: [`camera`] holds the ModelViewer.swift
 //! parity math — orbit/zoom/pan formulas, diagonal/2 framing with the floor
@@ -53,7 +56,7 @@ pub mod parts;
 pub mod scene;
 
 pub use grid::{GridMesh, GridVertex};
-pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear};
+pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear, srgb_to_linear_f};
 pub use scene::{ModelPrimitive, ModelScene};
 
 use wgpu::util::DeviceExt;
@@ -109,9 +112,35 @@ impl Default for Options {
     }
 }
 
-/// Per-part model transform (group 1): identity while parts render where
-/// they sit; explode offsets and playback poses write real matrices
-/// through the same binding.
+/// One part's pose for a frame: `Some` carries the column-major model
+/// matrix (glam `to_cols_array_2d`) the part's group-1 uniform is written
+/// with; `None` hides the part — its draw is skipped and it contributes to
+/// no effective aabb. The explode/visibility/playback state of a part is
+/// exactly this slot, written per frame, never staged into content.
+pub type PartPose = Option<[[f32; 4]; 4]>;
+
+/// Everything one frame's prepare needs, bundled: the camera, the staged
+/// scene, one [`PartPose`] per part (same length — asserted), the aabb the
+/// section cap and framing should use (defaults to the scene's own; the
+/// arrangement wiring replaces it with the effective box), the overlay,
+/// and the render mode. The struct is the renderer's whole per-frame
+/// input contract — later tasks extend it rather than grow the parameter
+/// list again.
+pub struct Frame<'a> {
+    pub camera: &'a Camera,
+    pub scene: &'a PartScene,
+    pub poses: &'a [PartPose],
+    /// The aabb of what is effectively drawn (hidden parts excluded,
+    /// arranged offsets included) in pinned scene space.
+    pub effective_aabb: ([f32; 3], [f32; 3]),
+    pub grid: Option<&'a GridMesh>,
+    pub options: Options,
+}
+
+/// Per-part model transform (group 1), written from the frame's pose on
+/// every prepare — the sanctioned per-frame path. Identity while parts
+/// render where they sit; explode offsets and playback poses write real
+/// matrices through the same binding.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Model {
@@ -383,13 +412,11 @@ struct MsaaTargets {
 }
 
 /// A part's GPU residency: its vertex buffer, draw count, and the content
-/// identity the buffer currently holds. Built by `prepare_parts` when a
-/// part's hash differs; untouched otherwise.
+/// identity the buffer currently holds — the transform is NOT part of it
+/// (poses write the model uniform per frame). Built by `prepare_parts`
+/// when a part's hash differs; untouched otherwise.
 struct ResidentPart {
     content_hash: u64,
-    /// The transform the resident model uniform carries — part of the
-    /// identity alongside the hash, so a transform-only change restages.
-    transform: [[f32; 4]; 4],
     vertex_buf: wgpu::Buffer,
     vertex_count: u32,
     /// The wireframe line list as a u32 index buffer into `vertex_buf`
@@ -398,6 +425,10 @@ struct ResidentPart {
     edge_count: u32,
     /// Group 1 for this part's draws: the model transform.
     model_bg: wgpu::BindGroup,
+    /// The model uniform behind `model_bg` — every prepare writes the
+    /// frame's pose into it (64 B), the whole per-frame cost of moving a
+    /// part.
+    model_buf: wgpu::Buffer,
 }
 
 /// The overlay's GPU residency — the same content-identity contract as
@@ -430,6 +461,10 @@ pub struct MeshPipeline {
     depth_tex: wgpu::Texture,
     uniform_buf: wgpu::Buffer,
     residents: Vec<ResidentPart>,
+    /// The slots the last prepared frame poses visibly (its `Some` poses,
+    /// in slot order) — the draw path's visibility snapshot, taken at
+    /// prepare because render has no pose slice to read.
+    drawn: Vec<usize>,
     /// The resident overlay, when the last prepared frame carried one.
     grid: Option<ResidentGrid>,
     cap_buf: wgpu::Buffer,
@@ -446,9 +481,10 @@ pub struct MeshPipeline {
     msaa: Option<MsaaTargets>,
     /// The frame mode last prepared (facts #44).
     wireframe: bool,
-    /// Vertex uploads since creation — one per part residency; camera and
-    /// cap uniforms write per frame and never count. Read only by the
-    /// `*_count_for_tests` accessors.
+    /// Vertex uploads since creation — one per part residency. The
+    /// per-frame uniform writes (camera, cap, per-part model) are the
+    /// sanctioned path and never count: these counters track vertex/index
+    /// data only. Read only by the `*_count_for_tests` accessors.
     #[cfg_attr(not(test), allow(dead_code))]
     upload_count: u32,
     /// Vertex-buffer allocations since creation (one per residency). Read
@@ -597,6 +633,7 @@ impl MeshPipeline {
             depth_tex,
             uniform_buf,
             residents: Vec::new(),
+            drawn: Vec::new(),
             grid: None,
             cap_buf,
             draw_cap: false,
@@ -1119,24 +1156,31 @@ impl MeshPipeline {
     }
 
     /// Per-frame upload: camera uniform, depth-texture resize to the
-    /// render-target `size`, and the upload-once mesh path — a part's
-    /// vertices and transform are (re)written only when its content
-    /// identity differs from what is resident, so an unchanged scene
-    /// costs zero mesh uploads however the camera moves. `grid` (when
-    /// `Some`) is the overlay [`grid::geometry`] built — its residency
-    /// follows the same content-identity contract; `options` picks the
-    /// frame's mode, and an `options.msaa` flip triggers the in-place
-    /// rebuild ([`Self::set_msaa`]) before anything else.
+    /// render-target `size`, each visible part's model uniform (the pose
+    /// path — 64 B/part, a moved or hidden part never touches a vertex),
+    /// and the upload-once mesh path — a part's vertices are (re)written
+    /// only when its content identity differs from what is resident, so an
+    /// unchanged scene costs zero mesh uploads however the camera or the
+    /// poses move. `frame.grid` (when `Some`) is the overlay
+    /// [`grid::geometry`] built — its residency follows the same
+    /// content-identity contract; `frame.options` picks the frame's mode,
+    /// and an `options.msaa` flip triggers the in-place rebuild
+    /// ([`Self::set_msaa`]) before anything else.
     pub fn prepare_parts(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: (u32, u32),
-        camera: &Camera,
-        scene: &PartScene,
-        grid: Option<&GridMesh>,
-        options: &Options,
+        frame: &Frame<'_>,
     ) {
+        let (camera, scene, grid, options) = (frame.camera, frame.scene, frame.grid, frame.options);
+        assert_eq!(
+            frame.poses.len(),
+            scene.parts.len(),
+            "one pose per part: {} poses for {} parts",
+            frame.poses.len(),
+            scene.parts.len()
+        );
         if options.msaa != self.sample_count {
             self.set_msaa(device, options.msaa);
         }
@@ -1159,14 +1203,17 @@ impl MeshPipeline {
         // upload-once: slot-keyed by part index. A resident part whose
         // content identity still matches is skipped whole; a changed or new
         // part gets a fresh exact-size vertex buffer (its allocation and
-        // init-write are what the counters track — model uniforms are not
+        // init-write are what the counters track — the model uniform a
+        // residency also allocates is written per frame below and is not
         // vertex/index data). Parts beyond the scene's length are dropped
         // with their buffers.
         self.residents.truncate(scene.parts.len());
         for (i, part) in scene.parts.iter().enumerate() {
-            if self.residents.get(i).is_some_and(|r| {
-                r.content_hash == part.content_hash && r.transform == part.transform
-            }) {
+            if self
+                .residents
+                .get(i)
+                .is_some_and(|r| r.content_hash == part.content_hash)
+            {
                 continue;
             }
             let label = &part.name;
@@ -1187,10 +1234,12 @@ impl MeshPipeline {
                 usage: wgpu::BufferUsages::INDEX,
             });
             let edge_count = edge_indices.len() as u32;
+            // zeroed: the pose write below fills it before any draw can
+            // read it
             let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("part {label} model")),
                 contents: bytemuck::bytes_of(&Model {
-                    transform: part.transform,
+                    transform: [[0.0; 4]; 4],
                 }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1204,18 +1253,35 @@ impl MeshPipeline {
             });
             let resident = ResidentPart {
                 content_hash: part.content_hash,
-                transform: part.transform,
                 vertex_buf,
                 vertex_count: part.vertices.len() as u32,
                 edge_buf,
                 edge_count,
                 model_bg,
+                model_buf,
             };
             if i < self.residents.len() {
                 self.residents[i] = resident;
             } else {
                 self.residents.push(resident);
             }
+        }
+        // The pose path: every visible part's model uniform written from
+        // the frame, and the visibility snapshot the draw path reads (a
+        // hidden part's slot is simply absent from it).
+        self.drawn = frame
+            .poses
+            .iter()
+            .enumerate()
+            .filter_map(|(i, pose)| pose.is_some().then_some(i))
+            .collect();
+        for &i in &self.drawn {
+            let pose = frame.poses[i].expect("drawn slots pose Some");
+            queue.write_buffer(
+                &self.residents[i].model_buf,
+                0,
+                bytemuck::bytes_of(&Model { transform: pose }),
+            );
         }
         // The cap is this port's cut-face stand-in, and upstream disables
         // the interior shell in wireframe (facts #45); line rasterization
@@ -1254,8 +1320,8 @@ impl MeshPipeline {
     }
 
     /// Vertex uploads since pipeline creation (test visibility): counts
-    /// vertex uploads only — camera and cap uniforms legitimately write
-    /// every frame and never count.
+    /// vertex uploads only — the camera, cap, and per-part model uniforms
+    /// legitimately write every frame and never count.
     #[cfg(test)]
     pub(crate) fn upload_count_for_tests(&self) -> u32 {
         self.upload_count
@@ -1267,11 +1333,22 @@ impl MeshPipeline {
         self.alloc_count
     }
 
+    /// Parts the last prepared frame poses visibly — the slots the draw
+    /// path binds, hidden parts absent (test visibility).
+    #[cfg(test)]
+    pub(crate) fn drawn_part_count_for_tests(&self) -> usize {
+        self.drawn.len()
+    }
+
     /// Vertices the wireframe line pass would draw this frame — every
-    /// resident edge contributes its 2 corner indices (test visibility).
+    /// drawn (visible) part's edges contribute their 2 corner indices
+    /// (test visibility).
     #[cfg(test)]
     pub(crate) fn line_vertex_count_for_tests(&self) -> u32 {
-        self.residents.iter().map(|r| r.edge_count).sum()
+        self.drawn
+            .iter()
+            .map(|&i| self.residents[i].edge_count)
+            .sum()
     }
 
     /// Renders the parts (filled, or the wireframe hairlines when the last
@@ -1297,8 +1374,8 @@ impl MeshPipeline {
         target: &wgpu::TextureView,
         viewport: [f32; 4],
     ) {
-        if self.residents.is_empty() && self.grid.is_none() {
-            return; // nothing prepared yet
+        if self.drawn.is_empty() && self.grid.is_none() {
+            return; // nothing visible was prepared
         }
         let set_vp = |pass: &mut wgpu::RenderPass| {
             pass.set_viewport(
@@ -1399,18 +1476,19 @@ impl MeshPipeline {
         }
     }
 
-    /// Part draws — one bind group + vertex buffer + draw per resident
-    /// part, filled triangles or the wireframe hairline list — then, when
-    /// the camera sections, the cap quad, and last the grid overlay —
-    /// into the pass's color attachment (msaa or single-sample alike:
-    /// everything here inherits the pass attachment and matches its
-    /// sample count).
+    /// Part draws — one bind group + vertex buffer + draw per DRAWN part
+    /// (the last prepared frame's visible slots; hidden parts are absent),
+    /// filled triangles or the wireframe hairline list — then, when the
+    /// camera sections, the cap quad, and last the grid overlay — into the
+    /// pass's color attachment (msaa or single-sample alike: everything
+    /// here inherits the pass attachment and matches its sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
             // facts #44: same material and opacity as fill, hairline list
             pass.set_pipeline(&self.line_pipeline);
-            for resident in &self.residents {
+            for &i in &self.drawn {
+                let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
                 pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
                 pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -1418,7 +1496,8 @@ impl MeshPipeline {
             }
         } else {
             pass.set_pipeline(&self.pipeline);
-            for resident in &self.residents {
+            for &i in &self.drawn {
+                let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
                 pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
                 pass.draw(0..resident.vertex_count, 0..1);
@@ -1694,21 +1773,32 @@ mod tests {
         }
     }
 
+    /// The Frame every upload-once test shares: default options, no overlay,
+    /// effective_aabb at the staged scene's own (T10 replaces that input).
+    fn frame<'a>(camera: &'a Camera, scene: &'a PartScene, poses: &'a [PartPose]) -> Frame<'a> {
+        Frame {
+            camera,
+            scene,
+            poses,
+            effective_aabb: (scene.aabb_min, scene.aabb_max),
+            grid: None,
+            options: Options::default(),
+        }
+    }
+
+    /// Identity poses for every slot of `scene` — the assembled default.
+    fn identity_poses(scene: &PartScene) -> Vec<PartPose> {
+        vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()]
+    }
+
     #[test]
     fn upload_once_second_frame_no_reupload() {
         let (device, queue) = gpu::device_queue();
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         let camera = default_camera(&scene, 4.0 / 3.0);
+        let poses = identity_poses(&scene);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1717,15 +1807,7 @@ mod tests {
         // second frame, same scene, MOVED camera: mesh bytes must not move
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &moved,
-            &scene,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&moved, &scene, &poses));
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1,
@@ -1744,16 +1826,9 @@ mod tests {
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
+        let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene1,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1766,15 +1841,7 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene2,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1789,16 +1856,9 @@ mod tests {
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
+        let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene1,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -1810,15 +1870,7 @@ mod tests {
         let n = parts[0].positions.len();
         parts[0].positions[n / 2][0] -= 5.0;
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene2,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -1841,29 +1893,14 @@ mod tests {
         assert!(parts[0].triangle_colors.iter().all(|c| c.is_none()));
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
+        let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene1,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
         let u1 = pipeline.upload_count_for_tests();
         // facts #43's light-mode neutral: same geometry, only the paint
         // changes — a skipped upload would serve the dark-mode colors
         let scene2 = PartScene::from_parts(&parts, [0.55, 0.64, 0.75]);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene2,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -2007,16 +2044,9 @@ mod tests {
         let mut parts = golden_3mf_parts();
         let scene1 = PartScene::from_parts(&parts, NEUTRAL);
         let camera = default_camera(&scene1, 4.0 / 3.0);
+        let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene1,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
         let u1 = pipeline.upload_count_for_tests();
         // grow past MODEL x=30: union widens, the pin's x-center shifts
         for corner in [[40.0, 0.0, 16.0], [41.0, 0.0, 16.0], [40.0, 1.0, 16.0]] {
@@ -2024,15 +2054,7 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene2,
-            None,
-            &Options::default(),
-        );
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 2,
@@ -2040,44 +2062,49 @@ mod tests {
         );
     }
 
-    /// The transform slot rides the same residency contract as the staged
-    /// vertices: changing a part's model transform without touching its
-    /// geometry must still restage it, or the model uniform would keep
-    /// serving the old matrix (the orientation test moves the lid this
-    /// way; explode offsets and playback poses follow in M4).
+    /// The GPU-first transform law: a pose change moves ink through the
+    /// model uniform alone — zero vertex uploads (the M3 behavior this
+    /// task retires restaged the whole part).
     #[test]
-    fn transform_change_reuploads() {
+    fn pose_change_moves_ink_without_uploads() {
         let (device, queue) = gpu::device_queue();
-        let parts = golden_3mf_parts();
-        let mut scene = PartScene::from_parts(&parts, NEUTRAL);
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         let camera = default_camera(&scene, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene,
-            None,
-            &Options::default(),
-        );
-        let u1 = pipeline.upload_count_for_tests();
-        // translate the lid through its transform slot: no vertex changes
-        scene.parts[1].transform =
-            glam::Mat4::from_translation(glam::Vec3::new(40.0, 0.0, 0.0)).to_cols_array_2d();
-        pipeline.prepare_parts(
-            device,
-            queue,
-            (800, 600),
-            &camera,
-            &scene,
-            None,
-            &Options::default(),
-        );
+        let poses = identity_poses(&scene);
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        let uploads = pipeline.upload_count_for_tests();
+        // sweep the lid 40mm along +x through the POSE path alone
+        let mut moved = poses.clone();
+        moved[1] =
+            Some(glam::Mat4::from_translation(glam::Vec3::new(40.0, 0.0, 0.0)).to_cols_array_2d());
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &moved));
         assert_eq!(
             pipeline.upload_count_for_tests(),
-            u1 + 1,
-            "a transform-only change must restage its part"
+            uploads,
+            "pose-only change uploads zero vertices"
+        );
+        assert_eq!(pipeline.drawn_part_count_for_tests(), 2);
+    }
+
+    /// `None` hides a part at draw with no residency change — visibility is
+    /// a pose, not a content edit.
+    #[test]
+    fn hidden_pose_skips_draw_without_reupload() {
+        let (device, queue) = gpu::device_queue();
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        let camera = default_camera(&scene, 4.0 / 3.0);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let poses = identity_poses(&scene);
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        let uploads = pipeline.upload_count_for_tests();
+        let hidden: Vec<PartPose> = vec![None, Some(glam::Mat4::IDENTITY.to_cols_array_2d())];
+        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &hidden));
+        assert_eq!(pipeline.drawn_part_count_for_tests(), 1);
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            uploads,
+            "hiding touches no residency"
         );
     }
 
@@ -2142,17 +2169,18 @@ mod tests {
         }
         let (device, queue) = gpu::device_queue();
         let camera = default_camera(&scene, 1.0);
+        let poses = identity_poses(&scene);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         pipeline.prepare_parts(
             device,
             queue,
             (64, 64),
-            &camera,
-            &scene,
-            None,
-            &Options {
-                wireframe: true,
-                ..Options::default()
+            &Frame {
+                options: Options {
+                    wireframe: true,
+                    ..Options::default()
+                },
+                ..frame(&camera, &scene, &poses)
             },
         );
         assert_eq!(
@@ -2160,5 +2188,81 @@ mod tests {
             36,
             "the line pass draws 18 edges x 2 endpoints"
         );
+    }
+
+    /// The f32 EOTF is the exact core the u8 form delegates to: every u8
+    /// value through `srgb_to_linear_f(c / 255)` equals `srgb_to_linear(c)`,
+    /// so downstream f32 callers (T3's cap color, T6's marker orange) sit on
+    /// the same curve the staging paints with.
+    #[test]
+    fn srgb_to_linear_f_is_the_u8_forms_core() {
+        for c in 0..=255u8 {
+            assert_eq!(
+                parts::srgb_to_linear_f(c as f32 / 255.0),
+                parts::srgb_to_linear(c),
+                "u8 {c}"
+            );
+        }
+        // the segment boundary is <= on the linear side
+        assert_eq!(parts::srgb_to_linear_f(0.04045), 0.04045 / 12.92);
+        assert!(parts::srgb_to_linear_f(0.04046) > parts::srgb_to_linear_f(0.04045));
+        // out-of-range inputs keep the formula's shape (callers clamp)
+        assert_eq!(parts::srgb_to_linear_f(0.0), 0.0);
+        assert!((parts::srgb_to_linear_f(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// `to_scene` is exactly the staging map (remap + the struct's pin), and
+    /// `to_model` inverts it: every MODEL corner lands on its staged byte,
+    /// and the roundtrip returns the MODEL corner — the crossing T5's
+    /// picking and T11's marker placement ride.
+    #[test]
+    fn to_scene_to_model_match_staging_and_roundtrip() {
+        let parts = golden_3mf_parts();
+        let scene = PartScene::from_parts(&parts, NEUTRAL);
+        for (part, raw) in scene.parts.iter().zip(&parts) {
+            assert_eq!(part.vertices.len(), raw.positions.len());
+            for (v, p) in part.vertices.iter().zip(&raw.positions) {
+                let s = scene.to_scene(*p);
+                let m = scene.to_model(v.pos);
+                for a in 0..3 {
+                    assert!((s[a] - v.pos[a]).abs() < 1e-5, "to_scene != staged at {a}");
+                    assert!((m[a] - p[a]).abs() < 1e-4, "roundtrip != MODEL at {a}");
+                }
+            }
+        }
+        // the recorded pin is the map's translation: to_scene of the origin
+        // is the pin itself
+        assert_eq!(scene.to_scene([0.0; 3]), scene.pin);
+    }
+
+    /// `from_parts_with_pin` stages against a caller-chosen frame: the
+    /// recorded pin is the input, and the staged bytes sit at exactly
+    /// (foreign pin − own pin) from `from_parts`'s — the comparison ghost's
+    /// contract (T12 stages the old model in the CURRENT scene's frame).
+    #[test]
+    fn from_parts_with_pin_honors_a_foreign_pin() {
+        let parts = golden_3mf_parts();
+        let own = PartScene::from_parts(&parts, NEUTRAL);
+        let pin = [10.0, 20.0, 30.0];
+        let foreign = PartScene::from_parts_with_pin(&parts, NEUTRAL, pin);
+        assert_eq!(foreign.pin, pin);
+        let shift = |a: usize| pin[a] - own.pin[a];
+        for a in 0..3 {
+            assert!(
+                (foreign.aabb_min[a] - own.aabb_min[a] - shift(a)).abs() < 1e-4,
+                "aabb shifted by the pin difference at {a}"
+            );
+        }
+        for (f, o) in foreign.parts[0].vertices.iter().zip(&own.parts[0].vertices) {
+            for a in 0..3 {
+                assert!((f.pos[a] - o.pos[a] - shift(a)).abs() < 1e-4);
+            }
+        }
+        // and the foreign scene's own crossing map lands on ITS staging
+        let p = parts[0].positions[0];
+        let s = foreign.to_scene(p);
+        for a in 0..3 {
+            assert!((s[a] - foreign.parts[0].vertices[0].pos[a]).abs() < 1e-5);
+        }
     }
 }
