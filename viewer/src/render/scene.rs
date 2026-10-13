@@ -11,13 +11,21 @@ use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
 
 use super::{
-    Camera, Frame, GridMesh, MarkerMesh, MeshPipeline, Options, PartPose, PartScene, camera, grid,
+    Camera, Frame, GridMesh, MarkerMesh, MeshPipeline, Options, PartAppearance, PartPose,
+    PartScene, camera, grid,
 };
 
 /// Identity poses for every slot of an n-part scene — the assembled
 /// default `new` starts at and `replace_scene` resets to.
 fn identity_poses(n: usize) -> Arc<[PartPose]> {
     Arc::from(vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); n])
+}
+
+/// Opaque default appearances for every slot of an n-part scene — the
+/// state `new` starts at and `replace_scene` resets to; the animation
+/// pane's playback writes real flags per frame.
+fn opaque_appearances(n: usize) -> Arc<[PartAppearance]> {
+    Arc::from(vec![PartAppearance::default(); n])
 }
 
 /// The interactive model scene: part scene, orbit camera state.
@@ -42,6 +50,11 @@ pub struct ModelScene {
     /// Arc-shared with the per-frame primitive like `scene`, so a pose
     /// update costs one refcount bump, never a mesh copy or re-stage.
     pub poses: Arc<[PartPose]>,
+    /// Per-part motion appearance flags for the next frame — opaque
+    /// defaults until the animation pane's playback (T6) writes per-frame
+    /// translucent static parts and flat-red colliding ones. Arc-shared
+    /// like `poses`, so an appearance update is a refcount bump too.
+    pub appearances: Arc<[PartAppearance]>,
     pub grid: Arc<GridMesh>,
     /// The staged measure markers, when a measurement is active — the
     /// measure flow stages [`crate::render::markers::geometry`] of the
@@ -93,6 +106,7 @@ impl ModelScene {
         let grid = Arc::new(grid::geometry(grid_aabb, None));
         Self {
             poses: identity_poses(scene.parts.len()),
+            appearances: opaque_appearances(scene.parts.len()),
             scene,
             grid,
             markers: None,
@@ -193,6 +207,7 @@ impl ModelScene {
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         self.poses = identity_poses(scene.parts.len());
+        self.appearances = opaque_appearances(scene.parts.len());
         self.scene = scene;
         self.target = target;
         self.distance = distance;
@@ -223,6 +238,7 @@ impl<Message> shader::Program<Message> for ModelScene {
         ModelPrimitive {
             scene: self.scene.clone(),
             poses: self.poses.clone(),
+            appearances: self.appearances.clone(),
             grid: self.show_grid.then(|| self.grid.clone()),
             markers: self.markers.clone(),
             ghost: self.ghost.clone(),
@@ -239,6 +255,7 @@ impl<Message> shader::Program<Message> for ModelScene {
 pub struct ModelPrimitive {
     scene: Arc<PartScene>,
     poses: Arc<[PartPose]>,
+    appearances: Arc<[PartAppearance]>,
     grid: Option<Arc<GridMesh>>,
     markers: Option<Arc<MarkerMesh>>,
     ghost: Option<Arc<PartScene>>,
@@ -264,6 +281,7 @@ impl shader::Primitive for ModelPrimitive {
             camera: &self.camera,
             scene: &self.scene,
             poses: &self.poses,
+            appearances: &self.appearances,
             effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
             grid: self.grid.as_deref(),
             markers: self.markers.as_deref(),

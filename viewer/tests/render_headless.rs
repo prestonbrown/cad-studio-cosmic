@@ -15,8 +15,8 @@ use viewer::render::grid;
 use viewer::render::lights;
 use viewer::render::markers;
 use viewer::render::{
-    Camera, Frame, GHOST_ALPHA, MeshPipeline, NEUTRAL, Options, PartPose, PartScene,
-    default_camera, preset_camera, srgb_to_linear,
+    Camera, Frame, GHOST_ALPHA, MeshPipeline, NEUTRAL, Options, PartAppearance, PartPose,
+    PartScene, default_camera, preset_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -49,6 +49,17 @@ fn ghost_parts_shifted_x(dx: f32) -> Vec<engine::parsing::Part> {
         }
     }
     parts
+}
+
+/// Identity poses for every slot of `scene` — the assembled default every
+/// non-pose-specific entry renders with.
+fn identity_poses(scene: &PartScene) -> Vec<PartPose> {
+    vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()]
+}
+
+/// Opaque default appearances for every slot of `scene`.
+fn default_appearances(scene: &PartScene) -> Vec<PartAppearance> {
+    vec![PartAppearance::default(); scene.parts.len()]
 }
 
 /// One frame at `w` x `h`: `prepare_parts` the pipeline, clear the target to
@@ -93,15 +104,28 @@ fn render_frame_opts(
     grid: Option<&grid::GridMesh>,
     options: &Options,
 ) -> Vec<u8> {
-    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    let poses = identity_poses(scene);
+    let appearances = default_appearances(scene);
     render_frame_with_poses(
-        device, queue, pipeline, scene, camera, w, h, grid, None, None, options, &poses,
+        device,
+        queue,
+        pipeline,
+        scene,
+        camera,
+        w,
+        h,
+        grid,
+        None,
+        None,
+        options,
+        &poses,
+        &appearances,
     )
 }
 
-/// The harness core: [`render_frame_opts`] plus the per-part poses, the
-/// staged measure markers, and the compare ghost threaded into the
-/// `Frame` — every pose-path test renders through here.
+/// The harness core: [`render_frame_opts`] plus the per-part poses and
+/// appearance flags, the staged measure markers, and the compare ghost
+/// threaded into the `Frame` — every pose-path test renders through here.
 fn render_frame_with_poses(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -115,11 +139,13 @@ fn render_frame_with_poses(
     ghost: Option<&PartScene>,
     options: &Options,
     poses: &[PartPose],
+    appearances: &[PartAppearance],
 ) -> Vec<u8> {
     let frame = Frame {
         camera,
         scene,
         poses,
+        appearances,
         effective_aabb: (scene.aabb_min, scene.aabb_max),
         grid,
         markers,
@@ -265,15 +291,32 @@ fn render_frame_msaa_with_grid(
 }
 
 /// The pose path's render entry — the common case with explicit per-part
-/// poses: default camera for the viewport, no overlay, solid mode. (The
-/// upload-count half of the pose law is asserted in-crate, where the
-/// counter accessors are visible.)
+/// poses: default camera for the viewport, no overlay, solid mode, opaque
+/// appearances. (The upload-count half of the pose law is asserted
+/// in-crate, where the counter accessors are visible.)
 fn render_frame_poses(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipeline: &mut MeshPipeline,
     scene: &PartScene,
     poses: &[PartPose],
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let appearances = default_appearances(scene);
+    render_frame_appearances(device, queue, pipeline, scene, poses, &appearances, w, h)
+}
+
+/// The appearance path's render entry — [`render_frame_poses`] plus the
+/// per-part motion appearance flags threaded into the `Frame`: default
+/// camera for the viewport, no overlay, solid mode.
+fn render_frame_appearances(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    poses: &[PartPose],
+    appearances: &[PartAppearance],
     w: u32,
     h: u32,
 ) -> Vec<u8> {
@@ -291,6 +334,7 @@ fn render_frame_poses(
         None,
         &Options::default(),
         poses,
+        appearances,
     )
 }
 
@@ -308,7 +352,8 @@ fn render_frame_ghost(
     h: u32,
 ) -> Vec<u8> {
     let camera = default_camera(scene, w as f32 / h as f32);
-    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    let poses = identity_poses(scene);
+    let appearances = default_appearances(scene);
     render_frame_with_poses(
         device,
         queue,
@@ -322,6 +367,7 @@ fn render_frame_ghost(
         Some(ghost),
         &Options::default(),
         &poses,
+        &appearances,
     )
 }
 
@@ -366,6 +412,19 @@ fn decode_linear(c: &[u8]) -> [f32; 3] {
         srgb_to_linear(c[1]),
         srgb_to_linear(c[2]),
     ]
+}
+
+/// The EOTF's inverse on the f32 unit scale with round-to-nearest storage:
+/// blend expectations round-trip decode → lerp → encode exactly as the
+/// fixed-function sRGB blend does (an sRGB attachment decodes both
+/// endpoints, blends in LINEAR space, and re-encodes on store).
+fn encode_srgb(linear: f32) -> u8 {
+    let srgb = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Chromaticity: the linear color scaled so its max component is 1.
@@ -1648,6 +1707,7 @@ fn orientation_pattern_matches_projection() {
             ..Options::default()
         },
         &poses,
+        &default_appearances(&scene),
     );
     assert!(
         ink_pixels(&px4, bg) > 5_000,
@@ -1785,7 +1845,7 @@ fn markers_render_orange_at_projected_points() {
     let scene_points: Vec<[f32; 3]> = model_points.iter().map(|p| scene.to_scene(*p)).collect();
     let radius = markers::marker_radius(camera::framing_radius(scene.aabb_min, scene.aabb_max));
     let mesh = markers::geometry(&scene_points, radius);
-    let poses = vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()];
+    let poses = identity_poses(&scene);
     // orange-chroma ink within 12px of each point's projection
     let orange_at = |px: &[u8]| -> [usize; 2] {
         let mut counts = [0usize; 2];
@@ -1817,6 +1877,7 @@ fn markers_render_orange_at_projected_points() {
         None,
         &Options::default(),
         &poses,
+        &default_appearances(&scene),
     );
     assert_eq!(
         orange_at(&plain),
@@ -1836,6 +1897,7 @@ fn markers_render_orange_at_projected_points() {
         None,
         &Options::default(),
         &poses,
+        &default_appearances(&scene),
     );
     let counts = orange_at(&marked);
     assert!(
@@ -1939,5 +2001,211 @@ fn ghost_uses_the_current_scene_pin() {
     assert!(
         (own.aabb_min[1] - 0.0).abs() < 1e-3,
         "control: own pin re-floors"
+    );
+}
+
+/// A static part renders translucent at upstream's 0.22: an sRGB attachment
+/// blends in LINEAR space (decode → blend → re-encode — the fixed-function
+/// sRGB rule), so the stored byte is
+/// `encode(0.22·decode(opaque_byte) + 0.78·decode(bg_byte))` — NOT raw-u8
+/// arithmetic (the white facet's opaque 165 over bg 89 stores 112; the raw
+/// lerp reads 106, six counts beyond the ±2 tolerance).
+///
+/// The translucent sample part is a SINGLE white triangle, not the golden
+/// box: the blend pipelines keep upstream's `faceCulling = .none`
+/// (ModelViewer.swift:412), under which a closed translucent box
+/// composites its far faces over its near ones at EVERY interior pixel
+/// (no depth write, no cull — two-plus order-dependent layers), so no box
+/// pixel carries the one-fragment blend this exact expectation describes.
+/// A lone facet has exactly one fragment per covered pixel — the sampled
+/// centroid is interior by construction, its normal the +y top-face one
+/// (staged winding below), so the opaque reference reads the same lit
+/// white on every channel.
+#[test]
+fn translucent_part_blends_at_upstream_opacity() {
+    let (device, queue) = gpu::device_queue();
+    // one white triangle, MODEL z=10 flat, wound for the +z MODEL normal
+    // that remaps to scene +y (the 0.374-lit top-face lighting)
+    let part = engine::parsing::Part {
+        name: "facet".into(),
+        positions: vec![[-40.0, -40.0, 10.0], [40.0, -40.0, 10.0], [0.0, 40.0, 10.0]],
+        triangle_colors: vec![Some([255, 255, 255])],
+    };
+    let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let cam = default_camera(&scene, 800.0 / 600.0);
+    let poses = identity_poses(&scene);
+    let plain = vec![PartAppearance::default(); scene.parts.len()];
+    let px_opaque = render_frame_appearances(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &poses,
+        &plain,
+        800,
+        600,
+    );
+    let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
+    let translucent = vec![PartAppearance {
+        translucent: true,
+        ..PartAppearance::default()
+    }];
+    let px_blend = render_frame_appearances(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &poses,
+        &translucent,
+        800,
+        600,
+    );
+    // the staged centroid: interior to the one facet, far from every edge
+    let vs = &scene.parts[0].vertices;
+    let centroid = [
+        (vs[0].pos[0] + vs[1].pos[0] + vs[2].pos[0]) / 3.0,
+        (vs[0].pos[1] + vs[1].pos[1] + vs[2].pos[1]) / 3.0,
+        (vs[0].pos[2] + vs[1].pos[2] + vs[2].pos[2]) / 3.0,
+    ];
+    let p = project_px(cam.view_proj, centroid, 800.0, 600.0)
+        .expect("facet centroid projects inside the frame");
+    let idx = (p.1 as usize * 800 + p.0 as usize) * 4;
+    for c in 0..3 {
+        // decode → lerp → encode in f32: the sRGB attachment blends linearized
+        let expected =
+            encode_srgb(0.22 * srgb_to_linear(px_opaque[idx + c]) + 0.78 * srgb_to_linear(bg[c]));
+        assert!(
+            (px_blend[idx + c] as i32 - expected as i32).abs() <= 2,
+            "channel {c}: {} vs linear-blended {expected}",
+            px_blend[idx + c]
+        );
+    }
+}
+
+/// A colliding part renders FLAT red — unlit, the same value from every
+/// normal (upstream's emissive collision material, ModelViewer.swift:275-279)
+/// — and opaque: the collision flag replaces translucency.
+#[test]
+fn collision_paints_flat_red_on_every_normal() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let poses = identity_poses(&scene);
+    let look = vec![
+        PartAppearance {
+            collision: true,
+            translucent: true, // collision must win over translucency
+        },
+        PartAppearance::default(),
+    ];
+    let px = render_frame_appearances(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &poses,
+        &look,
+        800,
+        600,
+    );
+    let cam = default_camera(&scene, 800.0 / 600.0);
+    // top face and +x side face: different normals, same flat color
+    for model_point in [[26.0, 0.0, 4.0], [30.0, 8.0, -2.0]] {
+        let p = project_px(cam.view_proj, scene.to_scene(model_point), 800.0, 600.0)
+            .expect("face point projects inside the frame");
+        let px4: [u8; 4] = px[(p.1 as usize * 800 + p.0 as usize) * 4..][..4]
+            .try_into()
+            .unwrap();
+        let lin = decode_linear(&px4);
+        for i in 0..3 {
+            assert!(
+                (lin[i] - viewer::render::COLLISION_LINEAR[i]).abs() < 0.05,
+                "MODEL {model_point:?} channel {i}: {lin:?}"
+            );
+        }
+    }
+}
+
+/// Carry-forward class (the M3/M6 grid-alpha bug, now on mesh parts): a 0.22
+/// part through the 4x MSAA resolve must still composite at 0.22 — neither
+/// snapped to the opaque color (alpha lost) nor to the background. The 4x
+/// options ride the harness core directly: default options carry msaa 1 and
+/// would flip the fresh 4x pipeline back before it ever rendered
+/// multisampled (the regression `render_frame_msaa`'s comment records). The
+/// bg-distance floor is 5, not 10: the golden base under `faceCulling
+/// .none` composites its far faces at the sampled pixel, landing its R
+/// around 70 against bg 89 (opaque 16) — the regression values are the
+/// endpoints themselves (alpha lost reads exactly one of them), so 5 holds
+/// the discrimination with rounding headroom on either side.
+#[test]
+fn translucent_alpha_survives_the_msaa_resolve() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let cam = default_camera(&scene, 800.0 / 600.0);
+    let mut bg_pipe = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut bg_pipe, &cam, 800, 600);
+    let mut pipeline =
+        MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
+    let poses = identity_poses(&scene);
+    let at4 = &Options {
+        msaa: 4,
+        ..Options::default()
+    };
+    let plain = vec![PartAppearance::default(); scene.parts.len()];
+    let px_opaque = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        800,
+        600,
+        None,
+        None,
+        None,
+        at4,
+        &poses,
+        &plain,
+    );
+    let translucent = vec![
+        PartAppearance {
+            translucent: true,
+            ..PartAppearance::default()
+        },
+        PartAppearance::default(),
+    ];
+    let px_blend = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        800,
+        600,
+        None,
+        None,
+        None,
+        at4,
+        &poses,
+        &translucent,
+    );
+    let p = project_px(
+        cam.view_proj,
+        scene.to_scene([26.0, 0.0, 4.0]),
+        800.0,
+        600.0,
+    )
+    .unwrap();
+    let idx = (p.1 as usize * 800 + p.0 as usize) * 4;
+    let distance_from_opaque = (px_blend[idx] as i32 - px_opaque[idx] as i32).abs();
+    let distance_from_bg = (px_blend[idx] as i32 - bg[0] as i32).abs();
+    assert!(
+        distance_from_opaque > 10 && distance_from_bg > 5,
+        "blended pixel sits between opaque ({}) and background ({}), not on either ({} vs {})",
+        px_opaque[idx],
+        bg[0],
+        distance_from_opaque,
+        distance_from_bg
     );
 }

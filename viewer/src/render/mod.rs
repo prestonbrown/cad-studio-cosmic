@@ -13,9 +13,10 @@
 //! resident, so an unchanged scene costs zero mesh bytes however the
 //! camera moves. What legitimately writes per frame: the camera uniform,
 //! the section-cap quad, and each visible part's model uniform — the
-//! [`Frame`] pose path moves and hides parts (64 B/part, draw-skip on
-//! `None`) without touching a vertex, and M7's playback rides the same
-//! binding.
+//! [`Frame`] pose path moves and hides parts (draw-skip on `None`)
+//! without touching a vertex, and M7's playback rides the same binding:
+//! poses AND the collision/translucency appearance flags are uniform
+//! state (80 B/part), never vertex re-staging.
 //!
 //! The camera is split the same way: [`camera`] holds the ModelViewer.swift
 //! parity math — orbit/zoom/pan formulas, diagonal/2 framing with the floor
@@ -134,17 +135,31 @@ impl Default for Options {
 /// exactly this slot, written per frame, never staged into content.
 pub type PartPose = Option<[[f32; 4]; 4]>;
 
+/// One part's motion-appearance flags for a frame (upstream's playback
+/// materials, ModelViewer.swift:263-266): `translucent` draws the part
+/// alpha-blended at [`TRANSLUCENT_ALPHA`] (the static-parts material),
+/// `collision` replaces the whole material with the flat-red emissive one
+/// — opaque, unlit, winning over `translucent` exactly as upstream's
+/// material-array swap does. The default `{ false, false }` draws the
+/// staged color, lit, opaque — byte-identical to a pre-motion frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PartAppearance {
+    pub translucent: bool,
+    pub collision: bool,
+}
+
 /// Everything one frame's prepare needs, bundled: the camera, the staged
-/// scene, one [`PartPose`] per part (same length — asserted), the aabb the
-/// section cap and framing should use (defaults to the scene's own; the
-/// arrangement wiring replaces it with the effective box), the overlay,
-/// and the render mode. The struct is the renderer's whole per-frame
-/// input contract — later tasks extend it rather than grow the parameter
-/// list again.
+/// scene, one [`PartPose`] and one [`PartAppearance`] per part (both same
+/// length — asserted), the aabb the section cap and framing should use
+/// (defaults to the scene's own; the arrangement wiring replaces it with
+/// the effective box), the overlay, and the render mode. The struct is the
+/// renderer's whole per-frame input contract — later tasks extend it
+/// rather than grow the parameter list again.
 pub struct Frame<'a> {
     pub camera: &'a Camera,
     pub scene: &'a PartScene,
     pub poses: &'a [PartPose],
+    pub appearances: &'a [PartAppearance],
     /// The aabb of what is effectively drawn (hidden parts excluded,
     /// arranged offsets included) in pinned scene space.
     pub effective_aabb: ([f32; 3], [f32; 3]),
@@ -161,14 +176,25 @@ pub struct Frame<'a> {
     pub options: Options,
 }
 
-/// Per-part model transform (group 1), written from the frame's pose on
-/// every prepare — the sanctioned per-frame path. Identity while parts
-/// render where they sit; explode offsets and playback poses write real
-/// matrices through the same binding.
+/// Per-part model transform plus motion appearance (group 1), written from
+/// the frame's pose and appearance on every prepare — the sanctioned
+/// per-frame path. Identity while parts render where they sit; explode
+/// offsets, playback poses, and the collision/translucency flags all write
+/// through this same binding, never a vertex.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Model {
     transform: [[f32; 4]; 4],
+    /// 1.0 when the frame's appearance flagged a collision — fs_main swaps
+    /// in the flat-red material on it.
+    collision: f32,
+    /// [`TRANSLUCENT_ALPHA`] when the appearance flagged translucency, else
+    /// 1.0 — fs_main's output alpha (opaque on collision parts regardless).
+    alpha: f32,
+    /// WGSL uniform structs round their size up to 16 bytes: 64 + 4 + 4 = 72
+    /// must be padded to 80 or bind-group validation fails on
+    /// min_binding_size.
+    _pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -185,6 +211,20 @@ struct CapVertex {
 /// constant is the one definition: `cap_wgsl_source` substitutes it into
 /// cap.wgsl, and the cap-color test reads it back against this value.
 pub const CUT_FACE_LINEAR: [f32; 3] = [0.6920, 0.0321, 0.0220];
+
+/// The motion collision material's color: systemRed straight through the
+/// exact EOTF (the same red [`CUT_FACE_LINEAR`] blends 15% black for the
+/// cut face; the collision material uses it unblended as BOTH baseColor
+/// and emissiveColor, ModelViewer.swift:275-279 — hence flat, unlit).
+/// LINEAR, the space the mesh shader writes into the sRGB target. The
+/// Rust constant is the one definition: `mesh_wgsl_source` substitutes it
+/// into mesh.wgsl, and the collision-color test reads it back against
+/// this value.
+pub const COLLISION_LINEAR: [f32; 3] = [1.0, 0.0437, 0.0295];
+
+/// The translucent static-parts material's opacity
+/// (ModelViewer.swift:410: `.transparent(opacity: 0.22)`).
+pub const TRANSLUCENT_ALPHA: f32 = 0.22;
 
 /// The compare ghost's straight alpha (ModelViewer.swift:375):
 /// `blending = .transparent(opacity: 0.6)` over the unlit systemOrange
@@ -508,11 +548,11 @@ struct ResidentPart {
     /// (2 indices per edge) and its index count.
     edge_buf: wgpu::Buffer,
     edge_count: u32,
-    /// Group 1 for this part's draws: the model transform.
+    /// Group 1 for this part's draws: the model transform + appearance.
     model_bg: wgpu::BindGroup,
     /// The model uniform behind `model_bg` — every prepare writes the
-    /// frame's pose into it (64 B), the whole per-frame cost of moving a
-    /// part.
+    /// frame's pose and appearance into it (80 B), the whole per-frame
+    /// cost of moving or recoloring a part.
     model_buf: wgpu::Buffer,
 }
 
@@ -579,11 +619,12 @@ fn ghost_identity(scene: &PartScene) -> u64 {
     h.finish()
 }
 
-/// The depth/stencil contract every unlit post-mesh pass shares — the
-/// grid/markers overlay pipeline and the compare ghost: depth-TESTED so
-/// the opaque mesh occludes these draws, depth-write OFF so they occlude
-/// nothing after them, stencil inert (Always/Keep — the mesh pass's
-/// winding parity stays untouched for whoever reads it next).
+/// The depth/stencil contract shared by every pass that must not occlude —
+/// the grid/markers overlay pipeline, the compare ghost, and the
+/// translucent part pipelines: depth-TESTED so the opaque mesh orders
+/// these draws correctly, depth-write OFF so they occlude nothing after
+/// them, stencil inert (Always/Keep — the mesh pass's winding parity stays
+/// untouched for whoever reads it next).
 fn overlay_depth_stencil() -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: wgpu::TextureFormat::Depth24PlusStencil8,
@@ -615,6 +656,11 @@ pub struct MeshPipeline {
     /// Wireframe hairlines (facts #44): the mesh shader at LineList
     /// topology, drawn instead of `pipeline` when `wireframe` is set.
     line_pipeline: wgpu::RenderPipeline,
+    /// The translucent part set's pipelines (motion playback): the mesh
+    /// and line materials with alpha blending and no depth write — drawn
+    /// after the opaque set, before the cap.
+    mesh_blend_pipeline: wgpu::RenderPipeline,
+    line_blend_pipeline: wgpu::RenderPipeline,
     /// Unlit grid/bed/tripod overlay (facts #34/#37).
     grid_pipeline: wgpu::RenderPipeline,
     /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
@@ -636,8 +682,14 @@ pub struct MeshPipeline {
     residents: Vec<ResidentPart>,
     /// The slots the last prepared frame poses visibly (its `Some` poses,
     /// in slot order) — the draw path's visibility snapshot, taken at
-    /// prepare because render has no pose slice to read.
+    /// prepare because render has no pose slice to read. This list holds
+    /// the OPAQUE slots (default or collision appearance); the translucent
+    /// slots sit in `drawn_translucent`.
     drawn: Vec<usize>,
+    /// The translucent (`!collision && translucent`) slots of the last
+    /// prepared frame, in slot order — drawn after `drawn` through the
+    /// blend pipelines.
+    drawn_translucent: Vec<usize>,
     /// The resident overlay, when the last prepared frame carried one.
     grid: Option<ResidentGrid>,
     /// The resident measure markers, when the last prepared frame carried
@@ -680,11 +732,11 @@ pub struct MeshPipeline {
     ghost_upload_count: u32,
 }
 
-/// mesh.wgsl with the lighting constants substituted from [`lights`] —
-/// the one definition the shader and the shading tests share. The @NAME@
-/// markers are not valid WGSL, so a missed substitution breaks shader
-/// compilation instead of silently rendering numbers the tests do not
-/// assert against.
+/// mesh.wgsl with the lighting constants substituted from [`lights`] and
+/// the collision color from [`COLLISION_LINEAR`] — the one definition the
+/// shader and the shading tests share. The @NAME@ markers are not valid
+/// WGSL, so a missed substitution breaks shader compilation instead of
+/// silently rendering numbers the tests do not assert against.
 fn mesh_wgsl_source() -> String {
     let vec3 = |p: [f32; 3]| format!("vec3<f32>({}, {}, {})", p[0], p[1], p[2]);
     include_str!("mesh.wgsl")
@@ -694,6 +746,9 @@ fn mesh_wgsl_source() -> String {
         .replace("@FILL_COEFF@", &lights::fill_coeff().to_string())
         .replace("@AMBIENT@", &lights::AMBIENT.to_string())
         .replace("@LIT_MAX@", &lights::LIT_MAX.to_string())
+        .replace("@COLLISION_R@", &COLLISION_LINEAR[0].to_string())
+        .replace("@COLLISION_G@", &COLLISION_LINEAR[1].to_string())
+        .replace("@COLLISION_B@", &COLLISION_LINEAR[2].to_string())
 }
 
 /// cap.wgsl with the cut-face color substituted from [`CUT_FACE_LINEAR`] —
@@ -727,6 +782,10 @@ struct Pipelines {
     mesh: wgpu::RenderPipeline,
     cap: wgpu::RenderPipeline,
     line: wgpu::RenderPipeline,
+    /// The mesh/line pipelines' alpha-blended twins for the translucent
+    /// part set (blend on, the overlay depth stance).
+    mesh_blend: wgpu::RenderPipeline,
+    line_blend: wgpu::RenderPipeline,
     grid: wgpu::RenderPipeline,
     ghost: wgpu::RenderPipeline,
 }
@@ -792,11 +851,13 @@ impl MeshPipeline {
             label: None,
         });
         // one bind group per part: no MAX_PARTS-style cap, just a bind per
-        // draw — assemblies of any size render correctly
+        // draw — assemblies of any size render correctly. VERTEX_FRAGMENT
+        // like the camera layout: fs_main reads model.collision/model.alpha,
+        // and pipeline creation fails validation until the layout says so
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -836,6 +897,8 @@ impl MeshPipeline {
             pipeline: pipelines.mesh,
             cap_pipeline: pipelines.cap,
             line_pipeline: pipelines.line,
+            mesh_blend_pipeline: pipelines.mesh_blend,
+            line_blend_pipeline: pipelines.line_blend,
             grid_pipeline: pipelines.grid,
             ghost_pipeline: pipelines.ghost,
             part_pass_layout,
@@ -847,6 +910,7 @@ impl MeshPipeline {
             uniform_buf,
             residents: Vec::new(),
             drawn: Vec::new(),
+            drawn_translucent: Vec::new(),
             grid: None,
             marker: None,
             ghost_residents: Vec::new(),
@@ -865,7 +929,7 @@ impl MeshPipeline {
         }
     }
 
-    /// The four render pipelines at `sample_count`, built against the SAME
+    /// The six render pipelines at `sample_count`, built against the SAME
     /// pipeline layout objects the resident bind groups reference — a
     /// rebuilt pipeline stays bind-compatible without re-staging anything.
     fn make_pipelines(
@@ -1106,6 +1170,93 @@ impl MeshPipeline {
             multiview_mask: None,
             cache: None,
         });
+        // The translucent part set (motion playback, ModelViewer.swift:410):
+        // the mesh material with ALPHA_BLENDING and the overlay depth stance
+        // ([`overlay_depth_stencil`]) — depth-TESTED so the opaque set orders
+        // correctly, never WRITING depth so a translucent part occludes
+        // nothing after it. Stencil all Keep through that shared state: the
+        // blend pipelines never participate in section winding parity —
+        // section ∩ animation is empty by mutual exclusion (the pane's
+        // isAnimating excludes sectioning) — stated here rather than silently
+        // inheriting the mesh's inc/dec ops that rely on it. No culling,
+        // like the mesh (upstream's translucent material sets faceCulling
+        // .none too).
+        let mesh_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh blend"),
+            layout: Some(part_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 36,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &vlayout,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(overlay_depth_stencil()),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        // The same swap on the wireframe hairlines: a translucent part in
+        // wireframe mode draws its edge list through this pipeline — fs_main
+        // applies model.alpha identically to fill.
+        let line_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wireframe lines blend"),
+            layout: Some(part_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 36,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &vlayout,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(overlay_depth_stencil()),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
         // Grid / bed / tripod overlay (facts #34/#37): unlit vertex colors,
         // alpha-blended, no culling. Depth-tested so the model occludes
         // the overlay, but NO depth write — an overlay must not occlude
@@ -1221,6 +1372,8 @@ impl MeshPipeline {
             mesh: pipeline,
             cap: cap_pipeline,
             line: line_pipeline,
+            mesh_blend: mesh_blend_pipeline,
+            line_blend: line_blend_pipeline,
             grid: grid_pipeline,
             ghost: ghost_pipeline,
         }
@@ -1243,6 +1396,8 @@ impl MeshPipeline {
         self.pipeline = pipelines.mesh;
         self.cap_pipeline = pipelines.cap;
         self.line_pipeline = pipelines.line;
+        self.mesh_blend_pipeline = pipelines.mesh_blend;
+        self.line_blend_pipeline = pipelines.line_blend;
         self.grid_pipeline = pipelines.grid;
         self.ghost_pipeline = pipelines.ghost;
         self.blit = (count > 1).then(|| Self::make_blit(device, self.format));
@@ -1419,8 +1574,9 @@ impl MeshPipeline {
 
     /// Per-frame upload: camera uniform, depth-texture resize to the
     /// render-target `size`, each visible part's model uniform (the pose
-    /// path — 64 B/part, a moved or hidden part never touches a vertex),
-    /// and the upload-once mesh path — a part's vertices are (re)written
+    /// and appearance path — 80 B/part: transform, collision flag, alpha;
+    /// a moved, hidden, translucent, or colliding part never touches a
+    /// vertex), and the upload-once mesh path — a part's vertices are (re)written
     /// only when its content identity differs from what is resident, so an
     /// unchanged scene costs zero mesh uploads however the camera or the
     /// poses move. `frame.grid` (when `Some`) is the overlay
@@ -1449,6 +1605,13 @@ impl MeshPipeline {
             scene.parts.len(),
             "one pose per part: {} poses for {} parts",
             frame.poses.len(),
+            scene.parts.len()
+        );
+        assert_eq!(
+            frame.appearances.len(),
+            scene.parts.len(),
+            "one appearance per part: {} appearances for {} parts",
+            frame.appearances.len(),
             scene.parts.len()
         );
         if options.msaa != self.sample_count {
@@ -1510,6 +1673,9 @@ impl MeshPipeline {
                 label: Some(&format!("part {label} model")),
                 contents: bytemuck::bytes_of(&Model {
                     transform: [[0.0; 4]; 4],
+                    collision: 0.0,
+                    alpha: 0.0,
+                    _pad: [0.0; 2],
                 }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1536,21 +1702,38 @@ impl MeshPipeline {
                 self.residents.push(resident);
             }
         }
-        // The pose path: every visible part's model uniform written from
-        // the frame, and the visibility snapshot the draw path reads (a
-        // hidden part's slot is simply absent from it).
-        self.drawn = frame
-            .poses
-            .iter()
-            .enumerate()
-            .filter_map(|(i, pose)| pose.is_some().then_some(i))
-            .collect();
-        for &i in &self.drawn {
-            let pose = frame.poses[i].expect("drawn slots pose Some");
+        // The pose+appearance path: every visible part's model uniform
+        // written from the frame (transform, collision flag, alpha — the
+        // whole motion surface as uniform state), and the visibility
+        // snapshot split the draw path reads: opaque slots (default OR
+        // collision — upstream's collision material REPLACES the
+        // translucent one, ModelViewer.swift:263-266, so a colliding part
+        // stays opaque) in `drawn`, the rest in `drawn_translucent`. A
+        // hidden part's slot is absent from both.
+        self.drawn.clear();
+        self.drawn_translucent.clear();
+        for (i, (pose, look)) in frame.poses.iter().zip(frame.appearances).enumerate() {
+            if pose.is_none() {
+                continue;
+            }
+            if look.translucent && !look.collision {
+                self.drawn_translucent.push(i);
+            } else {
+                self.drawn.push(i);
+            }
             queue.write_buffer(
                 &self.residents[i].model_buf,
                 0,
-                bytemuck::bytes_of(&Model { transform: pose }),
+                bytemuck::bytes_of(&Model {
+                    transform: pose.expect("drawn slots pose Some"),
+                    collision: look.collision as u32 as f32,
+                    alpha: if look.translucent {
+                        TRANSLUCENT_ALPHA
+                    } else {
+                        1.0
+                    },
+                    _pad: [0.0; 2],
+                }),
             );
         }
         // The cap is this port's cut-face stand-in, and upstream disables
@@ -1640,19 +1823,22 @@ impl MeshPipeline {
     }
 
     /// Parts the last prepared frame poses visibly — the slots the draw
-    /// path binds, hidden parts absent (test visibility).
+    /// path binds (opaque + translucent), hidden parts absent (test
+    /// visibility).
     #[cfg(test)]
     pub(crate) fn drawn_part_count_for_tests(&self) -> usize {
-        self.drawn.len()
+        self.drawn.len() + self.drawn_translucent.len()
     }
 
     /// Vertices the wireframe line pass would draw this frame — every
-    /// drawn (visible) part's edges contribute their 2 corner indices
-    /// (test visibility).
+    /// drawn part's edges (BOTH sets: opaque and translucent — a
+    /// translucent part in wireframe playback still draws its hairlines)
+    /// contribute their 2 corner indices (test visibility).
     #[cfg(test)]
     pub(crate) fn line_vertex_count_for_tests(&self) -> u32 {
         self.drawn
             .iter()
+            .chain(&self.drawn_translucent)
             .map(|&i| self.residents[i].edge_count)
             .sum()
     }
@@ -1682,6 +1868,7 @@ impl MeshPipeline {
         viewport: [f32; 4],
     ) {
         if self.drawn.is_empty()
+            && self.drawn_translucent.is_empty()
             && self.grid.is_none()
             && self.marker.is_none()
             && self.ghost_residents.is_empty()
@@ -1788,12 +1975,15 @@ impl MeshPipeline {
     }
 
     /// Part draws — one bind group + vertex buffer + draw per DRAWN part
-    /// (the last prepared frame's visible slots; hidden parts are absent),
-    /// filled triangles or the wireframe hairline list — then, when the
-    /// camera sections, the cap quad, then the compare ghost, and last the
-    /// unlit overlays (grid, then measure markers) — into the pass's color
-    /// attachment (msaa or single-sample alike: everything here inherits
-    /// the pass attachment and matches its sample count).
+    /// (the last prepared frame's visible slots; hidden parts are absent):
+    /// the opaque set first (filled triangles or the wireframe hairline
+    /// list; a collision part among them colors flat red through the
+    /// shader flag), then the translucent set through the blend pipelines
+    /// (same topology choice, alpha from the model uniform) — then, when
+    /// the camera sections, the cap quad, then the compare ghost, and last
+    /// the unlit overlays (grid, then measure markers) — into the pass's
+    /// color attachment (msaa or single-sample alike: everything here
+    /// inherits the pass attachment and matches its sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
@@ -1813,6 +2003,30 @@ impl MeshPipeline {
                 pass.set_bind_group(1, &resident.model_bg, &[]);
                 pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
                 pass.draw(0..resident.vertex_count, 0..1);
+            }
+        }
+        // The translucent set after every opaque part, before the cap: it
+        // blends over what is already drawn and must not occlude anything
+        // after it (no depth write) — a collision part never lands here
+        // (opaque by partition), so the flat-red branch never blends.
+        if !self.drawn_translucent.is_empty() {
+            if self.wireframe {
+                pass.set_pipeline(&self.line_blend_pipeline);
+                for &i in &self.drawn_translucent {
+                    let resident = &self.residents[i];
+                    pass.set_bind_group(1, &resident.model_bg, &[]);
+                    pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+                    pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                }
+            } else {
+                pass.set_pipeline(&self.mesh_blend_pipeline);
+                for &i in &self.drawn_translucent {
+                    let resident = &self.residents[i];
+                    pass.set_bind_group(1, &resident.model_bg, &[]);
+                    pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
+                    pass.draw(0..resident.vertex_count, 0..1);
+                }
             }
         }
         if self.draw_cap {
@@ -2161,8 +2375,13 @@ mod tests {
 
     /// The Frame every upload-once test shares: default options, no overlay,
     /// effective_aabb at the staged scene's own (T10 replaces that input).
-    fn frame<'a>(camera: &'a Camera, scene: &'a PartScene, poses: &'a [PartPose]) -> Frame<'a> {
-        frame_ghost(camera, scene, poses, None)
+    fn frame<'a>(
+        camera: &'a Camera,
+        scene: &'a PartScene,
+        poses: &'a [PartPose],
+        appearances: &'a [PartAppearance],
+    ) -> Frame<'a> {
+        frame_ghost(camera, scene, poses, appearances, None)
     }
 
     /// [`frame`] plus the compare ghost scene.
@@ -2170,12 +2389,14 @@ mod tests {
         camera: &'a Camera,
         scene: &'a PartScene,
         poses: &'a [PartPose],
+        appearances: &'a [PartAppearance],
         ghost: Option<&'a PartScene>,
     ) -> Frame<'a> {
         Frame {
             camera,
             scene,
             poses,
+            appearances,
             effective_aabb: (scene.aabb_min, scene.aabb_max),
             grid: None,
             markers: None,
@@ -2189,6 +2410,11 @@ mod tests {
         vec![Some(glam::Mat4::IDENTITY.to_cols_array_2d()); scene.parts.len()]
     }
 
+    /// Opaque default appearances for every slot of `scene`.
+    fn defaults(scene: &PartScene) -> Vec<PartAppearance> {
+        vec![PartAppearance::default(); scene.parts.len()]
+    }
+
     #[test]
     fn upload_once_second_frame_no_reupload() {
         let (device, queue) = gpu::device_queue();
@@ -2196,7 +2422,12 @@ mod tests {
         let camera = default_camera(&scene, 4.0 / 3.0);
         let poses = identity_poses(&scene);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &poses, &defaults(&scene)),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -2205,7 +2436,12 @@ mod tests {
         // second frame, same scene, MOVED camera: mesh bytes must not move
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
         let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&moved, &scene, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&moved, &scene, &poses, &defaults(&scene)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1,
@@ -2226,7 +2462,12 @@ mod tests {
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene1, &poses, &defaults(&scene1)),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -2239,7 +2480,12 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene2, &poses, &defaults(&scene2)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -2256,7 +2502,12 @@ mod tests {
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene1, &poses, &defaults(&scene1)),
+        );
         let (u1, a1) = (
             pipeline.upload_count_for_tests(),
             pipeline.alloc_count_for_tests(),
@@ -2268,7 +2519,12 @@ mod tests {
         let n = parts[0].positions.len();
         parts[0].positions[n / 2][0] -= 5.0;
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene2, &poses, &defaults(&scene2)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -2293,12 +2549,22 @@ mod tests {
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene1, &poses, &defaults(&scene1)),
+        );
         let u1 = pipeline.upload_count_for_tests();
         // facts #43's light-mode neutral: same geometry, only the paint
         // changes — a skipped upload would serve the dark-mode colors
         let scene2 = PartScene::from_parts(&parts, [0.55, 0.64, 0.75]);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene2, &poses, &defaults(&scene2)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 1,
@@ -2444,7 +2710,12 @@ mod tests {
         let camera = default_camera(&scene1, 4.0 / 3.0);
         let poses = identity_poses(&scene1);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene1, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene1, &poses, &defaults(&scene1)),
+        );
         let u1 = pipeline.upload_count_for_tests();
         // grow past MODEL x=30: union widens, the pin's x-center shifts
         for corner in [[40.0, 0.0, 16.0], [41.0, 0.0, 16.0], [40.0, 1.0, 16.0]] {
@@ -2452,7 +2723,12 @@ mod tests {
         }
         parts[1].triangle_colors.push(None);
         let scene2 = PartScene::from_parts(&parts, NEUTRAL);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene2, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene2, &poses, &defaults(&scene2)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             u1 + 2,
@@ -2470,13 +2746,23 @@ mod tests {
         let camera = default_camera(&scene, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         let poses = identity_poses(&scene);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &poses, &defaults(&scene)),
+        );
         let uploads = pipeline.upload_count_for_tests();
         // sweep the lid 40mm along +x through the POSE path alone
         let mut moved = poses.clone();
         moved[1] =
             Some(glam::Mat4::from_translation(glam::Vec3::new(40.0, 0.0, 0.0)).to_cols_array_2d());
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &moved));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &moved, &defaults(&scene)),
+        );
         assert_eq!(
             pipeline.upload_count_for_tests(),
             uploads,
@@ -2494,15 +2780,101 @@ mod tests {
         let camera = default_camera(&scene, 4.0 / 3.0);
         let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         let poses = identity_poses(&scene);
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &poses, &defaults(&scene)),
+        );
         let uploads = pipeline.upload_count_for_tests();
         let hidden: Vec<PartPose> = vec![None, Some(glam::Mat4::IDENTITY.to_cols_array_2d())];
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &hidden));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &hidden, &defaults(&scene)),
+        );
         assert_eq!(pipeline.drawn_part_count_for_tests(), 1);
         assert_eq!(
             pipeline.upload_count_for_tests(),
             uploads,
             "hiding touches no residency"
+        );
+    }
+
+    /// The WGSL uniform struct rounds to 16-byte boundaries: 64 + 4 + 4 is 72,
+    /// which must be padded to 80 in BOTH the Rust repr and the WGSL struct —
+    /// a mismatch fails bind-group validation at min_binding_size, loudly.
+    #[test]
+    fn model_uniform_is_80_bytes() {
+        assert_eq!(
+            std::mem::size_of::<Model>(),
+            80,
+            "transform 64 + collision 4 + alpha 4 + pad 8"
+        );
+    }
+
+    /// COLLISION_LINEAR is systemRed through the exact EOTF (the same red
+    /// ModelViewer.swift:363 blends 15% black for the cut face; the motion
+    /// material uses it straight, ModelViewer.swift:275-279).
+    #[test]
+    fn collision_color_is_linear_system_red() {
+        let srgb = [1.0_f32, 59.0 / 255.0, 48.0 / 255.0];
+        for i in 0..3 {
+            assert!(
+                (COLLISION_LINEAR[i] - parts::srgb_to_linear_f(srgb[i])).abs() < 1e-3,
+                "channel {i}: {} vs {}",
+                COLLISION_LINEAR[i],
+                parts::srgb_to_linear_f(srgb[i])
+            );
+        }
+    }
+
+    /// The whole motion surface is uniform state: a playback-shaped sweep —
+    /// pose matrices AND collision/translency flags changing every step —
+    /// uploads zero vertices and keeps both parts drawn.
+    #[test]
+    fn motion_sweep_moves_poses_and_flags_without_uploads() {
+        let (device, queue) = gpu::device_queue();
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        let camera = default_camera(&scene, 4.0 / 3.0);
+        let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let id = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let looks = defaults(&scene);
+        let mut uploads_after_first = None;
+        for step in 0..24u32 {
+            let poses: Vec<PartPose> = vec![
+                Some(id),
+                Some(
+                    glam::Mat4::from_translation(glam::Vec3::new(0.0, step as f32 * 0.5, 0.0))
+                        .to_cols_array_2d(),
+                ),
+            ];
+            let appearances = vec![
+                PartAppearance {
+                    collision: step % 2 == 0,
+                    translucent: step % 3 == 0,
+                },
+                PartAppearance::default(),
+            ];
+            let f = Frame {
+                appearances: &appearances,
+                ..frame(&camera, &scene, &poses, &looks)
+            };
+            pipeline.prepare_parts(device, queue, (800, 600), &f);
+            if step == 0 {
+                uploads_after_first = Some(pipeline.upload_count_for_tests());
+            }
+            assert_eq!(
+                pipeline.drawn_part_count_for_tests(),
+                2,
+                "a translucent part is still drawn (step {step})"
+            );
+        }
+        assert_eq!(
+            pipeline.upload_count_for_tests(),
+            uploads_after_first.unwrap(),
+            "24 playback frames: zero vertex uploads"
         );
     }
 
@@ -2578,7 +2950,7 @@ mod tests {
                     wireframe: true,
                     ..Options::default()
                 },
-                ..frame(&camera, &scene, &poses)
+                ..frame(&camera, &scene, &poses, &defaults(&scene))
             },
         );
         assert_eq!(
@@ -2637,7 +3009,7 @@ mod tests {
             device,
             queue,
             (800, 600),
-            &frame_ghost(&camera, &scene, &poses, Some(&ghost)),
+            &frame_ghost(&camera, &scene, &poses, &defaults(&scene), Some(&ghost)),
         );
         let u1 = pipeline.ghost_upload_count_for_tests();
         assert_eq!(u1, 2, "one upload per ghost part on residency");
@@ -2648,7 +3020,7 @@ mod tests {
             device,
             queue,
             (800, 600),
-            &frame_ghost(&moved, &scene, &poses, Some(&ghost)),
+            &frame_ghost(&moved, &scene, &poses, &defaults(&scene), Some(&ghost)),
         );
         assert_eq!(
             pipeline.ghost_upload_count_for_tests(),
@@ -2656,7 +3028,12 @@ mod tests {
             "an unchanged ghost must not reupload on a moved camera"
         );
         // compare off: the slot empties without restaging
-        pipeline.prepare_parts(device, queue, (800, 600), &frame(&camera, &scene, &poses));
+        pipeline.prepare_parts(
+            device,
+            queue,
+            (800, 600),
+            &frame(&camera, &scene, &poses, &defaults(&scene)),
+        );
         assert_eq!(
             pipeline.ghost_upload_count_for_tests(),
             u1,
@@ -2668,7 +3045,7 @@ mod tests {
             device,
             queue,
             (800, 600),
-            &frame_ghost(&camera, &scene, &poses, Some(&other)),
+            &frame_ghost(&camera, &scene, &poses, &defaults(&scene), Some(&other)),
         );
         assert!(
             pipeline.ghost_upload_count_for_tests() > u1,

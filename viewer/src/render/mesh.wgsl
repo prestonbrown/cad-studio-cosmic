@@ -6,10 +6,18 @@ struct Camera {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// per-part model transform: one bind group per part draw (identity today;
-// explode offsets and playback poses go through this same binding)
+// per-part model transform + motion appearance: one bind group per part
+// draw (identity today; explode offsets, playback poses, and the
+// collision/translucency flags all go through this same binding — motion
+// is uniform state, never a re-stage)
 struct Model {
     transform: mat4x4<f32>,
+    collision: f32,
+    alpha: f32,
+    // uniform structs round up to 16-byte boundaries: 64 + 4 + 4 = 72 pads
+    // to 80, matching the Rust repr exactly (bind-group validation checks
+    // min_binding_size)
+    _pad: vec2<f32>,
 };
 @group(1) @binding(0) var<uniform> model: Model;
 
@@ -20,13 +28,17 @@ struct Model {
 // clamped. The @NAME@ markers are substituted from the Rust-side `lights`
 // module at pipeline creation: one definition shared by the shader and the
 // headless shading tests (a surviving marker is invalid WGSL and fails
-// compilation loudly).
+// compilation loudly). The COLLISION_@ markers follow the same contract
+// from COLLISION_LINEAR.
 const KEY_POS: vec3<f32> = @KEY_POS@;
 const KEY_COEFF: f32 = @KEY_COEFF@;
 const FILL_POS: vec3<f32> = @FILL_POS@;
 const FILL_COEFF: f32 = @FILL_COEFF@;
 const AMBIENT: f32 = @AMBIENT@;
 const LIT_MAX: f32 = @LIT_MAX@;
+const COLLISION_R: f32 = @COLLISION_R@;
+const COLLISION_G: f32 = @COLLISION_G@;
+const COLLISION_B: f32 = @COLLISION_B@;
 
 struct Vin {
     @location(0) pos: vec3<f32>,
@@ -67,5 +79,10 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
     let lit = KEY_COEFF * max(dot(n, normalize(KEY_POS)), 0.0)
             + FILL_COEFF * max(dot(n, normalize(FILL_POS)), 0.0)
             + AMBIENT;
-    return vec4<f32>(in.color * clamp(lit, 0.0, LIT_MAX), 1.0);
+    if (model.collision > 0.5) {
+        // upstream's collision material: emissive systemRed — flat from
+        // every normal, opaque even on a would-be-translucent part
+        return vec4<f32>(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B), 1.0);
+    }
+    return vec4<f32>(in.color * clamp(lit, 0.0, LIT_MAX), model.alpha);
 }
