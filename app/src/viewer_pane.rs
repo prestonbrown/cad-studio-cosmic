@@ -91,6 +91,7 @@ use viewer::tools::section::{self, SectionAxis};
 use crate::camera_input::CameraInput;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
+use crate::fl;
 use crate::parts_overlay;
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
@@ -1381,6 +1382,21 @@ fn bottom_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Mess
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// The legend's dots: the first 12 colors (ModelPane.swift:204,
+/// `prefix(12)`).
+pub fn legend_dots(colors: &[[u8; 3]]) -> &[[u8; 3]] {
+    &colors[..colors.len().min(12)]
+}
+
+/// The legend's accessibility text (ModelPane.swift:212): the count of
+/// EVERY distinct color. The catalog key still carries upstream's
+/// Swift-style `%lld` placeholder (the M8 placeable sweep migrates it to a
+/// fluent `{$count}` arg), so the count substitutes onto the lookup —
+/// this substitution is the interim recorded for that sweep.
+pub fn legend_label(total: usize) -> String {
+    fl!("lld-colori").replace("%lld", &total.to_string())
 }
 
 #[cfg(test)]
