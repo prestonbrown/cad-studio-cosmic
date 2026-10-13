@@ -22,7 +22,9 @@
 //! the IR has no variant for it, so it folds to plain styled text (marker
 //! dropped — a documented deviation; add the variant if it ever matters).
 //! Reference-style link definitions render as plain text including the URL
-//! (upstream styles the URL as a link — same visible characters).
+//! (upstream styles the URL as a link — same visible characters). A link
+//! label's emphasis (`[**b**](u)` is a bold-labeled link upstream) also
+//! collapses: the link style wins because its URL is semantic.
 //!
 //! Pure: no iced/cosmic types, no I/O — the chat view maps [`MdSpan`]s onto
 //! iced spans.
@@ -73,6 +75,15 @@ pub fn to_ir(md: &str) -> Vec<MdSpan> {
     spans
 }
 
+/// An open inline element: the style its children carry, where the element
+/// starts (the opening marker — gap emission clamps before it) and where it
+/// ends (past the closing marker / link destination).
+struct Open {
+    style: MdStyle,
+    start: usize,
+    end: usize,
+}
+
 /// One even (non-code) segment, parsed inline-only over the block parser's
 /// offset iterator. `source` is the segment; all ranges index into it.
 fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
@@ -83,15 +94,6 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
     let parser = pulldown_cmark::Parser::new_ext(source, options).into_offset_iter();
-
-    /// An open inline element: the style its children carry, where the
-    /// element starts (the opening marker — gaps never reach into it) and
-    /// where it ends (past the closing marker / link destination).
-    struct Open {
-        style: MdStyle,
-        start: usize,
-        end: usize,
-    }
 
     let mut cursor = 0usize;
     let mut stack: Vec<Open> = Vec::new();
@@ -165,15 +167,14 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
             }
             pulldown_cmark::Event::Text(text) => {
                 if range.start >= cursor {
-                    emit_gap(spans, source, cursor, range.start, stack.last().map(|o| o.start));
-                    let style = stack.last().map(|o| o.style.clone()).unwrap_or(MdStyle::Plain);
-                    push_merged(spans, text.into_string(), style);
+                    emit_gap(spans, source, cursor, range.start, marker_floor(&stack, cursor));
+                    push_merged(spans, text.into_string(), current_style(&stack));
                     cursor = range.end;
                 }
             }
             pulldown_cmark::Event::Code(code) => {
                 if range.start >= cursor {
-                    emit_gap(spans, source, cursor, range.start, stack.last().map(|o| o.start));
+                    emit_gap(spans, source, cursor, range.start, marker_floor(&stack, cursor));
                     push_merged(spans, code.into_string(), MdStyle::Code);
                     cursor = range.end;
                 }
@@ -187,9 +188,34 @@ fn parse_inline(source: &str, spans: &mut Vec<MdSpan>) {
     emit_gap(spans, source, cursor, source.len(), None);
 }
 
+/// Where a gap emission must stop: the earliest open element whose start is
+/// still ahead of the cursor — the next opening marker region. Markers of
+/// stacked openers (`**[link](u)**`) all lie between that floor and the next
+/// text, so they suppress together; an element the cursor has already passed
+/// (its first child emitted, or an End skip moved past it) contributes no
+/// floor, which keeps REAL text between sibling elements
+/// (`**[a](u) [b](v)**`) out of the clamp.
+fn marker_floor(stack: &[Open], cursor: usize) -> Option<usize> {
+    stack.iter().map(|o| o.start).filter(|&start| start >= cursor).min()
+}
+
+/// The style a text run carries. A link's URL is semantic, so a link
+/// anywhere in the open chain wins over emphasis nesting (links cannot
+/// nest); otherwise the innermost open style applies. The emphasis a link
+/// label carries upstream (`[**b**](u)` is a bold-labeled link) is the
+/// documented single-style collapse.
+fn current_style(stack: &[Open]) -> MdStyle {
+    for open in stack.iter().rev() {
+        if matches!(open.style, MdStyle::Link { .. }) {
+            return open.style.clone();
+        }
+    }
+    stack.last().map(|o| o.style.clone()).unwrap_or(MdStyle::Plain)
+}
+
 /// Emit `source[cursor..end]` as a plain span, clamped at `floor` — the
-/// start of the innermost open inline element, so opening markers (`**`, the
-/// `[` of a link) are skipped rather than leaked as literal text.
+/// next unpassed opening marker, so markers (`**`, the `[` of a link) are
+/// skipped rather than leaked as literal text.
 fn emit_gap(
     spans: &mut Vec<MdSpan>,
     source: &str,
@@ -202,7 +228,8 @@ fn emit_gap(
         let gap = &source[cursor..end];
         // A gap that is a lone backslash is an escape marker: pulldown
         // starts the escaped character's Text range AFTER the backslash, and
-        // Apple decodes the escape ("\*" renders as "*", probe 2026-10-12).
+        // Apple decodes the escape (a backslash-asterisk renders as "*",
+        // probe 2026-10-12).
         if gap != "\\" {
             push_merged(spans, gap.to_string(), MdStyle::Plain);
         }
@@ -364,6 +391,60 @@ mod tests {
                 (Strong, "bold with ".into()),
                 (Code, "code".into()),
                 (Strong, " inside".into()),
+            ]
+        );
+    }
+
+    /// Stacked openers with NO text between them: a link directly inside
+    /// strong must not leak the strong's `**` (the gap walk clamps at the
+    /// earliest not-yet-passed opener). Swift: one strong link run "link".
+    #[test]
+    fn strong_around_link_leaks_no_markers() {
+        assert_eq!(
+            spans("**[link](u)**"),
+            vec![(Link { url: "u".into() }, "link".into())]
+        );
+    }
+
+    /// The mirror stack — strong inside a link — must not leak the `[` and
+    /// must keep the link's URL: a link anywhere in the open chain wins the
+    /// single-valued style (the URL is semantic; the emphasis loss is the
+    /// documented single-style collapse). Swift: link run, bold label.
+    #[test]
+    fn strong_inside_link_keeps_link() {
+        assert_eq!(
+            spans("[**b**](u)"),
+            vec![(Link { url: "u".into() }, "b".into())]
+        );
+        // emphasis inside strong inside link, still no leaks
+        assert_eq!(
+            spans("*[**b**](u)*"),
+            vec![(Link { url: "u".into() }, "b".into())]
+        );
+    }
+
+    /// Sibling nested elements inside one outer: the text BETWEEN them is
+    /// real and survives marker suppression (the clamp only reaches the next
+    /// unpassed opener, never across a closed sibling).
+    #[test]
+    fn adjacent_links_keep_separating_text() {
+        assert_eq!(
+            spans("**[a](u) [b](v)**"),
+            vec![
+                (Link { url: "u".into() }, "a".into()),
+                (Strong, " ".into()),
+                (Link { url: "v".into() }, "b".into()),
+            ]
+        );
+        // real text around a nested chain, spaces intact end to end
+        assert_eq!(
+            spans("a **b [c](u) d** e"),
+            vec![
+                (Plain, "a ".into()),
+                (Strong, "b ".into()),
+                (Link { url: "u".into() }, "c".into()),
+                (Strong, " d".into()),
+                (Plain, " e".into()),
             ]
         );
     }

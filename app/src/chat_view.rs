@@ -127,8 +127,9 @@ const IMAGES_ONLY: &str = "Images only";
 /// `lld-immagini` (`%lld images`)
 const IMAGES_COUNT: &str = "images";
 
-/// Upstream caps the collapsed tool output at 1500 characters before the
-/// "Show All" affordance (ToolActivityRow.swift:8).
+/// Upstream caps the collapsed tool output at 1500 CHARACTERS before the
+/// "Show All" affordance (ToolActivityRow.swift:8, `output.count` /
+/// `String(prefix:)`).
 const OUTPUT_PREVIEW_LEN: usize = 1500;
 
 /// The transcript scrollable's widget id — bottom-anchoring
@@ -167,16 +168,15 @@ pub fn entries<'a>(chat: &'a ChatState, busy: bool) -> Vec<ChatEntry<'a>> {
 
 /// The collapsed tool-output preview: the first [`OUTPUT_PREVIEW_LEN`]
 /// characters plus an ellipsis line, unless showing full (upstream
-/// `shownOutput`, ToolActivityRow.swift:69-71).
+/// `shownOutput`, ToolActivityRow.swift:69-71 — Swift's `prefix(_:)` counts
+/// characters, not bytes).
 pub fn shown_output(output: &str, show_full: bool) -> String {
-    if show_full || output.len() <= OUTPUT_PREVIEW_LEN {
+    if show_full || output.chars().count() <= OUTPUT_PREVIEW_LEN {
         return output.to_string();
     }
-    let mut cut = OUTPUT_PREVIEW_LEN;
-    while !output.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}\n…", &output[..cut])
+    let mut out: String = output.chars().take(OUTPUT_PREVIEW_LEN).collect();
+    out.push_str("\n…");
+    out
 }
 
 // ─── messages ──────────────────────────────────────────────────────────────
@@ -544,7 +544,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
             if !output.is_empty() {
                 let full = pane.full_output.contains(&message.id);
                 body = body.push(code_block(&shown_output(output, full)));
-                if output.len() > OUTPUT_PREVIEW_LEN && !full {
+                if output.chars().count() > OUTPUT_PREVIEW_LEN && !full {
                     body = body.push(
                         button::text(SHOW_ALL)
                             .class(cosmic::theme::Button::Text)
@@ -999,17 +999,19 @@ mod tests {
         assert!(entries(&empty, true).is_empty());
     }
 
-    /// shownOutput parity (ToolActivityRow.swift:69-71): clip at 1500 with
-    /// an ellipsis line, full text on demand, short outputs untouched.
+    /// shownOutput parity (ToolActivityRow.swift:69-71): clip at 1500
+    /// CHARACTERS with an ellipsis line, full text on demand, short outputs
+    /// untouched. The clip is character-based like Swift's `prefix(_:)`, so
+    /// multi-byte text keeps whole characters.
     #[test]
-    fn shown_output_clips_at_1500() {
+    fn shown_output_clips_at_1500_chars() {
         let short = "done";
         assert_eq!(shown_output(short, false), "done");
         assert_eq!(shown_output(short, true), "done");
 
         let long = "x".repeat(1501);
         let clipped = shown_output(&long, false);
-        assert_eq!(clipped.len(), 1500 + "\n…".len());
+        assert_eq!(clipped.chars().count(), 1500 + "\n…".chars().count());
         assert!(clipped.ends_with("\n…"));
         assert_eq!(shown_output(&long, true), long);
 
@@ -1017,10 +1019,9 @@ mod tests {
         let edge = "y".repeat(1500);
         assert_eq!(shown_output(&edge, false), edge);
 
-        // the cut backs off to a character boundary (é is 2 bytes, so the
-        // 1500-byte cut lands exactly after 750 of them)
-        let multibyte = "é".repeat(800);
-        assert_eq!(shown_output(&multibyte, false), "é".repeat(750) + "\n…");
+        // 2-byte characters clip at 1500 CHARS, not 1500 bytes
+        let multibyte = "é".repeat(1600);
+        assert_eq!(shown_output(&multibyte, false), "é".repeat(1500) + "\n…");
     }
 
     /// The pane's toggle state round-trips through update messages, and the
