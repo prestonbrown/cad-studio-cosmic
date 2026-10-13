@@ -173,6 +173,25 @@ impl MotionStudy {
         self.value_names.iter().map(String::as_str).collect()
     }
 
+    /// Upstream `collisionCount`: the number of FRAMES carrying any
+    /// collision (MotionStudy.swift:87) — the header warning's count.
+    pub fn collision_count(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|f| !f.collisions.is_empty())
+            .count()
+    }
+
+    /// Upstream `movingParts`: every part keyed by ANY keyframe
+    /// (MotionStudy.swift:81-83). Only these render opaque during
+    /// playback; every other part renders translucent at 0.22.
+    pub fn moving_parts(&self) -> std::collections::BTreeSet<String> {
+        self.frames
+            .iter()
+            .flat_map(|f| f.parts.keys().cloned())
+            .collect()
+    }
+
     pub fn state_at(&self, time: f64) -> StudyState {
         let Some(first) = self.frames.first() else {
             return StudyState::default();

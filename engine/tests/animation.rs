@@ -156,3 +156,49 @@ fn single_frame_study_is_inert() {
     let s = MotionStudy::parse(br#"{"frames":[{"t": 0.0}]}"#).unwrap();
     assert!(!s.is_active());
 }
+
+#[test]
+fn collision_count_counts_frames_not_pairs() {
+    let study = MotionStudy::parse(
+        br#"{"frames":[
+            {"t":0},
+            {"t":1,"collisions":[{"parts":["a","b"]},{"parts":["b","c"]}]},
+            {"t":2,"collisions":[{"parts":["a","b"]}]}
+        ]}"#,
+    )
+    .unwrap();
+    // two colliding FRAMES; the t=1 frame's two pairs count once
+    assert_eq!(study.collision_count(), 2);
+    assert_eq!(
+        MotionStudy::parse(br#"{"frames":[{"t":0},{"t":1}]}"#)
+            .unwrap()
+            .collision_count(),
+        0
+    );
+}
+
+#[test]
+fn moving_parts_is_the_union_of_keyed_names() {
+    let study = MotionStudy::parse(
+        br#"{"frames":[
+            {"t":0,"parts":{"lid":{"translate":[0,0,0]}}},
+            {"t":1,"parts":{"lid":{"translate":[0,0,2]},"cam":{"rotate":[0,0,0,1]}}}
+        ]}"#,
+    )
+    .unwrap();
+    let moving = study.moving_parts();
+    assert!(moving.contains("lid") && moving.contains("cam"));
+    assert_eq!(moving.len(), 2, "a part named in any keyframe moves");
+    // the golden fixture: only the lid carries keyframes
+    let golden = MotionStudy::parse(&std::fs::read(golden()).unwrap()).unwrap();
+    assert_eq!(
+        golden.moving_parts(),
+        ["lid".to_string()].into_iter().collect()
+    );
+}
+
+#[test]
+fn golden_study_reports_one_collision_frame() {
+    let golden = MotionStudy::parse(&std::fs::read(golden()).unwrap()).unwrap();
+    assert_eq!(golden.collision_count(), 1, "collision at t=1 only");
+}
