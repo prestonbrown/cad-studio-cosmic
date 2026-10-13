@@ -733,8 +733,9 @@ impl ProjectWindow {
             // transcript fresh — keeping the input bar's draft — and the
             // activity folds from the pipeline, the same source that
             // classified the outcome. `ParameterCommitted`/`BuildFinished`
-            // as overlay sync_parameters triggers remain the F2b
-            // carry-forward (M6 T10); restore already syncs.
+            // as overlay sync_parameters triggers remain the carry-forward
+            // (docs/research/carry-forwards.md, M6 section); restore
+            // already syncs.
             bridge::Message::ParameterCommitted { .. } => Task::none(),
             // upstream's build is buffered (ModelBuilder.build returns one
             // result, no per-line surface) — the events exist for the drain

@@ -18,6 +18,18 @@
 //! overlay — parity grid, bed outline, axis tripod — is [`render::grid`],
 //! stated against the same pinned frame.
 //!
+//! M6's interactive tools extend both halves. [`tools::section`] folds
+//! upstream's CPU clip into the mesh shader's scene-axis discard (MODEL-Y
+//! keep-above arrives as scene-below at the negated value), and
+//! [`tools::picking`] is the measure tool's two-sided ray cast against the
+//! staged, posed, sectioned scene — pure MODEL-space math, no GPU types.
+//! On the render side, [`render::Frame`]'s pose path moves and hides parts
+//! through per-part uniforms (draw-skip on `None`) without touching a
+//! staged vertex — the binding M7's playback reuses — while the section
+//! cap fills the cut face from stencil parity, the compare ghost draws a
+//! second scene as an unlit wireframe, and [`render::markers`] stages the
+//! orange measure spheres and link on the grid overlay pass.
+//!
 //! [`playback`] is the motion core: [`playback::MotionPlayer`] holds the
 //! upstream playback state machine (advance with remainder loop-wrap,
 //! clamp-and-stop without looping, restart-from-0 only at the duration),
