@@ -1,6 +1,7 @@
 //! CAD Studio app crate: the libcosmic shell around the engine and viewer,
 //! plus the pure, GUI-free logic modules that shell maps onto widgets. Every
-//! behavior module (camera_input, chat, panes, parameters, schematic) stays
+//! behavior module (camera_input, chat, panes, parameters, schematic,
+//! viewer_tools) stays
 //! free of cosmic/iced types so it is unit-testable without a window; widget
 //! files are thin mapping layers and register here as their tasks land.
 //!
@@ -29,6 +30,8 @@
 //!   port and its EnvEvent-to-state reduction), and agent-missing sheets.
 //! - [`viewer_pane`] — the embedded 3D viewer: scene reload from `output/`,
 //!   status bar, parameters overlay host.
+//! - [`viewer_tools`] — the ModelViewerState port: the 3D pane's tool
+//!   state (grid/wireframe/measure/section/layout/explode/hidden) (M6).
 //! - [`windows`] — the welcome and project windows.
 //!
 //! The About and Settings windows are M8 (spec §4.4 packaging/Sys row);
@@ -50,4 +53,5 @@ pub mod schematic;
 pub mod sheets;
 pub mod version_menu;
 pub mod viewer_pane;
+pub mod viewer_tools;
 pub mod windows;
