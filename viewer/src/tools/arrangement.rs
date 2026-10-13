@@ -14,12 +14,13 @@
 //!   flat layout by depth) use Swift's `sort`, which is not guaranteed
 //!   stable; Rust's `sort_by` is, so exact ties keep first-appearance
 //!   order — a divergence only on ties;
-//! - the explode floor lift reads BOTH minZ inputs over visible parts
-//!   only. Upstream's exploded minimum is hidden-filtered by construction
-//!   (the mesh holds visible parts, :74-85), but its assembled floor
-//!   iterates every part (:78) — a hidden part sitting below everything
-//!   would drag the exploded pile down to it. The plan pins both inputs
-//!   to visible parts so the pile re-pins to the floor the user sees.
+//! - the explode floor lift's two minZ inputs see different part sets,
+//!   exactly as upstream: the assembled floor iterates every part —
+//!   hidden included (:78) — while the exploded minimum is hidden-filtered
+//!   by construction (the mesh holds visible parts, :74-85). A hidden part
+//!   sitting below everything therefore drags the exploded pile down to
+//!   its floor; the hide stays observable through the fixed camera and
+//!   grid frame against the translated pile.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -161,13 +162,14 @@ pub fn arrange(
                     offsets[slot] = *o;
                 }
             }
-            // Floor lift (:77-85): both minZ inputs over visible parts with
-            // triangles — exactly the geometry upstream's mesh holds.
+            // Floor lift (:77-85): the assembled floor over ALL parts with
+            // triangles, hidden included (:78); the exploded minimum over
+            // visible ones — exactly the geometry upstream's mesh holds
+            // (:74-85).
             let assembled_floor = model_parts
                 .iter()
-                .enumerate()
-                .filter(|(slot, p)| visible[*slot] && p.triangle_count() > 0)
-                .map(|(_, p)| p.aabb().0[2])
+                .filter(|p| p.triangle_count() > 0)
+                .map(|p| p.aabb().0[2])
                 .reduce(f32::min)
                 .unwrap_or(0.0);
             let exploded_min = model_parts
@@ -203,7 +205,12 @@ pub fn arrange(
 /// `aabb()` translated by its arrangement offset, over VISIBLE slots only —
 /// upstream sections and grids against the arranged mesh, which excludes
 /// hidden parts (ModelViewerState.swift:116-121). When no slot is visible
-/// (the all-hidden fallback's input) it degrades to the all-parts union.
+/// (the all-hidden fallback's input) it degrades to the all-parts union —
+/// WITH each slot's arrangement offset applied, i.e. the arranged-but-
+/// invisible scene, not the assembled box (an all-hidden Exploded fold
+/// carries the explode pushes). T10 caller contract: that degrade feeds
+/// framing only, so the all-hidden frame matches the layout the user lands
+/// in on unhiding; section/cap/grid positions stay visible-only domains.
 /// An empty scene keeps a finite zero box for the camera math (the
 /// `PartScene` rule).
 pub fn effective_model_aabb(parts: &[Part], arranged: &Arranged) -> ([f32; 3], [f32; 3]) {
@@ -603,8 +610,10 @@ mod tests {
         );
         let a2 = effective_model_aabb(&parts, &assembled);
         assert!((a2.0[2] - (-20.0)).abs() < 1e-3);
-        // hidden-lowest: a hidden part pushed further down must NOT stretch the
-        // lift (minZ inputs are over VISIBLE parts only, PartArrangement.swift:74-85)
+        // hidden-lowest: the assembled floor reads the hidden part's z too
+        // (:78 iterates ALL parts), so the pile re-pins to -40, not the
+        // visible -20; the exploded-min side stays visible-only (the mesh,
+        // :74-85)
         let mut hidden = BTreeSet::new();
         hidden.insert("bolt_1".to_string());
         let parts_h = vec![
@@ -615,9 +624,41 @@ mod tests {
         let h = arrange(&parts_h, &[], PL::Exploded, 1.0, &hidden, &BTreeSet::new());
         let haabb = effective_model_aabb(&parts_h, &h);
         assert!(
-            (haabb.0[2] - (-20.0)).abs() < 1e-3,
-            "hidden lowest part ignored by the lift: {:?}",
+            (haabb.0[2] - (-40.0)).abs() < 1e-3,
+            "hidden lowest part pins the lift: {:?}",
             haabb.0
+        );
+    }
+
+    #[test]
+    fn explode_march_clears_an_inflated_overlap() {
+        // plug 2x2x2 sits INSIDE the 10x10x10 base: identical centers make
+        // the direction degenerate (+Z, :155) and the march is the whole
+        // push — the overlap ends once plug.min.z + travel reaches
+        // base.max.z + gap/2 (4 + 7 = 11), so travel = 7 and
+        // offset.z = travel + gap = 9. A port whose overlaps() never fires
+        // stops at travel 0 and pushes only the gap (2.0) — this test is
+        // that march-core's discriminator.
+        let parts = vec![
+            part("base", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+            part("plug", [4.0, 4.0, 4.0], [6.0, 6.0, 6.0]),
+        ];
+        let arranged = arrange(
+            &parts,
+            &[],
+            PL::Exploded,
+            1.0,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
+        let off = arranged.offsets[1];
+        assert!(
+            off[0] == 0.0 && off[1] == 0.0,
+            "degenerate center diff reads +Z: {off:?}"
+        );
+        assert!(
+            (off[2] - 9.0).abs() < 1e-3,
+            "march clears the margin-inflated anchor box: travel 7 + gap 2 = 9, got {off:?}"
         );
     }
 
