@@ -9,27 +9,36 @@ use crate::viewer_pane::load_model_parts;
 use viewer::render::{NEUTRAL, PartScene};
 
 impl ViewerPane {
-    /// Stage or clear the compared version's ghost mesh at the CURRENT
-    /// scene pin (`PartScene::from_parts_with_pin`) — upstream hangs the
-    /// ghost under content, so only the picker's `None` clears it; model
-    /// reloads re-stage via [`Self::restage_ghost`].
+    /// The compare picker's landing (upstream `compare(with:)`,
+    /// Project.swift:363-368 + `loadComparison`): stage the chosen
+    /// version's MESH as the ghost, or drop the comparison.
+    ///
+    /// `Some((number, version_dir))` parses `version_dir/output` through
+    /// the same 3MF-then-STL seam the live model loads
+    /// ([`load_model_parts`]) and stages it with the CURRENT scene's pin —
+    /// the ghost floats where the version's model sits relative to the
+    /// CURRENT floor, where its own pin would ground it. A version whose
+    /// mesh does not parse stages no ghost while the selection still
+    /// holds (upstream's `try?` leaves `comparisonMesh` nil,
+    /// ProjectOutput.swift:177). `None` clears the ghost and the flag —
+    /// the ONLY clear: a mesh reload or a version restore never drops the
+    /// comparison.
+    ///
+    /// Both edges re-arrange through [`Self::set_comparing`]: comparing
+    /// forces the Assembled layout (ModelViewerState.swift:78-86), so the
+    /// scene collapses under the ghost on enter and re-explodes on clear
+    /// — the ghost never floats over stale poses.
     pub fn set_compare(&mut self, version: Option<(i64, std::path::PathBuf)>) {
         match version {
             Some((number, dir)) => {
-                let pin = self.scene.scene.pin;
-                self.scene.ghost = load_model_parts(&dir.join("output"))
-                    .map(|parts| Arc::new(PartScene::from_parts_with_pin(&parts, NEUTRAL, pin)));
-                self.comparing = self.scene.ghost.is_some();
-                self.ghost_version = if self.comparing {
-                    Some((number, dir))
-                } else {
-                    None
-                };
+                self.ghost_version = Some((number, dir));
+                self.restage_ghost();
+                self.set_comparing(true);
             }
             None => {
                 self.scene.ghost = None;
-                self.comparing = false;
                 self.ghost_version = None;
+                self.set_comparing(false);
             }
         }
     }

@@ -2527,4 +2527,134 @@ mod tests {
         assert!(pane.tools.measure_points.is_empty());
         assert!(pane.scene.markers.is_none());
     }
+
+    // ── M6 T12: the compare ghost ─────────────────────────────────────────
+
+    /// A version-store snapshot for the compare tests:
+    /// `.cadstudio/versions/<n>/output/model.stl` holding one box, returning
+    /// the version directory (the handoff shape the window passes the pane).
+    fn write_version(root: &Path, number: i64, bounds: [[f64; 3]; 2]) -> PathBuf {
+        let dir = root
+            .join(".cadstudio")
+            .join("versions")
+            .join(number.to_string());
+        std::fs::create_dir_all(dir.join("output")).unwrap();
+        std::fs::write(dir.join("output").join("model.stl"), stl_of_box(bounds)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn ghost_uses_the_current_scene_pin() {
+        let (root, mut pane) = pane("ghost", &[], &["golden/model.3mf"]);
+        // a "version" whose model floats at MODEL z 40..60 — above the
+        // current scene's z -4..22. Staged with the CURRENT pin it keeps
+        // the current floor: golden's pin lifts model z -4 to scene y 0, so
+        // the version's z 40 stages at scene y 44. Its OWN pin would read
+        // 0 (from_parts grounds every scene at its own floor).
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        let ghost = pane.scene.ghost.as_ref().unwrap();
+        assert!(
+            (ghost.aabb_min[1] - 44.0).abs() < 1e-3,
+            "current pin kept (golden floor model z -4 -> scene y 0): {:?}",
+            ghost.aabb_min
+        );
+        assert_eq!(ghost.parts.len(), 1, "the ghost mesh is the version's STL");
+        assert!(pane.comparing);
+    }
+
+    #[test]
+    fn compare_stages_and_clears_on_none() {
+        let (root, mut pane) = pane("ghost2", &[], &["golden/model.3mf"]);
+        // the settings default leaves the pane Exploded: construction
+        // staged non-identity poses, the precondition for the forcing
+        // assertion below
+        let identity = || glam::Mat4::IDENTITY.to_cols_array_2d();
+        let all_identity = |pane: &ViewerPane| {
+            pane.scene
+                .poses
+                .iter()
+                .all(|p| p.map_or(false, |m| m == identity()))
+        };
+        assert!(
+            !all_identity(&pane),
+            "precondition: the exploded default scatters the poses"
+        );
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        assert!(pane.scene.ghost.is_some(), "a version with a mesh stages");
+        assert!(pane.comparing);
+        assert!(
+            all_identity(&pane),
+            "entering compare re-arranges: the effective layout forces Assembled (ModelViewerState.swift:78-86), so the exploded poses collapse under the ghost"
+        );
+        // None is the ONLY clear: the flag, the ghost, the recorded
+        // version, and the arrangement all go together
+        pane.set_compare(None);
+        assert!(pane.scene.ghost.is_none());
+        assert!(!pane.comparing);
+        assert!(pane.ghost_version.is_none());
+        assert!(!all_identity(&pane), "clearing re-explodes the scene");
+        // clearing with nothing staged settles the same way
+        pane.set_compare(None);
+        assert!(pane.scene.ghost.is_none() && !pane.comparing);
+    }
+
+    #[test]
+    fn mesh_reload_keeps_the_comparison_restaging_at_the_new_pin() {
+        let (root, mut pane) = pane("ghost-reload", &[], &["golden/model.3mf"]);
+        let vdir = write_version(&root, 1, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((1, vdir)));
+        assert!(
+            (pane.scene.ghost.as_ref().unwrap().aabb_min[1] - 44.0).abs() < 1e-3,
+            "precondition: staged at golden's pin"
+        );
+
+        // a different model lands in output/: the scene swaps, and the
+        // comparison SURVIVES it (upstream clears on nothing but the
+        // picker's None) with the ghost re-staged at the NEW pin — the flat
+        // box's floor is model z 0, so the version's z 40 stages at y 40
+        std::fs::remove_file(root.join("output/model.3mf")).unwrap();
+        std::fs::write(
+            root.join("output/model.stl"),
+            stl_of_box([[0.0, 0.0, 0.0], [20.0, 20.0, 10.0]]),
+        )
+        .unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(pane.comparing, "the selection survives a mesh reload");
+        let ghost = pane.scene.ghost.as_ref().unwrap();
+        assert!(
+            (ghost.aabb_min[1] - 40.0).abs() < 1e-3,
+            "re-staged at the new pin: {:?}",
+            ghost.aabb_min
+        );
+        assert!(
+            (ghost.aabb_max[1] - 60.0).abs() < 1e-3,
+            "still the VERSION's mesh (its model z 40..60 box)"
+        );
+
+        // an idempotent reload (same content) never re-stages: the ghost
+        // keeps its Arc identity through the short-circuit
+        let ghost_before = pane.scene.ghost.clone().unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(
+            Arc::ptr_eq(&ghost_before, pane.scene.ghost.as_ref().unwrap()),
+            "identical content rebuilds nothing"
+        );
+    }
+
+    #[test]
+    fn comparing_without_a_readable_version_mesh_has_no_ghost() {
+        let (root, mut pane) = pane("ghost-none", &[], &["golden/model.3mf"]);
+        // a picked version whose output never materialized: upstream's
+        // `try?` leaves comparisonMesh nil (ProjectOutput.swift:177) while
+        // the selection still holds (it gates the layout and the picker)
+        pane.set_compare(Some((7, root.join(".cadstudio/versions/7"))));
+        assert!(pane.comparing);
+        assert!(pane.scene.ghost.is_none());
+        // a real version still stages afterwards
+        let vdir = write_version(&root, 8, [[0.0, 0.0, 40.0], [10.0, 10.0, 60.0]]);
+        pane.set_compare(Some((8, vdir)));
+        assert!(pane.scene.ghost.is_some());
+    }
 }
