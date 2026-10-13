@@ -89,6 +89,15 @@
 //! shortcut, inert while a text field has focus; iced's global listener
 //! cannot see focus, so Space typed into the chat draft toggles playback
 //! too — revisit at M8's command system.
+//!
+//! The mounts: the bottom-center overlay slot is upstream's either/or
+//! (ModelPane.swift:39-45) — animating with a study floats
+//! [`view_motion_controls`], otherwise the section controls keep it — and
+//! the status bar carries the animation slot between the section toggle
+//! and the legend (:136-147): the Animazione toggle when motion is
+//! available, else the ask-the-agent icon button (busy-gated) for a
+//! multi-part model. Animating disables the measure/section toggles and
+//! the parts layout picker (:133-135; PartsOverlay.swift:23).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -126,6 +135,7 @@ use viewer::tools::section::{self, SectionAxis};
 use crate::camera_input::CameraInput;
 use crate::fl;
 use crate::localize::substitute_placeholders;
+use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
@@ -226,8 +236,7 @@ pub enum Message {
     /// The parts drawer's collapse chevron (persisted as
     /// `Settings.parts_collapsed`).
     TogglePartsCollapsed,
-    // ── M7 motion playback (the controls' view lands with the motion-
-    // controls task; the pane arms the semantics) ────────────────────────
+    // ── M7 motion playback ───────────────────────────────────────────────
     /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
     /// stops the study — the mutual exclusion with measuring/sectioning
     /// and the clock reset live in [`ViewerTools::set_animating`].
@@ -396,8 +405,9 @@ pub struct ViewerPane {
     /// The loaded motion study (`output/animation.json`), when it parsed to
     /// more than one frame — the controls and the clock read it.
     pub study: Option<MotionStudy>,
-    /// Why the study failed to load, localized and substituted — the
-    /// controls' error surface (T7).
+    /// Why the study failed to load, localized and substituted — upstream
+    /// surfaces it as a project issue (Project.swift:123-124), which the
+    /// window's issue list reads from here.
     pub motion_error: Option<String>,
     /// The study's moving parts (`movingParts`): only these render opaque
     /// during playback; refreshed on every study load.
@@ -941,6 +951,10 @@ impl ViewerPane {
     /// overlay family stacked over it, over the status bar (upstream
     /// ModelPane's VStack: content then PaneStatusBar, ModelPane.swift:17-49).
     pub fn view_model_3d(&self, overlay: Option<OverlayContext<'_>>) -> Element<'_, Message> {
+        // The shell's busy gate rides the overlay context; the bar's ask
+        // button is the only consumer here (upstream disables just that
+        // button on isBusy, ModelPane.swift:144).
+        let busy = overlay.as_ref().map_or(false, |ctx| ctx.busy);
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
             Column::new()
                 .push(text("No model").size(18))
@@ -968,12 +982,14 @@ impl ViewerPane {
             let effective = self
                 .tools
                 .effective_layout(self.model_parts.len(), self.comparing);
+            // the picker's disabled gate is upstream's union — animating OR
+            // comparing (PartsOverlay.swift:23)
             let panel = parts_overlay::view_parts_panel(
                 &self.tools,
                 &groups,
                 effective,
                 !self.plate_parts.is_empty(),
-                self.comparing,
+                self.comparing || self.tools.animating,
             );
             stack = stack.push(
                 Row::new()
@@ -996,13 +1012,26 @@ impl ViewerPane {
                 .width(Length::Fill);
             stack = stack.push(positioned);
         }
-        if self.shows_section_controls() {
+        // The bottom-center slot is upstream's either/or (ModelPane.swift:
+        // 39-45): animating with a study floats the motion controls,
+        // otherwise the section controls keep it. set_animating's exclusion
+        // clears sectioning, so both gates cannot hold at once — the else
+        // states upstream's precedence regardless.
+        let motion = self
+            .tools
+            .animating
+            .then(|| self.study.as_ref())
+            .flatten()
+            .map(|study| view_motion_controls(&self.tools.player, study));
+        if let Some(controls) = motion {
+            stack = stack.push(bottom_center(container(controls).padding(10)));
+        } else if self.shows_section_controls() {
             let controls = parts_overlay::view_section_controls(&self.tools);
             stack = stack.push(bottom_center(container(controls).padding(10)));
         }
         Column::new()
             .push(stack)
-            .push(self.view_status_bar())
+            .push(self.view_status_bar(busy))
             .into()
     }
 
@@ -1562,10 +1591,12 @@ impl ViewerPane {
         }
     }
 
-    fn view_status_bar(&self) -> Element<'_, Message> {
+    fn view_status_bar(&self, busy: bool) -> Element<'_, Message> {
         // Upstream's controls row (ModelPane.swift:120-152): preset picker,
-        // the four toggles, the color legend — then the port-specific MSAA
-        // toggle at the row's end, the info label right.
+        // the four toggles (misura/sezione disabled while animating,
+        // :133-135), the animation slot (:136-147), the color legend — then
+        // the port-specific MSAA toggle at the row's end, the info label
+        // right.
         let mut bar = Row::new()
             .spacing(8)
             .push(self.preset_picker())
@@ -1573,28 +1604,37 @@ impl ViewerPane {
                 self.tools.shows_grid,
                 fl!("griglia"),
                 fl!("mostra-la-griglia"),
-                Message::ToggleGrid,
+                Some(Message::ToggleGrid),
             ))
             .push(tool_toggle(
                 self.tools.wireframe,
                 fl!("wireframe"),
                 fl!("mostra-il-wireframe"),
-                Message::ToggleWireframe,
+                Some(Message::ToggleWireframe),
             ))
             .push(tool_toggle(
                 self.tools.measuring,
                 fl!("misura"),
                 fl!("misura-la-distanza-tra-due-punti"),
-                Message::ToggleMeasure,
+                (!self.tools.animating).then_some(Message::ToggleMeasure),
             ))
             .push(tool_toggle(
                 self.tools.sectioning,
                 fl!("sezione"),
                 fl!("mostra-una-sezione-del-modello"),
-                Message::ToggleSection,
+                (!self.tools.animating).then_some(Message::ToggleSection),
             ));
-        // The animation slot between section and legend is M7's
-        // (ModelPane.swift:136-147).
+        // The animation slot (ModelPane.swift:136-147): the Animazione
+        // toggle when motion is available, else the ask-the-agent button
+        // for a multi-part model.
+        if self
+            .tools
+            .motion_available(self.model_parts.len(), self.study.is_some())
+        {
+            bar = bar.push(self.animation_toggle());
+        } else if self.model_parts.len() > 1 {
+            bar = bar.push(self.ask_animation_button(busy));
+        }
         bar = bar
             .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
             .push(self.msaa_toggle())
@@ -1637,6 +1677,43 @@ impl ViewerPane {
         button::text(format!("{}×", self.scene.msaa))
             .on_press(Message::ToggleMsaa)
             .into()
+    }
+
+    /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
+    /// stops the study — the preset picker's pattern for a selected-state
+    /// text button (suggested class while on), the help text as the
+    /// description.
+    fn animation_toggle(&self) -> Element<'static, Message> {
+        button::text(fl!("animazione"))
+            .class(if self.tools.animating {
+                cosmic::theme::Button::Suggested
+            } else {
+                cosmic::theme::Button::Standard
+            })
+            .on_press(Message::ToggleAnimation)
+            .description(fl!("riproduci-l-animazione-con-la-simulazione-fisica"))
+            .into()
+    }
+
+    /// The create-animation ask (ModelPane.swift:138-146): no study, more
+    /// than one part — an icon button that asks the agent (the SHELL
+    /// intercepts [`Message::RequestMotionStudy`]). Busy is upstream's
+    /// `.disabled(project.isBusy)`: a button built without `on_press` is
+    /// iced's disabled state.
+    fn ask_animation_button(&self, busy: bool) -> Element<'static, Message> {
+        let ask = button::icon(
+            cosmic::widget::icon::from_name("media-playback-start")
+                .size(16)
+                .handle(),
+        )
+        .on_press_maybe((!busy).then_some(Message::RequestMotionStudy))
+        .description(fl!("crea-animazione"));
+        tooltip(
+            ask,
+            text(fl!("chiedi-all-agente-di-simulare-e-animare-il-meccanismo")),
+            cosmic::widget::tooltip::Position::FollowCursor,
+        )
+        .into()
     }
 }
 
@@ -1883,11 +1960,13 @@ fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
 /// One status-bar toggle button (upstream's borderless `Toggle`, shown as
 /// an icon-less text button — the documented glyph divergence): the
 /// selected state in the suggested class, the help text on a tooltip.
+/// `message: None` is upstream's `.disabled` (ModelPane.swift:133-135 gates
+/// misura/sezione on animating) — a button without `on_press`.
 fn tool_toggle(
     selected: bool,
     label: String,
     help: String,
-    message: Message,
+    message: Option<Message>,
 ) -> Element<'static, Message> {
     let toggle = button::text(label)
         .class(if selected {
@@ -1895,7 +1974,7 @@ fn tool_toggle(
         } else {
             cosmic::theme::Button::Standard
         })
-        .on_press(message);
+        .on_press_maybe(message);
     tooltip(
         toggle,
         text(help),
@@ -2758,7 +2837,7 @@ mod tests {
         // the recap finding: isMeasuring's didSet chain clears the points
         // when the exclusion fires (ModelViewerState.swift:28-38) — the
         // markers must not render through playback
-        let (root, mut pane) = pane("anim-measure", &[], &["golden/model.3mf"]);
+        let (_root, mut pane) = pane("anim-measure", &[], &["golden/model.3mf"]);
         let _ = pane.update(Message::Resized(Size::new(800.0, 600.0)));
         let _ = pane.update(Message::ToggleMeasure);
         let _ = pane.update(Message::Moved(Point::new(400.0, 300.0)));
@@ -3225,6 +3304,61 @@ mod tests {
         let _ = pane.subscription();
         let _ = pane.update(Message::ToggleAnimation);
         let _ = pane.subscription();
+    }
+
+    #[test]
+    fn status_bar_shows_the_animation_toggle_only_with_a_study() {
+        // (scoped: the brief's own snippet reuses the `pane` name for the
+        // binding and the constructor)
+        {
+            let (_root, pane) = pane("slot-study", &[], &["golden/model.3mf"]);
+            // no animation.json: two parts -> the ask button, not the toggle
+            assert!(!pane.tools.motion_available(2, pane.study.is_some()));
+            // view construction must not panic in either state (pure build)
+            let _ = pane.view_model_3d(None);
+            // the ask branch builds in both busy states (busy drops
+            // on_press only, ModelPane.swift:144)
+            let _ = pane.view_status_bar(false);
+            let _ = pane.view_status_bar(true);
+        }
+        let (root2, mut pane2) = pane("slot-study2", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root2);
+        let _ = pane2.update(Message::Reload(ReloadKind::Motion));
+        assert!(pane2.tools.motion_available(2, pane2.study.is_some()));
+        let _ = pane2.view_status_bar(false);
+        let _ = pane2.update(Message::ToggleAnimation);
+        let _ = pane2.view_model_3d(None); // animating: motion controls mounted
+    }
+
+    #[test]
+    fn animating_mounts_motion_controls_over_section_controls() {
+        let (root, mut pane) = pane("slot-mount", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleSection);
+        let _ = pane.update(Message::ToggleAnimation);
+        // upstream either/or: animating wins the bottom slot and sectioning
+        // was cleared by set_animating — the pane builds cleanly either way
+        assert!(!pane.tools.sectioning);
+        let _ = pane.view_model_3d(None);
+        let _ = pane.update(Message::ToggleAnimation);
+        assert!(!pane.tools.animating);
+        let _ = pane.view_model_3d(None);
+    }
+
+    #[test]
+    fn section_and_measure_toggle_states_track_animating() {
+        let (root, mut pane) = pane("slot-gates", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        // the disabled state is a view-time function of tools.animating; the
+        // model-side contract it renders: animating clears and holds them off
+        assert!(!pane.tools.sectioning && !pane.tools.measuring);
+        let _ = pane.update(Message::ToggleAnimation);
+        assert!(!pane.tools.animating);
+        let _ = pane.update(Message::ToggleSection); // re-enableable once off
+        assert!(pane.tools.sectioning);
     }
 
     #[test]
