@@ -238,11 +238,18 @@ impl ModelScene {
         camera
     }
 
+    /// The last-set section tuple — the discard plane the camera uniform
+    /// carries. Production read: the app's measure pick honors the same
+    /// plane so a click never answers through cut-away geometry.
+    pub fn section(&self) -> Option<(u32, f32)> {
+        self.section
+    }
+
     /// The last-set section tuple (test observation — the app's pane tests
     /// read the uniform input through this seam; kept `pub`, not
     /// `#[cfg(test)]`, because those tests sit in the app crate).
     pub fn section_for_tests(&self) -> Option<(u32, f32)> {
-        self.section
+        self.section()
     }
 
     /// The grid's content identity: its content hash and build half-extent
