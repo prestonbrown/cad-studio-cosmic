@@ -15,7 +15,7 @@ use viewer::render::grid;
 use viewer::render::lights;
 use viewer::render::{
     Camera, Frame, MeshPipeline, NEUTRAL, Options, PartPose, PartScene, default_camera,
-    srgb_to_linear,
+    preset_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -348,16 +348,18 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 
 /// Pixels in the section-cap red band. The target is Rgba8UnormSrgb, so
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
-/// (0.92, 0.15, 0.10) reads back as (246, 108, 89) — the brief's linear-g
-/// `g < 90` band misfires on exactly that. Calibrated from a measured
-/// histogram (T4, per-part colors under two-light shading): cap
-/// (246,108,89) — the cap shader is unlit, so it alone is
+/// CUT_FACE_LINEAR (0.692, 0.032, 0.022) reads back as (217, 50, 41) — a
+/// brief's linear-g `g < 90` band would misfire on exactly that. Calibrated
+/// from a measured histogram (T4, per-part colors under two-light shading):
+/// cap (217,50,41) — the cap shader is unlit, so it alone is
 /// shading-invariant; blue base faces (11,61,95), (13,67,103), (16,75,115);
 /// red lid faces (113,15,16), (123,17,19), (137,21,23); background
 /// (89,89,97). The reddest lit face tops out at r=137, so r > 180
 /// separates the cap from every measured mesh/background value with >40 of
 /// headroom; b < 120 clears the brightest blue face's 115 by 5; the g cap
-/// excludes any future bright-but-not-red surface.
+/// excludes any future bright-but-not-red surface. The blended red is
+/// DARKER than the spike-era (246,108,89) on r and g alike, so every bound
+/// still separates with the same headroom.
 fn cap_red_pixels(px: &[u8]) -> usize {
     px.chunks(4)
         .filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120)
@@ -413,6 +415,244 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
         gap < base / 100,
         "plane through the gap must paint no cap: {gap} red px"
     );
+}
+
+/// A MODEL-space box `[min, max]` as one 12-triangle part, staged with the
+/// IDENTITY pin: the staged coordinates are exactly the raw `(x, z, -y)`
+/// remap — the frame `tools::section::scene_plane` states its planes in,
+/// with no floor-pin offset for the test to fold in (the pane adds the live
+/// pin through `to_scene`; here pin 0 makes raw and staged coincide).
+fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
+    let (mn, mx) = (bounds[0], bounds[1]);
+    let corner = |i: usize| {
+        [
+            if i & 1 == 0 { mn[0] } else { mx[0] },
+            if i & 2 == 0 { mn[1] } else { mx[1] },
+            if i & 4 == 0 { mn[2] } else { mx[2] },
+        ]
+    };
+    let v = [
+        corner(0),
+        corner(1),
+        corner(2),
+        corner(3),
+        corner(4),
+        corner(5),
+        corner(6),
+        corner(7),
+    ];
+    let faces = [
+        (0usize, 3, 2, 1),
+        (4, 5, 6, 7),
+        (0, 1, 5, 4),
+        (1, 2, 6, 5),
+        (2, 3, 7, 6),
+        (3, 0, 4, 7),
+    ];
+    let mut positions = Vec::new();
+    for &(a, b, c, d) in &faces {
+        quad(&mut positions, v[a], v[b], v[c], v[d]);
+    }
+    let part = engine::parsing::Part {
+        name: "box".into(),
+        positions,
+        triangle_colors: vec![None; 12],
+    };
+    PartScene::from_parts_with_pin(std::slice::from_ref(&part), NEUTRAL, [0.0; 3])
+}
+
+/// The MODEL-space aabb of `scene`: the scene aabb's corners through
+/// `to_model` (the inverse remap+pin), re-extremized — the aabb
+/// `tools::section::plane_value` interpolates.
+fn scene_model_aabb(scene: &PartScene) -> ([f32; 3], [f32; 3]) {
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for a in [scene.aabb_min[0], scene.aabb_max[0]] {
+        for b in [scene.aabb_min[1], scene.aabb_max[1]] {
+            for c in [scene.aabb_min[2], scene.aabb_max[2]] {
+                let m = scene.to_model([a, b, c]);
+                for i in 0..3 {
+                    mn[i] = mn[i].min(m[i]);
+                    mx[i] = mx[i].max(m[i]);
+                }
+            }
+        }
+    }
+    (mn, mx)
+}
+
+/// The ink's row extent (min, max texture row, row 0 at the top), or None
+/// when nothing is inked. The top-preset section test compares this against
+/// projected geometry: from that camera screen rows order monotonically in
+/// world z (the near-vertical look direction puts world +z screen-down),
+/// and the projection of a box is bounded by its corners' projections
+/// (screen position is fractional-linear in world position, so extrema
+/// over a convex box sit at vertices) — no depth readback needed.
+fn ink_row_extent(px: &[u8], bg: [u8; 4], w: u32) -> Option<(usize, usize)> {
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for (i, c) in px.chunks(4).enumerate() {
+        if is_ink(c, bg) {
+            let row = i / w as usize;
+            lo = lo.min(row);
+            hi = hi.max(row);
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
+}
+
+/// MODEL-Y section keeps the ABOVE half (facts #84-87): a box offset in
+/// model y, cut at its midpoint, must keep the model-y >= V half — which
+/// the scene-plane mapping expresses as scene-z keep-below at -V. Rendered
+/// from the top preset (screen rows order in world z), the kept ink's row
+/// extent must match the projected kept slab z∈[4,12] exactly: bounded by
+/// the z=12 cut face's corners, reaching them, and starting at the z=4
+/// near face — not the discarded half's z∈[12,20], and not a smaller
+/// interior slab.
+#[test]
+fn y_axis_section_keeps_the_model_above_side() {
+    let (device, queue) = gpu::device_queue();
+    // MODEL box x[-20,20] y[-20,-4] z[0,20] -> raw-remap scene x[-20,20]
+    // y[0,20] z[4,20]; cut at MODEL y mid (-12) keeps y in [-12,-4] =
+    // scene z in [4,12] — the mapping's (2, 12.0) below
+    let scene = box_scene([[-20.0, -20.0, 0.0], [20.0, -4.0, 20.0]]);
+    let (axis, pos) = viewer::tools::section::scene_plane(
+        viewer::tools::section::SectionAxis::Y,
+        0.5,
+        scene_model_aabb(&scene),
+    );
+    assert_eq!((axis, pos), (2, 12.0));
+    let mut cam = preset_camera(&scene, camera::Preset::Top, 800.0 / 600.0);
+    cam.section_enable = 1.0;
+    cam.section_axis = axis;
+    cam.section_pos = pos;
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    assert!(
+        ink_pixels(&px, bg) > 1_000,
+        "the kept half renders: {}",
+        ink_pixels(&px, bg)
+    );
+    // the z=4/z=12/z=20 face-corner row bands (4 corners each: x ∈ {−20,20}
+    // × y ∈ {0,20}); fractional-linear projection puts the box's screen
+    // extrema at corners, so these bound the corresponding slab's ink
+    let row_band = |z: f32| -> (f32, f32) {
+        let rows: Vec<f32> = [-20.0f32, 20.0]
+            .iter()
+            .flat_map(|x| {
+                [0.0f32, 20.0].map(|y| {
+                    project_px(cam.view_proj, [*x, y, z], 800.0, 600.0)
+                        .unwrap()
+                        .1
+                })
+            })
+            .collect();
+        let lo = rows.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = rows.iter().cloned().fold(f32::MIN, f32::max);
+        (lo, hi)
+    };
+    let (near4_lo, near4_hi) = row_band(4.0);
+    let (cut12_lo, cut12_hi) = row_band(12.0);
+    let (gone20_lo, gone20_hi) = row_band(20.0);
+    // the kept and cut bands must be separable at all (they are: ~20px apart
+    // at this framing) — otherwise the asserts below could pass by accident
+    assert!(
+        cut12_lo > near4_hi + 4.0,
+        "z bands order on screen: {near4_hi} vs {cut12_lo}"
+    );
+    assert!(
+        gone20_lo > cut12_hi + 4.0,
+        "cut band orders under the discarded: {cut12_hi} vs {gone20_lo}"
+    );
+    let (ink_lo, ink_hi) = ink_row_extent(&px, bg, 800).expect("ink rows");
+    assert!(
+        (ink_lo as f32) >= near4_lo - 1.0 && (ink_hi as f32) <= cut12_hi + 1.0,
+        "ink rows [{ink_lo}, {ink_hi}] inside the kept slab's projection [~{near4_lo:.0}, ~{cut12_hi:.0}]"
+    );
+    assert!(
+        (ink_hi as f32) >= cut12_hi - 2.0,
+        "the ink reaches the cut face's band (rows to {ink_hi}, band [{cut12_lo:.0}, {cut12_hi:.0}]) — a slab stopping at z=8 would top out ~{cut12_lo:.0}"
+    );
+    assert!(
+        (ink_lo as f32) <= near4_lo + 2.0,
+        "the ink starts at the kept near face (row {ink_lo} vs band ~{near4_lo:.0}) — a port keeping MODEL-below would start at the cut band ~{cut12_lo:.0}"
+    );
+    // control: unsectioned, the box's far side reaches the z=20 band — the
+    // clipped extent above is the discard's doing, not the helper's blindness
+    cam.section_enable = 0.0;
+    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let (_, full_hi) = ink_row_extent(&px, bg, 800).expect("unsectioned ink rows");
+    assert!(
+        (full_hi as f32) >= gone20_hi - 2.0,
+        "unsectioned ink reaches the discarded far face's band: {full_hi} vs ~{gone20_hi:.0}"
+    );
+}
+
+/// The discard does not depend on winding (carry-forward M6 line 1): flip
+/// one part's triangle windings and the above-plane pixels still disappear.
+/// The plane sits BELOW the pinned aabb, so keep-below keeps nothing —
+/// every fragment is above it and the discard alone decides every pixel;
+/// any winding gate would leave rewound fragments alive and fail the exact
+/// zero.
+#[test]
+fn section_discard_is_winding_independent() {
+    let (device, queue) = gpu::device_queue();
+    let bytes = std::fs::read(fixture("model.3mf"))
+        .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
+    let mut parts = parse_3mf(&bytes).expect("golden model.3mf parses");
+    for t in parts[0].positions.chunks_exact_mut(3) {
+        t.swap(1, 2); // rewind the base
+    }
+    let scene = PartScene::from_parts(&parts, NEUTRAL);
+    let mut cam = default_camera(&scene, 800.0 / 600.0);
+    cam.section_enable = 1.0;
+    cam.section_axis = 1;
+    cam.section_pos = scene.aabb_min[1] - 0.5;
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    assert_eq!(
+        ink_pixels(&px, bg),
+        0,
+        "rewound part still discards everywhere above the plane"
+    );
+    // control: unsectioned, the rewound geometry itself renders — the zero
+    // above is the discard, not a broken scene
+    cam.section_enable = 0.0;
+    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    assert!(
+        ink_pixels(&px, bg) > 5_000,
+        "the rewound geometry renders unsectioned: {}",
+        ink_pixels(&px, bg)
+    );
+}
+
+/// The cap reads as the blended systemRed through the EOTF
+/// (`render::CUT_FACE_LINEAR`), not the spike's brighter red: sample the
+/// pixel at the projected center of the cut face.
+#[test]
+fn cap_color_matches_blended_system_red() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut cam = default_camera(&scene, 800.0 / 600.0);
+    cam.section_enable = 1.0;
+    cam.section_axis = 1;
+    cam.section_pos = 4.0; // mid-base cut (the established `base` plane)
+    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    // the cut face's center: the fixture's staged x/z are pin-centered and
+    // symmetric, and the cut sits at pinned scene y = 4 — the exact middle
+    // of the 60mm base cross-section
+    let center = project_px(cam.view_proj, [0.0, 4.0, 0.0], 800.0, 600.0).unwrap();
+    let idx = (center.1 as usize * 800 + center.0 as usize) * 4;
+    let pixel: [u8; 4] = px[idx..idx + 4].try_into().unwrap();
+    let lin = decode_linear(&pixel);
+    for i in 0..3 {
+        assert!(
+            (lin[i] - viewer::render::CUT_FACE_LINEAR[i]).abs() < 0.05,
+            "channel {i}: {lin:?}"
+        );
+    }
 }
 
 #[test]
