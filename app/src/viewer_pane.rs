@@ -4,16 +4,15 @@
 //! project's `output/` directory through the engine's watcher.
 //!
 //! Upstream shape (fixtures/upstream-source/Viewer3D/ModelPane.swift): the
-//! pane is the shader canvas plus a bottom status bar — controls (the
-//! iso/front/top/right preset picker) left, an info label right
-//! (Shared/PaneStatusBar.swift). M4 scope binding keeps the status bar
-//! MINIMAL: the model size formatted through the display unit
-//! (`MeasurementUnit::mm_per_unit`/`fraction_digits`) and the
-//! missing-output count from [`engine::project::outputs::missing_requirements`];
-//! the grid/wireframe/measure/section controls and the full ActivityViewer
-//! port land in their own milestones. MSAA is an OPT-IN pane option
-//! (default 1×): the spec §5 decision renders the mesh pass through
-//! `MeshPipeline::with_msaa`'s 4× pipeline set, reached by flipping
+//! pane is the shader canvas plus a bottom status bar — the preset picker,
+//! the grid/wireframe/measure/section toggles and the color legend left,
+//! the size-only info label right (ModelPane.swift:120-152, 215-219;
+//! Shared/PaneStatusBar.swift). The bar's toggle state and the overlay
+//! family that floats over the canvas (parts panel top-leading, measure
+//! badge top-center, section controls bottom-center — [`crate::parts_overlay`])
+//! read from [`tools`](ViewerTools), the T8 state hub. MSAA is an OPT-IN
+//! pane option (default 1×): the spec §5 decision renders the mesh pass
+//! through `MeshPipeline::with_msaa`'s 4× pipeline set, reached by flipping
 //! `Options::msaa` (the in-place rebuild — iced's Storage owns one
 //! pipeline per type).
 //!
@@ -87,7 +86,7 @@ use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
-use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text};
+use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text, tooltip};
 use engine::parsing::Part;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
@@ -1291,22 +1290,50 @@ impl ViewerPane {
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
-        container(
-            Row::new()
-                .push(self.preset_picker())
-                .push(Space::new().width(Length::Fill))
-                .push(self.msaa_toggle())
-                .push(Space::new().width(8))
-                .push(text(status_info(
-                    (!self.scene.scene.parts.is_empty())
-                        .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
-                    self.unit,
-                    self.warnings,
-                )))
-                .padding([4.0, 12.0]),
-        )
-        .width(Length::Fill)
-        .into()
+        // Upstream's controls row (ModelPane.swift:120-152): preset picker,
+        // the four toggles, the color legend — then the port-specific MSAA
+        // toggle at the row's end, the info label right.
+        let mut bar = Row::new()
+            .spacing(8)
+            .push(self.preset_picker())
+            .push(tool_toggle(
+                self.tools.shows_grid,
+                fl!("griglia"),
+                fl!("mostra-la-griglia"),
+                Message::ToggleGrid,
+            ))
+            .push(tool_toggle(
+                self.tools.wireframe,
+                fl!("wireframe"),
+                fl!("mostra-il-wireframe"),
+                Message::ToggleWireframe,
+            ))
+            .push(tool_toggle(
+                self.tools.measuring,
+                fl!("misura"),
+                fl!("misura-la-distanza-tra-due-punti"),
+                Message::ToggleMeasure,
+            ))
+            .push(tool_toggle(
+                self.tools.sectioning,
+                fl!("sezione"),
+                fl!("mostra-una-sezione-del-modello"),
+                Message::ToggleSection,
+            ));
+        // The animation slot between section and legend is M7's
+        // (ModelPane.swift:136-147).
+        bar = bar
+            .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
+            .push(self.msaa_toggle())
+            .push(Space::new().width(Length::Fill))
+            .push(text(status_info(
+                (!self.scene.scene.parts.is_empty())
+                    .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
+                self.unit,
+            )));
+        container(bar.padding([4.0, 12.0]))
+            .width(Length::Fill)
+            .into()
     }
 
     /// The iso/front/top/right preset bar (upstream's segmented
@@ -1315,16 +1342,11 @@ impl ViewerPane {
     /// widget's model borrows its owner, which a per-view rebuild cannot
     /// satisfy — four stateless buttons carry the same selection.
     fn preset_picker(&self) -> Element<'_, Message> {
-        const PRESETS: [(Preset, &str); 4] = [
-            (Preset::Iso, "Iso"),
-            (Preset::Front, "Front"),
-            (Preset::Top, "Top"),
-            (Preset::Right, "Right"),
-        ];
+        const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
         let mut bar = Row::new().spacing(4);
-        for (preset, label) in PRESETS {
+        for preset in PRESETS {
             bar = bar.push(
-                button::text(label)
+                button::text(preset_label(preset))
                     .class(if preset == self.preset {
                         cosmic::theme::Button::Suggested
                     } else {
@@ -1386,11 +1408,13 @@ pub fn model_size(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> [f64; 3] {
     [scene[0], scene[2], scene[1]]
 }
 
-/// The status bar's info label (upstream ModelPane.info, M4-minimal): the
-/// model size `X × Y × Z unit` when a model shows, plus the missing-output
-/// count when one is missing. Empty when there is nothing to say.
-pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit, warnings: usize) -> String {
-    let mut info = match size {
+/// The status bar's info label (upstream ModelPane.info,
+/// ModelPane.swift:215-219): the model size `X × Y × Z unit` when a model
+/// shows — the size string ONLY (issues live in the header's
+/// ActivityViewer, and M4's interim " · N warnings" suffix is dropped
+/// rather than recorded as a divergence). Empty when no model shows.
+pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit) -> String {
+    match size {
         // upstream puts the symbol on the last term only
         Some([x, y, z]) => format!(
             "{} × {} × {}",
@@ -1399,14 +1423,7 @@ pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit, warnings: usiz
             format_length(z, unit, true),
         ),
         None => String::new(),
-    };
-    if warnings > 0 {
-        if !info.is_empty() {
-            info.push_str(" · ");
-        }
-        info.push_str(&format!("{warnings} warnings"));
     }
-    info
 }
 
 /// Parse the output directory's model: `model.3mf` preferred (one part per
@@ -1563,6 +1580,57 @@ pub fn legend_label(total: usize) -> String {
     fl!("lld-colori").replace("%lld", &total.to_string())
 }
 
+/// A preset's picker label (CameraPreset.title,
+/// ModelPane.swift:122-129): `iso`/`fronte`/`alto`/`destra`.
+fn preset_label(preset: Preset) -> String {
+    match preset {
+        Preset::Iso => fl!("iso"),
+        Preset::Front => fl!("fronte"),
+        Preset::Top => fl!("alto"),
+        Preset::Right => fl!("destra"),
+    }
+}
+
+/// The status bar's color legend (ModelPane.swift:202-213): ten-pixel
+/// dots for the first twelve distinct colors; the tooltip carries the
+/// count label (the a11y stand-in).
+fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
+    let mut dots = Row::new().spacing(3);
+    for color in legend_dots(colors) {
+        dots = dots.push(parts_overlay::color_dot(Some(*color), 10.0));
+    }
+    tooltip(
+        dots,
+        text(legend_label(colors.len())),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    )
+    .into()
+}
+
+/// One status-bar toggle button (upstream's borderless `Toggle`, shown as
+/// an icon-less text button — the documented glyph divergence): the
+/// selected state in the suggested class, the help text on a tooltip.
+fn tool_toggle(
+    selected: bool,
+    label: String,
+    help: String,
+    message: Message,
+) -> Element<'static, Message> {
+    let toggle = button::text(label)
+        .class(if selected {
+            cosmic::theme::Button::Suggested
+        } else {
+            cosmic::theme::Button::Standard
+        })
+        .on_press(message);
+    tooltip(
+        toggle,
+        text(help),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    )
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1659,18 +1727,35 @@ mod tests {
     }
 
     #[test]
-    fn status_info_combines_size_and_warnings() {
+    fn status_info_is_the_size_string_only() {
+        // Upstream's info is the size alone (ModelPane.swift:215-219);
+        // M4's " · N warnings" suffix is dropped — issues live in the
+        // header's ActivityViewer, not the status bar.
         let unit = MeasurementUnit::Millimeters;
         assert_eq!(
-            status_info(Some([30.0, 15.5, 15.5]), unit, 0),
+            status_info(Some([30.0, 15.5, 15.5]), unit),
             "30.0 × 15.5 × 15.5 mm"
         );
-        assert_eq!(
-            status_info(Some([30.0, 15.5, 15.5]), unit, 2),
-            "30.0 × 15.5 × 15.5 mm · 2 warnings"
-        );
-        assert_eq!(status_info(None, unit, 3), "3 warnings");
-        assert_eq!(status_info(None, unit, 0), "");
+        assert_eq!(status_info(None, unit), "");
+    }
+
+    #[test]
+    fn legend_view_wraps_at_twelve() {
+        // 13 distinct colors -> 12 dots, the a11y count says 13; asserted
+        // through the pure legend_colors input the view consumes.
+        crate::localize::select("en");
+        let parts: Vec<Part> = (0..13u8)
+            .map(|i| Part {
+                name: format!("p{i}"),
+                positions: vec![[0.0; 3], [1.0; 3], [0.0, 1.0, 0.0]],
+                triangle_colors: vec![Some([i, 255 - i, i * 17])],
+            })
+            .collect();
+        let colors = arrangement::legend_colors(&parts);
+        assert_eq!(colors.len(), 13);
+        assert_eq!(legend_dots(&colors).len(), 12);
+        assert_eq!(legend_label(13), "13 colors");
+        let _ = view_legend(&colors);
     }
 
     #[test]
