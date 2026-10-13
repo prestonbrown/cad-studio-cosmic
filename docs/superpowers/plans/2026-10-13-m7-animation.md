@@ -12,6 +12,13 @@
 
 ## Global Constraints
 
+- PIXEL-EXPECTATION LAW (from T2's implementation, binding on T3/T6): with
+  upstream's faceCulling .none, a translucent closed mesh is NEVER
+  single-fragment — every interior pixel composites ≥2 draw-order-dependent
+  layers. Blend/color expectations must be built on single facets (or model
+  the layered compositing explicitly), never on closed-translucent
+  interiors.
+
 - DOCUMENTED DIVERGENCE (controller-ruled 2026-10-13): the Space play/pause
   shortcut cannot be focus-scoped at the pinned iced rev (a global key
   listener can't see widget focus) — it applies app-wide, or is paired with
