@@ -115,6 +115,11 @@ async fn run_slice() -> SliceRun {
     // headless driver performs the same mapping by hand (a cosmic Task's
     // stream is private to the iced runtime)
     let (bridge, mut messages) = Bridge::launch(settings, root.clone());
+    // the send gate refuses until python is verified (the m5 build
+    // pipeline's guard); the app's startup check is the real transition and
+    // is not this milestone's wiring — the seam m5 left "for T8's startup
+    // check" stands in for it
+    bridge.mark_python_ready_for_test();
 
     // the empty-project frame builds (the viewer pane's pure-construction
     // pattern, over the whole window)
@@ -139,6 +144,11 @@ async fn run_slice() -> SliceRun {
             }
             BridgeMessage::Closed => {
                 panic!("the slice turn closed without a terminal")
+            }
+            // a refused send announces itself as the sheet request — fail as
+            // the refusal it is, not as a turn that never comes
+            BridgeMessage::PythonSheetRequested => {
+                panic!("the send was refused: python not verified (enqueue gate)")
             }
             other => {
                 let _ = window.update(Message::Bridge(other));
