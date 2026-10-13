@@ -524,11 +524,10 @@ fn mesh_wgsl_source() -> String {
 /// a missed substitution breaks shader compilation instead of silently
 /// rendering a color the tests do not assert against.
 fn cap_wgsl_source() -> String {
-    let channel = |x: f32| x.to_string();
     include_str!("cap.wgsl")
-        .replace("@CAP_R@", &channel(CUT_FACE_LINEAR[0]))
-        .replace("@CAP_G@", &channel(CUT_FACE_LINEAR[1]))
-        .replace("@CAP_B@", &channel(CUT_FACE_LINEAR[2]))
+        .replace("@CAP_R@", &CUT_FACE_LINEAR[0].to_string())
+        .replace("@CAP_G@", &CUT_FACE_LINEAR[1].to_string())
+        .replace("@CAP_B@", &CUT_FACE_LINEAR[2].to_string())
 }
 
 /// The sample-count-dependent render pipelines, rebuilt as a set by

@@ -358,8 +358,9 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// separates the cap from every measured mesh/background value with >40 of
 /// headroom; b < 120 clears the brightest blue face's 115 by 5; the g cap
 /// excludes any future bright-but-not-red surface. The blended red is
-/// DARKER than the spike-era (246,108,89) on r and g alike, so every bound
-/// still separates with the same headroom.
+/// DARKER than the spike-era (246,108,89): r headroom over the 180 bound
+/// drops 66 -> 37 (still 80 clear of the reddest lit face's 137), while g
+/// and b headroom grow.
 fn cap_red_pixels(px: &[u8]) -> usize {
     px.chunks(4)
         .filter(|c| c[0] > 180 && c[1] < 150 && c[2] < 120)
@@ -417,30 +418,30 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     );
 }
 
-/// A MODEL-space box `[min, max]` as one 12-triangle part, staged with the
-/// IDENTITY pin: the staged coordinates are exactly the raw `(x, z, -y)`
-/// remap — the frame `tools::section::scene_plane` states its planes in,
-/// with no floor-pin offset for the test to fold in (the pane adds the live
-/// pin through `to_scene`; here pin 0 makes raw and staged coincide).
+/// A MODEL-space box `[min, max]` as one 12-triangle closed solid, staged
+/// with the IDENTITY pin: the staged coordinates are exactly the raw
+/// `(x, z, -y)` remap — the frame `tools::section::scene_plane` states its
+/// planes in, with no floor-pin offset for the test to fold in (the pane
+/// adds the live pin through `to_scene`; here pin 0 makes raw and staged
+/// coincide).
 fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     let (mn, mx) = (bounds[0], bounds[1]);
-    let corner = |i: usize| {
-        [
-            if i & 1 == 0 { mn[0] } else { mx[0] },
-            if i & 2 == 0 { mn[1] } else { mx[1] },
-            if i & 4 == 0 { mn[2] } else { mx[2] },
-        ]
-    };
+    // perimeter-ordered corners: 0-3 walk the z=min slice's x/y perimeter,
+    // 4-7 the same walk at z=max — the enumeration the face table below is
+    // written against. (A binary bit-encoded closure swaps corners 2/3 and
+    // 6/7 against this table, bowtie-ing the z faces and replacing the x
+    // walls with diagonals; the volume assert below is the discriminator.)
     let v = [
-        corner(0),
-        corner(1),
-        corner(2),
-        corner(3),
-        corner(4),
-        corner(5),
-        corner(6),
-        corner(7),
+        [mn[0], mn[1], mn[2]],
+        [mx[0], mn[1], mn[2]],
+        [mx[0], mx[1], mn[2]],
+        [mn[0], mx[1], mn[2]],
+        [mn[0], mn[1], mx[2]],
+        [mx[0], mn[1], mx[2]],
+        [mx[0], mx[1], mx[2]],
+        [mn[0], mx[1], mx[2]],
     ];
+    // six quads, all wound outward (mod.rs cube_part's table)
     let faces = [
         (0usize, 3, 2, 1),
         (4, 5, 6, 7),
@@ -453,6 +454,22 @@ fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     for &(a, b, c, d) in &faces {
         quad(&mut positions, v[a], v[b], v[c], v[d]);
     }
+    // pin the fixture's contract for every consumer (picking, parity, cap
+    // area): a closed, consistently wound box encloses exactly its volume —
+    // bowties/self-intersections read 0, flipped faces read negative
+    let signed_volume = positions.chunks_exact(3).fold(0.0f32, |acc, t| {
+        let (a, b, c) = (
+            glam::Vec3::from_array(t[0]),
+            glam::Vec3::from_array(t[1]),
+            glam::Vec3::from_array(t[2]),
+        );
+        acc + a.dot(b.cross(c)) / 6.0
+    });
+    let expected = (mx[0] - mn[0]) * (mx[1] - mn[1]) * (mx[2] - mn[2]);
+    assert!(
+        (signed_volume - expected).abs() < 1e-3 * expected,
+        "box_scene must enclose its volume: {signed_volume} vs {expected}"
+    );
     let part = engine::parsing::Part {
         name: "box".into(),
         positions,
