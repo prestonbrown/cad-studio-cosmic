@@ -147,6 +147,15 @@ Source of record: `.superpowers/sdd/m3-viewer-facts.md` — it moves to
 
 ## M8 (parity tail)
 
+From the M4 T3 bridge review (2026-10-13):
+
+- Persisted chat.json user rows must list the `references/` COPY names,
+  not the original request paths (upstream persists the copies,
+  Project.swift:199-200). The engine currently drops the copy names after
+  `copy_attachments` (session.rs:412) — M8's attachments work adds the
+  engine surface (e.g. a Started/TurnEcho field) and switches the bridge's
+  user-row text to the copies.
+
 - APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.
 - Fluent: 5 placeholder-only keys sanitized to key/key-2..key-5 need mapping;
   52 values carry % placeholders needing fluent placeable conversion; 2 values
