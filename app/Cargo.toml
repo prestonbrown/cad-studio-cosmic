@@ -17,6 +17,9 @@ path = "src/main.rs"
 libcosmic.workspace = true
 engine = { path = "../engine" }
 viewer = { path = "../viewer" }
+# the pane's pose wiring writes per-part translation matrices (the
+# arrangement offsets) — the same pin the viewer crate stages with
+glam.workspace = true
 uuid.workspace = true
 time.workspace = true
 serde_json.workspace = true

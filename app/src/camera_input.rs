@@ -207,6 +207,17 @@ impl CameraInput {
         reframe
     }
 
+    /// Adopt `aabb` as the framing reference OUTRIGHT — the pane's
+    /// layout-change seam (upstream's cameraID bump re-frames against the
+    /// ARRANGED mesh unconditionally, ModelViewerState.swift:42-43): unlike
+    /// [`CameraInput::mesh_changed`] there is no >50 % diagonal gate. The
+    /// camera pose itself is held here; the next
+    /// [`CameraInput::preset`]/[`CameraInput::fit`] frames against `aabb`,
+    /// and the zoom clamp follows its radius immediately.
+    pub fn set_framing_reference(&mut self, aabb: ([f32; 3], [f32; 3])) {
+        self.reframe_to(aabb.0, aabb.1, false);
+    }
+
     /// The viewport's pixel height — the pan formula's scale
     /// (ModelViewer.swift:312-320). Reported from layout.
     pub fn set_view_height(&mut self, height: f32) {
@@ -532,5 +543,26 @@ mod tests {
         assert!(cam.mesh_changed([0.0; 3], [300.0, 400.0, 0.0]));
         let (_, distance) = camera::frame([0.0; 3], [300.0, 400.0, 0.0]);
         approx(cam.distance, distance);
+    }
+
+    #[test]
+    fn forced_framing_reference_bypasses_the_gate() {
+        // The pane's layout-change seam (upstream's cameraID bump re-frames
+        // against the ARRANGED mesh unconditionally): the reference is
+        // adopted outright — no >50 % diagonal gate — the camera pose itself
+        // is held, and the next preset frames against the PUSHED aabb, not
+        // the one mesh_changed last tracked.
+        let mut cam = input();
+        cam.preset(Preset::Front);
+        cam.scroll(0.0, 24.0, true, false); // zoom off the preset distance
+        let distance_before = cam.distance;
+
+        // diagonal 50 -> ~57.2: well under the re-frame gate
+        cam.set_framing_reference(([0.0; 3], [30.0, 48.0, 0.0]));
+        approx(cam.distance, distance_before); // reference only, camera held
+
+        cam.preset(Preset::Front);
+        let (_, distance) = camera::frame([0.0; 3], [30.0, 48.0, 0.0]);
+        approx(cam.distance, distance); // framed at the pushed aabb
     }
 }

@@ -45,13 +45,27 @@
 //! into a window (pane focus commands, i18n via the extracted ftl keys all
 //! land there). User-visible strings are plain English pending that wiring,
 //! matching the schematic pane's documented M4 state.
+//!
+//! M6: the pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
+//! ModelViewerState port) drives `viewer::tools::arrangement`, and
+//! [`ViewerPane::apply_arrangement`] pushes the answer as per-part pose
+//! uniforms (explode offsets, hidden visibility) without touching staged
+//! bytes; the agent's `plate.3mf` swaps in a staged plate scene (the bed
+//! outline riding the grid in plate view), the grid itself FREEZES at
+//! scene/layout/plate-identity changes (upstream rebuilds on sceneID, never
+//! on explode/hidden), the section plane follows the effective aabb through
+//! the live scene pin, and a layout change re-frames at the current preset
+//! against the CURRENT arranged aabb (a forced framing reference, not the
+//! reload gate). `parts_layout`/`parts_collapsed` persist through the
+//! pane's settings path — [`ViewerPane::new_with_settings`] is the test
+//! seam that keeps that off the developer's real config.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cosmic::Element;
 use cosmic::iced::futures::StreamExt;
@@ -68,13 +82,16 @@ use engine::parsing::threemf::parse_3mf;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
-use engine::settings::MeasurementUnit;
+use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
-use viewer::render::{ModelScene, NEUTRAL, PartScene, camera::Preset};
+use viewer::render::{ModelScene, NEUTRAL, PartPose, PartScene, camera::Preset};
+use viewer::tools::arrangement::{self, PartGroup};
+use viewer::tools::section::{self, SectionAxis};
 
 use crate::camera_input::CameraInput;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
+use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -128,6 +145,37 @@ pub enum Message {
     /// (Commands.swift:69-73); the pane's subscription reports it until the
     /// shell owns menu commands.
     ToggleParameters,
+    // ── M6 tool controls (the widgets land with the parts-overlay task;
+    // the pane arms the semantics) ────────────────────────────────────────
+    /// Upstream `showsGrid` (facts #38): the parity grid overlay.
+    ToggleGrid,
+    /// Upstream `showsWireframe` (facts #44).
+    ToggleWireframe,
+    /// The measure tool's mode toggle — points clear on any change
+    /// (ModelViewerState.swift:51-53); the click flow is the measure task's.
+    ToggleMeasure,
+    /// Upstream `sectioning`: on/off for the GPU section plane.
+    ToggleSection,
+    /// The section plane's axis (upstream `sectionAxis`).
+    SetSectionAxis(SectionAxis),
+    /// The section plane's slider position, 0..1 along the axis.
+    SetSectionPosition(f32),
+    /// The layout picker (upstream `layout` didSet — the pane re-arranges,
+    /// persists, and re-frames).
+    SetLayout(PartsLayout),
+    /// The explode slider, 0..=2 (PartsOverlay.swift:28).
+    SetExplode(f32),
+    /// Eye toggle on a parts row: hide/show one group.
+    ToggleHiddenGroup(String),
+    /// Attach toggle on a parts row (OriginsOverlay): keep a group at its
+    /// assembled origin through explodes.
+    ToggleAttachedGroup(String),
+    /// A parts row was clicked — a double-click isolates the group
+    /// (PartsOverlay.swift:145-148).
+    RowClicked(String),
+    /// The parts drawer's collapse chevron (persisted as
+    /// `Settings.parts_collapsed`).
+    TogglePartsCollapsed,
 }
 
 /// Events crossing the pane's std channel into the subscription: watcher
@@ -190,6 +238,52 @@ pub struct ViewerPane {
     /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
     /// toggles).
     pub parameters_visible: bool,
+    // ── M6 arrangement state ──────────────────────────────────────────────
+    /// The toolbar/overlay state behind the pane (the ModelViewerState
+    /// port, T8).
+    pub tools: ViewerTools,
+    /// The parsed MODEL parts — the arrangement's input and the grouping
+    /// source, kept so re-arranging never re-parses.
+    pub model_parts: Vec<Part>,
+    /// The cached staged MODEL scene (`model_parts` staged once per reload;
+    /// `scene.scene` swaps between it and the plate scene).
+    model_scene: Arc<PartScene>,
+    /// The agent's parsed plate parts (empty until a plate.3mf loads).
+    pub plate_parts: Vec<Part>,
+    /// Whether `plate.3mf` parsed into parts (the Plate layout's
+    /// plate-scene gate; the flat fallback draws otherwise).
+    pub plate_loaded: bool,
+    /// The staged plate scene while it is (or was last) the drawn one —
+    /// rebuilt only when its inputs move (plate reload, hidden filter).
+    plate_scene_cache: Option<Arc<PartScene>>,
+    /// Compare mode (the shell/T12 owns the comparison): comparing forces
+    /// the Assembled layout (ModelViewerState.swift:78-86).
+    pub comparing: bool,
+    /// The settings file this pane reads and writes its persisted keys
+    /// through (`parts_layout`, `parts_collapsed`) — the real global path
+    /// in production; tests inject a temp path
+    /// ([`ViewerPane::new_with_settings`]) so parallel pane tests never
+    /// race the developer's config.
+    pub settings_path: PathBuf,
+    /// The effective MODEL aabb of the drawn arrangement (the section
+    /// plane's domain; plate-derived in plate view, zero-offset at the
+    /// all-hidden fallback).
+    pub effective_aabb: ([f32; 3], [f32; 3]),
+    /// The scene-space aabb of what is drawn — the re-frame input
+    /// ([`ViewerPane::set_layout`] pushes it as the forced framing
+    /// reference).
+    pub frame_aabb: ([f32; 3], [f32; 3]),
+    /// The FROZEN grid box (MODEL): captured only when `grid_stamp` moves,
+    /// re-fed verbatim afterwards — upstream rebuilds the grid on sceneID,
+    /// never on explode/hidden (ModelViewer.swift:165-170).
+    pub grid_aabb: ([f32; 3], [f32; 3]),
+    /// The bed the overlay was last stamped with (plate layout only).
+    pub grid_bed: Option<[f64; 2]>,
+    /// (scene Arc identity, effective layout, plate_loaded) — the
+    /// sceneID stand-in that gates `grid_aabb` recapture.
+    grid_stamp: Option<(usize, PartsLayout, bool)>,
+    /// The last parts-row click (Instant, group) — the double-click window.
+    last_row_click: Option<(Instant, String)>,
     project_root: PathBuf,
     output_dir: PathBuf,
     printer_model: Option<String>,
@@ -207,8 +301,28 @@ impl ViewerPane {
     /// `create_project` scaffolding guarantee): loads whatever model is
     /// already there, starts the 300 ms watcher, and computes the status
     /// bar's warning count. A missing output directory only means no watch
-    /// (and no model) — the pane still works.
+    /// (and no model) — the pane still works. Settings persist through the
+    /// global settings file.
     pub fn new(project_root: &Path, unit: MeasurementUnit, printer_model: Option<String>) -> Self {
+        Self::new_with_settings(
+            project_root,
+            unit,
+            printer_model,
+            engine::settings::settings_path(),
+        )
+    }
+
+    /// [`ViewerPane::new`] with an explicit settings path — the pane's
+    /// persisted keys (`parts_layout`, `parts_collapsed`) load from it at
+    /// construction and save back through it on change (the ONE-writer
+    /// rule's path half). Tests inject a per-project temp file; production
+    /// goes through [`ViewerPane::new`]'s global default.
+    pub fn new_with_settings(
+        project_root: &Path,
+        unit: MeasurementUnit,
+        printer_model: Option<String>,
+        settings_path: PathBuf,
+    ) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let output_dir = project_root.join("output");
         let (events, receiver) = channel::<PaneEvent>();
@@ -233,8 +347,9 @@ impl ViewerPane {
                 handle
             });
         let empty = Arc::new(PartScene::from_parts(&[], NEUTRAL));
+        let settings = Settings::load(&settings_path).unwrap_or_default();
         let mut pane = ViewerPane {
-            scene: ModelScene::new(empty),
+            scene: ModelScene::new(empty.clone()),
             input: CameraInput::new([0.0; 3], [0.0; 3]),
             preset: Preset::Iso,
             msaa: false,
@@ -244,6 +359,20 @@ impl ViewerPane {
             parameter_drafts: HashMap::new(),
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
+            tools: ViewerTools::new(settings.parts_layout, settings.parts_collapsed),
+            model_parts: Vec::new(),
+            model_scene: empty,
+            plate_parts: Vec::new(),
+            plate_loaded: false,
+            plate_scene_cache: None,
+            comparing: false,
+            settings_path,
+            effective_aabb: ([0.0; 3], [0.0; 3]),
+            frame_aabb: ([0.0; 3], [0.0; 3]),
+            grid_aabb: ([0.0; 3], [0.0; 3]),
+            grid_bed: None,
+            grid_stamp: None,
+            last_row_click: None,
             project_root: project_root.to_path_buf(),
             output_dir,
             printer_model,
@@ -308,16 +437,82 @@ impl ViewerPane {
             }
             Message::Reload(kind) => match kind {
                 // model-shaped outputs rebuild the scene; the manifest
-                // feeds the status bar's warning count. Schematic reloads
-                // are the schematic pane's (its own watcher wiring).
-                ReloadKind::Mesh | ReloadKind::Plate | ReloadKind::Manifest => {
-                    self.reload_outputs()
-                }
+                // feeds the status bar's warning count and the plate-view
+                // bed. Schematic reloads are the schematic pane's (its own
+                // watcher wiring).
+                ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
+                ReloadKind::Plate => self.reload_plate(),
                 ReloadKind::Motion | ReloadKind::Schematic => {}
             },
             Message::Resized(size) => self.input.set_view_height(size.height),
             Message::ToggleParameters => {
                 self.parameters_visible = !self.parameters_visible;
+            }
+            Message::ToggleGrid => {
+                self.tools.shows_grid = !self.tools.shows_grid;
+                self.scene.show_grid = self.tools.shows_grid;
+            }
+            Message::ToggleWireframe => {
+                self.tools.wireframe = !self.tools.wireframe;
+                self.scene.wireframe = self.tools.wireframe;
+            }
+            Message::ToggleMeasure => {
+                // any change drops the collected points
+                // (ModelViewerState.swift:51-53); the click flow and the
+                // marker staging are the measure task's
+                self.tools.toggle_measuring();
+            }
+            Message::ToggleSection => {
+                self.tools.set_sectioning(!self.tools.sectioning);
+                self.apply_arrangement();
+            }
+            Message::SetSectionAxis(axis) => {
+                self.tools.section_axis = axis;
+                self.apply_arrangement();
+            }
+            Message::SetSectionPosition(position) => {
+                // the slider's own range is SLIDER_MIN..=SLIDER_MAX; a
+                // direct message clamps to the same window so the cut
+                // always keeps geometry (ModelPane.swift:191)
+                self.tools.section_position =
+                    position.clamp(section::SLIDER_MIN, section::SLIDER_MAX);
+                self.apply_arrangement();
+            }
+            Message::SetLayout(layout) => self.set_layout(layout),
+            Message::SetExplode(amount) => {
+                self.tools.explode_amount =
+                    amount.clamp(*EXPLODE_RANGE.start(), *EXPLODE_RANGE.end());
+                self.apply_arrangement();
+            }
+            Message::ToggleHiddenGroup(group) => {
+                self.tools.toggle_hidden(&group);
+                // the plate scene stages the hidden filter, so its cache
+                // went stale with the set
+                self.plate_scene_cache = None;
+                self.apply_arrangement();
+            }
+            Message::ToggleAttachedGroup(group) => {
+                self.tools.toggle_attached(&group);
+                self.apply_arrangement();
+            }
+            Message::RowClicked(group) => {
+                let now = Instant::now();
+                let double = is_double_click(self.last_row_click.take(), now, &group);
+                self.last_row_click = Some((now, group.clone()));
+                if double {
+                    let names = self
+                        .groups()
+                        .into_iter()
+                        .map(|g| g.name)
+                        .collect::<Vec<_>>();
+                    self.tools.isolate(&group, &names);
+                    self.plate_scene_cache = None;
+                    self.apply_arrangement();
+                }
+            }
+            Message::TogglePartsCollapsed => {
+                self.tools.collapsed = !self.tools.collapsed;
+                self.persist_setting(|s| s.parts_collapsed = self.tools.collapsed);
             }
             // The shell acts on commits; the pane's local half (value snap,
             // draft clear) was applied when the message was emitted.
@@ -512,20 +707,303 @@ impl ViewerPane {
             && !self.scene.scene.parts.is_empty()
     }
 
-    /// Re-read everything model-shaped from `output/` and replace the
-    /// scene — idempotent by construction (see the module docs). Also
-    /// refreshes the manifest and the status bar's warning count.
+    /// Re-read everything model-shaped from `output/` and replace the model
+    /// scene — idempotent by construction (see the module docs): the change
+    /// check runs against the cached MODEL scene, never the drawn one (in
+    /// plate view the drawn scene is the plate's, and identical model
+    /// content must not masquerade as a change). The >50 % re-frame gate
+    /// stays the RELOAD rule ([`CameraInput::mesh_changed`]); the
+    /// arrangement then re-applies over the new parts (which is also what
+    /// swaps the drawn scene when a plate view is active). Also refreshes
+    /// the manifest, the status bar's warning count, and drops measure
+    /// points collected against the old geometry.
     fn reload_outputs(&mut self) {
         self.manifest = Manifest::load(&self.output_dir.join("manifest.json")).ok();
         if let Some(parts) = load_model_parts(&self.output_dir) {
             let next = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
-            if scenes_differ(&self.scene.scene, &next) {
+            if scenes_differ(&self.model_scene, &next) {
+                self.model_parts = parts;
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
-                self.scene.replace_scene(next);
-                self.sync_pose();
+                self.tools.mesh_changed();
+                self.model_scene = next;
             }
         }
+        self.apply_arrangement();
+        // after the arrangement: the drawn scene (a plate view holds the
+        // plate's parts) is what the warning count describes
         self.refresh_warnings();
+    }
+
+    /// Parse `output/plate.3mf` (the agent's print plate) and re-arrange: a
+    /// well-formed parse REPLACES the plate outright — empty parts
+    /// included; an empty plate is a plate with nothing on it, so the flat
+    /// fallback lays the model out instead. An unreadable or unparseable
+    /// file keeps the LAST GOOD plate (the pane's established model law).
+    fn reload_plate(&mut self) {
+        if let Ok(bytes) = std::fs::read(self.output_dir.join("plate.3mf")) {
+            if let Ok(parts) = parse_3mf(&bytes) {
+                self.plate_loaded = !parts.is_empty();
+                self.plate_parts = parts;
+                self.plate_scene_cache = None;
+                self.apply_arrangement();
+            }
+        }
+    }
+
+    // ── arrangement wiring (M6) ───────────────────────────────────────────
+
+    /// THE pose push (ModelPane.swift:70-85's port): recompute the
+    /// arrangement for the current tools state, select the drawn scene
+    /// (model vs the agent's plate), write per-part pose uniforms, the
+    /// effective aabbs, the frozen grid stamp, and the section uniform.
+    /// Called after every layout, explode, hidden, attached, section,
+    /// comparing, and scene change; it never moves the camera by itself —
+    /// only [`Self::set_layout`] and a scene swap touch the framing
+    /// reference.
+    fn apply_arrangement(&mut self) {
+        let layout = self
+            .tools
+            .effective_layout(self.model_parts.len(), self.comparing);
+        let arranged = arrangement::arrange(
+            &self.model_parts,
+            &self.plate_parts,
+            layout,
+            self.tools.explode_amount,
+            &self.tools.hidden,
+            &self.tools.attached,
+        );
+        let all_hidden = !arranged.visible.iter().any(|v| *v);
+
+        // Scene selection: the plate replaces the model when the
+        // arrangement calls for it, hidden-filtered by group like the model
+        // slots (the all-hidden fallback draws everything assembled, so the
+        // UNFILTERED plate stages). The caches keep a scene swap off the
+        // explode/hidden sweep path — those write poses only.
+        let mut swapped = false;
+        if arranged.plate_scene {
+            if self.plate_scene_cache.is_none() {
+                self.plate_scene_cache = Some(Arc::new(PartScene::from_parts(
+                    &self.visible_plate_parts(all_hidden),
+                    NEUTRAL,
+                )));
+            }
+            let plate = self.plate_scene_cache.clone().expect("built above");
+            if !Arc::ptr_eq(&self.scene.scene, &plate) {
+                self.scene.replace_scene(plate);
+                swapped = true;
+            }
+        } else if !Arc::ptr_eq(&self.scene.scene, &self.model_scene) {
+            let model = self.model_scene.clone();
+            self.scene.replace_scene(model);
+            swapped = true;
+        }
+
+        // Poses: MODEL offsets through the staging remap (x, z, -y) —
+        // parts.rs' `remap`, restated at the app boundary (crate-private in
+        // the viewer) — as translations; hidden slots drop out of the draw.
+        let identity = || Some(glam::Mat4::IDENTITY.to_cols_array_2d());
+        let poses: Vec<PartPose> = if arranged.plate_scene {
+            // the plate scene stages pre-arranged geometry
+            vec![identity(); self.scene.scene.parts.len()]
+        } else if all_hidden {
+            // ModelPane.swift:79-80: all-hidden falls back to the assembled
+            // model — identity poses, everything visible
+            vec![identity(); self.model_parts.len()]
+        } else {
+            arranged
+                .offsets
+                .iter()
+                .zip(&arranged.visible)
+                .map(|(offset, visible)| {
+                    visible.then(|| {
+                        let scene_offset = [offset[0], offset[2], -offset[1]];
+                        glam::Mat4::from_translation(glam::Vec3::from_array(scene_offset))
+                            .to_cols_array_2d()
+                    })
+                })
+                .collect()
+        };
+        self.scene.poses = poses.into();
+
+        // The SECTION's effective box (MODEL): the plate scene's staged box
+        // mapped back when it is the drawn geometry (upstream's arranged
+        // mesh IS the plate mesh, ModelViewerState.swift:116-121); the
+        // ZERO-offset all-parts union at all-hidden (the fallback draws the
+        // assembled model — the plane must not keep the exploded aabb);
+        // the visible-only arrangement otherwise.
+        let eff = if arranged.plate_scene {
+            self.plate_scene_aabb_as_model()
+        } else if all_hidden {
+            arrangement::effective_model_aabb(
+                &self.model_parts,
+                &arrangement::Arranged {
+                    offsets: vec![[0.0; 3]; self.model_parts.len()],
+                    visible: vec![true; self.model_parts.len()],
+                    plate_scene: false,
+                },
+            )
+        } else {
+            arrangement::effective_model_aabb(&self.model_parts, &arranged)
+        };
+        // The FRAMING box instead takes effective_model_aabb's own answer:
+        // at all-hidden that KEEPS the arrangement offsets (T1's caller
+        // contract — the degrade feeds framing only, so the all-hidden
+        // frame matches the layout the user lands in on unhiding).
+        let framing_eff = if arranged.plate_scene {
+            eff
+        } else {
+            arrangement::effective_model_aabb(&self.model_parts, &arranged)
+        };
+        self.effective_aabb = eff;
+        self.frame_aabb = if arranged.plate_scene {
+            (self.scene.scene.aabb_min, self.scene.scene.aabb_max)
+        } else {
+            self.scene_aabb_of(framing_eff)
+        };
+        if swapped {
+            // replace_scene re-derived the framing fields against the new
+            // scene; `input` owns the pose, so re-assert it — and adopt the
+            // drawn box as the framing reference outright (the plate swap
+            // is not a mesh reload; no >50 % gate applies).
+            self.input.set_framing_reference(self.frame_aabb);
+            self.sync_pose();
+        }
+
+        // The frozen grid stamp — upstream's sceneID (mesh + layout + plate
+        // identity, ModelViewer.swift:165-170 via ModelPane.swift:83): the
+        // grid box is captured ONLY when this stamp moves and re-fed
+        // verbatim afterwards (set_overlay_frame's own change gate makes
+        // the repeats free). The bed, by contrast, follows the manifest
+        // live and only draws in the plate layout.
+        let stamp = (
+            Arc::as_ptr(&self.scene.scene) as usize,
+            layout,
+            self.plate_loaded,
+        );
+        if self.grid_stamp != Some(stamp) {
+            self.grid_stamp = Some(stamp);
+            self.grid_aabb = eff;
+        }
+        self.grid_bed = (layout == PartsLayout::Plate)
+            .then_some(self.manifest.as_ref().and_then(|m| m.bed))
+            .flatten();
+        self.scene
+            .set_overlay_frame(self.scene_aabb_of(self.grid_aabb), self.grid_bed);
+
+        // The section uniform: the raw plane over the effective MODEL aabb,
+        // then the LIVE scene pin added by mapping a plane point through
+        // to_scene (scene_plane's value is pre-pin — exact only for
+        // pin-symmetric scenes; the golden fixture is not).
+        let section_plane = self.tools.sectioning.then(|| {
+            let (axis, raw) =
+                section::scene_plane(self.tools.section_axis, self.tools.section_position, eff);
+            // a MODEL point whose pinned scene coordinate along `axis` is
+            // exactly raw + the pin's component on that axis (scene x =
+            // model x, scene y = model z, scene z = -model y)
+            let model_point = match axis {
+                0 => [raw, 0.0, 0.0],
+                1 => [0.0, 0.0, raw],
+                _ => [0.0, -raw, 0.0],
+            };
+            let pinned = self.scene.scene.to_scene(model_point)[axis as usize];
+            (axis, pinned)
+        });
+        self.scene.set_section(section_plane);
+    }
+
+    /// The plate parts the hidden filter keeps — group-keyed like the model
+    /// slots (a plate part outside every model group falls back to its own
+    /// base name, mirroring arrange()'s mapping); the all-hidden fallback
+    /// stages the whole plate.
+    fn visible_plate_parts(&self, all_hidden: bool) -> Vec<Part> {
+        if all_hidden {
+            return self.plate_parts.clone();
+        }
+        let group_of: HashMap<String, String> = arrangement::groups(&self.model_parts)
+            .iter()
+            .flat_map(|g| g.members.iter().map(move |m| (m.clone(), g.name.clone())))
+            .collect();
+        self.plate_parts
+            .iter()
+            .filter(|p| {
+                let group = group_of
+                    .get(&p.name)
+                    .cloned()
+                    .unwrap_or_else(|| arrangement::group_name(&p.name));
+                !self.tools.hidden.contains(&group)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The plate scene's staged aabb mapped back to MODEL (`to_model`): the
+    /// effective box while the plate is the drawn geometry. The y axis
+    /// negates under the inverse remap, so min/max re-fold per axis.
+    fn plate_scene_aabb_as_model(&self) -> ([f32; 3], [f32; 3]) {
+        let scene = &self.scene.scene;
+        let a = scene.to_model(scene.aabb_min);
+        let b = scene.to_model(scene.aabb_max);
+        (
+            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+        )
+    }
+
+    /// A MODEL-space box as this scene's pinned SCENE box — the
+    /// [`model_size`] inverse: the remap permutes extents (scene x = model
+    /// x span, scene y = model z span, scene z = model y span, y negated)
+    /// and the pin translates every axis.
+    fn scene_aabb_of(&self, model: ([f32; 3], [f32; 3])) -> ([f32; 3], [f32; 3]) {
+        let pin = self.scene.scene.pin;
+        let (mn, mx) = model;
+        (
+            [mn[0] + pin[0], mn[2] + pin[1], -mx[1] + pin[2]],
+            [mx[0] + pin[0], mx[2] + pin[1], -mn[1] + pin[2]],
+        )
+    }
+
+    /// Layout change (ModelViewerState.swift:42, `layout` didSet): the
+    /// tools state, persistence, the re-arrangement — then ALWAYS re-frame
+    /// at the current preset against the CURRENT arranged aabb, pushed as a
+    /// FORCED framing reference (upstream's cameraID bump re-frames against
+    /// the ARRANGED mesh unconditionally, ModelViewer.swift:77 → :328-337 —
+    /// `preset` alone would re-frame against whatever `mesh_changed` last
+    /// pushed, the assembled scene, leaving Plate/Exploded mis-framed).
+    fn set_layout(&mut self, layout: PartsLayout) {
+        self.tools.set_layout(layout);
+        self.persist_setting(|s| s.parts_layout = layout);
+        self.apply_arrangement();
+        self.input.set_framing_reference(self.frame_aabb);
+        self.input.preset(self.preset);
+        self.sync_pose();
+    }
+
+    /// The parts tree's groups (T1) — the parts panel and the row-click
+    /// isolate consume them.
+    pub fn groups(&self) -> Vec<PartGroup> {
+        arrangement::groups(&self.model_parts)
+    }
+
+    /// The compare-mode flag (the shell owns the comparison state): it
+    /// forces the Assembled layout (ModelViewerState.swift:78-86), so the
+    /// arrangement re-applies when it flips.
+    pub fn set_comparing(&mut self, comparing: bool) {
+        if self.comparing != comparing {
+            self.comparing = comparing;
+            self.apply_arrangement();
+        }
+    }
+
+    /// Load-modify-save the pane's settings keys through
+    /// [`Self::settings_path`], preserving every other field (the
+    /// ONE-writer rule: this pane owns `parts_layout`/`parts_collapsed`
+    /// only) — the project window's established persist pattern.
+    fn persist_setting(&self, edit: impl FnOnce(&mut Settings)) {
+        let mut settings = Settings::load(&self.settings_path).unwrap_or_default();
+        edit(&mut settings);
+        if let Err(why) = settings.save(&self.settings_path) {
+            eprintln!("cad-studio: settings save failed: {why}");
+        }
     }
 
     /// Recompute the missing-output count from the outputs on disk.
@@ -840,9 +1318,18 @@ mod tests {
         root
     }
 
+    /// The pane with the project's own temp dir as its settings path — the
+    /// ONE-writer rule's test half: layout/collapse persistence rounds
+    /// through a disposable file, never the developer's real config
+    /// (parallel pane tests would race it).
     fn pane(tag: &str, root_files: &[&str], output_files: &[&str]) -> (PathBuf, ViewerPane) {
         let root = mk_project(tag, root_files, output_files);
-        let pane = ViewerPane::new(&root, MeasurementUnit::Millimeters, None);
+        let pane = ViewerPane::new_with_settings(
+            &root,
+            MeasurementUnit::Millimeters,
+            None,
+            root.join("settings.json"),
+        );
         (root, pane)
     }
 
@@ -1031,6 +1518,10 @@ mod tests {
         assert!((pane.scene.pitch - pane.input.pitch).abs() < 1e-6);
         assert!((pane.scene.yaw - pane.input.yaw).abs() < 1e-6);
 
+        // Fit frames the tracked reference; pin the layout so that
+        // reference IS the staged scene's own box (settings default the
+        // pane to Exploded, whose arranged frame is wider)
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
         let _ = pane.update(Message::Fit);
         let (_, distance) =
             viewer::render::camera::frame(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
@@ -1254,5 +1745,238 @@ mod tests {
             compare: None,
         };
         let _ = pane.view_model_3d(Some(ctx));
+    }
+
+    // ── M6 T10: arrangement wiring (layouts, explode, hidden, plate, bed,
+    // section) — the tests below drive the pane's messages end to end ──────
+
+    /// A minimal manifest carrying only a bed rectangle.
+    fn manifest_with_bed(width: f64, depth: f64) -> String {
+        format!("{{\"bed\": [{width}, {depth}]}}")
+    }
+
+    #[test]
+    fn layout_change_reframes_at_preset_and_rebuilds_grid() {
+        let (_root, mut pane) = pane("layout", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::Preset(Preset::Front));
+        // orbit away from the preset — the press must precede the moves:
+        // the first move after a press only anchors the reference point
+        // (hover moves are ignored entirely)
+        let _ = pane.update(Message::Pressed);
+        let _ = pane.update(Message::Moved(Point::new(300.0, 300.0)));
+        let _ = pane.update(Message::Moved(Point::new(340.0, 300.0)));
+        let yaw_before = pane.input.yaw;
+        assert!(yaw_before.abs() > 1e-3);
+        let dist_before = pane.input.distance;
+        let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
+        assert!(
+            (pane.input.yaw - 0.0).abs() < 1e-4,
+            "front preset yaw restored"
+        );
+        assert!((pane.input.pitch - 0.0).abs() < 1e-4);
+        assert!(
+            pane.input.distance > dist_before,
+            "re-frame used the CURRENT arranged aabb: the plate fallback lays parts side by side (wider than assembled), so the camera pulls BACK"
+        );
+        assert_eq!(pane.tools.layout, PartsLayout::Plate);
+        // persisted — through the pane's injected TEMP settings path, never the
+        // developer's real global file (parallel pane tests would race it)
+        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        assert_eq!(
+            s.parts_layout,
+            PartsLayout::Plate,
+            "ONE writer: the pane's settings path"
+        );
+    }
+
+    #[test]
+    fn explode_sweep_leaves_the_grid_frozen() {
+        let (_root, mut pane) = pane("grid-freeze", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        let identity = pane.scene.grid_identity_for_tests();
+        let _ = pane.update(Message::SetExplode(2.0));
+        let _ = pane.update(Message::ToggleHiddenGroup("lid".into()));
+        assert_eq!(
+            pane.scene.grid_identity_for_tests(),
+            identity,
+            "grid freezes at the layout-switch-time aabb (upstream rebuilds only on sceneID, not explode/hidden)"
+        );
+    }
+
+    #[test]
+    fn explode_updates_poses_without_a_scene_swap() {
+        let (_root, mut pane) = pane("explode", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        let scene_ptr = Arc::as_ptr(&pane.scene.scene);
+        let pose_at_one = pane.scene.poses[1];
+        // to_cols_array_2d is column-major: the translation is column 3, so
+        // read it back through from_cols_array_2d's w_axis — indexing
+        // m[0][3]/m[1][3]/m[2][3] reads the BOTTOM row, zeros for a
+        // translation matrix
+        let mag = |p: viewer::render::PartPose| {
+            p.map_or(0.0, |m| {
+                glam::Mat4::from_cols_array_2d(&m)
+                    .w_axis
+                    .truncate()
+                    .length()
+            })
+        };
+        let _ = pane.update(Message::SetExplode(2.0));
+        assert_eq!(
+            Arc::as_ptr(&pane.scene.scene),
+            scene_ptr,
+            "no scene rebuild"
+        );
+        assert!(
+            (mag(pane.scene.poses[1]) - 2.0 * mag(pose_at_one)).abs() < 1e-3,
+            "offset scales with explode: {} vs {}",
+            mag(pane.scene.poses[1]),
+            2.0 * mag(pose_at_one)
+        );
+        let _ = pane.update(Message::SetExplode(0.5));
+        assert!(
+            mag(pane.scene.poses[1]) < mag(pose_at_one),
+            "monotone in explode"
+        );
+        let _ = pane.update(Message::SetExplode(0.0));
+        assert_eq!(
+            mag(pane.scene.poses[1]),
+            0.0,
+            "explode 0 = assembled positions (+lift)"
+        );
+    }
+
+    #[test]
+    fn hiding_every_group_falls_back_to_assembled() {
+        let (_root, mut pane) = pane("hide-all", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        let _ = pane.update(Message::ToggleHiddenGroup("base".into()));
+        let _ = pane.update(Message::ToggleHiddenGroup("lid".into()));
+        assert!(
+            pane.scene.poses.iter().all(|p| p.is_some()),
+            "quirk: all-hidden shows assembled"
+        );
+        // and unhiding base leaves exactly ONE group out of the draw set:
+        // hidden == {"lid"} — the lid's pose drops, base draws
+        let _ = pane.update(Message::ToggleHiddenGroup("base".into()));
+        assert!(
+            pane.scene
+                .poses
+                .iter()
+                .enumerate()
+                .all(|(i, p)| pane.scene.scene.parts[i].name == "base" || p.is_none())
+        );
+    }
+
+    #[test]
+    fn plate_reload_stages_the_plate_scene_and_bed() {
+        let (root, mut pane) = pane("plate", &[], &["golden/model.3mf"]);
+        std::fs::copy(fixture("golden/plate.3mf"), root.join("output/plate.3mf")).unwrap();
+        // manifest with a bed
+        std::fs::write(
+            root.join("output/manifest.json"),
+            manifest_with_bed(220.0, 220.0),
+        )
+        .unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Plate));
+        let _ = pane.update(Message::Reload(ReloadKind::Manifest));
+        let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
+        assert!(pane.plate_loaded);
+        assert_eq!(
+            pane.scene.bed,
+            Some([220.0, 220.0]),
+            "bed outline in plate view"
+        );
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        assert_eq!(pane.scene.bed, None, "bed only in plate view");
+    }
+
+    #[test]
+    fn section_slider_maps_through_the_arranged_aabb() {
+        let (_root, mut pane) = pane("section", &[], &["golden/model.3mf"]);
+        // settings default the pane to Exploded; pin the layout so the
+        // assert below states the ASSEMBLED mid
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        let _ = pane.update(Message::ToggleSection);
+        let _ = pane.update(Message::SetSectionAxis(SectionAxis::Z));
+        let _ = pane.update(Message::SetSectionPosition(0.5));
+        let (axis, pos) = pane.scene.section_for_tests().expect("sectioning on");
+        assert_eq!(axis, 1, "MODEL Z -> scene y");
+        // golden: model z in [-4, 22]; assembled aabb mid = 9. The uniform
+        // carries the STAGED plane, so the live scene pin rides along
+        // (d944b65: scene_plane's value is pre-pin; the golden pin is +4
+        // along scene y — floor z=-4 pins to y=0) — 9 + 4, not the raw 9.
+        let pin_y = pane.scene.scene.pin[1];
+        assert!((pin_y - 4.0).abs() < 1e-4, "golden's scene pin: {pin_y}");
+        assert!(
+            (pos - (9.0 + pin_y)).abs() < 1.0,
+            "plane at the arranged mid, pin included: {pos}"
+        );
+        // exploding moves the aabb hence the plane for the SAME t (upstream
+        // quirk): the lid pushes +z while the lift holds min z at -4, so the
+        // mid rises
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        let (_, pos2) = pane.scene.section_for_tests().expect("still sectioning");
+        assert!(pos2 > pos, "same t, moved plane: {pos} -> {pos2}");
+    }
+
+    #[test]
+    fn y_axis_section_maps_negated() {
+        let (_root, mut pane) = pane("section-y", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        let _ = pane.update(Message::ToggleSection);
+        let _ = pane.update(Message::SetSectionAxis(SectionAxis::Y));
+        let _ = pane.update(Message::SetSectionPosition(0.5));
+        let (axis, _) = pane.scene.section_for_tests().expect("sectioning on");
+        assert_eq!(axis, 2, "MODEL Y -> scene z");
+    }
+
+    #[test]
+    fn row_double_click_isolates_the_group() {
+        let (_root, mut pane) = pane("row-click", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        // two clicks on DIFFERENT rows inside the window: not a double
+        let _ = pane.update(Message::RowClicked("base".into()));
+        let _ = pane.update(Message::RowClicked("lid".into()));
+        assert!(pane.tools.hidden.is_empty(), "different groups: no isolate");
+        // the same row again, inside the window: everything else hides
+        let _ = pane.update(Message::RowClicked("lid".into()));
+        assert_eq!(
+            pane.tools.hidden.iter().collect::<Vec<_>>(),
+            [&"base".to_string()],
+            "isolate = exactly-others"
+        );
+        // and the draw set follows: the lid draws, the base's pose drops
+        assert!(
+            pane.scene
+                .poses
+                .iter()
+                .enumerate()
+                .all(|(i, p)| pane.scene.scene.parts[i].name == "lid" || p.is_none())
+        );
+        // a second double-click on the same row restores (compare-and-assign
+        // toggles per double: a THIRD would isolate again)
+        let _ = pane.update(Message::RowClicked("lid".into()));
+        assert!(pane.tools.hidden.is_empty(), "second double-click clears");
+    }
+
+    #[test]
+    fn tool_toggles_drive_scene_flags_and_persist_collapse() {
+        let (_root, mut pane) = pane("tool-toggles", &[], &["golden/model.3mf"]);
+        assert!(
+            pane.scene.show_grid && !pane.scene.wireframe,
+            "ModelViewerState defaults"
+        );
+        let _ = pane.update(Message::ToggleGrid);
+        let _ = pane.update(Message::ToggleWireframe);
+        assert!(!pane.scene.show_grid && pane.scene.wireframe);
+        assert!(
+            !pane.tools.shows_grid && pane.tools.wireframe,
+            "tools and scene stay in sync"
+        );
+        // the parts drawer's chevron persists through the pane's path
+        let _ = pane.update(Message::TogglePartsCollapsed);
+        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
     }
 }

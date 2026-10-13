@@ -198,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "ashpd 0.12.3",
  "engine",
+ "glam 0.33.12",
  "i18n-embed",
  "image",
  "libcosmic",

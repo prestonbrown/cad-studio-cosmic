@@ -76,7 +76,13 @@ pub struct ModelScene {
     /// [`ModelScene::replace_scene`] so a reload's grid derives from it
     /// (upstream's pane re-sends the bed every update; a mesh swap alone
     /// never clears it).
-    bed: Option<[f64; 2]>,
+    pub bed: Option<[f64; 2]>,
+    /// The section plane the drawn camera carries: `Some((scene axis, scene
+    /// position))` turns the mesh shader's discard and the cap quad on;
+    /// `None` draws whole. The pane's arrangement wiring (M6 T10) computes
+    /// it from the effective aabb and the live scene pin; the adapter only
+    /// carries it.
+    section: Option<(u32, f32)>,
     /// The aabb [`ModelScene::grid`] was last built against — the change
     /// check [`ModelScene::set_overlay_frame`] compares against. Normally
     /// the staged scene's own; the pane's frozen stamp (T10) writes
@@ -106,6 +112,7 @@ impl ModelScene {
             target,
             radius,
             bed: None,
+            section: None,
             grid_aabb,
         }
     }
@@ -198,8 +205,36 @@ impl ModelScene {
         self.distance = distance;
     }
 
+    /// Store the section plane the camera uniform carries (the pane's M6
+    /// seam): `Some((axis, pos))` in THIS scene's pinned coordinates — the
+    /// caller adds the pin, `section::scene_plane`'s value is raw — enables
+    /// the mesh discard and the cap; `None` draws whole.
+    pub fn set_section(&mut self, section: Option<(u32, f32)>) {
+        self.section = section;
+    }
+
     fn camera(&self, aspect: f32) -> Camera {
-        Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect)
+        let mut camera = Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect);
+        if let Some((axis, pos)) = self.section {
+            camera.section_axis = axis;
+            camera.section_pos = pos;
+            camera.section_enable = 1.0;
+        }
+        camera
+    }
+
+    /// The last-set section tuple (test observation — the app's pane tests
+    /// read the uniform input through this seam; kept `pub`, not
+    /// `#[cfg(test)]`, because those tests sit in the app crate).
+    pub fn section_for_tests(&self) -> Option<(u32, f32)> {
+        self.section
+    }
+
+    /// The grid's content identity: its content hash and build half-extent
+    /// (test observation — an explode/hidden sweep must leave both alone;
+    /// same cross-crate seam note as [`ModelScene::section_for_tests`]).
+    pub fn grid_identity_for_tests(&self) -> (u64, f32) {
+        (self.grid.content_hash, self.grid.half_extent)
     }
 }
 
@@ -400,5 +435,33 @@ mod tests {
             Arc::ptr_eq(&rebuilt, &model.grid),
             "replace_scene recorded the new aabb and kept the bed"
         );
+    }
+
+    /// `set_section` is the pane's seam onto the camera uniform: the tuple
+    /// lands on the drawn camera's section fields (enable included), and
+    /// `None` restores sectioning-off.
+    #[test]
+    fn set_section_drives_the_camera_uniform() {
+        let scene = tri_scene(1.0);
+        let mut model = ModelScene::new(scene);
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let camera = |m: &ModelScene| {
+            shader::Program::<()>::draw(m, &(), mouse::Cursor::Unavailable, bounds).camera
+        };
+        assert_eq!(camera(&model).section_enable, 0.0, "off by default");
+        model.set_section(Some((1, 7.5)));
+        assert_eq!(model.section_for_tests(), Some((1, 7.5)));
+        let drawn = camera(&model);
+        assert_eq!(drawn.section_axis, 1);
+        assert!((drawn.section_pos - 7.5).abs() < 1e-6);
+        assert!(drawn.section_enable > 0.5);
+        model.set_section(None);
+        assert_eq!(model.section_for_tests(), None);
+        assert_eq!(camera(&model).section_enable, 0.0, "None disables");
     }
 }
