@@ -120,7 +120,7 @@ fn content_hash(vertices: &[Vertex]) -> u64 {
 }
 
 /// MODEL Z-up -> SCENE Y-up, upstream's `sceneVector`: a proper rotation.
-fn remap(p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn remap(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
 }
 

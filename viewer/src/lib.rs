@@ -10,7 +10,11 @@
 //! math is pure and headless-testable: [`render::camera`] transcribes
 //! ModelViewer.swift's orbit/zoom/pan formulas, diagonal/2 framing,
 //! presets, and clamps, and [`render::lights`] holds the two-light
-//! shading constants the mesh shader runs and the tests twin. The unlit
+//! shading constants the mesh shader runs and the tests twin.
+//! [`tools::arrangement`] is the PartsLayout math — grouping, explode
+//! offsets, plate flat layout — as pure MODEL-space transforms
+//! (PartArrangement.swift), consumed by the renderer as per-part data.
+//! The unlit
 //! overlay — parity grid, bed outline, axis tripod — is [`render::grid`],
 //! stated against the same pinned frame.
 //!
@@ -20,3 +24,4 @@
 //! the suite-global device context those tests share.
 
 pub mod render;
+pub mod tools;
