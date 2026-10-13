@@ -127,7 +127,7 @@ fn venv_plan_matches_upstream_argv() {
     assert_eq!(steps[1].argv[1..], ["-m", "pip", "install", "--upgrade", "pip"]);
     assert_eq!((steps[2].progress, steps[2].step),
         (0.25, "Installing build123d, matplotlib and numpy…"));
-    assert_eq!(&steps[2].argv[5..8], &PACKAGES[..]);
+    assert_eq!(&steps[2].argv[4..7], &PACKAGES[..]);
 }
 
 #[test]
@@ -148,10 +148,10 @@ fn verification_output_parses_into_versions_line() {
     assert_eq!(VERIFY_SCRIPT.lines().count(), 3);
     assert!(VERIFY_SCRIPT.contains("import sys, build123d, matplotlib, numpy"));
     let two = "0.8.1\nPython 3.12.4, build123d 0.8.1, matplotlib 3.9.2, numpy 2.1.0";
-    assert_eq!(parse_verification(two).map(|(v, l)| (v.as_str(), l.as_str())),
-        Some(("0.8.1", "Python 3.12.4, build123d 0.8.1, matplotlib 3.9.2, numpy 2.1.0")));
-    assert_eq!(parse_verification("0.8.1").map(|(v, l)| (v.as_str(), l.as_str())),
-        Some(("0.8.1", "")));
+    assert_eq!(parse_verification(two),
+        Some(("0.8.1".to_string(), "Python 3.12.4, build123d 0.8.1, matplotlib 3.9.2, numpy 2.1.0".to_string())));
+    assert_eq!(parse_verification("0.8.1"),
+        Some(("0.8.1".to_string(), String::new())));
     assert_eq!(parse_verification(""), None);
     // MINOR 6: lines are trimmed — \r\n interpreters parse the same
     assert_eq!(parse_verification("0.8.1 \r\nPython 3.12.4, build123d 0.8.1\r\n"),
@@ -229,9 +229,11 @@ fn argv_aware_spawn(dir: &Path, bin: &Path, body: &str)
 }
 
 /// The setup script that mints a verification-answering venv interpreter.
+/// Creates the interpreter's PARENT directory (never a directory at the
+/// interpreter path itself), writes the script there, marks it executable.
 fn minting_script(bin: &Path) -> String {
     format!(
-        "mkdir -p '{0}/bin'\nprintf '#!/bin/sh\\nprintf \"0.8.1\\\\nPython 3.12.4, build123d 0.8.1\\\\n\"\\n' > '{0}'\nchmod +x '{0}'\nexit 0\n",
+        "mkdir -p \"$(dirname '{0}')\"\nprintf '#!/bin/sh\\nprintf \"0.8.1\\\\nPython 3.12.4, build123d 0.8.1\\\\n\"\\n' > '{0}'\nchmod +x '{0}'\nexit 0\n",
         bin.display())
 }
 
@@ -714,7 +716,7 @@ async fn cancel_reports_interrupted() {
   - `pub fn has_changes(project_root: &Path, versions: &[ProjectVersion], current: Option<i64>) -> bool` — `true` when `current` names no loaded version; else byte-compare current `model.py` against the version's copy (VersionHistory.swift:37-42).
   - `pub fn record(project_root: &Path, versions: &mut Vec<ProjectVersion>, prompt: &str, session_id: Option<&str>, now: time::OffsetDateTime) -> Result<ProjectVersion, VersionError>` — create `versions/<n>/`, copy-if-present `model.py`, `output/` (recursive), `.cadstudio/chat.json`, write `version.json`, append + return.
   - `pub fn restore(project_root: &Path, version: &ProjectVersion) -> Result<(), VersionError>` — replace `model.py` and `.cadstudio/chat.json` (remove-then-copy-if-present), remove every entry in `output/`, copy the version's `output/` contents in (VersionHistory.swift:56-67). Does NOT touch metadata (caller owns `session_id`/`current_version`).
-  - `pub fn comparison_parameters(project_root: &Path, number: Option<i64>) -> std::collections::BTreeMap<String, f64>` — `number`'s `output/manifest.json` parameters; empty map when `None`, unreadable, or unparseable.
+  - `pub fn comparison_parameters(project_root: &Path, number: Option<i64>) -> std::collections::BTreeMap<String, f64>` — parses `number`'s stored **model.py copy** with `parameters::scan` (the version snapshot always carries model.py; the output manifest is NOT the parameter source — nothing regenerates it when a slider rewrites model.py, and upstream derives comparison values from the version's model source); empty map when `None`, unreadable, or no matches.
   - `pub fn missing_files(output_dir: &Path) -> Vec<String>` (in outputs.rs) — `expected_outputs()` filtered on existence, mapped to names, upstream report order (ProjectOutput.swift:32-36). This is the RECORD gate, deliberately narrower than `missing_requirements`.
 
 - [ ] **Step 1: Failing tests** — `engine/tests/versions.rs`:
@@ -843,10 +845,11 @@ fn next_number_is_last_plus_one() {
 }
 
 #[test]
-fn comparison_parameters_read_the_versions_manifest() {
+fn comparison_parameters_parse_the_versions_model_copy() {
     let root = project();
     let mut versions = vec![];
     record(&root, &mut versions, "p", None, time::OffsetDateTime::now_utc()).unwrap();
+    // previous values come from the recorded model.py, not the (static) manifest
     assert_eq!(comparison_parameters(&root, Some(1)),
         BTreeMap::from([("wall".to_string(), 2.0)]));
     assert!(comparison_parameters(&root, None).is_empty());
@@ -1369,7 +1372,8 @@ async fn restore_returns_project_to_the_snapshot() {
     // the chat transcript is the snapshot's (summary row of v1 is the last)
     let chat = load_chat(&root).unwrap();
     assert_eq!(chat.last().unwrap().detail.as_deref(), Some("1"));
-    // compare: previous parameter values come from version 2's manifest
+    // compare: previous parameter values are parsed from version 2's stored
+    // model.py copy (the slider rewrite landed there before the snapshot)
     bridge.compare_with(Some(2));
     assert_eq!(bridge.comparison_parameters().get("wall"), Some(&5.0));
     bridge.compare_with(None);
