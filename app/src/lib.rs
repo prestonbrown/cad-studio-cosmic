@@ -42,6 +42,7 @@ pub mod app;
 pub mod bridge;
 pub mod camera_input;
 pub mod chat;
+pub mod compare_pane;
 pub mod chat_view;
 pub mod localize;
 pub mod markdown;
