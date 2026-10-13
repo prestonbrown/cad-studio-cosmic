@@ -18,10 +18,21 @@
 //! overlay — parity grid, bed outline, axis tripod — is [`render::grid`],
 //! stated against the same pinned frame.
 //!
+//! [`playback`] is the motion core: [`playback::MotionPlayer`] holds the
+//! upstream playback state machine (advance with remainder loop-wrap,
+//! clamp-and-stop without looping, restart-from-0 only at the duration),
+//! and [`playback::poses`] derives one [`render::PartPose`] and one
+//! [`render::PartAppearance`] per scene part from a study state — the
+//! MODEL→SCENE remap on translations and quaternion imaginaries alike,
+//! composed through the scene pin, hidden parts never drawing. Pure
+//! state in, uniform-ready slots out; the animation clock and pane
+//! wiring live in the app.
+//!
 //! [`render::scene`] is the iced adapter (a `shader::Program`) that drives
 //! the pipeline from widget land; the windowed example and the headless
 //! render tests exercise the identical renderer, and [`render::gpu`] is
 //! the suite-global device context those tests share.
 
+pub mod playback;
 pub mod render;
 pub mod tools;
