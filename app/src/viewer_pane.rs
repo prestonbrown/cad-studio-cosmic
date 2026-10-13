@@ -688,13 +688,16 @@ impl ViewerPane {
     /// playback clock while [`Self::wants_tick`].
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
-        let animating = self.tools.animating;
-        let modifiers = keyboard::listen().filter_map(move |event| match event {
+        // The filter closure must stay NON-CAPTURING: iced's filter_map
+        // rejects capturing closures at compile time, so gates that need
+        // pane state live in the update arms, not here.
+        let modifiers = keyboard::listen().filter_map(|event| match event {
             keyboard::Event::ModifiersChanged(modifiers) => {
                 Some(Message::ModifiersChanged(modifiers))
             }
             // Space with no modifiers toggles playback while animating
-            // (MotionControls.swift:19) — winit reports no Named::Space,
+            // (MotionControls.swift:19) — the update arm's animating gate
+            // no-ops it on an idle pane. winit reports no Named::Space;
             // the logical key is the character " ". DIVERGENCE (module
             // docs): SwiftUI button shortcuts stay inert while a text
             // field has focus; iced's global listener cannot see focus.
@@ -702,9 +705,7 @@ impl ViewerPane {
                 key: keyboard::Key::Character(c),
                 modifiers,
                 ..
-            } if animating && modifiers.is_empty() && c.as_str() == " " => {
-                Some(Message::TogglePlayback)
-            }
+            } if modifiers.is_empty() && c.as_str() == " " => Some(Message::TogglePlayback),
             // ⌥⌘I (Commands.swift:69-73); the character form matches the
             // logical key with option held (macOS composes ⌥I — the
             // ignoring-modifiers key stays "i").
@@ -2586,5 +2587,20 @@ mod tests {
         let _ = pane.update(Message::ToggleAnimation);
         let _ = pane.update(Message::Scrub(999.0));
         assert!((pane.tools.player.time - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn subscription_builds_with_and_without_the_clock() {
+        // Subscription construction is pure (recipes only — streams spawn
+        // on the runtime), and referencing it here instantiates the
+        // keyboard filter's closure in the TEST build too, where iced's
+        // compile-time non-capturing check would catch a regression the
+        // lib-only tests otherwise never codegen.
+        let (root, mut pane) = pane("motion-subs", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.subscription();
+        let _ = pane.update(Message::ToggleAnimation);
+        let _ = pane.subscription();
     }
 }
