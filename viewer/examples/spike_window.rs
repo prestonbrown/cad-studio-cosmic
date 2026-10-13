@@ -17,7 +17,7 @@ use iced::mouse::ScrollDelta;
 use iced::widget::{center, checkbox, column, mouse_area, row, shader, text};
 use iced::{Center, Element, Fill, Point, Size, Subscription};
 
-use viewer::render::{NEUTRAL, PartScene, SpikeScene};
+use viewer::render::{ModelScene, NEUTRAL, PartScene};
 
 fn main() -> iced::Result {
     iced::application(Spike::default, Spike::update, Spike::view)
@@ -39,7 +39,7 @@ enum Message {
 }
 
 struct Spike {
-    scene: SpikeScene,
+    scene: ModelScene,
     dragging: bool,
     last: Option<Point>,
 }
@@ -53,7 +53,7 @@ impl Default for Spike {
         .expect("golden fixture model.3mf");
         let parts = parse_3mf(&bytes).expect("golden model.3mf parses");
         Self {
-            scene: SpikeScene::new(Arc::new(PartScene::from_parts(&parts, NEUTRAL))),
+            scene: ModelScene::new(Arc::new(PartScene::from_parts(&parts, NEUTRAL))),
             dragging: false,
             last: None,
         }

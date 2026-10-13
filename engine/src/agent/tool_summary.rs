@@ -124,14 +124,19 @@ pub fn live_title(name: &str, partial_json: &str) -> String {
 pub fn live_preview(partial_json: &str) -> Option<String> {
     let content = partial_string("content", partial_json)
         .or_else(|| partial_string("new_string", partial_json))?;
-    let mut lines: Vec<&str> = content.split('\n').filter(|l| !l.trim().is_empty()).collect();
+    let mut lines: Vec<&str> = content
+        .split('\n')
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     let kept = lines.split_off(lines.len().saturating_sub(4));
     Some(kept.join("\n"))
 }
 
 /// `path` relative to `root` when it lives under it, otherwise as given.
 pub fn rel_path(path: &str, root: &str) -> String {
-    path.strip_prefix(&format!("{root}/")).unwrap_or(path).to_string()
+    path.strip_prefix(&format!("{root}/"))
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Display form of a Bash command, upstream `shortCommand`: the venv
@@ -150,7 +155,10 @@ pub fn short_command(command: &str, root: &str, python: &str) -> String {
     }
     let mut command = command.split('\n').next().unwrap_or("").to_string();
     if command.starts_with("cd ") && command.contains(root) {
-        let separator = command.find("&&").map(|i| i + 2).or_else(|| command.find(';').map(|i| i + 1));
+        let separator = command
+            .find("&&")
+            .map(|i| i + 2)
+            .or_else(|| command.find(';').map(|i| i + 1));
         if let Some(end) = separator {
             command = command[end..].trim().to_string();
         }
@@ -176,19 +184,27 @@ fn command_title(command: &str) -> String {
             ANALYZE_MODEL.to_string()
         };
     }
-    if matches!(tool, "rsvg-convert" | "sips" | "magick" | "convert" | "qlmanage") {
+    if matches!(
+        tool,
+        "rsvg-convert" | "sips" | "magick" | "convert" | "qlmanage"
+    ) {
         return PREPARE_PREVIEW.to_string();
     }
     // read-only sed is checked here, BEFORE the model.py-edit case below
-    if matches!(tool, "ls" | "cat" | "head" | "tail" | "grep" | "rg" | "find" | "wc" | "file" | "stat")
-        || (tool == "sed" && !text.contains(" -i"))
+    if matches!(
+        tool,
+        "ls" | "cat" | "head" | "tail" | "grep" | "rg" | "find" | "wc" | "file" | "stat"
+    ) || (tool == "sed" && !text.contains(" -i"))
     {
         return EXAMINE_FILES.to_string();
     }
     if matches!(tool, "sed" | "perl") && text.contains("model.py") {
         return EDIT_MODEL.to_string();
     }
-    if matches!(tool, "sed" | "mv" | "cp" | "rm" | "mkdir" | "touch" | "perl") {
+    if matches!(
+        tool,
+        "sed" | "mv" | "cp" | "rm" | "mkdir" | "touch" | "perl"
+    ) {
         return TIDY_FILES.to_string();
     }
     WORK_PROJECT.to_string()
@@ -226,12 +242,18 @@ fn read_title(path: &str) -> String {
 fn file_path(input: &serde_json::Value) -> &str {
     match input.get("file_path").and_then(serde_json::Value::as_str) {
         Some(path) => path,
-        None => input.get("path").and_then(serde_json::Value::as_str).unwrap_or(""),
+        None => input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
     }
 }
 
 fn input_str<'a>(input: &'a serde_json::Value, key: &str) -> &'a str {
-    input.get(key).and_then(serde_json::Value::as_str).unwrap_or("")
+    input
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
 }
 
 /// Last path component — upstream uses NSString.lastPathComponent, which

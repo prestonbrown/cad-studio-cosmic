@@ -28,17 +28,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cosmic::Element;
 use cosmic::iced::alignment::Alignment;
-use cosmic::iced::futures::stream::BoxStream;
 use cosmic::iced::futures::StreamExt;
+use cosmic::iced::futures::stream::BoxStream;
 use cosmic::iced::mouse::{Interaction, ScrollDelta};
 use cosmic::iced::stream;
 use cosmic::iced::time;
 use cosmic::iced::widget::image::{FilterMethod, Handle};
 use cosmic::iced::widget::responsive;
 use cosmic::iced::{Length, Padding, Point, Rectangle, Size, Subscription, Task};
-use cosmic::Element;
-use cosmic::widget::{button, container, mouse_area, text, Column, Image, Row, Space};
+use cosmic::widget::{Column, Image, Row, Space, button, container, mouse_area, text};
 use engine::project::manifest::Manifest;
 
 // ---------------------------------------------------------------------------
@@ -142,7 +142,9 @@ impl Viewport {
     /// clamped to the zoom range, anchored at the view center.
     pub fn fit(&mut self) {
         self.fitted = true;
-        let Some((sheet_w, sheet_h)) = self.sheet else { return };
+        let Some((sheet_w, sheet_h)) = self.sheet else {
+            return;
+        };
         if sheet_w <= 0.0 || sheet_h <= 0.0 || self.view.0 <= 0.0 || self.view.1 <= 0.0 {
             return;
         }
@@ -222,7 +224,9 @@ impl Viewport {
     /// The body's flex centering and scroll clamping: centered while the
     /// sheet fits inside the margins, else clamped to the 24 px padding.
     fn clamp_offset(&mut self) {
-        let Some((sheet_w, sheet_h)) = self.sheet else { return };
+        let Some((sheet_w, sheet_h)) = self.sheet else {
+            return;
+        };
         let (vw, vh) = self.view;
         self.offset.0 = clamp_axis(sheet_w * self.scale, vw, self.offset.0);
         self.offset.1 = clamp_axis(sheet_h * self.scale, vh, self.offset.1);
@@ -232,7 +236,9 @@ impl Viewport {
 /// The wheel step factor `exp(clamp(−pixels·0.0025, ±0.2))`
 /// (SVGWebView.swift:85-87).
 pub fn wheel_factor(pixels: f64) -> f64 {
-    (-(pixels * WHEEL_GAIN)).clamp(-WHEEL_STEP_MAX, WHEEL_STEP_MAX).exp()
+    (-(pixels * WHEEL_GAIN))
+        .clamp(-WHEEL_STEP_MAX, WHEEL_STEP_MAX)
+        .exp()
 }
 
 /// One axis of the body layout: the flex box centers the sheet while it
@@ -455,7 +461,11 @@ pub fn rasterize_svg(data: &[u8], raster_scale: f64) -> Result<Raster, String> {
     if !(natural.0 > 0.0 && natural.1 > 0.0) {
         return Err("svg has no intrinsic size".to_string());
     }
-    let scale = if raster_scale > 0.0 { raster_scale } else { 1.0 };
+    let scale = if raster_scale > 0.0 {
+        raster_scale
+    } else {
+        1.0
+    };
     let width = ((natural.0 * scale).round() as u32).max(1);
     let height = ((natural.1 * scale).round() as u32).max(1);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
@@ -487,8 +497,7 @@ pub fn rasterize_page(path: &Path, raster_scale: f64) -> Result<Raster, String> 
             // the documented port addition: fall back to the generated PNG
             // (upstream shows a blank page for a broken SVG)
             let png_path = path.with_extension("png");
-            let png =
-                std::fs::read(&png_path).map_err(|error| format!("png read: {error}"))?;
+            let png = std::fs::read(&png_path).map_err(|error| format!("png read: {error}"))?;
             let image = image::load_from_memory(&png)
                 .map_err(|error| format!("png decode: {error}"))?
                 .to_rgba8();
@@ -583,7 +592,9 @@ impl RasterCache {
         self.order.push_back(key);
         self.used += bytes;
         while self.used > self.budget {
-            let Some(oldest) = self.order.pop_front() else { break };
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
             if let Some(old) = self.entries.remove(&oldest) {
                 self.used -= old.bytes;
             }
@@ -806,9 +817,12 @@ impl SchematicPane {
                 self.zoom_changed();
             }
             Message::DebounceTick => self.flush(),
-            Message::RasterArrived { page, revision, bucket, raster } => {
-                self.raster_arrived(page, revision, bucket, raster)
-            }
+            Message::RasterArrived {
+                page,
+                revision,
+                bucket,
+                raster,
+            } => self.raster_arrived(page, revision, bucket, raster),
         }
         Task::none()
     }
@@ -831,8 +845,7 @@ impl SchematicPane {
             Ok(raster) => {
                 self.cache.insert(page, revision, bucket, raster);
                 self.scheduler.raster_arrived(bucket, self.viewport.scale);
-                if let Some((handle, raster_size, natural)) =
-                    self.cache.get(page, revision, bucket)
+                if let Some((handle, raster_size, natural)) = self.cache.get(page, revision, bucket)
                 {
                     self.viewport.sheet_loaded(natural);
                     if bucket == bucket_index(self.viewport.scale) {
@@ -855,7 +868,8 @@ impl SchematicPane {
     }
 
     fn zoom_changed(&mut self) {
-        self.scheduler.scale_changed(self.viewport.scale, Instant::now());
+        self.scheduler
+            .scale_changed(self.viewport.scale, Instant::now());
         self.display_from_cache();
     }
 
@@ -1058,10 +1072,7 @@ impl SchematicPane {
                 .map(|p| p.title.as_str())
                 .unwrap_or_default();
             controls = controls
-                .push(
-                    button::text("<")
-                        .on_press_maybe((index > 0).then_some(Message::PrevPage)),
-                )
+                .push(button::text("<").on_press_maybe((index > 0).then_some(Message::PrevPage)))
                 .push(text(format!("{}/{} · {}", index + 1, pages, title)))
                 .push(
                     button::text(">")
@@ -1069,18 +1080,9 @@ impl SchematicPane {
                 )
         }
         controls = controls
-            .push(
-                button::text("-")
-                    .on_press_maybe(has_sheet.then_some(Message::ZoomOut)),
-            )
-            .push(
-                button::text("+")
-                    .on_press_maybe(has_sheet.then_some(Message::ZoomIn)),
-            )
-            .push(
-                button::text("Fit")
-                    .on_press_maybe(has_sheet.then_some(Message::Fit)),
-            );
+            .push(button::text("-").on_press_maybe(has_sheet.then_some(Message::ZoomOut)))
+            .push(button::text("+").on_press_maybe(has_sheet.then_some(Message::ZoomIn)))
+            .push(button::text("Fit").on_press_maybe(has_sheet.then_some(Message::Fit)));
         container(
             Row::new()
                 .push(zoom)
@@ -1245,7 +1247,14 @@ mod tests {
 
         let mut jobs = Vec::new();
         // wheel burst: wiggle inside bucket 1, cross into 2, settle there
-        for (ms, scale) in [(0u64, 1.1), (16, 1.5), (33, 1.9), (50, 2.1), (66, 2.5), (83, 2.7)] {
+        for (ms, scale) in [
+            (0u64, 1.1),
+            (16, 1.5),
+            (33, 1.9),
+            (50, 2.1),
+            (66, 2.5),
+            (83, 2.7),
+        ] {
             sched.scale_changed(scale, at(ms));
             if let Some(job) = sched.poll(at(ms)) {
                 jobs.push(job);
@@ -1407,7 +1416,10 @@ mod tests {
 
     /// Pull the next relay message without ever hanging the test thread:
     /// poll the stream and give up at a wall-clock deadline.
-    fn next_message(stream: &mut BoxStream<'static, Message>, deadline: Instant) -> Option<Message> {
+    fn next_message(
+        stream: &mut BoxStream<'static, Message>,
+        deadline: Instant,
+    ) -> Option<Message> {
         while Instant::now() < deadline {
             if let Some(message) = stream.as_mut().next().now_or_never() {
                 return message;
@@ -1458,7 +1470,12 @@ mod tests {
             other => panic!("resize event lost in the relay: {other:?}"),
         }
         match next_message(&mut stream, deadline) {
-            Some(Message::RasterArrived { page, revision, bucket, raster }) => {
+            Some(Message::RasterArrived {
+                page,
+                revision,
+                bucket,
+                raster,
+            }) => {
                 assert_eq!((page, revision, bucket), (1, 4, 2));
                 assert!(raster.is_ok());
             }
@@ -1504,8 +1521,7 @@ mod tests {
         // the round-1 bug this pins: a raster arrives, sheet_loaded's fit
         // moves the scale into another bucket, and the pane must arm that
         // bucket's raster instead of staying blank
-        let mut pane =
-            SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
+        let mut pane = SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
         // a small viewport makes the post-load fit land far below bucket 0
         drive(&mut pane, Message::Resized(Size::new(200.0, 200.0)));
         assert_eq!(pane.viewport.view, (200.0, 200.0));
@@ -1563,8 +1579,7 @@ mod tests {
         // the revision contract: T7 bumps set_revision when a page's SVG
         // changes on disk; rasters requested under the old revision must
         // not display
-        let mut pane =
-            SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
+        let mut pane = SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
         pane.set_revision(7);
         assert_eq!(pane.revision, 7);
 

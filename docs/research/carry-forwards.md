@@ -38,6 +38,15 @@ From M1's reviews, for later milestones:
 
 ## M4 (app shell)
 
+From the M4 T5 3D-pane review cycle (2026-10-13):
+
+- Pinch/magnify zoom DELIVERY is toolkit-blocked: the pinned iced fork
+  (dbc62f2) drops winit's `PinchGesture` in its event conversion
+  (iced/winit/src/conversion.rs). The app's pure pinch layer is complete,
+  clamped, and tested; `viewer_pane`'s message wiring needs exactly one
+  match arm when a future iced/winit rev surfaces the event. Re-check the
+  fork's conversion on the next libcosmic pin bump.
+
 From the M3 whole-branch review (2026-10-12):
 
 - Pinch/magnify zoom (trackpad gesture) is in the viewer facts' M3 input

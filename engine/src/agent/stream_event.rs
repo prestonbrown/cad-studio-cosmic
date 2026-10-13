@@ -48,13 +48,23 @@ pub struct StreamInner {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InnerEvent {
     MessageStart,
-    ContentStart { index: i64, block: ContentBlock },
-    ContentDelta { index: i64, delta: Delta },
-    ContentStop { index: i64 },
+    ContentStart {
+        index: i64,
+        block: ContentBlock,
+    },
+    ContentDelta {
+        index: i64,
+        delta: Delta,
+    },
+    ContentStop {
+        index: i64,
+    },
     /// `message_delta` carries the message's final `stop_reason`
     /// (`end_turn`, `tool_use`, ...); streamed assistant snapshots leave it
     /// null, so this is where the turn outcome is learned.
-    MessageDelta { stop_reason: Option<String> },
+    MessageDelta {
+        stop_reason: Option<String>,
+    },
     MessageStop,
     Other(String),
 }
@@ -107,11 +117,20 @@ pub struct AssistantEvent {
 /// `content_block_start`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentBlock {
-    Text { text: String },
-    Thinking { thinking: String, signature: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     /// `redacted_thinking`; the encrypted `data` needs no consumer.
     RedactedThinking,
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 /// `content_block_delta` payload — an open set with a unit fallback. The
@@ -367,16 +386,14 @@ struct ToolResultRaw {
 impl StreamEventRaw {
     fn into_event(self) -> StreamEvent {
         match self {
-            StreamEventRaw::Typed(TypedLineRaw::System(raw)) => {
-                StreamEvent::System(SystemEvent {
-                    kind: SystemKind::from_subtype(&raw.subtype),
-                    session_id: raw.session_id,
-                    estimated_tokens: raw.estimated_tokens,
-                })
-            }
-            StreamEventRaw::Typed(TypedLineRaw::Stream(raw)) => {
-                StreamEvent::Stream { event: raw.into_inner() }
-            }
+            StreamEventRaw::Typed(TypedLineRaw::System(raw)) => StreamEvent::System(SystemEvent {
+                kind: SystemKind::from_subtype(&raw.subtype),
+                session_id: raw.session_id,
+                estimated_tokens: raw.estimated_tokens,
+            }),
+            StreamEventRaw::Typed(TypedLineRaw::Stream(raw)) => StreamEvent::Stream {
+                event: raw.into_inner(),
+            },
             StreamEventRaw::Typed(TypedLineRaw::Assistant(raw)) => {
                 match raw.message.content.first().and_then(ContentBlock::from_raw) {
                     Some(block) => StreamEvent::Assistant(AssistantEvent {
@@ -415,7 +432,10 @@ impl StreamLineRaw {
     fn into_inner(self) -> StreamInner {
         let event = match self.event {
             InnerEventRaw::Typed(TypedInnerRaw::MessageStart) => InnerEvent::MessageStart,
-            InnerEventRaw::Typed(TypedInnerRaw::ContentStart { index, content_block }) => {
+            InnerEventRaw::Typed(TypedInnerRaw::ContentStart {
+                index,
+                content_block,
+            }) => {
                 match ContentBlock::from_raw(&content_block) {
                     Some(block) => InnerEvent::ContentStart { index, block },
                     // Unknown block type from a newer agent: keep the event
@@ -424,18 +444,26 @@ impl StreamLineRaw {
                 }
             }
             InnerEventRaw::Typed(TypedInnerRaw::ContentDelta { index, delta }) => {
-                InnerEvent::ContentDelta { index, delta: delta.into_delta() }
+                InnerEvent::ContentDelta {
+                    index,
+                    delta: delta.into_delta(),
+                }
             }
             InnerEventRaw::Typed(TypedInnerRaw::ContentStop { index }) => {
                 InnerEvent::ContentStop { index }
             }
             InnerEventRaw::Typed(TypedInnerRaw::MessageDelta { delta }) => {
-                InnerEvent::MessageDelta { stop_reason: delta.and_then(|d| d.stop_reason) }
+                InnerEvent::MessageDelta {
+                    stop_reason: delta.and_then(|d| d.stop_reason),
+                }
             }
             InnerEventRaw::Typed(TypedInnerRaw::MessageStop) => InnerEvent::MessageStop,
             InnerEventRaw::TypeOnly(tag) => InnerEvent::Other(tag.kind),
         };
-        StreamInner { session_id: self.session_id, event }
+        StreamInner {
+            session_id: self.session_id,
+            event,
+        }
     }
 }
 
@@ -444,7 +472,9 @@ impl ContentBlock {
     /// or a `tool_use` without its identifying fields.
     fn from_raw(raw: &BlockRaw) -> Option<ContentBlock> {
         match raw.kind.as_str() {
-            "text" => Some(ContentBlock::Text { text: raw.text.clone().unwrap_or_default() }),
+            "text" => Some(ContentBlock::Text {
+                text: raw.text.clone().unwrap_or_default(),
+            }),
             "thinking" => Some(ContentBlock::Thinking {
                 thinking: raw.thinking.clone().unwrap_or_default(),
                 signature: raw.signature.clone().unwrap_or_default(),
@@ -463,12 +493,18 @@ impl ContentBlock {
 impl DeltaRaw {
     fn into_delta(self) -> Delta {
         match self.kind.as_str() {
-            "text_delta" => Delta::Text { text: self.text.unwrap_or_default() },
-            "thinking_delta" => Delta::Thinking { thinking: self.thinking.unwrap_or_default() },
-            "input_json_delta" => {
-                Delta::InputJson { partial_json: self.partial_json.unwrap_or_default() }
-            }
-            "signature_delta" => Delta::Signature { signature: self.signature.unwrap_or_default() },
+            "text_delta" => Delta::Text {
+                text: self.text.unwrap_or_default(),
+            },
+            "thinking_delta" => Delta::Thinking {
+                thinking: self.thinking.unwrap_or_default(),
+            },
+            "input_json_delta" => Delta::InputJson {
+                partial_json: self.partial_json.unwrap_or_default(),
+            },
+            "signature_delta" => Delta::Signature {
+                signature: self.signature.unwrap_or_default(),
+            },
             _ => Delta::Other,
         }
     }

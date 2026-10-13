@@ -5,9 +5,7 @@
 
 use cosmic::widget::pane_grid::{self, Configuration, Node, Split, State};
 use engine::project::layout::{self, Axis, LayoutNode, PaneKind};
-use engine::project::store::{
-    load_metadata, save_metadata, ProjectMetadata, ProjectStoreError,
-};
+use engine::project::store::{ProjectMetadata, ProjectStoreError, load_metadata, save_metadata};
 use engine::settings::{Settings, SettingsError};
 use std::path::Path;
 
@@ -48,7 +46,8 @@ pub fn clamp_resize(
     height: f32,
     spacing: f32,
 ) -> f32 {
-    let Some((found, region_w, region_h)) = find_split(state.layout(), split, width, height, spacing)
+    let Some((found, region_w, region_h)) =
+        find_split(state.layout(), split, width, height, spacing)
     else {
         return proposed;
     };
@@ -124,7 +123,12 @@ fn from_grid_axis(axis: pane_grid::Axis) -> Axis {
 fn to_configuration(node: &LayoutNode) -> Configuration<PaneKind> {
     match node {
         LayoutNode::Pane(kind) => Configuration::Pane(*kind),
-        LayoutNode::Split { axis, first, second, fraction } => Configuration::Split {
+        LayoutNode::Split {
+            axis,
+            first,
+            second,
+            fraction,
+        } => Configuration::Split {
             axis: to_grid_axis(*axis),
             ratio: *fraction as f32,
             a: Box::new(to_configuration(first)),
@@ -141,7 +145,9 @@ fn node_to_layout(node: &Node, state: &State<PaneKind>) -> LayoutNode {
                 .get(pane)
                 .expect("every pane id in the tree has state"),
         ),
-        Node::Split { axis, ratio, a, b, .. } => LayoutNode::Split {
+        Node::Split {
+            axis, ratio, a, b, ..
+        } => LayoutNode::Split {
             axis: from_grid_axis(*axis),
             first: Box::new(node_to_layout(a, state)),
             second: Box::new(node_to_layout(b, state)),
@@ -184,10 +190,21 @@ fn find_split<'a>(
 ) -> Option<(SplitRef<'a>, f32, f32)> {
     match node {
         Node::Pane(_) => None,
-        Node::Split { id, axis, ratio, a, b } => {
+        Node::Split {
+            id,
+            axis,
+            ratio,
+            a,
+            b,
+        } => {
             if id == target {
                 return Some((
-                    SplitRef { axis: *axis, ratio: *ratio, a, b },
+                    SplitRef {
+                        axis: *axis,
+                        ratio: *ratio,
+                        a,
+                        b,
+                    },
                     width,
                     height,
                 ));
@@ -341,7 +358,12 @@ mod tests {
     /// Rebuild `base` with a new root fraction — what a drag produces.
     fn with_root_fraction(base: &LayoutNode, fraction: f64) -> LayoutNode {
         match base {
-            LayoutNode::Split { axis, first, second, .. } => LayoutNode::Split {
+            LayoutNode::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => LayoutNode::Split {
                 axis: *axis,
                 first: first.clone(),
                 second: second.clone(),
@@ -363,7 +385,11 @@ mod tests {
         let resized = with_root_fraction(&base, 0.45);
         set_fraction(&mut metadata, &resized);
 
-        assert_eq!(metadata.layout.as_ref(), Some(&resized), "model sees the drag");
+        assert_eq!(
+            metadata.layout.as_ref(),
+            Some(&resized),
+            "model sees the drag"
+        );
         assert_eq!(
             load_metadata(&root).unwrap().layout.as_ref(),
             Some(&base),
@@ -376,7 +402,10 @@ mod tests {
 
         // The established save points (window close, turn-end saves) flush it.
         save_metadata(&root, &metadata).unwrap();
-        assert_eq!(load_metadata(&root).unwrap().layout.as_ref(), Some(&resized));
+        assert_eq!(
+            load_metadata(&root).unwrap().layout.as_ref(),
+            Some(&resized)
+        );
     }
 
     #[test]

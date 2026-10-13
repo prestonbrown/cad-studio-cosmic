@@ -1,4 +1,4 @@
-use engine::watch::{watch_directory, ReloadKind};
+use engine::watch::{ReloadKind, watch_directory};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,12 +15,20 @@ fn write(path: &std::path::Path, bytes: &[u8]) {
 
 const FAST: Duration = Duration::from_millis(30);
 
-fn drain_until(rx: &std::sync::mpsc::Receiver<ReloadKind>, want: ReloadKind, deadline_ms: u64) -> bool {
+fn drain_until(
+    rx: &std::sync::mpsc::Receiver<ReloadKind>,
+    want: ReloadKind,
+    deadline_ms: u64,
+) -> bool {
     let mut seen = std::collections::BTreeSet::new();
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(deadline_ms) {
-        while let Ok(k) = rx.try_recv() { seen.insert(k); }
-        if seen.contains(&want) { return true; }
+        while let Ok(k) = rx.try_recv() {
+            seen.insert(k);
+        }
+        if seen.contains(&want) {
+            return true;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     false
@@ -30,12 +38,20 @@ fn drain_until(rx: &std::sync::mpsc::Receiver<ReloadKind>, want: ReloadKind, dea
 /// so each kind can be asserted by name. A per-kind `drain_until` sequence
 /// would not work here: each call consumes the channel, so a sibling kind
 /// drained by an earlier call is gone when its own turn comes.
-fn drain_until_all(rx: &std::sync::mpsc::Receiver<ReloadKind>, wants: &[ReloadKind], deadline_ms: u64) -> std::collections::BTreeSet<ReloadKind> {
+fn drain_until_all(
+    rx: &std::sync::mpsc::Receiver<ReloadKind>,
+    wants: &[ReloadKind],
+    deadline_ms: u64,
+) -> std::collections::BTreeSet<ReloadKind> {
     let mut seen = std::collections::BTreeSet::new();
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(deadline_ms) {
-        while let Ok(k) = rx.try_recv() { seen.insert(k); }
-        if wants.iter().all(|w| seen.contains(w)) { return seen; }
+        while let Ok(k) = rx.try_recv() {
+            seen.insert(k);
+        }
+        if wants.iter().all(|w| seen.contains(w)) {
+            return seen;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     seen
@@ -54,7 +70,13 @@ fn maps_files_to_reload_kinds() {
     write(&d.join("schematic-2.svg"), b"x");
     write(&d.join("schematic.png"), b"x");
     write(&d.join("references-dont-care.txt"), b"x");
-    let wants = [ReloadKind::Manifest, ReloadKind::Plate, ReloadKind::Motion, ReloadKind::Mesh, ReloadKind::Schematic];
+    let wants = [
+        ReloadKind::Manifest,
+        ReloadKind::Plate,
+        ReloadKind::Motion,
+        ReloadKind::Mesh,
+        ReloadKind::Schematic,
+    ];
     let kinds = drain_until_all(&rx, &wants, 5000);
     for want in wants {
         assert!(kinds.contains(&want), "missing reload kind {want:?}");
@@ -69,8 +91,14 @@ fn storm_collapses_to_one_reload_per_file() {
         write(&d.join("model.3mf"), b"storm");
         write(&d.join("manifest.json"), b"{}");
     }
-    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "the storm's single Mesh reload never arrived");
-    assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "trailing-edge debounce + mod-time dedup collapse the storm");
+    assert!(
+        drain_until(&rx, ReloadKind::Mesh, 5000),
+        "the storm's single Mesh reload never arrived"
+    );
+    assert!(
+        !drain_until(&rx, ReloadKind::Mesh, 300),
+        "trailing-edge debounce + mod-time dedup collapse the storm"
+    );
 }
 
 #[test]
@@ -78,10 +106,19 @@ fn second_write_after_quiet_emits_again() {
     let d = tmp_output();
     let (_h, rx) = watch_directory(&d, FAST).unwrap();
     write(&d.join("model.3mf"), b"one");
-    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "first write never reloaded");
+    assert!(
+        drain_until(&rx, ReloadKind::Mesh, 5000),
+        "first write never reloaded"
+    );
     write(&d.join("model.3mf"), b"two");
-    assert!(drain_until(&rx, ReloadKind::Mesh, 5000), "second write after quiet never reloaded");
-    assert!(!drain_until(&rx, ReloadKind::Mesh, 300), "a third Mesh reload arrived for two writes");
+    assert!(
+        drain_until(&rx, ReloadKind::Mesh, 5000),
+        "second write after quiet never reloaded"
+    );
+    assert!(
+        !drain_until(&rx, ReloadKind::Mesh, 300),
+        "a third Mesh reload arrived for two writes"
+    );
 }
 
 #[test]
@@ -96,6 +133,10 @@ fn untouched_files_never_reload() {
     write(&d.join("manifest.json"), b"{}");
     std::thread::sleep(Duration::from_millis(200));
     while let Ok(k) = rx.try_recv() {
-        assert_ne!(k, ReloadKind::Mesh, "model.3mf never changed after watch start");
+        assert_ne!(
+            k,
+            ReloadKind::Mesh,
+            "model.3mf never changed after watch start"
+        );
     }
 }

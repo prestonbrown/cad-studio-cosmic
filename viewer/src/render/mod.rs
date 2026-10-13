@@ -54,7 +54,7 @@ pub mod scene;
 
 pub use grid::{GridMesh, GridVertex};
 pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear};
-pub use scene::{SpikePrimitive, SpikeScene};
+pub use scene::{ModelPrimitive, ModelScene};
 
 use wgpu::util::DeviceExt;
 
@@ -1373,14 +1373,7 @@ impl MeshPipeline {
             // the blit spans the whole prepared size: the mesh pass placed
             // the viewport-offset scene inside the surface-sized
             // intermediate, and the uncovered region composites transparent
-            blit_pass.set_viewport(
-                0.0,
-                0.0,
-                self.size.0 as f32,
-                self.size.1 as f32,
-                0.0,
-                1.0,
-            );
+            blit_pass.set_viewport(0.0, 0.0, self.size.0 as f32, self.size.1 as f32, 0.0, 1.0);
             blit_pass.set_pipeline(&blit.pipeline);
             blit_pass.set_bind_group(0, &msaa.bind_group, &[]);
             blit_pass.draw(0..3, 0..1);
@@ -1629,8 +1622,7 @@ mod tests {
             pitch.sin(),
             pitch.cos() * yaw.cos(),
         );
-        let view =
-            glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
+        let view = glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
         // col-major glam: matrix rows 0/1 are the camera right/up axes
         let right = glam::Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = glam::Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);

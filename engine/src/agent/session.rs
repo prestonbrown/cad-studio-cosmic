@@ -58,8 +58,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use time::macros::format_description;
 use time::OffsetDateTime;
+use time::macros::format_description;
 use tokio::sync::{mpsc, watch};
 
 use crate::agent::claude::{
@@ -131,11 +131,19 @@ pub enum EngineEvent {
     /// A tool row opened at `content_block_start` (or by an assistant
     /// snapshot the stream never announced). `name` is the `tool_use`
     /// block's tool name.
-    ToolStarted { id: String, name: String, title: String },
+    ToolStarted {
+        id: String,
+        name: String,
+        title: String,
+    },
     /// One `input_json_delta` for the row's accumulating input JSON.
     ToolInput { id: String, partial: String },
     /// A `user` tool result closed the row.
-    ToolFinished { id: String, output: String, is_error: bool },
+    ToolFinished {
+        id: String,
+        output: String,
+        is_error: bool,
+    },
     /// A system chat row the lifecycle dance emits between attempts
     /// (upstream `role: .system`): the busy and missing-session fallback
     /// explanations. Nothing else in the engine produces one.
@@ -147,11 +155,18 @@ pub enum EngineEvent {
 /// How a turn ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnOutcome {
-    Success { session_id: Option<String>, text: String },
+    Success {
+        session_id: Option<String>,
+        text: String,
+    },
     /// The child's exit code — `None` when no process was ever spawned or
     /// it died without reporting one (signal), `Some(0)` when it exited
     /// clean but the turn still failed (an error result line).
-    Failed { error: String, auth: bool, exit_code: Option<i32> },
+    Failed {
+        error: String,
+        auth: bool,
+        exit_code: Option<i32>,
+    },
     /// A resume collided with an active writer twice. [`Session::send`]'s
     /// dance absorbs this itself (retry, then a fresh run), so the engine
     /// never emits it; it names the classification for a caller that drives
@@ -197,7 +212,11 @@ pub struct Session {
 
 impl Session {
     pub fn new(settings: Settings) -> Self {
-        Self { settings, system_template: String::new(), retry_delay: RETRY_DELAY }
+        Self {
+            settings,
+            system_template: String::new(),
+            retry_delay: RETRY_DELAY,
+        }
     }
 
     /// Sets the `CADSystemPrompt.md` template substituted into
@@ -232,7 +251,14 @@ impl Session {
             cancel: cancel_rx,
             pid: Arc::clone(&pid),
         };
-        (TurnHandle { events, cancel: cancel_tx, pid }, ctx)
+        (
+            TurnHandle {
+                events,
+                cancel: cancel_tx,
+                pid,
+            },
+            ctx,
+        )
     }
 
     /// Runs one turn: spawn, translate, tee, persist, classify. Returns as
@@ -311,7 +337,11 @@ impl Attempt {
     /// A turn that never produced a stream to classify.
     fn failed(error: impl Into<String>) -> Self {
         Self {
-            outcome: TurnOutcome::Failed { error: error.into(), auth: false, exit_code: None },
+            outcome: TurnOutcome::Failed {
+                error: error.into(),
+                auth: false,
+                exit_code: None,
+            },
             turn_result: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -324,7 +354,10 @@ async fn single_turn(mut ctx: TurnCtx) {
     let metadata = stored_metadata(&ctx.root);
     let resume_sid = metadata.session_id.clone();
     let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
-    let _ = ctx.events.send(EngineEvent::TurnFinished(attempt.outcome)).await;
+    let _ = ctx
+        .events
+        .send(EngineEvent::TurnFinished(attempt.outcome))
+        .await;
 }
 
 /// [`Session::send`]'s driver — the full turn dance
@@ -337,7 +370,11 @@ async fn full_dance(mut ctx: TurnCtx) {
     let mut allows_resume = true;
     loop {
         let metadata = stored_metadata(&ctx.root);
-        let resume_sid = if allows_resume { metadata.session_id } else { None };
+        let resume_sid = if allows_resume {
+            metadata.session_id
+        } else {
+            None
+        };
         let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
 
         // the guards (AgentSession.swift:72/87 + 306/312): only an attempt
@@ -346,7 +383,10 @@ async fn full_dance(mut ctx: TurnCtx) {
         // carried unheard
         if resume_sid.is_some()
             && !matches!(attempt.outcome, TurnOutcome::Cancelled)
-            && attempt.turn_result.as_ref().is_none_or(|result| result.is_error)
+            && attempt
+                .turn_result
+                .as_ref()
+                .is_none_or(|result| result.is_error)
         {
             let combined = combined_text(&attempt);
             if is_busy_session(&combined) {
@@ -379,7 +419,9 @@ async fn full_dance(mut ctx: TurnCtx) {
                 clear_session_id(&ctx.root);
                 let _ = ctx
                     .events
-                    .send(EngineEvent::System { text: BUSY_FRESH_MESSAGE.to_string() })
+                    .send(EngineEvent::System {
+                        text: BUSY_FRESH_MESSAGE.to_string(),
+                    })
                     .await;
                 allows_resume = false;
                 continue;
@@ -388,14 +430,19 @@ async fn full_dance(mut ctx: TurnCtx) {
                 clear_session_id(&ctx.root);
                 let _ = ctx
                     .events
-                    .send(EngineEvent::System { text: MISSING_SESSION_MESSAGE.to_string() })
+                    .send(EngineEvent::System {
+                        text: MISSING_SESSION_MESSAGE.to_string(),
+                    })
                     .await;
                 allows_resume = false;
                 continue;
             }
         }
 
-        let _ = ctx.events.send(EngineEvent::TurnFinished(attempt.outcome)).await;
+        let _ = ctx
+            .events
+            .send(EngineEvent::TurnFinished(attempt.outcome))
+            .await;
         return;
     }
 }
@@ -520,7 +567,11 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
         }
     }
 
-    let RunningProcess { stderr_text, exit_status, .. } = proc;
+    let RunningProcess {
+        stderr_text,
+        exit_status,
+        ..
+    } = proc;
     let stderr = stderr_text.await.unwrap_or_default();
     let Ok(status) = exit_status.await else {
         // only reachable when the spawner's reader task itself died
@@ -532,7 +583,12 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     } else {
         outcome(&driver.state, &stderr, status.code())
     };
-    Attempt { outcome, turn_result: driver.state.turn_result, stdout: driver.state.stdout_text, stderr }
+    Attempt {
+        outcome,
+        turn_result: driver.state.turn_result,
+        stdout: driver.state.stdout_text,
+        stderr,
+    }
 }
 
 /// The project's stored metadata, or a fresh document when none loads.
@@ -592,7 +648,9 @@ fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
             .clone()
             .unwrap_or_else(|| "not specified".to_string()),
         guidelines: settings.printer_type.prompt_guidelines().to_string(),
-        date: OffsetDateTime::now_utc().format(&ISO_DATE).unwrap_or_default(),
+        date: OffsetDateTime::now_utc()
+            .format(&ISO_DATE)
+            .unwrap_or_default(),
     }
 }
 
@@ -600,7 +658,10 @@ fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
 /// locator's discovery from the settings' custom path.
 fn resolve_executable(settings: &Settings) -> Option<AgentPath> {
     if let Some(path) = std::env::var_os(TEST_CLAUDE_ENV) {
-        return Some(AgentPath { path: path.into(), version: String::new() });
+        return Some(AgentPath {
+            path: path.into(),
+            version: String::new(),
+        });
     }
     locator::find_agent(AgentKind::Claude, settings.claude_path.as_deref())
 }
@@ -635,14 +696,18 @@ impl TurnDriver {
                     }
                     let _ = self
                         .events
-                        .send(EngineEvent::Started { session_id: system.session_id })
+                        .send(EngineEvent::Started {
+                            session_id: system.session_id,
+                        })
                         .await;
                 }
                 SystemKind::ThinkingTokens => {
                     if let Some(tokens) = system.estimated_tokens {
                         let _ = self
                             .events
-                            .send(EngineEvent::Thinking { estimated_tokens: tokens })
+                            .send(EngineEvent::Thinking {
+                                estimated_tokens: tokens,
+                            })
                             .await;
                     }
                 }
@@ -761,7 +826,10 @@ impl TurnDriver {
 fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutcome {
     match state.turn_result.as_ref() {
         Some(result) if !result.is_error => TurnOutcome::Success {
-            session_id: result.session_id.clone().or_else(|| state.session_id.clone()),
+            session_id: result
+                .session_id
+                .clone()
+                .or_else(|| state.session_id.clone()),
             text: if state.has_confirmed_text {
                 state.last_confirmed_text.clone()
             } else {
@@ -772,7 +840,11 @@ fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutco
             let message = result
                 .map(|result| result.result.clone())
                 .unwrap_or_default();
-            let stdout = if exit_code == Some(0) { "" } else { state.stdout_text.as_str() };
+            let stdout = if exit_code == Some(0) {
+                ""
+            } else {
+                state.stdout_text.as_str()
+            };
             let mut details: Vec<String> = [message, stderr.to_string(), stdout.to_string()]
                 .into_iter()
                 .map(|piece| piece.trim().to_string())
@@ -800,9 +872,14 @@ pub fn is_busy_session(text: &str) -> bool {
 
 /// Upstream `isMissingSession`'s needles.
 pub fn is_missing_session(text: &str) -> bool {
-    ["no conversation found", "no rollout found", "session not found", "thread not found"]
-        .iter()
-        .any(|needle| contains_ci(text, needle))
+    [
+        "no conversation found",
+        "no rollout found",
+        "session not found",
+        "thread not found",
+    ]
+    .iter()
+    .any(|needle| contains_ci(text, needle))
 }
 
 /// Upstream `isAuthenticationError`'s needles, with one M4 amendment: the
@@ -839,5 +916,7 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 
 /// `localizedCaseInsensitiveContains` for ASCII needles.
 fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }

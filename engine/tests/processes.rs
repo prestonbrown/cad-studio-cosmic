@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use engine::processes::{
-    Line, reap_orphans_at, register_at, registry_path, spawn_streaming,
-};
+use engine::processes::{Line, reap_orphans_at, register_at, registry_path, spawn_streaming};
 
 const ENV_VAR: &str = "CAD_STUDIO_RUNNING_PROCESSES";
 const MINIMAL_ENV: &[(&str, &str)] = &[("PATH", "/usr/bin:/bin")];
@@ -97,7 +95,11 @@ async fn stdout_and_stderr_stream_line_by_line() {
     let stderr_text = proc.stderr_text.await.unwrap();
     let status = proc.exit_status.await.unwrap();
 
-    assert_eq!(stdout_lines, ["out-1", "out-2", "out-3"], "per-stream order preserved");
+    assert_eq!(
+        stdout_lines,
+        ["out-1", "out-2", "out-3"],
+        "per-stream order preserved"
+    );
     assert_eq!(stderr_lines, ["err-1"]);
     assert_eq!(stderr_text, "err-1\n");
     assert!(status.success());
@@ -110,13 +112,18 @@ async fn interrupt_escalates_to_sigterm() {
     // SIGTERM escalation can end it. The sleep child is a leftover by design
     // (signals go to the child's pid only), so its pid is recorded for cleanup.
     let pidfile = dir.join("leftover.pid");
-    let body = format!("trap '' INT\nsleep 30 &\necho $! > '{}'\nwait\n", pidfile.display());
+    let body = format!(
+        "trap '' INT\nsleep 30 &\necho $! > '{}'\nwait\n",
+        pidfile.display()
+    );
     let proc = spawn_script(&dir, &body).await;
 
     let registry = dir.join("running-processes");
     let marker = format!("{}:", proc.pid);
     assert!(
-        std::fs::read_to_string(&registry).unwrap().contains(&marker),
+        std::fs::read_to_string(&registry)
+            .unwrap()
+            .contains(&marker),
         "spawn registers the pid"
     );
 
@@ -134,12 +141,21 @@ async fn interrupt_escalates_to_sigterm() {
     assert!(elapsed < Duration::from_secs(5));
     assert_eq!(status.signal(), Some(15), "killed by SIGTERM, not SIGINT");
     assert!(
-        !std::fs::read_to_string(&registry).unwrap().contains(&marker),
+        !std::fs::read_to_string(&registry)
+            .unwrap()
+            .contains(&marker),
         "exit unregisters the pid"
     );
 
-    let leftover: u32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
-    let _ = Command::new("/bin/kill").arg("-9").arg(leftover.to_string()).status();
+    let leftover: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = Command::new("/bin/kill")
+        .arg("-9")
+        .arg(leftover.to_string())
+        .status();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -206,7 +222,10 @@ async fn orphan_reaping() {
     let spawn_orphan = |pidfile: &Path| {
         Command::new("/bin/sh")
             .arg("-c")
-            .arg(format!("sleep 300 & echo $! > '{}'; exit 0", pidfile.display()))
+            .arg(format!(
+                "sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -216,8 +235,16 @@ async fn orphan_reaping() {
     let forged_pidfile = dir.join("forged.pid");
     spawn_orphan(&orphan_pidfile);
     spawn_orphan(&forged_pidfile);
-    let orphan: u32 = std::fs::read_to_string(&orphan_pidfile).unwrap().trim().parse().unwrap();
-    let forged: u32 = std::fs::read_to_string(&forged_pidfile).unwrap().trim().parse().unwrap();
+    let orphan: u32 = std::fs::read_to_string(&orphan_pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let forged: u32 = std::fs::read_to_string(&forged_pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
 
     // Control: our own live child — ppid is this test process, never 1.
     let mut control: Child = Command::new("/bin/sleep")
@@ -236,7 +263,11 @@ async fn orphan_reaping() {
     register_at(&registry, orphan);
     register_at(&registry, control.id());
     let reaped = reap_orphans_at(&registry);
-    assert_eq!(reaped, vec![orphan], "only the ppid-1 entry matches and dies");
+    assert_eq!(
+        reaped,
+        vec![orphan],
+        "only the ppid-1 entry matches and dies"
+    );
     assert!(
         eventually(|| !alive(orphan), Duration::from_secs(2)).await,
         "reaped orphan is SIGTERMed"
@@ -259,7 +290,10 @@ async fn orphan_reaping() {
 
     control.kill().unwrap();
     control.wait().unwrap();
-    let _ = Command::new("/bin/kill").arg("-9").arg(forged.to_string()).status();
+    let _ = Command::new("/bin/kill")
+        .arg("-9")
+        .arg(forged.to_string())
+        .status();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,13 +307,24 @@ async fn registry_survives_and_deduplicates() {
 
     let text = std::fs::read_to_string(&registry).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 1, "registering a known pid twice leaves one line: {text:?}");
-    assert!(lines[0].starts_with(&format!("{me}:")), "line is pid:starttime: {text:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "registering a known pid twice leaves one line: {text:?}"
+    );
+    assert!(
+        lines[0].starts_with(&format!("{me}:")),
+        "line is pid:starttime: {text:?}"
+    );
 
     {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: all setters and readers of ENV_VAR hold ENV_LOCK.
         unsafe { std::env::set_var(ENV_VAR, &registry) };
-        assert_eq!(registry_path(), registry, "override selects the registry file");
+        assert_eq!(
+            registry_path(),
+            registry,
+            "override selects the registry file"
+        );
     }
 }

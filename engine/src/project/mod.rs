@@ -1,10 +1,12 @@
 //! Project types (spec §4.2): the manifest decoder lives in [`manifest`],
 //! the pane layout tree in [`layout`], persistence in [`store`], the
-//! version snapshots in [`versions`].
+//! parameter panel's model.py rewrite in [`parameters`], the version
+//! snapshots in [`versions`].
 
 pub mod layout;
 pub mod manifest;
 pub mod outputs;
+pub mod parameters;
 pub mod store;
 pub mod versions;
 

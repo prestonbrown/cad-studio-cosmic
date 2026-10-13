@@ -25,15 +25,23 @@ fn metadata_roundtrips_upstream_shape() {
         }),
     };
     let json = serde_json::to_string(&m).unwrap();
-    for k in ["\"session_id\"", "\"current_version\"", "\"created_at\"",
-              "\"updated_at\"", "\"app_version\""] {
+    for k in [
+        "\"session_id\"",
+        "\"current_version\"",
+        "\"created_at\"",
+        "\"updated_at\"",
+        "\"app_version\"",
+    ] {
         assert!(json.contains(k), "snake_case CodingKeys: missing {k}");
     }
     assert!(json.contains("\"pane\":\"chat\""));
     assert!(json.contains("\"pane\":\"model3D\""), "exact casing");
     assert!(json.contains("\"axis\":\"row\""));
     assert!(json.contains("\"fraction\":0.34"));
-    assert!(json.contains("2023-11-14T22:13:20Z"), "whole-second UTC dates: {json}");
+    assert!(
+        json.contains("2023-11-14T22:13:20Z"),
+        "whole-second UTC dates: {json}"
+    );
     assert!(!json.contains("22:13:20."), "no fractional seconds: {json}");
     assert!(json.contains('Z'), "UTC");
     let back: ProjectMetadata = serde_json::from_str(&json).unwrap();
@@ -46,17 +54,43 @@ fn metadata_roundtrips_upstream_shape() {
 fn chat_roundtrips_all_roles_and_tools() {
     let t = time::OffsetDateTime::from_unix_timestamp(1_700_000_500).unwrap();
     let msgs = vec![
-        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::User, text: "make a box".into(),
-                      date: t, tool: None, detail: None, action: None,
-                      attachments: vec!["references/1-sketch.png".into()] },
-        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::Tool, text: String::new(), date: t,
-                      tool: Some(ToolActivity { tool_use_id: "tu_1".into(), name: "Bash".into(),
-                          input: "python model.py".into(), output: Some("ok".into()),
-                          preview: Some("Compiles the model".into()), state: ToolState::Succeeded }),
-                      detail: None, action: None, attachments: vec![] },
-        ChatMessage { id: uuid::Uuid::new_v4(), role: Role::System, text: "build failed".into(),
-                      date: t, tool: None, detail: Some("Traceback…".into()),
-                      action: Some(Action::AskClaudeToFix), attachments: vec![] },
+        ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::User,
+            text: "make a box".into(),
+            date: t,
+            tool: None,
+            detail: None,
+            action: None,
+            attachments: vec!["references/1-sketch.png".into()],
+        },
+        ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::Tool,
+            text: String::new(),
+            date: t,
+            tool: Some(ToolActivity {
+                tool_use_id: "tu_1".into(),
+                name: "Bash".into(),
+                input: "python model.py".into(),
+                output: Some("ok".into()),
+                preview: Some("Compiles the model".into()),
+                state: ToolState::Succeeded,
+            }),
+            detail: None,
+            action: None,
+            attachments: vec![],
+        },
+        ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::System,
+            text: "build failed".into(),
+            date: t,
+            tool: None,
+            detail: Some("Traceback…".into()),
+            action: Some(Action::AskClaudeToFix),
+            attachments: vec![],
+        },
     ];
     let json = serde_json::to_string(&msgs).unwrap();
     assert!(json.contains("\"toolUseID\""), "property-name casing");
@@ -78,7 +112,9 @@ fn saves_are_atomic_no_tmp_residue() {
     assert!(d.join(".cadstudio/chat.json").exists());
     let mut residue = 0;
     for e in std::fs::read_dir(d.join(".cadstudio")).unwrap() {
-        if e.unwrap().file_name().to_string_lossy().ends_with(".tmp") { residue += 1; }
+        if e.unwrap().file_name().to_string_lossy().ends_with(".tmp") {
+            residue += 1;
+        }
     }
     assert_eq!(residue, 0);
     let m2 = load_metadata(&d).unwrap();
@@ -116,9 +152,14 @@ fn recents_dedupe_evict_and_filter_missing() {
     std::fs::remove_dir_all(d.join("p6")).unwrap();
     let filtered = r.filter_existing();
     assert!(!filtered.0.contains(&p0));
-    assert!(!filtered.0.contains(&p6), "deleted projects are filtered out");
-    assert!(filtered.0.contains(&d.join("p4").canonicalize().unwrap()),
-            "existing projects are kept");
+    assert!(
+        !filtered.0.contains(&p6),
+        "deleted projects are filtered out"
+    );
+    assert!(
+        filtered.0.contains(&d.join("p4").canonicalize().unwrap()),
+        "existing projects are kept"
+    );
     assert_eq!(filtered.0.len(), 11);
 }
 
@@ -133,12 +174,21 @@ fn create_project_scaffolds_tree() {
     let root = create_project(&parent, "gearbox").unwrap();
     assert_eq!(root, parent.join("gearbox"));
     assert!(root.join("output").is_dir(), "output/ scaffolded");
-    assert!(root.join(".cadstudio").join("logs").is_dir(), ".cadstudio/logs/ scaffolded");
+    assert!(
+        root.join(".cadstudio").join("logs").is_dir(),
+        ".cadstudio/logs/ scaffolded"
+    );
     let metadata = load_metadata(&root).unwrap();
-    assert_eq!(metadata.session_id, None, "a fresh project has no session yet");
+    assert_eq!(
+        metadata.session_id, None,
+        "a fresh project has no session yet"
+    );
     assert!(!metadata.app_version.is_empty());
     // upstream refuses to clobber a folder that already exists
-    assert!(create_project(&parent, "gearbox").is_err(), "second create must fail");
+    assert!(
+        create_project(&parent, "gearbox").is_err(),
+        "second create must fail"
+    );
 }
 
 /// An invalid name fails before anything is created — no partial scaffold.

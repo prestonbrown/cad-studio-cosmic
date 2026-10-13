@@ -97,7 +97,11 @@ impl<'de> Deserialize<'de> for Frame {
         let values = v
             .get("values")
             .and_then(|v| v.as_object())
-            .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
+                    .collect()
+            })
             .unwrap_or_default();
         let collisions = v
             .get("collisions")
@@ -181,7 +185,11 @@ impl MotionStudy {
             .position(|f| f.t >= time)
             .unwrap_or(self.frames.len() - 1);
         let next = &self.frames[upper];
-        let previous = if upper > 0 { &self.frames[upper - 1] } else { first };
+        let previous = if upper > 0 {
+            &self.frames[upper - 1]
+        } else {
+            first
+        };
         let span = next.t - previous.t;
         let fraction = if span > 0.0 {
             ((time - previous.t) / span).clamp(0.0, 1.0) as f32

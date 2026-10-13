@@ -195,7 +195,10 @@ async fn check_missing_interpreter_reports_missing() {
     let events = drain(env::check(&dir, &spawn)).await;
     // Missing is its own failure kind (upstream .missing gates the setup
     // sheet's presentation); upstream has no display string for it.
-    assert_eq!(events.last(), Some(&EnvEvent::Finished(Err(EnvFailure::Missing))));
+    assert_eq!(
+        events.last(),
+        Some(&EnvEvent::Finished(Err(EnvFailure::Missing)))
+    );
     assert_eq!(EnvFailure::Missing.message(), "");
 }
 
@@ -301,7 +304,10 @@ async fn install_failing_step_reports_command_name() {
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
         Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
-            assert_eq!(f.message(), "The command “uv” failed. Check the log for details.");
+            assert_eq!(
+                f.message(),
+                "The command “uv” failed. Check the log for details."
+            );
         }
         other => panic!("expected command failure, got {other:?}"),
     }
@@ -347,5 +353,9 @@ async fn install_rejects_candidates_whose_probe_fails() {
         }
         other => panic!("expected pythonNotFound, got {other:?}"),
     }
-    assert!(!events.iter().any(|e| matches!(e, EnvEvent::Log(l) if l.starts_with("Found "))));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EnvEvent::Log(l) if l.starts_with("Found ")))
+    );
 }

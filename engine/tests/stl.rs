@@ -2,7 +2,9 @@ use engine::parsing::stl::{is_binary_stl, parse_stl};
 use std::path::PathBuf;
 
 fn fixture(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(p)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures")
+        .join(p)
 }
 
 #[test]
@@ -43,7 +45,11 @@ fn ascii_skips_bad_lines_errors_only_on_zero_triangles() {
     // upstream skips unparseable vertex lines; error only if nothing parsed
     let text = b"solid x\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex bogus\n      vertex 1 0 0\n      vertex 0 1 0\n    endloop\n  endfacet\nendsolid x\n";
     let part = parse_stl(text).unwrap();
-    assert_eq!(part.triangle_count(), 1, "bad line skipped, three good vertices still form the triangle");
+    assert_eq!(
+        part.triangle_count(),
+        1,
+        "bad line skipped, three good vertices still form the triangle"
+    );
     assert!(parse_stl(b"solid empty\nendsolid empty\n").is_err());
 }
 

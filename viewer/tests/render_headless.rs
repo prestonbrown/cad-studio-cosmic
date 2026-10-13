@@ -1207,4 +1207,3 @@ fn msaa_toggle_rebuilds_in_place() {
         "flipping back to 1x must restore the single-sample frame exactly"
     );
 }
-
