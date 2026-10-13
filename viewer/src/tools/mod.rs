@@ -3,7 +3,10 @@
 //! — part grouping, explode offsets, and the plate flat layout — stated as
 //! transforms per part slot that the renderer consumes as per-part data,
 //! never vertex rewrites (spec §9.6 records the divergence from upstream's
-//! rebuilt TriangleMesh).
+//! rebuilt TriangleMesh). [`picking`] is the measure tool's CPU hit test —
+//! the click-driven ray against the staged, posed, sectioned scene (spec
+//! §5: event-driven, never per-frame).
 
 pub mod arrangement;
+pub mod picking;
 pub mod section;

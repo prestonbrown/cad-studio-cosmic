@@ -339,6 +339,51 @@ pub mod camera {
             (pitch + dy * ORBIT_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
         )
     }
+
+    /// pick(at:in:on:)'s ray half (ModelViewer.swift:291-299, facts #29):
+    /// the scene-space (origin, direction) a click at `cursor` casts through
+    /// the orbit camera at `(distance, yaw, pitch)` around `target`, for a
+    /// `view`-sized viewport at `aspect`. Upstream unprojects through
+    /// RealityKit — `camera.convert((x, y, −1), to: root)` — which in pure
+    /// math is `normalize(x·r + y·u + f)` over the look-at basis
+    /// [`orbit`]/[`panned`] build: eye from placeCamera's formula, `f`
+    /// forward, `r`/`u` the camera's own right/up. `cursor` is iced's
+    /// top-down point and must cross to AppKit's bottom-up `h − cy` BEFORE
+    /// the NDC mapping (facts #29) or every vertical click aims mirrored;
+    /// `x` scales by `aspect` and both by the half-FOV tangent, exactly
+    /// upstream's unprojection terms. Pure — the click flow owns the
+    /// off-thread seam this is cast from.
+    pub fn pick_ray(
+        distance: f32,
+        yaw: f32,
+        pitch: f32,
+        target: [f32; 3],
+        aspect: f32,
+        cursor: (f32, f32),
+        view: (f32, f32),
+    ) -> ([f32; 3], [f32; 3]) {
+        let at = glam::Vec3::from_array(target);
+        // placeCamera's eye offset, a unit vector by construction
+        let back = glam::Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+        let eye = at + back * distance;
+        // the look-at basis: f = normalize(target − eye) = −back; r and u as
+        // `panned` derives them (r degenerate only at ±90° pitch, which
+        // MAX_PITCH's clamp keeps unreachable)
+        let f = -back;
+        let r = glam::Vec3::Y.cross(back).normalize_or_zero();
+        let u = back.cross(r);
+        let tangent = (FOV / 2.0).tan();
+        let (w, h) = view;
+        let x = (2.0 * cursor.0 / w - 1.0) * tangent * aspect;
+        // iced's cursor is top-down; AppKit's point is bottom-up (facts #29)
+        let y = (2.0 * (h - cursor.1) / h - 1.0) * tangent;
+        let dir = (r * x + u * y + f).normalize_or_zero();
+        (eye.to_array(), dir.to_array())
+    }
 }
 
 /// Two-light parity shading (facts §1, ModelViewer.swift:344-353):
@@ -1796,6 +1841,57 @@ mod tests {
             // the hardcode this task kills would render both identically
             assert_ne!(vp, camera::orbit(distance, yaw, pitch, target, 16.0 / 9.0));
         }
+    }
+
+    /// The pick ray aims where the clicked pixel looks: center exactly along
+    /// the view axis at the target, the screen edges tilting with the
+    /// camera's own right/up axes. The y-flip (facts #29) is the load-bearing
+    /// convention here — iced's cursor is top-down, upstream's AppKit point
+    /// is bottom-up, so `h − cy` must happen BEFORE the NDC mapping or every
+    /// vertical drag picks mirrored.
+    #[test]
+    fn pick_ray_center_points_at_the_target() {
+        // yaw 0, pitch 0: eye = target + dist*(0,0,1); center pixel aims at f
+        let (o, d) = camera::pick_ray(
+            100.0,
+            0.0,
+            0.0,
+            [0.0, 5.0, 0.0],
+            4.0 / 3.0,
+            (400.0, 300.0),
+            (800.0, 600.0),
+        );
+        assert!(
+            (o[0] - 0.0).abs() < 1e-4 && (o[1] - 5.0).abs() < 1e-4 && (o[2] - 100.0).abs() < 1e-4
+        );
+        let dot = glam::Vec3::from_array(d).dot(glam::Vec3::new(0.0, 0.0, -1.0));
+        assert!(dot > 0.999, "center ray along the view axis: {d:?}");
+        // right edge (x=799) tilts toward +x; BOTTOM-left corner tilts -x -y
+        // (iced y is top-down: cursor y 599 flips to AppKit y 1 = bottom,
+        // which aims DOWN in any bottom-up convention)
+        let (_, d2) = camera::pick_ray(
+            100.0,
+            0.0,
+            0.0,
+            [0.0, 5.0, 0.0],
+            4.0 / 3.0,
+            (799.0, 300.0),
+            (800.0, 600.0),
+        );
+        assert!(d2[0] > 0.1, "right edge aims right: {d2:?}");
+        let (_, d3) = camera::pick_ray(
+            100.0,
+            0.0,
+            0.0,
+            [0.0, 5.0, 0.0],
+            4.0 / 3.0,
+            (0.0, 599.0),
+            (800.0, 600.0),
+        );
+        assert!(
+            d3[0] < 0.0 && d3[1] < 0.0,
+            "bottom-left aims left and DOWN (iced bottom = AppKit bottom after the flip): {d3:?}"
+        );
     }
 
     /// The Frame every upload-once test shares: default options, no overlay,
