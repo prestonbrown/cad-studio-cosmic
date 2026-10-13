@@ -655,8 +655,18 @@ impl Bridge {
         self.pipeline().activity.clone()
     }
 
+    /// The app's python-state mirror (upstream's `PythonEnvironment.shared`
+    /// singleton: one environment, every Project observes it). The setup
+    /// sheet's reducer owns the state — the startup check's and installs'
+    /// outcomes reach every open bridge through the app, keeping all the
+    /// readiness guards in agreement.
+    pub fn set_python_state(&self, state: EnvState) {
+        self.pipeline().python_state = state;
+    }
+
     /// Test seam for T8's startup check / sheet completion: mark the
-    /// environment verified so guards pass without a real venv.
+    /// environment verified so guards pass without a real venv (production
+    /// goes through [`Bridge::set_python_state`] with the sheet's state).
     pub fn mark_python_ready_for_test(&self) {
         self.pipeline().python_state = EnvState::Ready {
             build123d_version: String::new(),

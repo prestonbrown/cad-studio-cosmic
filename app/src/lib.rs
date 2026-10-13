@@ -5,7 +5,9 @@
 //! files are thin mapping layers and register here as their tasks land.
 //!
 //! Module map (M4 complete — the vertical slice
-//! `app/tests/vertical_slice.rs` drives one prompt through all of it):
+//! `app/tests/vertical_slice.rs` drives one prompt through all of it; M5's
+//! wrap slice `app/tests/m5_slice.rs` adds the python check, slider
+//! rebuild, version restore, and compare picker on top):
 //!
 //! - [`activity`] — the header's ActivityViewer model + issue list (pure).
 //! - [`app`] — the `cosmic::Application`: windows, sheets, commands,
@@ -23,7 +25,8 @@
 //! - [`recents`] — the recents store wrapping the engine's, via
 //!   cosmic-config.
 //! - [`schematic`] — the drawing-page model, raster cache, and pane.
-//! - [`sheets`] — the first-run setup and agent-missing sheets.
+//! - [`sheets`] — the first-run setup, python setup (the PythonSetupSheet
+//!   port and its EnvEvent-to-state reduction), and agent-missing sheets.
 //! - [`viewer_pane`] — the embedded 3D viewer: scene reload from `output/`,
 //!   status bar, parameters overlay host.
 //! - [`windows`] — the welcome and project windows.
