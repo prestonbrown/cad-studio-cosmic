@@ -153,11 +153,21 @@ struct CapVertex {
     pos: [f32; 3],
 }
 
-/// World-space quad on the section plane: the scene aabb cross-section at
-/// `camera.section_pos`, grown 10% on the two off-axis directions so the cap
-/// always covers the cut face (the stencil test clips it back to the solid).
-/// A 4-vertex triangle strip.
-fn cap_quad(scene: &PartScene, camera: &Camera) -> [CapVertex; 4] {
+/// The section cap's color: upstream's cut-face material —
+/// `systemRed.blended(withFraction: 0.15, of: .black)` (ModelViewer.swift:
+/// 363) = sRGB `(0.85, 0.85·59/255, 0.85·48/255)` through the exact EOTF —
+/// LINEAR, the space the unlit cap shader writes into the sRGB target (the
+/// same once-only crossing every staged triangle color makes). The Rust
+/// constant is the one definition: `cap_wgsl_source` substitutes it into
+/// cap.wgsl, and the cap-color test reads it back against this value.
+pub const CUT_FACE_LINEAR: [f32; 3] = [0.6920, 0.0321, 0.0220];
+
+/// World-space quad on the section plane: the effective scene aabb
+/// cross-section at `frame.camera.section_pos`, grown 10% on the two
+/// off-axis directions so the cap always covers the cut face (the stencil
+/// test clips it back to the solid). A 4-vertex triangle strip.
+fn cap_quad(frame: &Frame<'_>) -> [CapVertex; 4] {
+    let camera = frame.camera;
     // match the mesh shader: axis 0 -> x, 2 -> z, anything else -> y
     let axis = match camera.section_axis {
         0 | 1 | 2 => camera.section_axis as usize,
@@ -172,8 +182,8 @@ fn cap_quad(scene: &PartScene, camera: &Camera) -> [CapVertex; 4] {
         CapVertex { pos: p }
     };
     let edge = |a: usize| {
-        let center = (scene.aabb_min[a] + scene.aabb_max[a]) / 2.0;
-        let half = (scene.aabb_max[a] - scene.aabb_min[a]) / 2.0 * 1.1;
+        let center = (frame.effective_aabb.0[a] + frame.effective_aabb.1[a]) / 2.0;
+        let half = (frame.effective_aabb.1[a] - frame.effective_aabb.0[a]) / 2.0 * 1.1;
         (center - half, center + half)
     };
     let (u0, u1) = edge(u);
@@ -509,6 +519,17 @@ fn mesh_wgsl_source() -> String {
         .replace("@LIT_MAX@", &lights::LIT_MAX.to_string())
 }
 
+/// cap.wgsl with the cut-face color substituted from [`CUT_FACE_LINEAR`] —
+/// the mesh_wgsl_source pattern: the @CAP_@ markers are not valid WGSL, so
+/// a missed substitution breaks shader compilation instead of silently
+/// rendering a color the tests do not assert against.
+fn cap_wgsl_source() -> String {
+    include_str!("cap.wgsl")
+        .replace("@CAP_R@", &CUT_FACE_LINEAR[0].to_string())
+        .replace("@CAP_G@", &CUT_FACE_LINEAR[1].to_string())
+        .replace("@CAP_B@", &CUT_FACE_LINEAR[2].to_string())
+}
+
 /// The sample-count-dependent render pipelines, rebuilt as a set by
 /// [`MeshPipeline::make_pipelines`] at creation and on every
 /// [`Options::msaa`] flip in `prepare_parts`.
@@ -754,7 +775,7 @@ impl MeshPipeline {
         // Camera-only (camera_layout): the cap has no per-part transform.
         let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cap.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("cap.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(cap_wgsl_source().into()),
         });
         let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("section cap"),
@@ -1288,11 +1309,7 @@ impl MeshPipeline {
         // breaks winding parity anyway
         self.draw_cap = camera.section_enable > 0.5 && !options.wireframe;
         if self.draw_cap {
-            queue.write_buffer(
-                &self.cap_buf,
-                0,
-                bytemuck::cast_slice(&cap_quad(scene, camera)),
-            );
+            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(frame)));
         }
         self.wireframe = options.wireframe;
         // Overlay residency — the same content-identity contract as the
