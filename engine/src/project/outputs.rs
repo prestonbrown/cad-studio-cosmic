@@ -20,6 +20,18 @@ pub fn expected_outputs() -> [&'static str; 7] {
     ]
 }
 
+/// The expected outputs not on disk, in report order (upstream
+/// `ProjectOutput.missingFiles`, ProjectOutput.swift:32-36). This is the
+/// gate for recording a version, deliberately narrower than
+/// [`missing_requirements`]: no plate, page-count, or manifest demands.
+pub fn missing_files(output_dir: &Path) -> Vec<String> {
+    expected_outputs()
+        .into_iter()
+        .filter(|name| !output_dir.join(name).exists())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Page count of the PDF at `path`, or the parse error as a string.
 pub fn pdf_page_count(path: &Path) -> Result<u32, String> {
     lopdf::Document::load(path)
