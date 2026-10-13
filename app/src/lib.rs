@@ -4,6 +4,7 @@
 //! of cosmic/iced types so it is unit-testable without a window; widget
 //! files are thin mapping layers and register here as their tasks land.
 
+pub mod bridge;
 pub mod chat;
 pub mod panes;
 pub mod schematic;
