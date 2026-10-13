@@ -4,16 +4,15 @@
 //! project's `output/` directory through the engine's watcher.
 //!
 //! Upstream shape (fixtures/upstream-source/Viewer3D/ModelPane.swift): the
-//! pane is the shader canvas plus a bottom status bar — controls (the
-//! iso/front/top/right preset picker) left, an info label right
-//! (Shared/PaneStatusBar.swift). M4 scope binding keeps the status bar
-//! MINIMAL: the model size formatted through the display unit
-//! (`MeasurementUnit::mm_per_unit`/`fraction_digits`) and the
-//! missing-output count from [`engine::project::outputs::missing_requirements`];
-//! the grid/wireframe/measure/section controls and the full ActivityViewer
-//! port land in their own milestones. MSAA is an OPT-IN pane option
-//! (default 1×): the spec §5 decision renders the mesh pass through
-//! `MeshPipeline::with_msaa`'s 4× pipeline set, reached by flipping
+//! pane is the shader canvas plus a bottom status bar — the preset picker,
+//! the grid/wireframe/measure/section toggles and the color legend left,
+//! the size-only info label right (ModelPane.swift:120-152, 215-219;
+//! Shared/PaneStatusBar.swift). The bar's toggle state and the overlay
+//! family that floats over the canvas (parts panel top-leading, measure
+//! badge top-center, section controls bottom-center — [`crate::parts_overlay`])
+//! read from [`tools`](ViewerTools), the T8 state hub. MSAA is an OPT-IN
+//! pane option (default 1×): the spec §5 decision renders the mesh pass
+//! through `MeshPipeline::with_msaa`'s 4× pipeline set, reached by flipping
 //! `Options::msaa` (the in-place rebuild — iced's Storage owns one
 //! pipeline per type).
 //!
@@ -41,17 +40,18 @@
 //! versions, compare selection — at view time via
 //! [`parameters_view::OverlayContext`].
 //!
-//! M4 status: this module is the pane model + view; the shell task wires it
-//! into a window (pane focus commands, i18n via the extracted ftl keys all
-//! land there). User-visible strings are plain English pending that wiring,
-//! matching the schematic pane's documented M4 state.
+//! M6 status: this module is the pane model + view with the M6 overlay
+//! family mounted; the arrangement wiring (layout poses, plate scene,
+//! bed, section uniform, persistence) lands with the pane-wiring task.
+//! User-visible strings read through [`fl!`](crate::fl) (M6 T9 is its
+//! first consumer; the pre-M6 modules' constants still await the swap).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cosmic::Element;
 use cosmic::iced::futures::StreamExt;
@@ -61,20 +61,24 @@ use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
-use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text};
+use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text, tooltip};
 use engine::parsing::Part;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
-use engine::settings::MeasurementUnit;
+use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::{ModelScene, NEUTRAL, PartScene, camera::Preset};
+use viewer::tools::arrangement;
 
 use crate::camera_input::CameraInput;
+use crate::fl;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
+use crate::parts_overlay;
+use crate::viewer_tools::{self, ViewerTools};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -128,6 +132,40 @@ pub enum Message {
     /// (Commands.swift:69-73); the pane's subscription reports it until the
     /// shell owns menu commands.
     ToggleParameters,
+    // ── M6 viewer tools (the T8 state hub's widgets) ───────────────────
+    /// Grid toggle (ModelPane.swift:130): flips the tool state and the
+    /// scene's draw flag together.
+    ToggleGrid,
+    /// Wireframe toggle (ModelPane.swift:131).
+    ToggleWireframe,
+    /// Measure mode toggle (ModelPane.swift:132): the T8 hub clears the
+    /// points on every change.
+    ToggleMeasure,
+    /// Section toggle (ModelPane.swift:134); the mesh rebuild it triggers
+    /// upstream is the pane-wiring task's.
+    ToggleSection,
+    /// The section axis picker's choice (ModelPane.swift:183-189).
+    SetSectionAxis(viewer::tools::section::SectionAxis),
+    /// The section position slider, 0.001…0.999 (ModelPane.swift:191).
+    SetSectionPosition(f32),
+    /// The parts-overlay layout picker (PartsOverlay.swift:16); the T8
+    /// hub clears the measurement and the pane-wiring task re-frames and
+    /// persists.
+    SetLayout(PartsLayout),
+    /// The explode slider, 0…2 (PartsOverlay.swift:28).
+    SetExplode(f32),
+    /// A group row's eye button (PartsOverlay.swift:119-126).
+    ToggleHiddenGroup(String),
+    /// A group row's attach button, exploded layout only
+    /// (PartsOverlay.swift:109-118).
+    ToggleAttachedGroup(String),
+    /// A press on a group row's name cluster — every press reports; the
+    /// pane decodes the double-click (T8's `is_double_click`) and
+    /// isolates the group (PartsOverlay.swift:132-134, 145-148).
+    RowClicked(String),
+    /// The parts panel's header collapse toggle
+    /// (PartsOverlay.swift:57-77).
+    TogglePartsCollapsed,
 }
 
 /// Events crossing the pane's std channel into the subscription: watcher
@@ -190,6 +228,29 @@ pub struct ViewerPane {
     /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
     /// toggles).
     pub parameters_visible: bool,
+    /// The M6 viewer-tool state hub (T8's `ModelViewerState` port) behind
+    /// the status-bar toggles and the parts overlay. `layout`/`collapsed`
+    /// seed from the engine settings at construction (upstream
+    /// `@AppStorage` reads at init); the change-time PERSISTENCE is the
+    /// pane-wiring task's.
+    pub tools: ViewerTools,
+    /// The parse source behind the parts panel's groups and the legend
+    /// (`arrangement::groups`/`legend_colors` consume `Part`s, not staged
+    /// geometry). Kept in lockstep with the scene: a reload that keeps
+    /// the last good mesh keeps these too.
+    pub model_parts: Vec<Part>,
+    /// The agent's plate parts (`output/plate.3mf`) — the plate-note and
+    /// plate-scene gates read it. Parsing lands with the pane-wiring
+    /// task; until then this stays empty and the note shows in Plate
+    /// layout (correct: no plate was parsed).
+    pub plate_parts: Vec<Part>,
+    /// A comparison is active (upstream `compareVersion != nil`): forces
+    /// the effective layout to Assembled and disables the layout picker
+    /// (ModelViewerState.swift:78-86, PartsOverlay.swift:23). The shell
+    /// owns the compare flow and sets this.
+    pub comparing: bool,
+    /// The last group-row press, for T8's double-click decode.
+    last_row_click: Option<(Instant, String)>,
     project_root: PathBuf,
     output_dir: PathBuf,
     printer_model: Option<String>,
@@ -233,6 +294,10 @@ impl ViewerPane {
                 handle
             });
         let empty = Arc::new(PartScene::from_parts(&[], NEUTRAL));
+        // @AppStorage's read-at-init (PartsOverlay.swift:5,
+        // ModelViewerState.swift:21-47): layout/collapse come from the
+        // engine settings; change-time writes are the pane-wiring task's.
+        let settings = Settings::load(&engine::settings::settings_path()).unwrap_or_default();
         let mut pane = ViewerPane {
             scene: ModelScene::new(empty),
             input: CameraInput::new([0.0; 3], [0.0; 3]),
@@ -244,6 +309,11 @@ impl ViewerPane {
             parameter_drafts: HashMap::new(),
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
+            tools: ViewerTools::new(settings.parts_layout, settings.parts_collapsed),
+            model_parts: Vec::new(),
+            plate_parts: Vec::new(),
+            comparing: false,
+            last_row_click: None,
             project_root: project_root.to_path_buf(),
             output_dir,
             printer_model,
@@ -319,6 +389,42 @@ impl ViewerPane {
             Message::ToggleParameters => {
                 self.parameters_visible = !self.parameters_visible;
             }
+            // ── M6 viewer tools: the state-hub mutations only — the
+            // arrangement/pose/persistence consequences land with the
+            // pane-wiring task (grid/wireframe are complete here: their
+            // whole effect is the scene's draw flag) ──
+            Message::ToggleGrid => {
+                self.tools.shows_grid = !self.tools.shows_grid;
+                self.scene.show_grid = self.tools.shows_grid;
+            }
+            Message::ToggleWireframe => {
+                self.tools.wireframe = !self.tools.wireframe;
+                self.scene.wireframe = self.tools.wireframe;
+            }
+            Message::ToggleMeasure => self.tools.toggle_measuring(),
+            Message::ToggleSection => self.tools.set_sectioning(!self.tools.sectioning),
+            Message::SetSectionAxis(axis) => self.tools.section_axis = axis,
+            Message::SetSectionPosition(position) => self.tools.section_position = position,
+            Message::SetLayout(layout) => self.tools.set_layout(layout),
+            Message::SetExplode(amount) => self.tools.explode_amount = amount,
+            Message::ToggleHiddenGroup(group) => self.tools.toggle_hidden(&group),
+            Message::ToggleAttachedGroup(group) => self.tools.toggle_attached(&group),
+            Message::RowClicked(group) => {
+                // PartsOverlay.swift:132-134, 145-148: a second press on
+                // the same row inside the double-click window runs T8's
+                // compare-and-assign isolate; any other press only stages
+                // the tap.
+                let now = Instant::now();
+                if viewer_tools::is_double_click(self.last_row_click.take(), now, &group) {
+                    let names: Vec<String> = arrangement::groups(&self.model_parts)
+                        .into_iter()
+                        .map(|group| group.name)
+                        .collect();
+                    self.tools.isolate(&group, &names);
+                }
+                self.last_row_click = Some((now, group));
+            }
+            Message::TogglePartsCollapsed => self.tools.collapsed = !self.tools.collapsed,
             // The shell acts on commits; the pane's local half (value snap,
             // draft clear) was applied when the message was emitted.
             Message::ParameterCommit(_, _) => {}
@@ -456,9 +562,9 @@ impl ViewerPane {
         self.commit_parameter(name)
     }
 
-    /// The 3D pane's element: the shader canvas in a mouse area over the
-    /// status bar (upstream ModelPane's VStack: content then
-    /// PaneStatusBar).
+    /// The 3D pane's element: the shader canvas in a mouse area with the
+    /// overlay family stacked over it, over the status bar (upstream
+    /// ModelPane's VStack: content then PaneStatusBar, ModelPane.swift:17-49).
     pub fn view_model_3d(&self, overlay: Option<OverlayContext<'_>>) -> Element<'_, Message> {
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
             Column::new()
@@ -472,36 +578,73 @@ impl ViewerPane {
         } else {
             self.view_canvas()
         };
-        // The overlay floats over the canvas, top-trailing with 10 px of
-        // padding (ModelPane.swift:41-44). `None` (or upstream's gate — no
-        // model, no parameters, hidden) skips the layer entirely.
-        let content: Element<'_, Message> = match overlay.filter(|_| self.show_parameters_overlay())
-        {
-            Some(ctx) => {
-                let parameters = parameters_view::view_parameters(
-                    &self.parameters,
-                    &self.parameter_drafts,
-                    &self.committed_parameters,
-                    &ctx,
-                )
-                .map(Message::Parameters);
-                let positioned = Row::new()
+        // The overlay stack, in upstream's z-order: measure badge top,
+        // parts panel top-leading, parameters top-trailing, section bottom.
+        let mut stack = Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(content);
+        if self.shows_measure_badge() {
+            let badge = parts_overlay::view_measure_badge(&self.tools.measure_points, self.unit);
+            stack = stack.push(top_center(container(badge).padding(10)));
+        }
+        if self.shows_parts_panel() {
+            let groups = arrangement::groups(&self.model_parts);
+            let effective = self
+                .tools
+                .effective_layout(self.model_parts.len(), self.comparing);
+            let panel = parts_overlay::view_parts_panel(
+                &self.tools,
+                &groups,
+                effective,
+                !self.plate_parts.is_empty(),
+                self.comparing,
+            );
+            stack = stack.push(
+                Row::new()
+                    .push(container(panel).padding([32.0, 0.0, 0.0, 10.0]))
                     .push(Space::new().width(Length::Fill))
-                    .push(container(parameters).padding(10))
-                    .width(Length::Fill);
-                Stack::new()
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .push(content)
-                    .push(positioned)
-                    .into()
-            }
-            None => content,
-        };
+                    .width(Length::Fill),
+            );
+        }
+        if let Some(ctx) = overlay.filter(|_| self.show_parameters_overlay()) {
+            let parameters = parameters_view::view_parameters(
+                &self.parameters,
+                &self.parameter_drafts,
+                &self.committed_parameters,
+                &ctx,
+            )
+            .map(Message::Parameters);
+            let positioned = Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(container(parameters).padding(10))
+                .width(Length::Fill);
+            stack = stack.push(positioned);
+        }
+        if self.shows_section_controls() {
+            let controls = parts_overlay::view_section_controls(&self.tools);
+            stack = stack.push(bottom_center(container(controls).padding(10)));
+        }
         Column::new()
-            .push(content)
+            .push(stack)
             .push(self.view_status_bar())
             .into()
+    }
+
+    /// Upstream's overlay gates (ModelPane.swift:21-45): every one needs a
+    /// model rendering; the parts panel also needs more than one part or
+    /// plate parts to speak of.
+    fn shows_measure_badge(&self) -> bool {
+        self.tools.measuring && !self.scene.scene.parts.is_empty()
+    }
+
+    fn shows_parts_panel(&self) -> bool {
+        !self.scene.scene.parts.is_empty()
+            && (self.model_parts.len() > 1 || !self.plate_parts.is_empty())
+    }
+
+    fn shows_section_controls(&self) -> bool {
+        self.tools.sectioning && !self.scene.scene.parts.is_empty()
     }
 
     /// Upstream's overlay gate: visible AND parameters exist AND a model
@@ -519,6 +662,8 @@ impl ViewerPane {
         self.manifest = Manifest::load(&self.output_dir.join("manifest.json")).ok();
         if let Some(parts) = load_model_parts(&self.output_dir) {
             let next = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
+            // the parse source rides with the mesh it produced
+            self.model_parts = parts;
             if scenes_differ(&self.scene.scene, &next) {
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
                 self.scene.replace_scene(next);
@@ -601,22 +746,50 @@ impl ViewerPane {
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
-        container(
-            Row::new()
-                .push(self.preset_picker())
-                .push(Space::new().width(Length::Fill))
-                .push(self.msaa_toggle())
-                .push(Space::new().width(8))
-                .push(text(status_info(
-                    (!self.scene.scene.parts.is_empty())
-                        .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
-                    self.unit,
-                    self.warnings,
-                )))
-                .padding([4.0, 12.0]),
-        )
-        .width(Length::Fill)
-        .into()
+        // Upstream's controls row (ModelPane.swift:120-152): preset picker,
+        // the four toggles, the color legend — then the port-specific MSAA
+        // toggle at the row's end, the info label right.
+        let mut bar = Row::new()
+            .spacing(8)
+            .push(self.preset_picker())
+            .push(tool_toggle(
+                self.tools.shows_grid,
+                fl!("griglia"),
+                fl!("mostra-la-griglia"),
+                Message::ToggleGrid,
+            ))
+            .push(tool_toggle(
+                self.tools.wireframe,
+                fl!("wireframe"),
+                fl!("mostra-il-wireframe"),
+                Message::ToggleWireframe,
+            ))
+            .push(tool_toggle(
+                self.tools.measuring,
+                fl!("misura"),
+                fl!("misura-la-distanza-tra-due-punti"),
+                Message::ToggleMeasure,
+            ))
+            .push(tool_toggle(
+                self.tools.sectioning,
+                fl!("sezione"),
+                fl!("mostra-una-sezione-del-modello"),
+                Message::ToggleSection,
+            ));
+        // The animation slot between section and legend is M7's
+        // (ModelPane.swift:136-147).
+        bar = bar
+            .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
+            .push(self.msaa_toggle())
+            .push(Space::new().width(Length::Fill))
+            .push(text(status_info(
+                (!self.scene.scene.parts.is_empty())
+                    .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
+                self.unit,
+            )));
+        container(bar.padding([4.0, 12.0]))
+            .width(Length::Fill)
+            .into()
     }
 
     /// The iso/front/top/right preset bar (upstream's segmented
@@ -625,16 +798,11 @@ impl ViewerPane {
     /// widget's model borrows its owner, which a per-view rebuild cannot
     /// satisfy — four stateless buttons carry the same selection.
     fn preset_picker(&self) -> Element<'_, Message> {
-        const PRESETS: [(Preset, &str); 4] = [
-            (Preset::Iso, "Iso"),
-            (Preset::Front, "Front"),
-            (Preset::Top, "Top"),
-            (Preset::Right, "Right"),
-        ];
+        const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
         let mut bar = Row::new().spacing(4);
-        for (preset, label) in PRESETS {
+        for preset in PRESETS {
             bar = bar.push(
-                button::text(label)
+                button::text(preset_label(preset))
                     .class(if preset == self.preset {
                         cosmic::theme::Button::Suggested
                     } else {
@@ -696,11 +864,13 @@ pub fn model_size(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> [f64; 3] {
     [scene[0], scene[2], scene[1]]
 }
 
-/// The status bar's info label (upstream ModelPane.info, M4-minimal): the
-/// model size `X × Y × Z unit` when a model shows, plus the missing-output
-/// count when one is missing. Empty when there is nothing to say.
-pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit, warnings: usize) -> String {
-    let mut info = match size {
+/// The status bar's info label (upstream ModelPane.info,
+/// ModelPane.swift:215-219): the model size `X × Y × Z unit` when a model
+/// shows — the size string ONLY (issues live in the header's
+/// ActivityViewer, and M4's interim " · N warnings" suffix is dropped
+/// rather than recorded as a divergence). Empty when no model shows.
+pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit) -> String {
+    match size {
         // upstream puts the symbol on the last term only
         Some([x, y, z]) => format!(
             "{} × {} × {}",
@@ -709,14 +879,93 @@ pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit, warnings: usiz
             format_length(z, unit, true),
         ),
         None => String::new(),
-    };
-    if warnings > 0 {
-        if !info.is_empty() {
-            info.push_str(" · ");
-        }
-        info.push_str(&format!("{warnings} warnings"));
     }
-    info
+}
+
+/// A preset's picker label (CameraPreset.title,
+/// ModelPane.swift:122-129): `iso`/`fronte`/`alto`/`destra`.
+fn preset_label(preset: Preset) -> String {
+    match preset {
+        Preset::Iso => fl!("iso"),
+        Preset::Front => fl!("fronte"),
+        Preset::Top => fl!("alto"),
+        Preset::Right => fl!("destra"),
+    }
+}
+
+/// The legend's dots: the first 12 colors (ModelPane.swift:204,
+/// `prefix(12)`).
+pub fn legend_dots(colors: &[[u8; 3]]) -> &[[u8; 3]] {
+    &colors[..colors.len().min(12)]
+}
+
+/// The legend's accessibility text (ModelPane.swift:212): the count of
+/// EVERY distinct color. The catalog key still carries upstream's
+/// Swift-style `%lld` placeholder (the M8 placeable sweep migrates it to a
+/// fluent `{$count}` arg), so the count substitutes onto the lookup —
+/// this substitution is the interim recorded for that sweep.
+pub fn legend_label(total: usize) -> String {
+    fl!("lld-colori").replace("%lld", &total.to_string())
+}
+
+/// The status bar's color legend (ModelPane.swift:202-213): ten-pixel
+/// dots for the first twelve distinct colors; the tooltip carries the
+/// count label (the a11y stand-in).
+fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
+    let mut dots = Row::new().spacing(3);
+    for color in legend_dots(colors) {
+        dots = dots.push(parts_overlay::color_dot(Some(*color), 10.0));
+    }
+    tooltip(
+        dots,
+        text(legend_label(colors.len())),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    )
+    .into()
+}
+
+/// One status-bar toggle button (upstream's borderless `Toggle`, shown as
+/// an icon-less text button — the documented glyph divergence): the
+/// selected state in the suggested class, the help text on a tooltip.
+fn tool_toggle(
+    selected: bool,
+    label: String,
+    help: String,
+    message: Message,
+) -> Element<'static, Message> {
+    let toggle = button::text(label)
+        .class(if selected {
+            cosmic::theme::Button::Suggested
+        } else {
+            cosmic::theme::Button::Standard
+        })
+        .on_press(message);
+    tooltip(
+        toggle,
+        text(help),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    )
+    .into()
+}
+
+/// A Stack layer pinned top-center: the element between fill spacers.
+fn top_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Row::new()
+        .push(Space::new().width(Length::Fill))
+        .push(layer.into())
+        .push(Space::new().width(Length::Fill))
+        .width(Length::Fill)
+        .into()
+}
+
+/// A Stack layer pinned bottom-center: fill space above a centered row.
+fn bottom_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Column::new()
+        .push(Space::new().height(Length::Fill))
+        .push(top_center(layer))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// Parse the output directory's model: `model.3mf` preferred (one part per
@@ -807,6 +1056,9 @@ mod tests {
     use super::*;
     use cosmic::iced::mouse::ScrollDelta;
     use engine::project::versions::ProjectVersion;
+    use engine::settings::PartsLayout;
+    use viewer::tools::arrangement;
+    use viewer::tools::section::SectionAxis;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d =
@@ -889,18 +1141,16 @@ mod tests {
     }
 
     #[test]
-    fn status_info_combines_size_and_warnings() {
+    fn status_info_is_the_size_string_only() {
+        // Upstream's info is the size alone (ModelPane.swift:215-219);
+        // M4's " · N warnings" suffix is dropped — issues live in the
+        // header's ActivityViewer, not the status bar.
         let unit = MeasurementUnit::Millimeters;
         assert_eq!(
-            status_info(Some([30.0, 15.5, 15.5]), unit, 0),
+            status_info(Some([30.0, 15.5, 15.5]), unit),
             "30.0 × 15.5 × 15.5 mm"
         );
-        assert_eq!(
-            status_info(Some([30.0, 15.5, 15.5]), unit, 2),
-            "30.0 × 15.5 × 15.5 mm · 2 warnings"
-        );
-        assert_eq!(status_info(None, unit, 3), "3 warnings");
-        assert_eq!(status_info(None, unit, 0), "");
+        assert_eq!(status_info(None, unit), "");
     }
 
     #[test]
@@ -1209,6 +1459,154 @@ mod tests {
         assert!(!pane.parameters.collapsed);
         let _ = pane.update(Message::Parameters(parameters_view::Message::Close));
         assert!(!pane.parameters_visible);
+    }
+
+    #[test]
+    fn view_builds_with_overlays_in_every_state() {
+        // Element construction is pure; the overlay states: measure badge
+        // (with a two-point measurement), section controls, exploded
+        // (slider + attach buttons), the plate note (no plate parsed), the
+        // collapsed panel, comparing (picker disabled), all with the
+        // parameters overlay mounted too. The single-part gate check runs
+        // first — the binding below shadows the `pane` constructor helper.
+        let (_, mut solo) = pane("overlay-single", &[], &["golden/model.stl"]);
+        assert_eq!(solo.model_parts.len(), 1);
+        assert!(!solo.shows_parts_panel(), "one part: no parts panel");
+        let _ = solo.update(Message::SetLayout(PartsLayout::Plate));
+        let _ = solo.view_model_3d(None);
+
+        let (_, mut pane) = pane("overlay-states", &[], &["golden/model.3mf"]);
+        assert_eq!(pane.model_parts.len(), 2);
+        assert!(pane.shows_parts_panel(), "2 parts -> the panel mounts");
+        assert!(pane.plate_parts.is_empty(), "no plate parsed yet");
+
+        let _ = pane.update(Message::ToggleMeasure);
+        pane.tools.add_measure_point([0.0, 0.0, 0.0]);
+        pane.tools.add_measure_point([3.0, 4.0, 0.0]);
+        assert!(pane.shows_measure_badge());
+        let _ = pane.view_model_3d(None);
+
+        let _ = pane.update(Message::ToggleSection);
+        assert!(pane.shows_section_controls());
+        let _ = pane.view_model_3d(None);
+
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        let _ = pane.view_model_3d(None);
+
+        // plate layout with no plate parsed: the note state
+        let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
+        let _ = pane.view_model_3d(None);
+
+        let _ = pane.update(Message::TogglePartsCollapsed);
+        assert!(pane.tools.collapsed);
+        let _ = pane.view_model_3d(None);
+        let _ = pane.update(Message::TogglePartsCollapsed);
+
+        // comparing forces the effective layout to Assembled and disables
+        // the picker (the panel still mounts)
+        pane.comparing = true;
+        assert_eq!(
+            pane.tools
+                .effective_layout(pane.model_parts.len(), pane.comparing),
+            PartsLayout::Assembled
+        );
+        let _ = pane.view_model_3d(None);
+        pane.comparing = false;
+
+        // with the parameters overlay mounted on top of everything
+        pane.sync_parameters(&[ModelParameter {
+            name: "wall".into(),
+            value: 2.0,
+        }]);
+        let _ = pane.view_model_3d(None);
+    }
+
+    #[test]
+    fn legend_view_wraps_at_twelve() {
+        // 13 distinct colors -> 12 dots, the a11y count says 13; asserted
+        // through the pure legend_colors input the view consumes.
+        crate::localize::select("en");
+        let parts: Vec<Part> = (0..13u8)
+            .map(|i| Part {
+                name: format!("p{i}"),
+                positions: vec![[0.0; 3], [1.0; 3], [0.0, 1.0, 0.0]],
+                triangle_colors: vec![Some([i, 255 - i, i * 17])],
+            })
+            .collect();
+        let colors = arrangement::legend_colors(&parts);
+        assert_eq!(colors.len(), 13);
+        assert_eq!(legend_dots(&colors).len(), 12);
+        assert_eq!(legend_label(13), "13 colors");
+        let _ = view_legend(&colors);
+    }
+
+    #[test]
+    fn tool_messages_drive_tools_and_scene_flags() {
+        // The M6 widget messages mutate the T8 state hub; grid/wireframe
+        // also flip the scene's draw flags (the only scene-side effect in
+        // this task — arrangement/poses land with the T10 wiring).
+        let (_, mut pane) = pane("tool-messages", &[], &["golden/model.3mf"]);
+        assert!(pane.tools.shows_grid && pane.scene.show_grid);
+        let _ = pane.update(Message::ToggleGrid);
+        assert!(!pane.tools.shows_grid);
+        assert!(!pane.scene.show_grid, "the toggle reaches the draw flag");
+
+        let _ = pane.update(Message::ToggleWireframe);
+        assert!(pane.tools.wireframe && pane.scene.wireframe);
+
+        // measure toggle clears the points on every change (T8 rule)
+        pane.tools.add_measure_point([1.0; 3]);
+        let _ = pane.update(Message::ToggleMeasure);
+        assert!(pane.tools.measuring);
+        assert!(pane.tools.measure_points.is_empty());
+        let _ = pane.update(Message::ToggleMeasure);
+        assert!(!pane.tools.measuring);
+
+        let _ = pane.update(Message::ToggleSection);
+        assert!(pane.tools.sectioning);
+        let _ = pane.update(Message::SetSectionAxis(SectionAxis::Z));
+        let _ = pane.update(Message::SetSectionPosition(0.25));
+        assert_eq!(pane.tools.section_axis, SectionAxis::Z);
+        assert_eq!(pane.tools.section_position, 0.25);
+
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+        assert_eq!(pane.tools.layout, PartsLayout::Exploded);
+        let _ = pane.update(Message::SetExplode(1.5));
+        assert_eq!(pane.tools.explode_amount, 1.5);
+
+        let _ = pane.update(Message::ToggleHiddenGroup("lid".into()));
+        assert!(pane.tools.hidden.contains("lid"));
+        let _ = pane.update(Message::ToggleAttachedGroup("lid".into()));
+        assert!(pane.tools.attached.contains("lid"));
+
+        let _ = pane.update(Message::TogglePartsCollapsed);
+        assert!(pane.tools.collapsed);
+    }
+
+    #[test]
+    fn row_click_double_tap_isolates_the_group() {
+        // One click stores the tap; the second inside DOUBLE_CLICK_WINDOW
+        // runs T8's compare-and-assign isolate (PartsOverlay.swift:145-148).
+        let (_, mut pane) = pane("row-click", &[], &["golden/model.3mf"]);
+        let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
+
+        let _ = pane.update(Message::RowClicked("base".into()));
+        assert!(pane.tools.hidden.is_empty(), "first tap only stores");
+
+        let _ = pane.update(Message::RowClicked("base".into()));
+        assert_eq!(
+            pane.tools.hidden,
+            ["lid"].into_iter().map(String::from).collect(),
+            "double-click hides the OTHER groups"
+        );
+
+        let _ = pane.update(Message::RowClicked("base".into()));
+        assert!(pane.tools.hidden.is_empty(), "second double-click restores");
+
+        // a different row between taps breaks the pair
+        let _ = pane.update(Message::RowClicked("lid".into()));
+        let _ = pane.update(Message::RowClicked("base".into()));
+        assert!(pane.tools.hidden.is_empty(), "row switch resets the pair");
     }
 
     #[test]
