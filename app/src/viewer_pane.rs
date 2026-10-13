@@ -59,8 +59,27 @@
 //! reload gate). `parts_layout`/`parts_collapsed` persist through the
 //! pane's settings path — [`ViewerPane::new_with_settings`] is the test
 //! seam that keeps that off the developer's real config.
+//!
+//! M7: the pane owns motion PLAYBACK — the study reload
+//! ([`ViewerPane::reload_motion`]: a missing file or single-frame snapshot
+//! is inert, a parse failure surfaces the localized error), the playback
+//! clock (a `time::every(TICK)` subscription mounted only while
+//! [`ViewerPane::wants_tick`] — animating, playing, an active study — whose
+//! [`Message::Tick`] arm advances the player by REAL elapsed time,
+//! baselines on the first tick after every start/resume, and re-poses only
+//! when the player's time actually moved, upstream's posedTime gate), and
+//! [`ViewerPane::apply_poses`], the one pose writer during playback: hidden
+//! group members never draw (hidden wins over pose and collision), static
+//! parts render translucent, colliding parts flat red. Upstream's timer
+//! keeps firing while paused (those ticks are posedTime no-ops); the pane
+//! instead mounts the subscription only while playing — behavior-identical,
+//! without waking the runtime 60×/s for nothing. One recorded divergence:
+//! upstream's Space shortcut (MotionControls.swift:19) is a SwiftUI button
+//! shortcut, inert while a text field has focus; iced's global listener
+//! cannot see focus, so Space typed into the chat draft toggles playback
+//! too — revisit at M8's command system.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -77,6 +96,7 @@ use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
 use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text};
 use engine::parsing::Part;
+use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
 use engine::project::manifest::Manifest;
@@ -84,12 +104,13 @@ use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
-use viewer::render::{ModelScene, NEUTRAL, PartPose, PartScene, camera::Preset};
+use viewer::render::{ModelScene, NEUTRAL, PartAppearance, PartPose, PartScene, camera::Preset};
 use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::section::{self, SectionAxis};
 
 use crate::camera_input::CameraInput;
 use crate::fl;
+use crate::localize::substitute_placeholders;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
@@ -104,6 +125,12 @@ pub const RELAY_RETRY_MAX: Duration = Duration::from_millis(64);
 /// Total time to keep retrying one full-channel message before dropping it
 /// (liveness over completeness; the next event re-derives dropped state).
 pub const RELAY_RETRY_BUDGET: Duration = Duration::from_secs(2);
+/// The playback clock's interval (upstream's `Timer(timeInterval: 1/60)`,
+/// ModelViewer.swift:236): [`Message::Tick`] advances by REAL elapsed
+/// time, so the interval is a smoothness knob, not a correctness one.
+/// `from_nanos` because `from_secs_f64` is not a const fn (1/60 s is
+/// 16,666,666.7 ns).
+pub const TICK: Duration = Duration::from_nanos(16_666_667);
 
 /// The pane's messages. Pane focus and viewer preset/fit menu commands are
 /// the shell's on top of these.
@@ -178,6 +205,29 @@ pub enum Message {
     /// The parts drawer's collapse chevron (persisted as
     /// `Settings.parts_collapsed`).
     TogglePartsCollapsed,
+    // ── M7 motion playback (the controls' view lands with the motion-
+    // controls task; the pane arms the semantics) ────────────────────────
+    /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
+    /// stops the study — the mutual exclusion with measuring/sectioning
+    /// and the clock reset live in [`ViewerTools::set_animating`].
+    ToggleAnimation,
+    /// The motion controls' play/pause button, Space while animating
+    /// (MotionControls.swift:19).
+    TogglePlayback,
+    /// The scrub slider (MotionControls.swift:24-30): scrubs PAUSE — never
+    /// auto-resume; the clamp keeps a dragged thumb inside the study.
+    Scrub(f64),
+    /// The speed menu (MotionControls.swift:7).
+    SetSpeed(f64),
+    /// The Ripeti loop toggle (MotionControls.swift:43).
+    ToggleLoops,
+    /// One beat of the playback clock — the pane's `time::every(TICK)`
+    /// subscription while [`ViewerPane::wants_tick`] holds.
+    Tick(Instant),
+    /// The ask-the-agent "create animation" button
+    /// (ModelPane.swift:138-146) — the SHELL intercepts it (T8: it sends
+    /// the chat prompt); the pane's own arm is a no-op.
+    RequestMotionStudy,
 }
 
 /// Events crossing the pane's std channel into the subscription: watcher
@@ -289,6 +339,23 @@ pub struct ViewerPane {
     grid_stamp: Option<(usize, PartsLayout, bool)>,
     /// The last parts-row click (Instant, group) — the double-click window.
     last_row_click: Option<(Instant, String)>,
+    // ── M7 motion playback state ─────────────────────────────────────────
+    /// The loaded motion study (`output/animation.json`), when it parsed to
+    /// more than one frame — the controls and the clock read it.
+    pub study: Option<MotionStudy>,
+    /// Why the study failed to load, localized and substituted — the
+    /// controls' error surface (T7).
+    pub motion_error: Option<String>,
+    /// The study's moving parts (`movingParts`): only these render opaque
+    /// during playback; refreshed on every study load.
+    moving: BTreeSet<String>,
+    /// The clock's last tick — `None` until the next tick baselines (start,
+    /// resume, and a re-mounted subscription all reset it, so the first
+    /// tick after a pause measures nothing).
+    last_tick: Option<Instant>,
+    /// The player time the current poses were written at — the posedTime
+    /// gate: a tick whose advance didn't move the time re-poses nothing.
+    posed_time: Option<f64>,
     project_root: PathBuf,
     output_dir: PathBuf,
     printer_model: Option<String>,
@@ -379,6 +446,11 @@ impl ViewerPane {
             grid_bed: None,
             grid_stamp: None,
             last_row_click: None,
+            study: None,
+            motion_error: None,
+            moving: BTreeSet::new(),
+            last_tick: None,
+            posed_time: None,
             project_root: project_root.to_path_buf(),
             output_dir,
             printer_model,
@@ -464,7 +536,15 @@ impl ViewerPane {
                 // watcher wiring).
                 ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
                 ReloadKind::Plate => self.reload_plate(),
-                ReloadKind::Motion | ReloadKind::Schematic => {}
+                // a CHANGED study keeps playing — upstream has no stop on
+                // change, only on disappearance (ModelPane.swift:69-73)
+                ReloadKind::Motion => {
+                    self.reload_motion();
+                    if self.tools.animating {
+                        self.apply_poses();
+                    }
+                }
+                ReloadKind::Schematic => {}
             },
             Message::Resized(size) => self.input.set_view_height(size.height),
             Message::ToggleParameters => {
@@ -536,6 +616,53 @@ impl ViewerPane {
                 self.tools.collapsed = !self.tools.collapsed;
                 self.persist_setting(|s| s.parts_collapsed = self.tools.collapsed);
             }
+            Message::ToggleAnimation => {
+                // no re-frame: upstream's isAnimating didSet bumps no
+                // cameraID; set_animating owns the player reset and the
+                // measuring/sectioning exclusion
+                self.tools.set_animating(!self.tools.animating);
+                self.last_tick = None;
+                self.apply_poses();
+            }
+            Message::TogglePlayback => {
+                if self.tools.animating {
+                    if let Some(study) = self.study.as_ref() {
+                        let duration = study.duration();
+                        self.tools.player.toggle_playback(duration);
+                        // the subscription re-mounts on resume; its first
+                        // tick baselines instead of leaping across the gap
+                        self.last_tick = None;
+                    }
+                }
+            }
+            Message::Scrub(time) => {
+                if self.tools.animating {
+                    if let Some(study) = self.study.as_ref() {
+                        let duration = study.duration();
+                        self.tools.player.time = time.min(duration);
+                        self.tools.player.is_playing = false;
+                        self.apply_poses();
+                    }
+                }
+            }
+            Message::SetSpeed(speed) => self.tools.player.speed = speed,
+            Message::ToggleLoops => self.tools.player.loops = !self.tools.player.loops,
+            Message::Tick(now) => {
+                if !self.wants_tick() {
+                    // a straggler tick after pause/stop: baseline afresh
+                    self.last_tick = None;
+                } else if let Some(last) = self.last_tick.replace(now) {
+                    let duration = self.study.as_ref().map_or(0.0, MotionStudy::duration);
+                    self.tools
+                        .player
+                        .advance(now.duration_since(last).as_secs_f64(), duration);
+                    if self.posed_time != Some(self.tools.player.time) {
+                        self.posed_time = Some(self.tools.player.time);
+                        self.apply_poses();
+                    }
+                }
+            }
+            Message::RequestMotionStudy => {}
             // The shell acts on commits; the pane's local half (value snap,
             // draft clear) was applied when the message was emitted.
             Message::ParameterCommit(_, _) => {}
@@ -544,15 +671,41 @@ impl ViewerPane {
         Task::none()
     }
 
+    /// Whether the playback clock should run: animation on, the player
+    /// playing, an active study. Upstream's timer idles only on study
+    /// disappearance — its paused ticks are posedTime no-ops — so gating on
+    /// playing too is behavior-identical without waking the runtime
+    /// 60×/s for nothing.
+    pub fn wants_tick(&self) -> bool {
+        self.tools.animating
+            && self.tools.player.is_playing
+            && self.study.as_ref().is_some_and(|s| s.is_active())
+    }
+
     /// The pane's subscriptions: the output-event relay plus keyboard
-    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag)
-    /// and the parameters overlay's ⌥⌘I toggle.
+    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag),
+    /// the parameters overlay's ⌥⌘I toggle, Space while animating, and the
+    /// playback clock while [`Self::wants_tick`].
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
+        // The filter closure must stay NON-CAPTURING: iced's filter_map
+        // rejects capturing closures at compile time, so gates that need
+        // pane state live in the update arms, not here.
         let modifiers = keyboard::listen().filter_map(|event| match event {
             keyboard::Event::ModifiersChanged(modifiers) => {
                 Some(Message::ModifiersChanged(modifiers))
             }
+            // Space with no modifiers toggles playback while animating
+            // (MotionControls.swift:19) — the update arm's animating gate
+            // no-ops it on an idle pane. winit reports no Named::Space;
+            // the logical key is the character " ". DIVERGENCE (module
+            // docs): SwiftUI button shortcuts stay inert while a text
+            // field has focus; iced's global listener cannot see focus.
+            keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character(c),
+                modifiers,
+                ..
+            } if modifiers.is_empty() && c.as_str() == " " => Some(Message::TogglePlayback),
             // ⌥⌘I (Commands.swift:69-73); the character form matches the
             // logical key with option held (macOS composes ⌥I — the
             // ignoring-modifiers key stays "i").
@@ -565,7 +718,13 @@ impl ViewerPane {
             }
             _ => None,
         });
-        Subscription::batch([relay, modifiers])
+        // The playback clock: mounted only while a frame can actually
+        // move — the subscription's presence IS the timer (upstream
+        // invalidates its Timer on the same disappearance).
+        let clock = self
+            .wants_tick()
+            .then(|| cosmic::iced::time::every(TICK).map(Message::Tick));
+        Subscription::batch([relay, modifiers].into_iter().chain(clock))
     }
 
     // ── parameters overlay (M5) ──────────────────────────────────────────
@@ -769,6 +928,20 @@ impl ViewerPane {
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
                 self.tools.mesh_changed();
                 self.model_scene = next;
+                if self.tools.animating {
+                    // upstream's motionStudy is parts.count > 1-gated
+                    // (ModelPane.swift:13-15): a model that drops to a
+                    // single part makes it disappear, and the disappearance
+                    // stops animating (:69-73) — without this the study
+                    // stays Some, wants_tick keeps firing, and a lone static
+                    // part even renders translucent (not in `moving`).
+                    if self.model_parts.len() <= 1 {
+                        self.tools.set_animating(false);
+                    }
+                    // a new model re-poses immediately (measure markers
+                    // already cleared by mesh_changed above)
+                    self.apply_poses();
+                }
             }
         }
         self.apply_arrangement();
@@ -791,6 +964,95 @@ impl ViewerPane {
                 self.apply_arrangement();
             }
         }
+    }
+
+    // ── motion playback (M7) ─────────────────────────────────────────────
+
+    /// Read `output/animation.json` (ProjectOutput.swift:122-136): missing
+    /// → no study, no error; parsed to more than one frame → the study
+    /// (replacing any previous one) plus a refreshed moving set and a
+    /// cleared error; a single-frame study is a snapshot, dropped at load;
+    /// anything unreadable or unparseable → no study and the localized
+    /// error with the engine's text substituted. A study that ended up
+    /// absent stops a running animation (ModelPane.swift:69-73).
+    fn reload_motion(&mut self) {
+        let path = self.output_dir.join("animation.json");
+        if !path.exists() {
+            self.study = None;
+            self.motion_error = None;
+        } else {
+            match std::fs::read(&path)
+                .map_err(|why| why.to_string())
+                .and_then(|bytes| MotionStudy::parse(&bytes))
+            {
+                Ok(study) if study.is_active() => {
+                    self.moving = study.moving_parts();
+                    self.study = Some(study);
+                    self.motion_error = None;
+                }
+                Ok(_) => {
+                    self.study = None;
+                    self.motion_error = None;
+                }
+                Err(why) => {
+                    self.study = None;
+                    self.motion_error = Some(substitute_placeholders(
+                        &fl!("animation-json-non-valido"),
+                        &[&why],
+                    ));
+                }
+            }
+        }
+        if self.study.is_none() && self.tools.animating {
+            self.tools.set_animating(false);
+            self.apply_poses();
+        }
+    }
+
+    /// THE one pose writer during playback (ModelViewer.swift:206-233's
+    /// pane half): the arrangement first — while animating its effective
+    /// layout is Assembled, so it writes identity/hidden-only poses and
+    /// keeps the grid stamp frozen — then, with animation on and a study
+    /// present, the study state at the player's time REPLACES poses and
+    /// appearances (hidden members never draw; static parts go
+    /// translucent; colliding parts flat red). Otherwise appearances
+    /// reset to the opaque defaults (playback may have written flags).
+    fn apply_poses(&mut self) {
+        self.apply_arrangement();
+        let playback = self
+            .tools
+            .animating
+            .then(|| {
+                let study = self.study.as_ref()?;
+                Some(viewer::playback::poses(
+                    &self.scene.scene,
+                    &study.state_at(self.tools.player.time),
+                    &self.moving,
+                    &self.hidden_members(),
+                ))
+            })
+            .flatten();
+        match playback {
+            Some((poses, appearances)) => {
+                self.scene.poses = poses.into();
+                self.scene.appearances = appearances.into();
+            }
+            None => {
+                self.scene.appearances =
+                    vec![PartAppearance::default(); self.scene.scene.parts.len()].into();
+            }
+        }
+    }
+
+    /// The hidden set expanded from groups to member names (upstream
+    /// `hiddenMembers`, ModelPane.swift:116-118): hiding a GROUP hides
+    /// every member part, during arrangement and playback alike.
+    fn hidden_members(&self) -> BTreeSet<String> {
+        arrangement::groups(&self.model_parts)
+            .iter()
+            .filter(|group| self.tools.hidden.contains(&group.name))
+            .flat_map(|group| group.members.iter().cloned())
+            .collect()
     }
 
     // ── arrangement wiring (M6) ───────────────────────────────────────────
@@ -1392,10 +1654,10 @@ pub fn legend_dots(colors: &[[u8; 3]]) -> &[[u8; 3]] {
 /// The legend's accessibility text (ModelPane.swift:212): the count of
 /// EVERY distinct color. The catalog key still carries upstream's
 /// Swift-style `%lld` placeholder (the M8 placeable sweep migrates it to a
-/// fluent `{$count}` arg), so the count substitutes onto the lookup —
-/// this substitution is the interim recorded for that sweep.
+/// fluent `{$count}` arg); [`substitute_placeholders`] is the interim
+/// substitution recorded for that sweep.
 pub fn legend_label(total: usize) -> String {
-    fl!("lld-colori").replace("%lld", &total.to_string())
+    substitute_placeholders(&fl!("lld-colori"), &[&total.to_string()])
 }
 
 #[cfg(test)]
@@ -2096,5 +2358,249 @@ mod tests {
         let _ = pane.update(Message::TogglePartsCollapsed);
         let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
         assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
+    }
+
+    // ── M7 T6: the playback clock and pose application ────────────────────
+
+    fn load_golden_animation(root: &std::path::Path) {
+        std::fs::copy(
+            fixture("golden/animation.json"),
+            root.join("output/animation.json"),
+        )
+        .unwrap();
+    }
+
+    fn write_animation(root: &std::path::Path, json: &[u8]) {
+        std::fs::write(root.join("output/animation.json"), json).unwrap();
+    }
+
+    #[test]
+    fn motion_reload_parses_activates_and_reports_errors() {
+        let (root, mut pane) = pane("motion-load", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        assert!(pane.study.is_some());
+        assert!(pane.motion_error.is_none());
+        assert_eq!(pane.moving.iter().next().map(String::as_str), Some("lid"));
+        // single-frame study is inert (upstream drops it at load)
+        write_animation(&root, br#"{"frames":[{"t":0}]}"#);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        assert!(pane.study.is_none() && pane.motion_error.is_none());
+        // malformed: the study clears and the error surfaces, substituted
+        write_animation(&root, b"{ not json");
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        assert!(pane.study.is_none());
+        let error = pane.motion_error.as_deref().unwrap();
+        assert!(
+            error.starts_with("animation.json"),
+            "substituted fl! text: {error}"
+        );
+        assert!(!error.contains("%@"), "placeholder substituted");
+    }
+
+    #[test]
+    fn study_disappearing_mid_playback_stops_cleanly() {
+        let (root, mut pane) = pane("motion-stop", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        // the pre-animation arrangement (settings default: Exploded) — what
+        // the pane must return to: upstream re-renders at the user's
+        // effectiveLayout when isAnimating flips off, not at assembled
+        // (ModelViewerState.swift:78-86)
+        let arranged = pane.scene.poses.clone();
+        let _ = pane.update(Message::ToggleAnimation);
+        assert!(pane.tools.animating && pane.tools.player.is_playing);
+        assert!(pane.wants_tick());
+        std::fs::remove_file(root.join("output/animation.json")).unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        assert!(!pane.tools.animating, "disappearance stops playback");
+        assert!(!pane.wants_tick());
+        assert!(
+            pane.scene
+                .poses
+                .iter()
+                .zip(arranged.iter())
+                .all(|(p, q)| p == q),
+            "poses revert to the arranged layout"
+        );
+        assert!(
+            pane.scene
+                .appearances
+                .iter()
+                .all(|a| *a == Default::default())
+        );
+    }
+
+    #[test]
+    fn study_swap_keeps_playing() {
+        let (root, mut pane) = pane("motion-swap", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        // a DIFFERENT two-frame study (lid to MODEL z 20): keeps playing
+        write_animation(
+            &root,
+            br#"{"frames":[
+            {"t":0,"parts":{"lid":{"translate":[0,0,0]}}},
+            {"t":1,"parts":{"lid":{"translate":[0,0,20]}}}]}"#,
+        );
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        assert!(pane.tools.animating, "a changed study never stops playback");
+        assert!(pane.study.as_ref().unwrap().duration() == 1.0);
+    }
+
+    #[test]
+    fn parts_drop_to_one_stops_playback() {
+        // study_swap's sibling: the STUDY persists but the MODEL drops to a
+        // single part — upstream re-gates motionStudy on parts.count > 1 and
+        // its disappearance stops animating (ModelPane.swift:13-15, :69-73)
+        let (root, mut pane) = pane("motion-drop", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        assert!(pane.tools.animating && pane.wants_tick());
+        // swap to the single-part STL output (load_model_parts' fallback)
+        std::fs::remove_file(root.join("output/model.3mf")).unwrap();
+        std::fs::copy(fixture("golden/model.stl"), root.join("output/model.stl")).unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Mesh));
+        assert!(!pane.tools.animating, "a <=1-part model stops playback");
+        assert!(!pane.wants_tick());
+        assert!(
+            pane.scene
+                .appearances
+                .iter()
+                .all(|a| *a == Default::default()),
+            "appearances reset with the poses"
+        );
+    }
+
+    #[test]
+    fn tick_advances_and_poses_the_study() {
+        let (root, mut pane) = pane("motion-tick", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        let t0 = std::time::Instant::now();
+        let _ = pane.update(Message::Tick(t0)); // baseline
+        assert_eq!(pane.tools.player.time, 0.0);
+        // 0.4 s real elapsed: strictly inside the first span, where the
+        // nearest frame is the collision-free t=0 one (the span-midpoint
+        // tie takes the LATER frame, so t=0.5 already collides)
+        let _ = pane.update(Message::Tick(t0 + Duration::from_millis(400)));
+        assert!(
+            (pane.tools.player.time - 0.4).abs() < 0.05,
+            "elapsed-driven: {}",
+            pane.tools.player.time
+        );
+        // golden at t=0.4: lid interpolated to MODEL z 4 -> scene +y 4; the
+        // static base translucent, the moving lid opaque. to_cols_array_2d
+        // is column-major: the translation is the w_axis (column 3)
+        let lid = pane.scene.poses[1].expect("lid posed");
+        let m = glam::Mat4::from_cols_array_2d(&lid);
+        assert!(
+            (m.w_axis.y - 4.0).abs() < 1e-3,
+            "scene +y 4: {}",
+            m.w_axis.y
+        );
+        assert!(pane.scene.appearances[0].translucent);
+        assert!(
+            !pane.scene.appearances[1].translucent,
+            "moving lid stays opaque"
+        );
+        // past the midpoint the t=1 collision is live before t=1
+        let _ = pane.update(Message::Tick(t0 + Duration::from_millis(900)));
+        assert!(pane.scene.appearances[0].collision && pane.scene.appearances[1].collision);
+        // scrub to the colliding frame: pauses + flags both members
+        let _ = pane.update(Message::Scrub(1.0));
+        assert!(
+            !pane.tools.player.is_playing,
+            "scrub pauses, no auto-resume"
+        );
+        assert!(pane.scene.appearances[0].collision && pane.scene.appearances[1].collision);
+        assert!(!pane.wants_tick());
+    }
+
+    #[test]
+    fn first_tick_after_resume_baselines_instead_of_jumping() {
+        let (root, mut pane) = pane("motion-resume", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        let t0 = std::time::Instant::now();
+        let _ = pane.update(Message::Tick(t0));
+        let _ = pane.update(Message::Tick(t0 + Duration::from_millis(250)));
+        let mid = pane.tools.player.time;
+        // pause across a LONG gap, then resume: the first tick must baseline
+        let _ = pane.update(Message::TogglePlayback);
+        let later = t0 + Duration::from_secs(30);
+        let _ = pane.update(Message::TogglePlayback);
+        let _ = pane.update(Message::Tick(later));
+        assert!(
+            (pane.tools.player.time - mid).abs() < 1e-9,
+            "no teleport across the pause: {} vs {mid}",
+            pane.tools.player.time
+        );
+        let _ = pane.update(Message::Tick(later + Duration::from_millis(100)));
+        assert!((pane.tools.player.time - mid - 0.1).abs() < 0.02);
+    }
+
+    #[test]
+    fn non_loop_end_stops_and_replay_restarts() {
+        let (root, mut pane) = pane("motion-end", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleLoops);
+        let _ = pane.update(Message::ToggleAnimation);
+        let t0 = std::time::Instant::now();
+        let _ = pane.update(Message::Tick(t0));
+        let _ = pane.update(Message::Tick(t0 + Duration::from_secs(3)));
+        assert!(
+            (pane.tools.player.time - 2.0).abs() < 1e-9,
+            "clamped at duration"
+        );
+        assert!(!pane.tools.player.is_playing && !pane.wants_tick());
+        let _ = pane.update(Message::TogglePlayback);
+        assert_eq!(pane.tools.player.time, 0.0, "replay restarts from 0");
+        assert!(pane.tools.player.is_playing);
+    }
+
+    #[test]
+    fn hidden_group_stays_hidden_during_playback() {
+        let (root, mut pane) = pane("motion-hidden", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleHiddenGroup("lid".into()));
+        let _ = pane.update(Message::ToggleAnimation);
+        let _ = pane.update(Message::Scrub(1.0));
+        assert!(
+            pane.scene.poses[1].is_none(),
+            "hidden member never draws — even colliding and keyed by the study"
+        );
+        assert!(pane.scene.poses[0].is_some());
+    }
+
+    #[test]
+    fn scrub_clamps_past_duration() {
+        let (root, mut pane) = pane("motion-clamp", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.update(Message::ToggleAnimation);
+        let _ = pane.update(Message::Scrub(999.0));
+        assert!((pane.tools.player.time - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn subscription_builds_with_and_without_the_clock() {
+        // Subscription construction is pure (recipes only — streams spawn
+        // on the runtime), and referencing it here instantiates the
+        // keyboard filter's closure in the TEST build too, where iced's
+        // compile-time non-capturing check would catch a regression the
+        // lib-only tests otherwise never codegen.
+        let (root, mut pane) = pane("motion-subs", &[], &["golden/model.3mf"]);
+        load_golden_animation(&root);
+        let _ = pane.update(Message::Reload(ReloadKind::Motion));
+        let _ = pane.subscription();
+        let _ = pane.update(Message::ToggleAnimation);
+        let _ = pane.subscription();
     }
 }
