@@ -45,7 +45,7 @@
 //! untouched, upstream `buildDidFinish`'s interrupt branch calling no
 //! `continueQueue` at all.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -102,6 +102,10 @@ const NO_MODEL_SCRIPT: &str = "No model.py to build";
 const PARAMETER_NOT_FOUND: &str = "Parameter %@ not found in model.py";
 /// `versione-lld` (Project.swift:329).
 const VERSION_ROW: &str = "Version %lld";
+/// `versione-lld-ripristinata` (Project.swift:318).
+const VERSION_RESTORED: &str = "Version %lld restored";
+/// `impossibile-ripristinare-la-versione-lld` (Project.swift:322).
+const CANNOT_RESTORE: &str = "Can’t restore version %lld";
 /// `l-esecuzione-di-model-py-non-riesce-con-questo-errore-correggi-lo-script`
 /// (Project.swift:258-260); upstream's `\n` escapes are real newlines.
 const ASK_FIX: &str = "Running model.py fails with this error. Fix the script:\n```\n%@\n```";
@@ -149,6 +153,10 @@ struct Pipeline {
     missing_outputs: Vec<String>,
     sheet_requested: bool,
     draft: Option<String>,
+    /// The compare picker's selection (`None` = "Nessuna"); the overlay's
+    /// previous values below parse from that version's stored model.py.
+    compare_version: Option<i64>,
+    comparison_parameters: BTreeMap<String, f64>,
 }
 
 impl Pipeline {
@@ -164,6 +172,8 @@ impl Pipeline {
             missing_outputs: missing_files(&root.join("output")),
             sheet_requested: false,
             draft: None,
+            compare_version: None,
+            comparison_parameters: BTreeMap::new(),
         }
     }
 
@@ -526,6 +536,70 @@ impl Bridge {
         self.enqueue(ASK_FIX.replace("%@", traceback), Vec::new())
     }
 
+    /// Swap a recorded version back in (upstream `restore`,
+    /// Project.swift:308-321): refuses while busy; on success the metadata
+    /// points at the restored version (its session id, its number) and the
+    /// observed state reloads — parameters re-read from the restored
+    /// manifest, `build_error` and `missing_outputs` cleared, the activity
+    /// announcing the restore. An engine failure surfaces as the failed
+    /// activity plus `build_error`, like upstream's catch branch.
+    ///
+    /// Parity note: upstream does NOT reset `compareVersion` on restore —
+    /// the picker's selection (and the values parsed from that version)
+    /// survive the swap, so the port keeps them too.
+    pub fn restore(&mut self, number: i64) -> Result<(), BuildRefusal> {
+        if self.pipeline().busy() {
+            return Err(BuildRefusal::Busy);
+        }
+        // the menu only offers recorded numbers; a miss (a history that
+        // changed under the app) takes the failure branch, not a panic
+        let outcome = self
+            .pipeline()
+            .versions
+            .iter()
+            .find(|version| version.number == number)
+            .map(|version| {
+                versions::restore(&self.root, version)
+                    .map(|()| version.session_id.clone())
+                    .map_err(|err| err.to_string())
+            })
+            .unwrap_or_else(|| Err(format!("version {number} is not in the history")));
+        match outcome {
+            Ok(session_id) => {
+                let mut metadata = fresh_metadata(&self.root);
+                metadata.session_id = session_id;
+                metadata.current_version = Some(number);
+                let _ = store::save_metadata(&self.root, &metadata);
+                let mut pipeline = self.pipeline();
+                pipeline.parameters = refresh_parameters(&self.root);
+                pipeline.missing_outputs = Vec::new();
+                pipeline.build_error = None;
+                pipeline.activity =
+                    Activity::Succeeded(VERSION_RESTORED.replace("%lld", &number.to_string()));
+                Ok(())
+            }
+            Err(err) => {
+                let mut pipeline = self.pipeline();
+                pipeline.build_error = Some(err);
+                pipeline.activity =
+                    Activity::Failed(CANNOT_RESTORE.replace("%lld", &number.to_string()));
+                Ok(())
+            }
+        }
+    }
+
+    /// The compare picker's selection (upstream `compareVersion`): store
+    /// the choice and parse the previous parameter values from that
+    /// version's stored model.py copy — a slider rewrite never regenerates
+    /// the manifest, so the model source is the only value that stays
+    /// truthful. `None` ("Nessuna") empties them. The ghost MESH the
+    /// orange values annotate is M6's, documented out of scope here.
+    pub fn compare_with(&mut self, number: Option<i64>) {
+        let mut pipeline = self.pipeline();
+        pipeline.comparison_parameters = versions::comparison_parameters(&self.root, number);
+        pipeline.compare_version = number;
+    }
+
     /// Interrupt the running turn or build (SIGINT now, SIGTERM after 3 s) —
     /// upstream `stop()`'s one `task` owns both. The running one only: the
     /// queue is untouched and pauses when the cancelled turn ends.
@@ -565,6 +639,17 @@ impl Bridge {
         self.pipeline().versions.clone()
     }
 
+    /// The compare picker's selection (`None` = "Nessuna").
+    pub fn compare_version(&self) -> Option<i64> {
+        self.pipeline().compare_version
+    }
+
+    /// The compared version's parameter values (owned — the pipeline lives
+    /// behind a mutex, so a reference cannot outlive the read).
+    pub fn comparison_parameters(&self) -> BTreeMap<String, f64> {
+        self.pipeline().comparison_parameters.clone()
+    }
+
     /// The status line (upstream `activity`).
     pub fn activity(&self) -> Activity {
         self.pipeline().activity.clone()
@@ -597,6 +682,12 @@ fn default_interpreter() -> PathBuf {
 
 fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The project's metadata, loaded now — the discipline every writer in
+/// this file follows for `project.json` (see [`Drive::record_version`]).
+fn fresh_metadata(root: &Path) -> ProjectMetadata {
+    store::load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(app_version()))
 }
 
 /// How a drained turn ended, for the driver's queue decision.
@@ -1195,10 +1286,9 @@ impl Drive {
         }
     }
 
-    /// The project's metadata, loaded now — the discipline every writer in
-    /// this file follows for `project.json` (see [`Self::record_version`]).
+    /// The project's metadata, loaded now ([`fresh_metadata`]'s law).
     fn load_metadata(&self) -> ProjectMetadata {
-        store::load_metadata(&self.root).unwrap_or_else(|_| ProjectMetadata::new(app_version()))
+        fresh_metadata(&self.root)
     }
 }
 
