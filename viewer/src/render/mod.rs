@@ -46,16 +46,20 @@
 //! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
 //! part pass to the 1px hairline edge list — same material, LineList
 //! topology; the section cap sits out (upstream disables the interior
-//! shell in wireframe, facts #45). The grid/bed/tripod overlay
-//! ([`grid::geometry`]) draws last, unlit and alpha-blended: depth-tested
-//! so the model occludes it, but never writing depth.
+//! shell in wireframe, facts #45). After the parts, the unlit
+//! alpha-blended overlays: the grid/bed/tripod ([`grid::geometry`])
+//! first, then the measure markers ([`markers::geometry`]) — orange
+//! spheres at the picked points plus the two-point link. Both are
+//! depth-tested so the model occludes them, but neither writes depth.
 
 pub mod gpu;
 pub mod grid;
+pub mod markers;
 pub mod parts;
 pub mod scene;
 
 pub use grid::{GridMesh, GridVertex};
+pub use markers::{MarkerMesh, ORANGE};
 pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear, srgb_to_linear_f};
 pub use scene::{ModelPrimitive, ModelScene};
 
@@ -134,6 +138,9 @@ pub struct Frame<'a> {
     /// arranged offsets included) in pinned scene space.
     pub effective_aabb: ([f32; 3], [f32; 3]),
     pub grid: Option<&'a GridMesh>,
+    /// The staged measure markers, when a measurement is active — drawn
+    /// after the grid on the same unlit overlay pass.
+    pub markers: Option<&'a MarkerMesh>,
     pub options: Options,
 }
 
@@ -441,12 +448,42 @@ struct ResidentPart {
     model_buf: wgpu::Buffer,
 }
 
-/// The overlay's GPU residency — the same content-identity contract as
-/// [`ResidentPart`], over the [`GridMesh`] staged by [`grid::geometry`].
+/// An overlay's GPU residency — the same content-identity contract as
+/// [`ResidentPart`], over the unlit meshes staged by [`grid::geometry`]
+/// and [`markers::geometry`].
 struct ResidentGrid {
     content_hash: u64,
     vertex_buf: wgpu::Buffer,
     vertex_count: u32,
+}
+
+/// Content-hash-keyed overlay residency — the staging step both overlay
+/// slots (`grid`, `marker`) share: (re)build the vertex buffer only when
+/// the content identity differs from what the slot holds; `None` drops
+/// the slot entirely. `label` names the buffer for debuggers.
+fn stage_overlay(
+    slot: &mut Option<ResidentGrid>,
+    device: &wgpu::Device,
+    mesh: Option<(u64, &[GridVertex], &str)>,
+) {
+    if let Some((content_hash, vertices, label)) = mesh {
+        if !slot
+            .as_ref()
+            .is_some_and(|r| r.content_hash == content_hash)
+        {
+            *slot = Some(ResidentGrid {
+                content_hash,
+                vertex_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{label} vertices")),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                vertex_count: vertices.len() as u32,
+            });
+        }
+    } else {
+        *slot = None;
+    }
 }
 
 pub struct MeshPipeline {
@@ -477,6 +514,9 @@ pub struct MeshPipeline {
     drawn: Vec<usize>,
     /// The resident overlay, when the last prepared frame carried one.
     grid: Option<ResidentGrid>,
+    /// The resident measure markers, when the last prepared frame carried
+    /// any — the same content-identity contract as `grid`.
+    marker: Option<ResidentGrid>,
     cap_buf: wgpu::Buffer,
     draw_cap: bool,
     size: (u32, u32),
@@ -656,6 +696,7 @@ impl MeshPipeline {
             residents: Vec::new(),
             drawn: Vec::new(),
             grid: None,
+            marker: None,
             cap_buf,
             draw_cap: false,
             size: (1, 1),
@@ -1202,7 +1243,13 @@ impl MeshPipeline {
         size: (u32, u32),
         frame: &Frame<'_>,
     ) {
-        let (camera, scene, grid, options) = (frame.camera, frame.scene, frame.grid, frame.options);
+        let (camera, scene, grid, markers, options) = (
+            frame.camera,
+            frame.scene,
+            frame.grid,
+            frame.markers,
+            frame.options,
+        );
         assert_eq!(
             frame.poses.len(),
             scene.parts.len(),
@@ -1321,27 +1368,19 @@ impl MeshPipeline {
         }
         self.wireframe = options.wireframe;
         // Overlay residency — the same content-identity contract as the
-        // parts: an unchanged grid costs zero overlay bytes however the
-        // camera moves; `None` drops it (the app's grid toggle)
-        if let Some(g) = grid {
-            if !self
-                .grid
-                .as_ref()
-                .is_some_and(|r| r.content_hash == g.content_hash)
-            {
-                self.grid = Some(ResidentGrid {
-                    content_hash: g.content_hash,
-                    vertex_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("grid overlay vertices"),
-                        contents: bytemuck::cast_slice(&g.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                    vertex_count: g.vertices.len() as u32,
-                });
-            }
-        } else {
-            self.grid = None;
-        }
+        // parts: an unchanged grid or marker set costs zero overlay bytes
+        // however the camera moves; `None` drops the slot (the app's grid
+        // toggle, the measure flow's clear)
+        stage_overlay(
+            &mut self.grid,
+            device,
+            grid.map(|g| (g.content_hash, &g.vertices[..], "grid overlay")),
+        );
+        stage_overlay(
+            &mut self.marker,
+            device,
+            markers.map(|m| (m.content_hash, &m.vertices[..], "measure marker")),
+        );
     }
 
     /// Vertex uploads since pipeline creation (test visibility): counts
@@ -1378,8 +1417,9 @@ impl MeshPipeline {
 
     /// Renders the parts (filled, or the wireframe hairlines when the last
     /// prepared `Options` set it) — the red cap quad when the camera
-    /// sections, then the grid overlay last — into `target` (the iced
-    /// surface view) inside a viewer-owned pass. Color attachment:
+    /// sections, then the unlit overlays (grid first, measure markers
+    /// after it) — into `target` (the iced surface view) inside a
+    /// viewer-owned pass. Color attachment:
     /// `LoadOp::Load` (iced content underneath stays); depth and stencil:
     /// cleared. `viewport` is `[x, y, width, height]` in physical pixels.
     ///
@@ -1399,7 +1439,7 @@ impl MeshPipeline {
         target: &wgpu::TextureView,
         viewport: [f32; 4],
     ) {
-        if self.drawn.is_empty() && self.grid.is_none() {
+        if self.drawn.is_empty() && self.grid.is_none() && self.marker.is_none() {
             return; // nothing visible was prepared
         }
         let set_vp = |pass: &mut wgpu::RenderPass| {
@@ -1504,9 +1544,10 @@ impl MeshPipeline {
     /// Part draws — one bind group + vertex buffer + draw per DRAWN part
     /// (the last prepared frame's visible slots; hidden parts are absent),
     /// filled triangles or the wireframe hairline list — then, when the
-    /// camera sections, the cap quad, and last the grid overlay — into the
-    /// pass's color attachment (msaa or single-sample alike: everything
-    /// here inherits the pass attachment and matches its sample count).
+    /// camera sections, the cap quad, and last the unlit overlays (grid,
+    /// then measure markers) — into the pass's color attachment (msaa or
+    /// single-sample alike: everything here inherits the pass attachment
+    /// and matches its sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
@@ -1538,13 +1579,18 @@ impl MeshPipeline {
             pass.set_vertex_buffer(0, self.cap_buf.slice(..));
             pass.draw(0..4, 0..1);
         }
-        if let Some(grid) = &self.grid {
-            // overlay last: depth-tested against the parts, never writing
-            // depth, so it never occludes what follows
+        // Overlays last, painter-ordered (they write no depth): the grid,
+        // then the measure markers after it — both unlit vertex-colored,
+        // depth-tested against the parts so the model occludes them, but
+        // never writing depth, so they never occlude what follows.
+        for overlay in [self.grid.as_ref(), self.marker.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             pass.set_pipeline(&self.grid_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, grid.vertex_buf.slice(..));
-            pass.draw(0..grid.vertex_count, 0..1);
+            pass.set_vertex_buffer(0, overlay.vertex_buf.slice(..));
+            pass.draw(0..overlay.vertex_count, 0..1);
         }
     }
 }
@@ -1798,8 +1844,9 @@ mod tests {
         }
     }
 
-    /// The Frame every upload-once test shares: default options, no overlay,
-    /// effective_aabb at the staged scene's own (T10 replaces that input).
+    /// The Frame every upload-once test shares: default options, no overlay
+    /// or markers, effective_aabb at the staged scene's own (T10 replaces
+    /// that input).
     fn frame<'a>(camera: &'a Camera, scene: &'a PartScene, poses: &'a [PartPose]) -> Frame<'a> {
         Frame {
             camera,
@@ -1807,6 +1854,7 @@ mod tests {
             poses,
             effective_aabb: (scene.aabb_min, scene.aabb_max),
             grid: None,
+            markers: None,
             options: Options::default(),
         }
     }
