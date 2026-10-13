@@ -54,7 +54,7 @@ pub mod scene;
 
 pub use grid::{GridMesh, GridVertex};
 pub use parts::{GpuPart, NEUTRAL, PartScene, srgb_to_linear};
-pub use scene::{SpikePrimitive, SpikeScene};
+pub use scene::{ModelPrimitive, ModelScene};
 
 use wgpu::util::DeviceExt;
 
