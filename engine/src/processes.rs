@@ -13,8 +13,10 @@
 //!   starttime is `ps -o lstart=` — the portable shape of upstream's
 //!   `pbi_start_tvsec` (and of `/proc/<pid>/stat`'s starttime on Linux). A
 //!   pid whose current start time differs from the registry line is a
-//!   recycled pid, not our orphan. After a reap the file is emptied
-//!   (upstream persists `[]`, ProcessRunner.swift:157).
+//!   recycled pid, not our orphan. After a reap the entries that still
+//!   resolve and were not signalled stay listed — upstream persists `[]`
+//!   (ProcessRunner.swift:157), but a child this process cancelled that
+//!   outlives the app must stay known to a later launch's reap.
 //! - Signals and process info go through `/bin/kill` and `/bin/ps` via
 //!   [`std::process::Command`] — no libc/nix dependency, and exactly what
 //!   reaches the child stays visible under `ps` while debugging. Unix only.
@@ -160,8 +162,9 @@ pub fn register(pid: u32) {
 }
 
 /// Kill processes the registry still lists whose parent is now init and
-/// whose start time still matches the registered one, then empty the
-/// registry. Returns the pids that were signalled.
+/// whose start time still matches the registered one, then rewrite the
+/// registry to the entries that still resolve and were not signalled.
+/// Returns the pids that were signalled.
 pub fn reap_orphans() -> Vec<u32> {
     let path = registry_path();
     reap_orphans_at(&path)
@@ -176,13 +179,16 @@ pub fn register_at(path: &Path, pid: u32) {
 }
 
 /// [`reap_orphans`] against an explicit registry file. A missing file has
-/// nothing to reap and is left uncreated; a present file is always emptied.
+/// nothing to reap and is left uncreated; a present file is rewritten to
+/// the still-resolving, un-signalled entries.
 pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
     let mut killed = Vec::new();
+    // what survives the reap: resolvable pids this pass did not signal
+    let mut remaining = BTreeSet::new();
     for line in text.lines() {
         let Some((pid_text, started)) = line.split_once(':') else {
             continue;
@@ -196,9 +202,11 @@ pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
         if ppid == 1 && starts_now == started {
             let _ = signal(pid, "-TERM");
             killed.push(pid);
+        } else {
+            remaining.insert(pid);
         }
     }
-    persist(path, &BTreeSet::new());
+    persist(path, &remaining);
     killed
 }
 

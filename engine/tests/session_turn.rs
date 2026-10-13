@@ -679,6 +679,73 @@ async fn restricted_allowlist_and_child_env_name_the_app_venv() {
     assert_eq!(invocation["env"]["PYTHONUNBUFFERED"], "1", "{line}");
 }
 
+/// The session-level half of the versions rule: prompt_ctx feeds the shared
+/// versions cell into the python line and the {{ENVIRONMENT}} bullets, so
+/// the rendered system prompt a real turn hands the agent (the
+/// `--append-system-prompt` argv) carries the fallback until a verification
+/// lands, the verified line after.
+#[tokio::test(flavor = "multi_thread")]
+async fn rendered_prompt_carries_versions_line() {
+    let root = mk_project();
+    let settings = Settings::default();
+    let dump = root.join("argv-dump.jsonl");
+
+    engine::python::env::set_shared_versions(None);
+    let events = run_fake_with(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &settings,
+        Some(&dump),
+    )
+    .await;
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
+    let prompt = append_system_prompt(&dump);
+    assert!(
+        prompt.contains("- Python packages: build123d, matplotlib, numpy"),
+        "fallback line in rendered prompt: {prompt}"
+    );
+
+    engine::python::env::set_shared_versions(Some("Python 3.12.4, build123d 0.8.1".into()));
+    let events = run_fake_with(
+        &root,
+        &fixture_fake("scenarios/pong.jsonl"),
+        &settings,
+        Some(&dump),
+    )
+    .await;
+    assert!(
+        matches!(finished(&events), TurnOutcome::Success { .. }),
+        "{events:?}"
+    );
+    let prompt = append_system_prompt(&dump);
+    assert!(
+        prompt.contains("- Python packages: Python 3.12.4, build123d 0.8.1"),
+        "verified line in rendered prompt: {prompt}"
+    );
+    engine::python::env::set_shared_versions(None);
+}
+
+/// The `--append-system-prompt` value of the LAST invocation in an argv dump.
+fn append_system_prompt(dump: &Path) -> String {
+    let line = std::fs::read_to_string(dump)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .expect("one dump line")
+        .to_string();
+    let invocation: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let argv = invocation["argv"].as_array().unwrap();
+    let pos = argv
+        .iter()
+        .position(|v| v.as_str() == Some("--append-system-prompt"))
+        .expect("append-system-prompt flag");
+    argv[pos + 1].as_str().unwrap().to_string()
+}
+
 // ─── classification surface for the lifecycle dance (task 8) ────────────────
 
 #[test]

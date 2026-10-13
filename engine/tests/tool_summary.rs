@@ -311,3 +311,31 @@ fn short_command_normalizes_venv_and_cd() {
         "python model.py"
     );
 }
+
+#[test]
+fn short_command_empty_root_strips_any_cd() {
+    // Carry-forward divergence: upstream requires the cd target to contain
+    // the project root; the port's root-free classification (summarize's
+    // Bash path) strips ANY leading cd, so a foreign-cd command classifies
+    // one class up from upstream. Preserved deliberately.
+    assert_eq!(
+        short_command("cd /elsewhere && python x.py", "", ""),
+        "python x.py"
+    );
+    assert_eq!(
+        summarize(
+            "Bash",
+            &json!({"command": "cd /elsewhere && python model.py"})
+        ),
+        "Building the model" // upstream: "Working on the project"
+    );
+    // The other two preserved divergences, restated where they live:
+    assert_eq!(
+        live_preview(r#"{"new_string": "a\nb"}"#).as_deref(),
+        Some("a\nb")
+    );
+    assert_eq!(
+        summarize("Read", &json!({"file_path": "/w/references/model.py"})),
+        "Studying the reference" // segment match, not just prefix
+    );
+}

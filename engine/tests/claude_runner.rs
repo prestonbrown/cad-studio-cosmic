@@ -232,10 +232,10 @@ fn system_prompt_all_placeholders_rendered() {
 fn environment_bullets_match_agent_session() {
     // fresh project: no model.py, empty output/, no references/ yet
     let root = mk_project(&[], &[]);
-    let bullets = environment_bullets(&root, "python interpreter not verified yet");
+    let bullets = environment_bullets(&root, "build123d, matplotlib, numpy");
     assert_eq!(
         bullets[0],
-        "- Python packages: python interpreter not verified yet"
+        "- Python packages: build123d, matplotlib, numpy"
     );
     assert_eq!(bullets[1], "- model.py does not exist yet: create it");
     assert_eq!(bullets[2], "- output/: empty");
@@ -260,6 +260,30 @@ fn environment_bullets_match_agent_session() {
     assert_eq!(bullets[1], "- model.py exists (3 lines)");
     assert_eq!(bullets[2], "- output/: model.stl");
     assert_eq!(bullets[3], "- references/: empty");
+}
+
+#[test]
+fn python_display_fallback_and_verified_line() {
+    // environment_bullets takes the display string; the session sources it
+    // from the shared cell. Pin BOTH halves of the rule here.
+    engine::python::env::set_shared_versions(None);
+    assert_eq!(
+        engine::python::env::versions_display(),
+        "build123d, matplotlib, numpy"
+    );
+    let root = mk_project(&["model.py"], &[]);
+    let bullets = environment_bullets(&root, &engine::python::env::versions_display());
+    assert_eq!(
+        bullets[0],
+        "- Python packages: build123d, matplotlib, numpy"
+    );
+    engine::python::env::set_shared_versions(Some("Python 3.12.4, build123d 0.8.1".into()));
+    let bullets = environment_bullets(&root, &engine::python::env::versions_display());
+    assert_eq!(
+        bullets[0],
+        "- Python packages: Python 3.12.4, build123d 0.8.1"
+    );
+    engine::python::env::set_shared_versions(None);
 }
 
 #[test]

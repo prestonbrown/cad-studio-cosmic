@@ -273,10 +273,11 @@ async fn orphan_reaping() {
         "reaped orphan is SIGTERMed"
     );
     assert!(alive(control.id()), "a live non-orphan child is untouched");
-    assert_eq!(
-        std::fs::read_to_string(&registry).unwrap(),
-        "",
-        "registry cleared after reap (upstream persists [])"
+    assert!(
+        std::fs::read_to_string(&registry)
+            .unwrap()
+            .starts_with(&format!("{}:", control.id())),
+        "a live child of this process stays listed after the reap"
     );
 
     // Pid-recycling defense: a ppid-1 process whose registry line carries a
@@ -286,7 +287,12 @@ async fn orphan_reaping() {
     let reaped = reap_orphans_at(&registry);
     assert!(reaped.is_empty(), "starttime mismatch spares the process");
     assert!(alive(forged));
-    assert_eq!(std::fs::read_to_string(&registry).unwrap(), "");
+    assert!(
+        std::fs::read_to_string(&registry)
+            .unwrap()
+            .starts_with(&format!("{}:", forged)),
+        "a spared entry that still resolves stays listed, its line re-derived from ps"
+    );
 
     control.kill().unwrap();
     control.wait().unwrap();
@@ -294,6 +300,45 @@ async fn orphan_reaping() {
         .arg("-9")
         .arg(forged.to_string())
         .status();
+    assert!(
+        eventually(|| !alive(forged), Duration::from_secs(2)).await,
+        "init reaps the SIGKILLed leftover before the final reap"
+    );
+    // both entries now dead: persist drops pids ps no longer resolves
+    assert!(reap_orphans_at(&registry).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        "",
+        "registry drops dead entries"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reap_keeps_live_children_listed() {
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    // our OWN live child; the trap makes the cleanup SIGINT land within one
+    // sleep tick (the gentle-interrupt pattern), so the awaited exit below
+    // cannot stall on an untrapped shell waiting out its sleep
+    let proc = spawn_script(&dir, "trap 'exit 7' INT\nwhile true; do sleep 0.2; done\n").await;
+    // (the spawn already registered the pid — no register_at needed)
+    let killed = reap_orphans_at(&registry);
+    assert!(killed.is_empty(), "ppid != 1: not touched");
+    let text = std::fs::read_to_string(&registry).unwrap();
+    assert!(
+        text.contains(&format!("{}:", proc.pid)),
+        "live child erased from registry: {text}"
+    );
+    proc.interrupt();
+    // AWAIT the exit before reaping: SIGINT is asynchronous, and a
+    // still-live child would legitimately stay listed.
+    let _ = tokio::time::timeout(Duration::from_secs(5), proc.exit_status).await;
+    let _ = reap_orphans_at(&registry);
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        "",
+        "gone after death: no longer listed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

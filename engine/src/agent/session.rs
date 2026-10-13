@@ -85,9 +85,6 @@ use crate::settings::Settings;
 /// from the environment and would treat a probe invocation as a turn.
 const TEST_CLAUDE_ENV: &str = "CAD_TEST_CLAUDE";
 
-/// The python line's display text until M5 verifies the project venv.
-const PYTHON_UNVERIFIED: &str = "python interpreter not verified yet";
-
 /// The log-name timestamp (AgentSession.swift:325-333). Upstream formats local
 /// time; the port pins UTC because a process-local offset is unavailable once
 /// threads exist — the name only needs uniqueness and sortability. Appending
@@ -630,18 +627,22 @@ fn app_venv_python() -> PathBuf {
 
 /// The system-prompt substitutions the session can derive on its own. The
 /// date is ISO numeric: upstream's locale-dependent numeric format has no
-/// deterministic engine-side equivalent.
+/// deterministic engine-side equivalent. The python line is the shared
+/// versions cell's display: the verified versions line, or upstream's
+/// "build123d, matplotlib, numpy" fallback while no verification has
+/// succeeded (AgentSession.swift:206).
 fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
     const ISO_DATE: &[time::format_description::FormatItem] =
         format_description!("[year]-[month]-[day]");
+    let python_display = crate::python::env::versions_display();
     PromptCtx {
         project_name: root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string()),
-        python_display: PYTHON_UNVERIFIED.to_string(),
+        python_display: python_display.clone(),
         venv_python: app_venv_python(),
-        environment: environment_bullets(root, PYTHON_UNVERIFIED),
+        environment: environment_bullets(root, &python_display),
         units: settings.measurement_unit.prompt_name().to_string(),
         printer: settings
             .printer_model

@@ -25,8 +25,9 @@ pub struct TurnRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptCtx {
     pub project_name: String,
-    /// The python line's display text: "python interpreter not verified
-    /// yet" until M5 verifies the project venv.
+    /// The python line's display text: the verified versions line, or
+    /// upstream's "build123d, matplotlib, numpy" fallback
+    /// (AgentSession.swift:206).
     pub python_display: String,
     /// The interpreter path used in the restricted-bash allowlist and
     /// `{{PYTHON}}`.
@@ -135,7 +136,8 @@ pub fn render_system_prompt(tpl: &str, ctx: &PromptCtx) -> String {
 /// The `{{ENVIRONMENT}}` bullets: the python line, the model.py status, the
 /// output/ listing and — only when references/ exists — its listing
 /// (AgentSession.swift:197-217). The python line's display text comes from
-/// the caller because the venv is not verified until M5.
+/// the caller: verification state is process-global (the shared versions
+/// cell), not derivable from the project root.
 pub fn environment_bullets(root: &Path, python_display: &str) -> Vec<String> {
     let mut lines = vec![format!("- Python packages: {python_display}")];
     match std::fs::read_to_string(root.join("model.py")) {
