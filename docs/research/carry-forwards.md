@@ -158,13 +158,18 @@ Source of record: `.superpowers/sdd/m3-viewer-facts.md` — it moves to
 
 From the M4 whole-branch review's minors (2026-10-13, ownerless until now):
 
-- `PresentSetupSheet` self-loop: the project window's update returns the
+- ~~`PresentSetupSheet` self-loop: the project window's update returns the
   variant to itself — route it to the app layer (or confirm the
   pass-through is the intended shell seam) when M6's app wave touches the
-  window message flow.
-- Global ⌥⌘I: the parameters toggle is viewer-pane-local; upstream binds it
+  window message flow.~~ (landed M7 — T8 verified app.rs's intercept stands
+  ahead of the fall-through update, so the window arm was dead; folded into
+  the `CloseRequested | App(_)` "the app layer acts" arm)
+- ~~Global ⌥⌘I: the parameters toggle is viewer-pane-local; upstream binds it
   app-wide (Commands.swift:69-73). Move the match arm to the app layer when
-  the toolbar/command surface is next touched.
+  the toolbar/command surface is next touched.~~ (landed M7 — T8's
+  `(true, true, false, "i")` arm in the window's `project_shortcut` routes
+  `Command::ToggleParameters` to the pane; the pane-local listener removed
+  in the same edit)
 
 From the M5 T7 review (2026-10-13):
 
@@ -214,6 +219,42 @@ From the M6 T10 review (2026-10-13):
 - The > 50 % reload gate frames the STAGED assembled box, not the arranged
   one — pre-existing (the staged-box feed to `mesh_changed` is T7's rule;
   T10 changed only the tracked reference, an improvement for the next Fit).
+
+## M7 (animation playback)
+
+From the M7 wrap (2026-10-13) — the accepted divergences and deferred
+minors, each with its owner:
+
+- Space focus: upstream's Space shortcut (MotionControls.swift:19) is a
+  SwiftUI button shortcut, inert while a text field has focus; iced's
+  global listener cannot see focus, so Space typed into the chat draft
+  toggles playback too. M8's command system owns the revisit (the pane's
+  module doc has the detail).
+- Keyboard-driven scrub pauses: upstream pauses only on drag-start
+  (`onEditingChanged`, MotionControls.swift:24-30), which iced's slider
+  does not surface — every `Scrub` message pauses, drag or keys.
+- The speed control is a dropdown plus an adjacent loop button where
+  upstream nests the picker and the Ripeti toggle in ONE menu (:35-49) —
+  one menu's worth of popover machinery for a two-item menu
+  (motion_controls' module doc).
+- Translucent parts composite in slot order (no sort among translucents,
+  depth-write off) where SceneKit sorts transparents back-to-front —
+  cosmetic; the offscreen playback shots are the eyeball-verdict venue
+  (the M0/M6 pattern).
+- `ToggleParameters` is the only keybound command without a menu entry —
+  upstream surfaces it as a menu button (Commands.swift:69-73). Deferred
+  to M8's command system (the T8 review's minor).
+- The no-model whole-bar disable is absent: upstream disables the ENTIRE
+  controls row when `output.mesh == nil` (ModelPane.swift:151); the port's
+  bar keeps preset/toggles clickable with no model. M6 T9 provenance
+  (pre-existing at M7's base); fixwave-shaped — an `on_press_maybe` sweep
+  across the whole bar, including the port-specific MSAA toggle upstream
+  cannot answer.
+- Exact-tie rounding: `format_significant`'s headroom path formats
+  ties-to-even (Rust `{:.N}`) where Swift/ICU rounds half-up — e.g.
+  `0.125(1,2)` → "0.12" vs "0.13". Unpinned by the brief and contrived
+  for real study values; a note for future formatter hardening (the T5
+  review's minor).
 
 ## M8 (parity tail)
 

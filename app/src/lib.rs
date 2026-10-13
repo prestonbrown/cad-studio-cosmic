@@ -10,9 +10,12 @@
 //! wrap slice `app/tests/m5_slice.rs` adds the python check, slider
 //! rebuild, version restore, and compare picker on top; M6's model tests
 //! `app/tests/viewer_tools_model.rs` + `app/tests/parts_overlay_model.rs`
-//! pin the viewer-tool state and the overlay's badge/section text):
+//! pin the viewer-tool state and the overlay's badge/section text; M7's
+//! `app/tests/motion_controls_model.rs` pins the playback capsule's
+//! Swift-format shapes):
 //!
-//! - [`activity`] — the header's ActivityViewer model + issue list (pure).
+//! - [`activity`] — the header's ActivityViewer model + issue list (pure);
+//!   motion errors and collision warnings join the list (M7).
 //! - [`app`] — the `cosmic::Application`: windows, sheets, commands,
 //!   startup reap + SIGTERM, portals, DBus reveal.
 //! - [`bridge`] — turn driving over the engine session: the send queue,
@@ -41,7 +44,11 @@
 //!   port and its EnvEvent-to-state reduction), and agent-missing sheets.
 //! - [`viewer_pane`] — the embedded 3D viewer: scene reload from `output/`,
 //!   status bar, parameters overlay host, and the M6 tool wiring
-//!   (arrangement poses, plate scene, frozen grid, section).
+//!   (arrangement poses, plate scene, frozen grid, section). M7 adds the
+//!   motion half: the playback clock (a `time::every(TICK)` subscription
+//!   mounted only while animating AND playing), animating's mutual
+//!   exclusion with measuring/sectioning, and the study reload whose
+//!   error and collision counts feed the header's issues.
 //! - [`viewer_tools`] — the ModelViewerState port: the 3D pane's tool
 //!   state (grid/wireframe/measure/section/layout/explode/hidden) (M6).
 //! - [`windows`] — the welcome and project windows.
