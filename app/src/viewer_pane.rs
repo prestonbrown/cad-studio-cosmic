@@ -913,17 +913,20 @@ impl ViewerPane {
             &self.tools.attached,
         );
         let all_hidden = !arranged.visible.iter().any(|v| *v);
+        // ModelPane.swift:78-80: an arrangement whose visible set is empty
+        // draws the assembled MODEL (`output.mesh`), never the plate — the
+        // model scene stages ahead of the plate whenever every group hides.
+        let draw_plate = arranged.plate_scene && !all_hidden;
 
         // Scene selection: the plate replaces the model when the
         // arrangement calls for it, hidden-filtered by group like the model
-        // slots (the all-hidden fallback draws everything assembled, so the
-        // UNFILTERED plate stages). The caches keep a scene swap off the
-        // explode/hidden sweep path — those write poses only.
+        // slots. The caches keep a scene swap off the explode/hidden sweep
+        // path — those write poses only.
         let mut swapped = false;
-        if arranged.plate_scene {
+        if draw_plate {
             if self.plate_scene_cache.is_none() {
                 self.plate_scene_cache = Some(Arc::new(PartScene::from_parts(
-                    &self.visible_plate_parts(all_hidden),
+                    &self.visible_plate_parts(),
                     NEUTRAL,
                 )));
             }
@@ -942,7 +945,7 @@ impl ViewerPane {
         // parts.rs' `remap`, restated at the app boundary (crate-private in
         // the viewer) — as translations; hidden slots drop out of the draw.
         let identity = || Some(glam::Mat4::IDENTITY.to_cols_array_2d());
-        let poses: Vec<PartPose> = if arranged.plate_scene {
+        let poses: Vec<PartPose> = if draw_plate {
             // the plate scene stages pre-arranged geometry
             vec![identity(); self.scene.scene.parts.len()]
         } else if all_hidden {
@@ -971,7 +974,7 @@ impl ViewerPane {
         // ZERO-offset all-parts union at all-hidden (the fallback draws the
         // assembled model — the plane must not keep the exploded aabb);
         // the visible-only arrangement otherwise.
-        let eff = if arranged.plate_scene {
+        let eff = if draw_plate {
             self.plate_scene_aabb_as_model()
         } else if all_hidden {
             arrangement::effective_model_aabb(
@@ -989,13 +992,13 @@ impl ViewerPane {
         // at all-hidden that KEEPS the arrangement offsets (T1's caller
         // contract — the degrade feeds framing only, so the all-hidden
         // frame matches the layout the user lands in on unhiding).
-        let framing_eff = if arranged.plate_scene {
+        let framing_eff = if draw_plate {
             eff
         } else {
             arrangement::effective_model_aabb(&self.model_parts, &arranged)
         };
         self.effective_aabb = eff;
-        self.frame_aabb = if arranged.plate_scene {
+        self.frame_aabb = if draw_plate {
             (self.scene.scene.aabb_min, self.scene.scene.aabb_max)
         } else {
             self.scene_aabb_of(framing_eff)
@@ -1054,12 +1057,9 @@ impl ViewerPane {
 
     /// The plate parts the hidden filter keeps — group-keyed like the model
     /// slots (a plate part outside every model group falls back to its own
-    /// base name, mirroring arrange()'s mapping); the all-hidden fallback
-    /// stages the whole plate.
-    fn visible_plate_parts(&self, all_hidden: bool) -> Vec<Part> {
-        if all_hidden {
-            return self.plate_parts.clone();
-        }
+    /// base name, mirroring arrange()'s mapping). Never called all-hidden:
+    /// that fallback draws the assembled MODEL, so the plate stages nothing.
+    fn visible_plate_parts(&self) -> Vec<Part> {
         let group_of: HashMap<String, String> = arrangement::groups(&self.model_parts)
             .iter()
             .flat_map(|g| g.members.iter().map(move |m| (m.clone(), g.name.clone())))
@@ -2257,6 +2257,50 @@ mod tests {
         );
         let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
         assert_eq!(pane.scene.bed, None, "bed only in plate view");
+    }
+
+    #[test]
+    fn all_hidden_in_plate_view_falls_back_to_the_assembled_model() {
+        // ModelPane.swift:78-80: an arrangement whose visible set is empty
+        // draws `output.mesh` — the assembled MODEL, not the unfiltered
+        // plate — so the drawn scene swaps back with identity poses and a
+        // model-derived effective box (the section/framing domain follows)
+        let (root, mut pane) = pane("plate-hide-all", &[], &["golden/model.3mf"]);
+        std::fs::copy(fixture("golden/plate.3mf"), root.join("output/plate.3mf")).unwrap();
+        let _ = pane.update(Message::Reload(ReloadKind::Plate));
+        let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
+        assert!(
+            !Arc::ptr_eq(&pane.scene.scene, &pane.model_scene),
+            "precondition: the plate scene draws"
+        );
+        let _ = pane.update(Message::ToggleHiddenGroup("base".into()));
+        let _ = pane.update(Message::ToggleHiddenGroup("lid".into()));
+        assert!(
+            Arc::ptr_eq(&pane.scene.scene, &pane.model_scene),
+            "all-hidden draws the assembled model, never the plate"
+        );
+        assert!(
+            pane.scene.poses.iter().all(|p| p.is_some()),
+            "the fallback shows everything: identity poses"
+        );
+        // the effective box is the assembled MODEL's (the whole staged
+        // scene mapped back), not the plate's
+        let scene = &pane.scene.scene;
+        let a = scene.to_model(scene.aabb_min);
+        let b = scene.to_model(scene.aabb_max);
+        let want = (
+            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+        );
+        for axis in 0..3 {
+            assert!(
+                (pane.effective_aabb.0[axis] - want.0[axis]).abs() < 1e-3
+                    && (pane.effective_aabb.1[axis] - want.1[axis]).abs() < 1e-3,
+                "axis {axis}: effective {:?} vs the assembled model {:?}",
+                pane.effective_aabb,
+                want
+            );
+        }
     }
 
     #[test]
