@@ -255,6 +255,11 @@ async fn startup_check_through_slider_to_restore() {
     )
     .await;
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(1));
+    assert_eq!(
+        window.metadata.current_version,
+        Some(1),
+        "the turn-end save point refreshes the menu pointer"
+    );
     assert!(
         chat_has_row(&window, Role::Summary, "Version 1"),
         "the driver-appended version row renders live: {:?}",
@@ -339,8 +344,14 @@ async fn startup_check_through_slider_to_restore() {
         "the watcher-driven reload rebuilt the 2-part scene"
     );
 
-    // version 2 recorded, its row rendered live, the activity classified
+    // version 2 recorded, its row rendered live, the activity classified,
+    // and the version menu's pointer current (the fresh-metadata refresh)
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(2));
+    assert_eq!(
+        window.metadata.current_version,
+        Some(2),
+        "the menu's current pointer follows a slider-only record"
+    );
     assert!(
         chat_has_row(&window, Role::Summary, "Version 2"),
         "the slider build's version row renders live: {:?}",
@@ -369,6 +380,7 @@ async fn startup_check_through_slider_to_restore() {
         "wall = 3\nheight = 12\n"
     );
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(3));
+    assert_eq!(window.metadata.current_version, Some(3));
     let _ = collect_reloads(&reloads, &[ReloadKind::Mesh]); // drain the burst
 
     // ── restore(2) through the window's own message: model.py, chat and
@@ -514,4 +526,142 @@ async fn failed_build_renders_row_activity_and_fix_action() {
     }
     drop(messages);
     drop(guard);
+}
+
+/// A refused send keeps the draft in the input bar (M5 branch review
+/// MAJOR 1): python not verified, the user types and sends — the text
+/// STAYS in the pane (and the attachments with it), the bridge's parked
+/// copy clears, and once the environment verifies, the same text sends
+/// and the bar empties.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_send_keeps_the_draft_in_the_input_bar() {
+    let guard = ENV_LOCK.lock().await;
+
+    let root = project_with_script();
+    // SAFETY: fake env holds this suite's ENV_LOCK for the whole test.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
+        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/pong.jsonl"));
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+    }
+
+    let settings = Settings::default();
+    let (bridge, mut messages) =
+        Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
+    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    // python Unknown — the send gate refuses (the first-run canonical path)
+
+    // the user types into the input bar, then attaches a reference
+    let typed = "a 20 mm cube";
+    let _ = window.update(Message::Chat(app::chat_view::Message::Draft(
+        cosmic::widget::text_editor::Action::Edit(cosmic::iced::widget::text_editor::Edit::Paste(
+            std::sync::Arc::new(typed.into()),
+        )),
+    )));
+    assert_eq!(window.chat_pane.draft(), typed, "the typing staged");
+    window.chat.draft_attachments = vec!["references/bracket.png".into()];
+
+    // Send: refused on python readiness — the draft must survive
+    let _ = window.update(Message::Chat(app::chat_view::Message::Send));
+    assert_eq!(
+        window.chat_pane.draft(),
+        typed,
+        "a refused send keeps the text in the input bar"
+    );
+    assert_eq!(window.chat.draft, typed, "the mirror re-staged");
+    assert_eq!(
+        window.chat.draft_attachments,
+        vec!["references/bracket.png".to_string()],
+        "the attachments stay staged"
+    );
+    assert!(
+        window.bridge.draft_text_for_test().is_none(),
+        "the bridge's parked copy cleared — one home for the draft"
+    );
+    // the refusal announced the sheet (drain it so the stream stays clean)
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::PythonSheetRequested),
+        "the refusal's sheet request",
+    )
+    .await;
+
+    // the environment verifies; the SAME text now sends and the bar empties
+    window.bridge.set_python_state(EnvState::Ready {
+        build123d_version: "0.8.1".into(),
+    });
+    let _ = window.update(Message::Chat(app::chat_view::Message::Send));
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::TurnStarted { prompt, .. } if prompt == typed),
+        "the re-sent turn",
+    )
+    .await;
+    assert_eq!(
+        window.chat_pane.draft(),
+        "",
+        "a successful send empties the bar"
+    );
+    assert!(window.chat.draft_attachments.is_empty());
+    run_until(
+        &mut window,
+        &mut messages,
+        |m| matches!(m, BridgeMessage::Event(EngineEvent::TurnFinished(_))),
+        "the turn's terminal",
+    )
+    .await;
+
+    // SAFETY: env cleanup still inside the ENV_LOCK window.
+    unsafe {
+        std::env::remove_var("CAD_TEST_CLAUDE");
+        std::env::remove_var("CAD_FAKE_SCENARIO");
+        std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+    }
+    drop(messages);
+    drop(guard);
+}
+
+/// The parameters overlay's collapse state persists through the engine
+/// settings (M5 branch review MINOR 1): the seed comes from
+/// `Settings.parameters_collapsed` at open, and the toggle writes back
+/// through the window's settings path (the single-writer law).
+#[tokio::test(flavor = "multi_thread")]
+async fn parameters_collapse_persists_through_engine_settings() {
+    let root = project_with_script();
+    let settings = Settings {
+        parameters_collapsed: true,
+        ..Settings::default()
+    };
+    let (bridge, _messages) =
+        Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
+    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    assert!(
+        window.viewer.parameters.collapsed,
+        "the pane seeds from the persisted setting"
+    );
+
+    // a disposable settings file — the real one is the user's
+    let settings_file = root.parent().unwrap().join("settings.json");
+    window.set_settings_path_for_test(settings_file.clone());
+    let _ = window.update(Message::Viewer(app::viewer_pane::Message::Parameters(
+        app::parameters_view::Message::Collapse(false),
+    )));
+    assert!(
+        !window.viewer.parameters.collapsed,
+        "the pane followed the toggle"
+    );
+    let saved = Settings::load(&settings_file).unwrap();
+    assert!(!saved.parameters_collapsed, "the toggle persisted");
+
+    // and a fresh window over the same settings seeds the saved state
+    let (bridge2, _messages2) =
+        Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
+    let window2 = ProjectWindow::with_bridge(
+        root.clone(),
+        &Settings::load(&settings_file).unwrap(),
+        bridge2,
+    );
+    assert!(!window2.viewer.parameters.collapsed);
 }
