@@ -21,10 +21,13 @@ use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
 
 /// Upstream's welcome geometry (WelcomeWindow.swift:14-21): a 480 px
-/// actions pane beside a 300 px recents list, 460 px tall.
+/// actions pane beside a 300 px recents list, 460 px tall. The port runs
+/// 560 px: the first-run setup sheet must fit inside the window with its
+/// action row pinned (macOS sheets may exceed the window; popovers may
+/// not), and 460 clipped it.
 pub const ACTIONS_WIDTH: f32 = 480.0;
 pub const RECENTS_WIDTH: f32 = 300.0;
-pub const WINDOW_HEIGHT: f32 = 460.0;
+pub const WINDOW_HEIGHT: f32 = 560.0;
 
 /// The new-project sheet (NewProjectSheet.swift).
 pub mod new_project {
@@ -125,7 +128,13 @@ pub mod new_project {
                 )
                 .spacing(8),
         );
-        container(stack).padding(20).width(480.0).into()
+        // Dialog card (opaque) — a bare container let the welcome content
+        // behind bleed through the sheet in its popover.
+        container(stack)
+            .padding(20)
+            .width(480.0)
+            .class(cosmic::theme::Container::Dialog(true))
+            .into()
     }
 
     fn dim_text() -> cosmic::theme::Text {

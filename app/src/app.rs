@@ -66,6 +66,13 @@ pub enum Message {
     /// A window's header close button: libcosmic's `on_close` is
     /// message-only, so the handler must issue the `window::close` itself.
     CloseWindow(window::Id),
+    /// Header-bar drag: start an interactive move (libcosmic's shell wires
+    /// `Action::Drag`; this port's custom `decorate` emits it as a message).
+    DragWindow(window::Id),
+    /// Header-bar double-click: toggle maximized.
+    ToggleMaximize(window::Id),
+    /// Header-bar right-click: the window menu.
+    WindowMenu(window::Id),
     /// A window finished closing (the platform Closed event).
     WindowClosed(window::Id),
     /// The startup/verify locate finished (`true` = a working executable).
@@ -172,6 +179,9 @@ impl Application for CadStudio {
             Message::PythonSheet(msg) => self.update_python_sheet(msg),
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
+            Message::DragWindow(id) => cosmic::iced::window::drag(id),
+            Message::ToggleMaximize(id) => cosmic::iced::window::toggle_maximize(id),
+            Message::WindowMenu(id) => cosmic::iced::window::show_system_menu(id),
             Message::WindowClosed(id) => self.window_closed(id),
             Message::AgentLocated(found) => {
                 if found {
@@ -251,10 +261,44 @@ impl Application for CadStudio {
         let focused = self.core.focused_window() == Some(id);
         match self.windows.get(&id) {
             Some(WindowKind::Welcome) => {
+                // The first-run setup sheet REPLACES the welcome body.
+                // Presented as a popover it had to be modal (upstream is
+                // dismiss-blocked), and libcosmic's modal popovers capture
+                // mouse events window-wide — killing the header bar's
+                // drag/close. As the body, the card centers in the window
+                // and the chrome stays live.
+                if let Some(setup) = &self.setup {
+                    let card: Element<'_, Message> =
+                        sheets::view_setup(setup).map(Message::SetupSheet);
+                    let centered = container(card)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(cosmic::iced::alignment::Horizontal::Center)
+                        .align_y(cosmic::iced::alignment::Vertical::Center)
+                        .into();
+                    return self.decorate(id, focused, centered, "Welcome to CAD Studio");
+                }
                 let body = self
                     .welcome
                     .view(self.recents.paths())
                     .map(Message::Welcome);
+                // The new-project sheet presents over the welcome window
+                // (NewProjectSheet.swift attaches there). It also replaces
+                // the body — a modal popover would kill the window chrome
+                // (see the setup branch above).
+                let body = match self.welcome.creating.as_ref() {
+                    Some(sheet) => {
+                        let card: Element<'_, Message> = welcome::new_project::view(sheet)
+                            .map(|m| Message::Welcome(welcome::Message::NewSheet(m)));
+                        container(card)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(cosmic::iced::alignment::Horizontal::Center)
+                            .align_y(cosmic::iced::alignment::Vertical::Center)
+                            .into()
+                    }
+                    None => body,
+                };
                 let with_sheet = self.apply_sheets(body);
                 self.decorate(id, focused, with_sheet, "Welcome to CAD Studio")
             }
@@ -700,23 +744,29 @@ impl CadStudio {
         Task::none()
     }
 
-    /// Wrap a window's body with the app-level sheets (first-run setup
-    /// first — it is dismiss-blocked upstream — then the python sheet,
-    /// then agent-missing; ProjectWindow.swift:59-68 stacks python over
-    /// agent-missing, and the first-run gate sits before both).
+    /// Wrap a window's body with the app-level sheets (python setup, then
+    /// agent-missing; ProjectWindow.swift:59-68 stacks python over
+    /// agent-missing). The first-run sheet is NOT here: it replaces the
+    /// welcome body instead (see `view_window`) because a modal popover
+    /// captures mouse events window-wide, killing the window chrome.
+    /// These two are modal gates over the project canvas — blocking the
+    /// content behind them is the intent.
     fn apply_sheets<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {
         let mut pop = popover(body);
-        if let Some(setup) = &self.setup {
-            let sheet: Element<'_, Message> = sheets::view_setup(setup).map(Message::SetupSheet);
-            pop = pop.popup(sheet);
-        } else if self.python.presented {
+        let mut presented = false;
+        if self.python.presented {
             let sheet: Element<'_, Message> =
                 sheets::view_python_setup(&self.python).map(Message::PythonSheet);
             pop = pop.popup(sheet);
+            presented = true;
         } else if let Some(sheet) = &self.agent_missing {
             let sheet: Element<'_, Message> =
                 sheets::view_agent_missing(sheet).map(Message::AgentSheet);
             pop = pop.popup(sheet);
+            presented = true;
+        }
+        if presented {
+            pop = pop.modal(true);
         }
         pop.into()
     }
@@ -736,7 +786,14 @@ impl CadStudio {
                     cosmic::widget::header_bar()
                         .title(title.to_string())
                         .focused(focused)
-                        .on_close(Message::CloseWindow(id)),
+                        .on_close(Message::CloseWindow(id))
+                        // libcosmic's shell wires these on its own header
+                        // bars (src/app/mod.rs:782-784); the port's custom
+                        // decorate must wire them itself or the window
+                        // cannot be moved, maximized, or menu'd.
+                        .on_drag(Message::DragWindow(id))
+                        .on_double_click(Message::ToggleMaximize(id))
+                        .on_right_click(Message::WindowMenu(id)),
                 )
                 .push(body),
         )

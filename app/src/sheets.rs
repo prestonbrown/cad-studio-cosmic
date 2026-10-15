@@ -11,12 +11,14 @@
 //! the app itself saves the engine settings file. Verify re-locates and
 //! dismisses only when a working executable turns up.
 //!
-//! Cosmetic port notes: upstream's `CodeBlock` and pickers become a mono
-//! block with a copy button and radio-style option lists (no nested popup
-//! inside a modal); the PythonSetupSheet's DisclosureGroup becomes a
-//! toggle button over the mono log. User-visible strings follow the
-//! landed modules' convention: plain English values, each named for its
-//! en/main.ftl key, pending the repo-wide `fl!()` swap.
+//! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
+//! copy button; pickers are compact dropdowns. Sheets render as Dialog
+//! cards (opaque, rounded, shadowed) in a modal popover, with scrollable
+//! content and pinned action rows so nothing clips in a short window; the
+//! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
+//! mono log. User-visible strings follow the landed modules' convention:
+//! plain English values, each named for its en/main.ftl key, pending the
+//! repo-wide `fl!()` swap.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,7 +27,7 @@ use cosmic::iced::Color;
 use cosmic::iced::Length;
 use cosmic::iced::widget::container::Style as ContainerStyle;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::widget::{Column, Row, Space, button, container, text_input};
+use cosmic::widget::{Column, Row, Space, button, container, scrollable, text_input};
 use cosmic::{Element, Task};
 use engine::agent::locator::find_executable;
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
@@ -140,28 +142,37 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
             sheet
                 .last_verified_missing
                 .then(|| body("No working executable found.".to_string()).class(error_text())),
+        );
+    let actions = Row::new()
+        .spacing(8)
+        .push(
+            button::text("Open Terminal")
+                .class(cosmic::theme::Button::Standard)
+                .on_press(AgentMessage::OpenTerminal),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(
+            button::text("Close")
+                .class(cosmic::theme::Button::Standard)
+                .on_press(AgentMessage::Close),
         )
         .push(
-            Row::new()
-                .spacing(8)
-                .push(
-                    button::text("Open Terminal")
-                        .class(cosmic::theme::Button::Standard)
-                        .on_press(AgentMessage::OpenTerminal),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::text("Close")
-                        .class(cosmic::theme::Button::Standard)
-                        .on_press(AgentMessage::Close),
-                )
-                .push(
-                    button::text("Verify")
-                        .class(cosmic::theme::Button::Suggested)
-                        .on_press_maybe((!sheet.checking).then_some(AgentMessage::Verify)),
-                ),
+            button::text("Verify")
+                .class(cosmic::theme::Button::Suggested)
+                .on_press_maybe((!sheet.checking).then_some(AgentMessage::Verify)),
         );
-    container(stack).padding(20).width(560.0).into()
+    // Dialog card: opaque, rounded, shadowed — a bare container in the
+    // popover let the window content behind bleed through the sheet.
+    // The content scrolls above the cap; the action row stays pinned.
+    let card = Column::new()
+        .spacing(14)
+        .push(container(scrollable(stack)).max_height(420.0))
+        .push(actions);
+    container(card)
+        .padding(20)
+        .width(560.0)
+        .class(cosmic::theme::Container::Dialog(true))
+        .into()
 }
 
 // ─── first-run setup sheet ─────────────────────────────────────────────────
@@ -257,13 +268,23 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
             "Tell us how you print: you can change this any time in Settings.".to_string(),
         ));
 
-    let mut form = Column::new().spacing(16);
-    form = form.push(option_list(
-        "Printer type:",
-        PRINTER_TYPES.map(printer_type_title),
-        sheet.printer_type as usize,
-        |index| SetupMessage::PrinterType(PRINTER_TYPES[index]),
-    ));
+    // Upstream's Pickers, as compact dropdowns: the radio-list expansion
+    // this view shipped with made the sheet taller than the 460 px
+    // welcome window, clipping the unit list and Continue off-screen.
+    let printer_types = PRINTER_TYPES.map(printer_type_title).to_vec();
+    let units = MEASUREMENT_UNITS.map(measurement_unit_title).to_vec();
+
+    let mut form = Column::new().spacing(12);
+    form = form.push(
+        Column::new()
+            .spacing(6)
+            .push(body("Printer type:".to_string()))
+            .push(cosmic::widget::dropdown(
+                printer_types,
+                Some(sheet.printer_type as usize),
+                |index| SetupMessage::PrinterType(PRINTER_TYPES[index]),
+            )),
+    );
     form = form
         .push(
             Column::new()
@@ -278,60 +299,38 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
                     .size(14),
                 ),
         )
-        .push(option_list(
-            "Measurement unit:",
-            MEASUREMENT_UNITS.map(measurement_unit_title),
-            sheet.unit as usize,
-            |index| SetupMessage::Unit(MEASUREMENT_UNITS[index]),
-        ))
+        .push(
+            Column::new()
+                .spacing(6)
+                .push(body("Measurement unit:".to_string()))
+                .push(cosmic::widget::dropdown(
+                    units,
+                    Some(sheet.unit as usize),
+                    |index| SetupMessage::Unit(MEASUREMENT_UNITS[index]),
+                )),
+        )
         .push(
             body("The agent adapts wall thickness, clearances and printing advice to your printer and uses the chosen unit in responses and drawings. STL and 3MF files always stay in millimeters.".to_string())
                 .class(secondary_text()),
         );
 
-    let stack = Column::new().spacing(18).push(head).push(form).push(
-        Row::new().push(Space::new().width(Length::Fill)).push(
-            button::text("Continue")
-                .class(cosmic::theme::Button::Suggested)
-                .on_press(SetupMessage::Continue),
-        ),
+    // The form scrolls if it ever outgrows the cap (a small window);
+    // Continue stays pinned below it, never scrolled away.
+    let stack = Column::new().spacing(14).push(head).push(form);
+    let actions = Row::new().push(Space::new().width(Length::Fill)).push(
+        button::text("Continue")
+            .class(cosmic::theme::Button::Suggested)
+            .on_press(SetupMessage::Continue),
     );
-    container(stack).padding(20).width(560.0).into()
-}
-
-/// One labeled radio-style option list; `pick` maps the option index to the
-/// typed message. The picked row carries the check icon; unpicked rows
-/// reserve the icon column so the labels align (upstream's Picker rows).
-fn option_list<'a>(
-    label: &str,
-    options: [&'a str; 4],
-    selected: usize,
-    pick: fn(usize) -> SetupMessage,
-) -> Element<'a, SetupMessage> {
-    let mut list = Column::new().spacing(4).push(body(label.to_string()));
-    for (index, option) in options.into_iter().enumerate() {
-        let picked = index == selected;
-        // the mark column: a check icon when picked, reserved blank space
-        // otherwise, so the labels align (upstream's Picker rows)
-        let mark: Element<'_, SetupMessage> = if picked {
-            icon("object-select", 14).into()
-        } else {
-            Space::new().width(14).into()
-        };
-        list = list.push(
-            button::custom(
-                Row::new()
-                    .spacing(8)
-                    .push(mark)
-                    .push(body(option.to_string()))
-                    .width(Length::Fill),
-            )
-            .class(cosmic::theme::Button::Transparent)
-            .padding([4, 8])
-            .on_press(pick(index)),
-        );
-    }
-    list.into()
+    let card = Column::new()
+        .spacing(14)
+        .push(container(scrollable(stack)).max_height(420.0))
+        .push(actions);
+    container(card)
+        .padding(20)
+        .width(600.0)
+        .class(cosmic::theme::Container::Dialog(true))
+        .into()
 }
 
 // ─── python setup sheet ─────────────────────────────────────────────────────
@@ -554,13 +553,21 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             .class(subtle_block()),
         );
     }
-    let stack = stack.push(
-        Row::new()
-            .spacing(8)
-            .push(Space::new().width(Length::Fill))
-            .push(python_buttons(&state.state)),
-    );
-    container(stack).padding(20).width(520.0).into()
+    let actions = Row::new()
+        .spacing(8)
+        .push(Space::new().width(Length::Fill))
+        .push(python_buttons(&state.state));
+    // Dialog card (opaque) with the log-bearing content scrollable above
+    // the cap and the state-driven buttons pinned below it.
+    let card = Column::new()
+        .spacing(14)
+        .push(container(scrollable(stack)).max_height(420.0))
+        .push(actions);
+    container(card)
+        .padding(20)
+        .width(520.0)
+        .class(cosmic::theme::Container::Dialog(true))
+        .into()
 }
 
 /// The button row for one state (PythonSetupSheet.swift:61-82): the busy

@@ -277,5 +277,23 @@ From the M4 T3 bridge review (2026-10-13):
 ## M9 / general
 
 - Visual gates honestly unclosed by M0: Preston's eyeball verdict on
-  shots/ PNGs still pending; window smoke-run of the scaffold app deferred.
+  shots/ PNGs still pending; ~~window smoke-run of the scaffold app
+  deferred.~~ (First window smoke-run 2026-10-15 — first-run sheet and
+  window chrome findings fixed on branch `ui-smoke`; see below.)
+- libcosmic (pin dbc62f2) modal popovers capture mouse events
+  WINDOW-WIDE (popover.rs Overlay::update swallows every Mouse/Touch
+  event outside the popup card, header bar included): a modal popover
+  kills drag/close/maximize on the CSD header. Sheets that must keep the
+  chrome alive replace the window body instead (first-run setup,
+  new-project — app.rs `view_window`); modal popovers stay only over the
+  project canvas (python/agent sheets) where blocking is the intent.
+- Custom `decorate` must wire header_bar `on_drag`/`on_double_click`/
+  `on_right_click` itself — libcosmic's shell does it for its own bars
+  (src/app/mod.rs:782-784); the port's bar was inert until 2026-10-15.
+- Welcome window height diverges from upstream's 460 (WelcomeWindow.swift)
+  to 560: macOS sheets may exceed their window; popovers/content cannot,
+  and 460 clipped the setup card. Documented at WINDOW_HEIGHT.
+- Desktop entry + icon (`net.brownhouse.CadStudio`) installed USER-LOCAL
+  on thelio only (~/.local/share/{applications,icons}) for the dock;
+  needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
