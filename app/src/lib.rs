@@ -63,6 +63,7 @@ pub mod camera_input;
 pub mod chat;
 pub mod chat_view;
 pub mod compare_pane;
+pub mod drive;
 pub mod localize;
 pub mod markdown;
 pub mod motion_controls;

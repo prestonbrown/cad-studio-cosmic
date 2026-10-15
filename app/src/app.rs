@@ -167,7 +167,11 @@ impl Application for CadStudio {
         // state (a missing/failed venv presents the sheet once first-run
         // setup is done)
         let python_check = python_events(check(&venv_dir(), &streaming_spawn()));
-        (app, Task::batch([locate, sigterm, python_check]))
+        // the optional UI drive harness (CAD_STUDIO_DRIVE): a script of
+        // user-action messages streamed into the loop — the smoke-run
+        // replacement for synthetic input, which COSMIC 1.6 gates
+        let drive = crate::drive::startup_task().map(Action::App);
+        (app, Task::batch([locate, sigterm, python_check, drive]))
     }
 
     fn update(&mut self, message: Message) -> Task<Action<Message>> {

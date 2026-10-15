@@ -296,8 +296,17 @@ pub fn view_chat<'a>(
     queue: &'a [QueueItem],
     queue_paused: bool,
 ) -> Element<'a, Message> {
-    let transcript: Element<'a, Message> = if chat.messages.is_empty() {
-        empty_state()
+    // The transcript area is ALWAYS a scrollable — swapping an empty-state
+    // column into the slot and back lands a stateful scrollable on a
+    // stateless widget tree on the first message, which iced's positional
+    // tree diff cannot reconcile (panic: "Downcast on stateless state").
+    let body: Element<'_, Message> = if chat.messages.is_empty() {
+        container(empty_state())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(cosmic::iced::alignment::Horizontal::Center)
+            .align_y(cosmic::iced::alignment::Vertical::Center)
+            .into()
     } else {
         let mut rows = Column::new().spacing(12).padding(12).width(Length::Fill);
         for entry in entries(chat, busy) {
@@ -306,12 +315,12 @@ pub fn view_chat<'a>(
                 ChatEntry::StreamingIndicator => streaming_indicator(),
             });
         }
-        cosmic::widget::scrollable::scrollable(rows)
-            .id(transcript_id())
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .into()
+        rows.into()
     };
+    let transcript = cosmic::widget::scrollable::scrollable(body)
+        .id(transcript_id())
+        .height(Length::Fill)
+        .width(Length::Fill);
     Column::new()
         .push(transcript)
         .push(input_bar(pane, chat, busy, queue, queue_paused))

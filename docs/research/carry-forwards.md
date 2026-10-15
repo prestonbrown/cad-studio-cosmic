@@ -276,6 +276,26 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
+- **BLOCKER (2026-10-15 smoke-run): opening a project window panics on its
+  2nd/3rd frame** — `Downcast on stateless state` (iced tree.rs:505) at
+  TextEditor layout inside the chat pane (backtrace: popover root → … →
+  IdContainer pane → Column → Row → TextEditor). PRE-EXISTING: reproduces
+  on 60dfe7e (pre-ui-smoke) with only the drive harness cherry-picked on
+  — M4-T8's "window assembly smoke-checked by building one frame's
+  element tree" never exercised a second frame. Deterministic repro:
+  `CAD_STUDIO_DRIVE=<script>` (see app/src/drive.rs) with
+  `setup Continue / recent <project>` — crash within ~2 s of open, no
+  user input. Trace (CAD_STUDIO_TRACE=1): two IDENTICAL view builds
+  (same panes/msgs/queue/flags) then panic at layout — the corrupting
+  swap is not in ProjectWindow state. RULED OUT: transcript
+  empty↔populated swap (chat_view now keeps the scrollable mounted in
+  both states — kept as a hardening fix), the `responsive` wrapper
+  (bypassed, still crashes), pane iteration order (BTreeMap, stable),
+  the editor's widget id (stable "chat-input"). Remaining suspects: an
+  ancestor subtree cross-matched positionally inside the pane-grid /
+  multi-window tree cache (iced_winit build_user_interfaces), or a
+  cosmic pane_grid Content diff gap. Needs: instrumented
+  Tree::diff_children_custom or gdb on the debug build at the panic.
 - Visual gates honestly unclosed by M0: Preston's eyeball verdict on
   shots/ PNGs still pending; ~~window smoke-run of the scaffold app
   deferred.~~ (First window smoke-run 2026-10-15 — first-run sheet and

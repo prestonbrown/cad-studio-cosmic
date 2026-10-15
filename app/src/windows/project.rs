@@ -905,12 +905,35 @@ impl ProjectWindow {
     /// The whole window: header over the pane grid (upstream
     /// ProjectSplitView), with the open issue list as a popover.
     pub fn view(&self) -> Element<'_, Message> {
-        let events = self.events.clone();
-        let last_size = self.last_size.clone();
-        let this = self;
+        // TEMP smoke instrumentation: the project window panics on its
+        // second-ish frame ("Downcast on stateless state"); log the
+        // structural choices per build to catch the swapping pair.
+        if std::env::var_os("CAD_STUDIO_TRACE").is_some() {
+            let panes: Vec<&str> = self
+                .grid
+                .iter()
+                .map(|(_, kind)| match kind {
+                    PaneKind::Chat => "chat",
+                    PaneKind::Model3D => "3d",
+                    PaneKind::Schematic => "sch",
+                })
+                .collect();
+            eprintln!(
+                "TRACE view: panes={:?} msgs={} busy={} queue={} flash={:?} issues={:?}",
+                panes,
+                self.chat.messages.len(),
+                self.is_busy(),
+                self.queue.len(),
+                self.focus_flash,
+                self.shown_issues,
+            );
+        }
         // the grid reports its laid-out size through the shell relay: the
         // resize clamp needs the GRID extent, and the window size would
         // ignore the header (the panes' responsive report pattern)
+        let events = self.events.clone();
+        let last_size = self.last_size.clone();
+        let this = self;
         let sized = cosmic::iced::widget::responsive(move |size: Size| {
             {
                 let mut last = last_size.lock().unwrap();
@@ -990,7 +1013,7 @@ impl ProjectWindow {
     /// ActivityViewer | commands menu + reveal + slicer.
     fn view_header(&self) -> Element<'_, Message> {
         let chat_toggle = button::icon(
-            cosmic::widget::icon::from_name("sidebar-hide")
+            cosmic::widget::icon::from_name("view-column")
                 .size(16)
                 .handle(),
         )
@@ -1012,7 +1035,7 @@ impl ProjectWindow {
         // upstream gates the slicer button on output.hasThreeMF
         let has_3mf = self.output_dir().join("model.3mf").exists();
         let slicer = button::icon(
-            cosmic::widget::icon::from_name("x-app-export")
+            cosmic::widget::icon::from_name("document-export")
                 .size(16)
                 .handle(),
         )

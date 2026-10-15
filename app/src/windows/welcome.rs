@@ -231,9 +231,13 @@ impl Welcome {
     /// The window body (WelcomeWindow.swift:13-88): actions pane, divider,
     /// recents list. Sheets are the app layer's popover.
     pub fn view(&self, recents: &[PathBuf]) -> Element<'_, Message> {
+        // Upstream's actions VStack(spacing: 0): Spacer / app icon 128 /
+        // title / version (+2 top) / Spacer / buttons (spacing 8, 320) /
+        // Spacer — vertically distributed, not top-hung.
         let actions = Column::new()
-            .spacing(8)
-            .push(Space::new().height(48))
+            .spacing(0)
+            .push(Space::new().height(Length::Fill))
+            .push_maybe(app_icon().map(|h| cosmic::widget::image(h).width(128).height(128)))
             .push(
                 text("CAD Studio".to_string())
                     .size(36)
@@ -242,18 +246,23 @@ impl Welcome {
                         ..cosmic::font::default()
                     }),
             )
-            .push(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).class(dim_text()))
-            .push(Space::new().height(32))
+            .push(
+                container(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).class(dim_text()))
+                    .padding([2, 0, 0, 0]),
+            )
+            .push(Space::new().height(Length::Fill))
             .push(action_button(
-                "plus-square",
+                "list-add",
                 "Create New Project…",
                 Message::NewProject,
             ))
+            .push(Space::new().height(8))
             .push(action_button(
                 "folder",
                 "Open Existing Project…",
                 Message::OpenExisting,
             ))
+            .push(Space::new().height(Length::Fill))
             .width(Length::Fill)
             .align_x(cosmic::iced::alignment::Alignment::Center);
 
@@ -314,7 +323,8 @@ impl Welcome {
         let thumbnail: Element<'_, Message> = match self.thumbnail(path) {
             Some(handle) => cosmic::widget::image(handle).width(40).height(30).into(),
             None => container(
-                cosmic::widget::icon::from_name("preferences-desktop-3d")
+                // `cube` upstream; the theme fallback is a package glyph
+                cosmic::widget::icon::from_name("package-x-generic")
                     .size(18)
                     .icon(),
             )
@@ -368,6 +378,34 @@ impl Welcome {
         cache.insert(root.to_path_buf(), loaded.clone());
         loaded
     }
+}
+
+/// The app icon (upstream `NSApp.applicationIconImage`, shown 128×128
+/// above the wordmark). Rasterized once from the embedded SVG — the same
+/// artwork as the installed desktop entry, on a transparent ground.
+fn app_icon() -> Option<Handle> {
+    thread_local! {
+        static CACHED: Option<Handle> = {
+            const SVG: &[u8] = include_bytes!("../../resources/app-icon.svg");
+            let options = resvg::usvg::Options::default();
+            let tree = match resvg::usvg::Tree::from_data(SVG, &options) {
+                Ok(tree) => tree,
+                Err(_) => return None,
+            };
+            let size = tree.size();
+            if !(size.width() > 0.0 && size.height() > 0.0) {
+                return None;
+            }
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(128, 128)?;
+            let transform = resvg::tiny_skia::Transform::from_scale(
+                128.0 / size.width(),
+                128.0 / size.height(),
+            );
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+            Some(Handle::from_rgba(128, 128, pixmap.data().to_vec()))
+        };
+    }
+    CACHED.with(Clone::clone)
 }
 
 /// Decode a PNG into an image handle (upstream `NSImage(contentsOf:)` +
