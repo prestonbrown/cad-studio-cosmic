@@ -381,28 +381,14 @@ impl Welcome {
 }
 
 /// The app icon (upstream `NSApp.applicationIconImage`, shown 128×128
-/// above the wordmark). Rasterized once from the embedded SVG — the same
-/// artwork as the installed desktop entry, on a transparent ground.
+/// above the wordmark): the original app's actual icon PNG, decoded once.
 fn app_icon() -> Option<Handle> {
     thread_local! {
         static CACHED: Option<Handle> = {
-            const SVG: &[u8] = include_bytes!("../../resources/app-icon.svg");
-            let options = resvg::usvg::Options::default();
-            let tree = match resvg::usvg::Tree::from_data(SVG, &options) {
-                Ok(tree) => tree,
-                Err(_) => return None,
-            };
-            let size = tree.size();
-            if !(size.width() > 0.0 && size.height() > 0.0) {
-                return None;
-            }
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(128, 128)?;
-            let transform = resvg::tiny_skia::Transform::from_scale(
-                128.0 / size.width(),
-                128.0 / size.height(),
-            );
-            resvg::render(&tree, transform, &mut pixmap.as_mut());
-            Some(Handle::from_rgba(128, 128, pixmap.data().to_vec()))
+            const PNG: &[u8] = include_bytes!("../../resources/app-icon.png");
+            let decoded = image::load_from_memory(PNG).ok()?.to_rgba8();
+            let (width, height) = decoded.dimensions();
+            Some(Handle::from_rgba(width, height, decoded.into_raw()))
         };
     }
     CACHED.with(Clone::clone)
