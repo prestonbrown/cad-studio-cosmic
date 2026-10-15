@@ -905,29 +905,6 @@ impl ProjectWindow {
     /// The whole window: header over the pane grid (upstream
     /// ProjectSplitView), with the open issue list as a popover.
     pub fn view(&self) -> Element<'_, Message> {
-        // TEMP smoke instrumentation: the project window panics on its
-        // second-ish frame ("Downcast on stateless state"); log the
-        // structural choices per build to catch the swapping pair.
-        if std::env::var_os("CAD_STUDIO_TRACE").is_some() {
-            let panes: Vec<&str> = self
-                .grid
-                .iter()
-                .map(|(_, kind)| match kind {
-                    PaneKind::Chat => "chat",
-                    PaneKind::Model3D => "3d",
-                    PaneKind::Schematic => "sch",
-                })
-                .collect();
-            eprintln!(
-                "TRACE view: panes={:?} msgs={} busy={} queue={} flash={:?} issues={:?}",
-                panes,
-                self.chat.messages.len(),
-                self.is_busy(),
-                self.queue.len(),
-                self.focus_flash,
-                self.shown_issues,
-            );
-        }
         // the grid reports its laid-out size through the shell relay: the
         // resize clamp needs the GRID extent, and the window size would
         // ignore the header (the panes' responsive report pattern)

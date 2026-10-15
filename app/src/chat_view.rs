@@ -799,6 +799,15 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
     line = line.push(
         text_editor::text_editor(&pane.input)
             .id(input_id())
+            // The id must live on exactly ONE tree level: cosmic's editor
+            // wrapper (context-menu mode, default) forwards the inner
+            // editor's id as its own, so both levels enter iced's
+            // name-keyed NAMED state map and clobber each other's records
+            // — the inner slot is left stateless and the next layout
+            // panics ("Downcast on stateless state"). Collapsing the
+            // wrapper keeps rip+restore symmetric; the right-click menu
+            // is the casualty until libcosmic stops forwarding id().
+            .context_menu(false)
             .placeholder(if busy { PLACEHOLDER_BUSY } else { PLACEHOLDER })
             .on_action(Message::Draft)
             // Return sends; shift/option+Return breaks the line

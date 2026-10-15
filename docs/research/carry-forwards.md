@@ -276,26 +276,36 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
-- **BLOCKER (2026-10-15 smoke-run): opening a project window panics on its
-  2nd/3rd frame** — `Downcast on stateless state` (iced tree.rs:505) at
-  TextEditor layout inside the chat pane (backtrace: popover root → … →
-  IdContainer pane → Column → Row → TextEditor). PRE-EXISTING: reproduces
-  on 60dfe7e (pre-ui-smoke) with only the drive harness cherry-picked on
-  — M4-T8's "window assembly smoke-checked by building one frame's
-  element tree" never exercised a second frame. Deterministic repro:
-  `CAD_STUDIO_DRIVE=<script>` (see app/src/drive.rs) with
-  `setup Continue / recent <project>` — crash within ~2 s of open, no
-  user input. Trace (CAD_STUDIO_TRACE=1): two IDENTICAL view builds
-  (same panes/msgs/queue/flags) then panic at layout — the corrupting
-  swap is not in ProjectWindow state. RULED OUT: transcript
-  empty↔populated swap (chat_view now keeps the scrollable mounted in
-  both states — kept as a hardening fix), the `responsive` wrapper
-  (bypassed, still crashes), pane iteration order (BTreeMap, stable),
-  the editor's widget id (stable "chat-input"). Remaining suspects: an
-  ancestor subtree cross-matched positionally inside the pane-grid /
-  multi-window tree cache (iced_winit build_user_interfaces), or a
-  cosmic pane_grid Content diff gap. Needs: instrumented
-  Tree::diff_children_custom or gdb on the debug build at the panic.
+- **FIXED (2026-10-15): project window panicked on its 2nd frame —
+  `Downcast on stateless state`** (iced tree.rs:505) at TextEditor layout
+  inside the chat pane. Root cause (proven by instrumenting
+  `Tree::take_all_named`/`Tree::diff` in the vendored iced, pin dbc62f2):
+  cosmic's `text_editor` widget in context-menu mode (`has_context_menu`,
+  default true on Linux builds) is a two-level widget — wrapper plus inner
+  iced `TextEditor` — and the wrapper's `Widget::id()` forwards the inner
+  editor's id (libcosmic src/widget/text_editor.rs). So the chat input's
+  `Id::new("chat-input")` is reported at TWO adjacent tree levels, and
+  iced's NAMED state-preservation map (thread-local, keyed by id NAME
+  only) has both levels clobber each other in `take_all_named` on every
+  cached rebuild: the second `insert` under "chat-input" drops the
+  wrapper's record (which holds the inner editor's subtree). The re-diff
+  then restores one level from the surviving record and leaves the other
+  a tag-matching stateless shell — `Tree::diff`'s self-id path swaps its
+  already-ripped `None` state back in without rebuilding — and the next
+  layout downcasts that shell. Frame 1 never panics because a fresh tree
+  comes from `Tree::new` (no rip). Fix: `.context_menu(false)` on the
+  chat input (chat_view.rs `input_bar`) so the id lives on exactly one
+  tree level; casualty is the editor's right-click context menu until
+  libcosmic stops forwarding `id()` from the wrapper (still the case on
+  upstream master as of 2026-10-15 — worth filing upstream with this
+  evidence). Verified: drive repro (`setup Continue` / `recent`) and the
+  full new-project flow (`welcome NewProject` / `sheet Name` / `sheet
+  Advance` / `parent`) both survive to the timeout kill with many view
+  builds and no panic; `cargo test --workspace` green. The
+  CAD_STUDIO_TRACE view/update probes were scaffolding for this hunt and
+  are gone; CAD_STUDIO_DRIVE stays as the smoke harness. NOTE for future
+  smokes: `parent <dir>` must name an EXISTING directory (the portal
+  contract) — `create_project` uses `create_dir`, not `create_dir_all`.
 - Visual gates honestly unclosed by M0: Preston's eyeball verdict on
   shots/ PNGs still pending; ~~window smoke-run of the scaffold app
   deferred.~~ (First window smoke-run 2026-10-15 — first-run sheet and
