@@ -282,14 +282,21 @@ From the M4 T3 bridge review (2026-10-13):
   (ActivityViewer.swift:44-46; ChatView.swift:170 — a 12pt-font, 24pt-tall
   bar); both spinners are functionally parity (both show), only sized
   large. M8: size to match if the pinned cosmic rev exposes a size handle.
-- Busy-state cold-start (2026-10-28, observed after the version-menu crash):
-  after a mid-turn crash, reopening the project appeared UNABLE to start new
-  turns — a UI-sent prompt produced no agent process and no visible error
-  (silently swallowed; suspected stale in-flight state or a silent refusal).
-  Root-cause in flight (2026-10-28); ALSO note the send-press gap:
-  update_chat's Send arm sets no local activity, so busy lags one
-  bridge-task round-trip where upstream Project.send sets .working
-  synchronously (Project.swift:192-208) — fix both in M8 wave 0.
+- Busy-state cold-start (2026-10-28, RESOLVED same day): the observed
+  silent swallow after the crash was NOT persisted busy state — a cold
+  start is idle by construction (now pinned end-to-end by
+  bridge::tests::cold_start_over_crashed_store_starts_turns over the
+  crashed store's exact shape). It was `Bridge::enqueue`'s
+  python-readiness refusal (EnvState::Unknown until the one-shot venv
+  check lands; a failed check never retried) arriving with zero
+  chat-surface feedback. Fixed: the refusal sets
+  `Activity::Failed("Python setup required")` and every enqueue-driving
+  site folds the bridge activity. Two follow-ups: the status-line naming
+  is an upstream ADDITION (upstream refuses sheet-only,
+  Project.swift:192-196 — recorded divergence), and a FAILED venv check
+  has no retry (owner: M8 settings/Python tab or wave 2). The
+  synchronous busy-rise half (Send arm sets no local activity where
+  upstream's send() does, Project.swift:192-208) remains M8 plan Task 0.
 - Version-history chrome divergence (2026-10-28, 16ea45e): upstream's
   VersionMenu is a SwiftUI `Menu` dropdown; the port renders a popover
   card (the issue-list pattern) because cosmic's menu overlay corrupts
