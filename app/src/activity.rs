@@ -15,11 +15,18 @@ use std::path::Path;
 use engine::agent::session::TurnOutcome;
 #[cfg(test)]
 use engine::project::outputs::expected_outputs;
+use engine::settings::Settings;
 
 use crate::fl;
 
-/// The engine display name (AgentLocator.swift:12 — upstream "Claude Code").
-pub const ENGINE_NAME: &str = "Claude Code";
+/// The engine display name the activity strings interpolate
+/// (AgentLocator.swift:11-16: "Claude Code" / "Codex"), read from the
+/// agent_engine setting so a mid-conversation engine flip renames the next
+/// turn's rows. Callers resolve it fresh from the settings file — the
+/// settings window's picker is a live preference.
+pub fn engine_name(settings: &Settings) -> &'static str {
+    settings.agent_kind().display_name()
+}
 
 /// What the header shows the project is doing (upstream `Activity`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,14 +144,15 @@ pub enum Signal<'a> {
     Closed,
 }
 
-/// The next activity for a signal. `missing_outputs_empty` is the
-/// missing-files state AFTER the turn (upstream recomputes before
-/// classifying, Project.swift:266-274).
-pub fn next(signal: Signal<'_>, missing_outputs_empty: bool) -> Activity {
+/// The next activity for a signal. `agent` is the engine display name
+/// ([`engine_name`]). `missing_outputs_empty` is the missing-files state
+/// AFTER the turn (upstream recomputes before classifying,
+/// Project.swift:266-274).
+pub fn next(signal: Signal<'_>, missing_outputs_empty: bool, agent: &str) -> Activity {
     match signal {
-        Signal::TurnStarted => Activity::Working(fl!("sta-lavorando", agent = ENGINE_NAME)),
+        Signal::TurnStarted => Activity::Working(fl!("sta-lavorando", agent = agent)),
         Signal::ToolOpened(title) => {
-            Activity::Working(fl!("sta-lavorando-2", agent = ENGINE_NAME, title = title))
+            Activity::Working(fl!("sta-lavorando-2", agent = agent, title = title))
         }
         Signal::TurnFinished(outcome) => match outcome {
             TurnOutcome::Success { .. } => {
@@ -157,18 +165,18 @@ pub fn next(signal: Signal<'_>, missing_outputs_empty: bool) -> Activity {
             // upstream `agentDidFinish(.failed(...))` classifications
             // (AgentSession.swift:269, 294, 301)
             TurnOutcome::Failed { auth: true, .. } => {
-                Activity::Failed(fl!("accesso-a-richiesto", agent = ENGINE_NAME))
+                Activity::Failed(fl!("accesso-a-richiesto", agent = agent))
             }
-            TurnOutcome::Failed { .. } => Activity::Failed(fl!("errore-di", agent = ENGINE_NAME)),
+            TurnOutcome::Failed { .. } => Activity::Failed(fl!("errore-di", agent = agent)),
             TurnOutcome::Cancelled => Activity::Failed(crate::chat::interrupted()),
             // Busy/MissingSession never surface as events (the engine's
             // dance absorbs them); a caller driving raw turns still ends
             // failed rather than stuck working.
             TurnOutcome::Busy | TurnOutcome::MissingSession => {
-                Activity::Failed(fl!("errore-di", agent = ENGINE_NAME))
+                Activity::Failed(fl!("errore-di", agent = agent))
             }
         },
-        Signal::Closed => Activity::Failed(fl!("errore-di", agent = ENGINE_NAME)),
+        Signal::Closed => Activity::Failed(fl!("errore-di", agent = agent)),
     }
 }
 
@@ -189,16 +197,18 @@ mod tests {
     }
 
     /// The activity transitions match AgentSession's: working on start,
-    /// working·title on each tool, and every end classification.
+    /// working·title on each tool, and every end classification. The engine
+    /// display name is the caller's input — the claude rows here, the codex
+    /// pair in the engine_name test below.
     #[test]
     fn activity_transitions_match_upstream() {
         let _lang = crate::localize::pin_en();
         assert_eq!(
-            next(Signal::TurnStarted, false),
+            next(Signal::TurnStarted, false, "Claude Code"),
             Activity::Working("Claude Code is working…".into())
         );
         assert_eq!(
-            next(Signal::ToolOpened("Writing model.py"), false),
+            next(Signal::ToolOpened("Writing model.py"), false, "Claude Code"),
             Activity::Working("Claude Code is working… · Writing model.py".into())
         );
         assert_eq!(
@@ -207,7 +217,8 @@ mod tests {
                     session_id: None,
                     text: String::new()
                 }),
-                true
+                true,
+                "Claude Code"
             ),
             Activity::Succeeded("Model generated".into())
         );
@@ -217,7 +228,8 @@ mod tests {
                     session_id: None,
                     text: String::new()
                 }),
-                false
+                false,
+                "Claude Code"
             ),
             Activity::Succeeded("Response completed".into())
         );
@@ -228,7 +240,8 @@ mod tests {
                     auth: true,
                     exit_code: Some(1)
                 }),
-                true
+                true,
+                "Claude Code"
             ),
             Activity::Failed("Sign-in to Claude Code required".into())
         );
@@ -239,17 +252,51 @@ mod tests {
                     auth: false,
                     exit_code: Some(2)
                 }),
-                true
+                true,
+                "Claude Code"
             ),
             Activity::Failed("Claude Code error".into())
         );
         assert_eq!(
-            next(Signal::TurnFinished(&TurnOutcome::Cancelled), true),
+            next(Signal::TurnFinished(&TurnOutcome::Cancelled), true, "Claude Code"),
             Activity::Failed("Stopped".into())
         );
         assert_eq!(
-            next(Signal::Closed, true),
+            next(Signal::Closed, true, "Claude Code"),
             Activity::Failed("Claude Code error".into())
+        );
+    }
+
+    /// The engine display name follows the agent_engine setting
+    /// (AgentLocator.swift:11-16), and every activity string interpolates
+    /// whatever engine the setting names.
+    #[test]
+    fn engine_name_follows_the_setting() {
+        let _lang = crate::localize::pin_en();
+        let mut s = engine::settings::Settings::default();
+        assert_eq!(engine_name(&s), "Claude Code");
+        s.agent_engine = "codex".into();
+        assert_eq!(engine_name(&s), "Codex");
+        s.agent_engine = "bogus".into();
+        assert_eq!(engine_name(&s), "Claude Code", "unknown engines read claude");
+
+        let mut codex = engine::settings::Settings::default();
+        codex.agent_engine = "codex".into();
+        assert_eq!(
+            next(Signal::TurnStarted, false, engine_name(&codex)),
+            Activity::Working("Codex is working…".into())
+        );
+        assert_eq!(
+            next(
+                Signal::TurnFinished(&TurnOutcome::Failed {
+                    error: "bad".into(),
+                    auth: false,
+                    exit_code: None
+                }),
+                true,
+                engine_name(&codex)
+            ),
+            Activity::Failed("Codex error".into())
         );
     }
 
