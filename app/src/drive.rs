@@ -17,6 +17,9 @@
 //! sheet Advance                   # the sheet's Next ( Return)
 //! sheet Cancel                    # the sheet's Cancel
 //! parent <dir>                    # the folder portal answering <dir>
+//! saveas <path>                   # the export save portal answering
+//!                                 # <path> (the portal needs a user; the
+//!                                 # zip + activity path downstream is real)
 //! recent <path>                   # click a recents row
 //! chat <text…>                    # stage the text as the chat draft and
 //!                                 # SEND it through the real shell path
@@ -102,6 +105,15 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 }
             }
             "parent" => Step::Msg(Message::ParentFolderChosen(Ok(vec![PathBuf::from(rest)]))),
+            "saveas" => {
+                if rest.is_empty() {
+                    return Err(format!(
+                        "line {}: saveas wants a destination path",
+                        number + 1
+                    ));
+                }
+                Step::Msg(Message::DriveSaveAs(PathBuf::from(rest)))
+            }
             "recent" => Step::Msg(Message::Welcome(welcome::Message::OpenRecent(
                 PathBuf::from(rest),
             ))),
@@ -211,6 +223,20 @@ mod tests {
             &steps[0],
             Step::Msg(Message::DriveChat(text)) if text == "animate the cap screwing onto the jar"
         ));
+    }
+
+    /// `saveas` injects the SaveFile portal's answer for the export flow —
+    /// the portal itself needs a user, so a scripted export never opens it;
+    /// the window receives the chosen destination directly and zips from
+    /// there (the real downstream path).
+    #[test]
+    fn saveas_command_parses_the_portal_answer() {
+        let steps = parse("saveas /tmp/smoke/l-bracket.zip\n").unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::Msg(Message::DriveSaveAs(path)) if path == &PathBuf::from("/tmp/smoke/l-bracket.zip")
+        ));
+        assert!(parse("saveas").is_err(), "saveas wants a destination path");
     }
 
     #[test]
