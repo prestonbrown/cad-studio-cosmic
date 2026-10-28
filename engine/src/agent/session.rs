@@ -66,6 +66,7 @@ use crate::agent::claude::{
     PromptCtx, TurnRequest, build_args, build_prompt, copy_attachments, environment_bullets,
     render_system_prompt,
 };
+use crate::agent::codex::{self, CodexTranslator};
 use crate::agent::locator::{self, AgentKind, AgentPath, shell_env};
 use crate::agent::stream_event::{
     ContentBlock, Delta, InnerEvent, ResultEvent, StreamEvent, SystemKind, ToolResultContent,
@@ -208,6 +209,10 @@ impl TurnHandle {
 /// state lives in the project's metadata, re-read per turn.
 pub struct Session {
     settings: Settings,
+    /// The settings file each attempt re-reads when attached (upstream
+    /// reads UserDefaults live); `None` = the startup snapshot decides, the
+    /// embedder/test seam.
+    settings_file: Option<PathBuf>,
     system_template: String,
     retry_delay: Duration,
 }
@@ -216,6 +221,7 @@ impl Session {
     pub fn new(settings: Settings) -> Self {
         Self {
             settings,
+            settings_file: None,
             system_template: String::new(),
             retry_delay: RETRY_DELAY,
         }
@@ -237,6 +243,15 @@ impl Session {
         self
     }
 
+    /// Attaches the settings file each attempt re-reads its settings from
+    /// (the production path — the bridge hands the engine settings path in).
+    /// Without it the startup snapshot decides every turn, which is what
+    /// embedders that own their settings want.
+    pub fn with_settings_file(mut self, path: PathBuf) -> Self {
+        self.settings_file = Some(path);
+        self
+    }
+
     /// Wire one turn's plumbing (event channel, cancel switch, pid cell) and
     /// hand the driver task everything it owns.
     fn launch(&self, root: &Path, req: &TurnRequest) -> (TurnHandle, TurnCtx) {
@@ -247,6 +262,7 @@ impl Session {
             root: root.to_path_buf(),
             req: req.clone(),
             settings: self.settings.clone(),
+            settings_file: self.settings_file.clone(),
             system_template: self.system_template.clone(),
             retry_delay: self.retry_delay,
             events: events_tx,
@@ -291,6 +307,7 @@ struct TurnCtx {
     root: PathBuf,
     req: TurnRequest,
     settings: Settings,
+    settings_file: Option<PathBuf>,
     system_template: String,
     retry_delay: Duration,
     events: mpsc::Sender<EngineEvent>,
@@ -309,6 +326,13 @@ struct TurnDriver {
 
 /// Per-turn translation state (the mutable half of AgentSession).
 struct TurnState {
+    /// The engine this attempt runs, decided per attempt from the settings
+    /// (upstream resets `engine = AgentEngine.current` at the top of every
+    /// `run()`, AgentSession.swift:31).
+    engine: AgentKind,
+    /// The codex line translator, reset per attempt like upstream's
+    /// (`translator = CodexTranslator()`); unused on claude attempts.
+    translator: CodexTranslator,
     session_id: Option<String>,
     /// The current text block's accumulated stream text.
     streaming_text: String,
@@ -452,7 +476,10 @@ async fn full_dance(mut ctx: TurnCtx) {
 /// One spawned attempt: setup, spawn, translate, tee, persist, classify —
 /// everything a single upstream `run()` does short of emitting a terminal
 /// event. `resume_sid` is the id the argv resumes (None = fresh); the
-/// metadata the attempt persists into is re-read from disk here.
+/// metadata the attempt persists into is re-read from disk here. The
+/// attempt's settings — engine included — are re-read from the attached
+/// settings file, falling back to the startup snapshot
+/// ([`Session::with_settings_file`]).
 async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     // Upstream copies the attachments in Project.send BEFORE the session
     // runs (Project.swift:198-208); the port's session absorbed that role.
@@ -460,10 +487,14 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     // copies back from references/.
     let _ = copy_attachments(&ctx.req, &ctx.root);
 
+    let settings = attempt_settings(ctx);
+    let engine = settings.agent_kind();
     let mut driver = TurnDriver {
         root: ctx.root.clone(),
         metadata: stored_metadata(&ctx.root),
         state: TurnState {
+            engine,
+            translator: CodexTranslator::default(),
             session_id: None,
             streaming_text: String::new(),
             tool_ids: HashMap::new(),
@@ -477,10 +508,11 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
         events: ctx.events.clone(),
     };
 
-    let Some(executable) = resolve_executable(&ctx.settings) else {
-        return Attempt::failed(
-            "claude is not installed or was not found. Install it or set its path in settings.",
-        );
+    let Some(executable) = resolve_executable(engine, &settings) else {
+        return Attempt::failed(format!(
+            "{} is not installed or was not found. Install it or set its path in settings.",
+            engine.display_name()
+        ));
     };
 
     // the missing-output note needs the parts count from the parsed 3MF and
@@ -495,22 +527,34 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
         project_root: &ctx.root,
         output_dir: &output_dir,
         parts_count,
-        printer_model: ctx.settings.printer_model.as_deref(),
+        printer_model: settings.printer_model.as_deref(),
         manifest: manifest.as_ref(),
     };
     let prompt = build_prompt(&ctx.req, &ctx.root, &missing);
     let system_prompt =
-        render_system_prompt(&ctx.system_template, &prompt_ctx(&ctx.root, &ctx.settings));
+        render_system_prompt(&ctx.system_template, &prompt_ctx(&ctx.root, &settings));
     let venv_python = app_venv_python();
     let mut argv = vec![executable.path.to_string_lossy().into_owned()];
-    argv.extend(build_args(
-        &executable,
-        &prompt,
-        &system_prompt,
-        &ctx.settings,
-        resume_sid,
-        &venv_python,
-    ));
+    match engine {
+        // the codex argv: same assembled prompt and rendered system prompt,
+        // codex flags (CodexRunner.swift:19-40)
+        AgentKind::Codex => argv.extend(codex::build_args(
+            &settings,
+            &prompt,
+            &ctx.req.images,
+            &ctx.root,
+            &system_prompt,
+            resume_sid,
+        )),
+        AgentKind::Claude => argv.extend(build_args(
+            &executable,
+            &prompt,
+            &system_prompt,
+            &settings,
+            resume_sid,
+            &venv_python,
+        )),
+    }
     // The login environment is snapshotted per turn: upstream caches it in
     // its long-lived actor, which M4's app can layer on top the same way.
     let mut env = shell_env();
@@ -522,7 +566,9 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
 
     let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
-        Err(error) => return Attempt::failed(format!("could not start claude: {error}")),
+        Err(error) => {
+            return Attempt::failed(format!("could not start {}: {error}", engine.display_name()))
+        }
     };
     *ctx.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc.pid);
     // a cancel that arrived before the pid was published still lands
@@ -598,6 +644,21 @@ fn stored_metadata(root: &Path) -> ProjectMetadata {
     load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION")))
 }
 
+/// The settings this attempt runs with (Ruling 1, M8 plan): upstream's
+/// `run()` re-reads every setting live at the top of each turn — flipping
+/// the engine picker mid-conversation changes the engine of the NEXT turn
+/// while the stored session id stays engine-blind (upstream's settings
+/// FOOTER says existing projects keep their engine; the code disagrees, and
+/// the code is what ports). When a settings file is attached
+/// ([`Session::with_settings_file`]) each attempt re-reads it, falling back
+/// to the startup snapshot when it cannot load.
+fn attempt_settings(ctx: &TurnCtx) -> Settings {
+    match &ctx.settings_file {
+        Some(path) => Settings::load(path).unwrap_or_else(|_| ctx.settings.clone()),
+        None => ctx.settings.clone(),
+    }
+}
+
 /// Upstream's classification text: the result line's text joined with the
 /// process's whole stdout and stderr (AgentSession.swift:307).
 fn combined_text(attempt: &Attempt) -> String {
@@ -661,15 +722,16 @@ fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
 }
 
 /// The executable this session spawns: the test/embedder override, else the
-/// locator's discovery from the settings' custom path.
-fn resolve_executable(settings: &Settings) -> Option<AgentPath> {
+/// locator's discovery for `engine` from that engine's custom path setting
+/// (upstream `AgentLocator.current` picks the locator by engine).
+fn resolve_executable(engine: AgentKind, settings: &Settings) -> Option<AgentPath> {
     if let Some(path) = std::env::var_os(TEST_CLAUDE_ENV) {
         return Some(AgentPath {
             path: path.into(),
             version: String::new(),
         });
     }
-    locator::find_agent(AgentKind::Claude, settings.claude_path.as_deref())
+    locator::find_agent(engine, settings.agent_path(engine))
 }
 
 /// Create this turn's tee log under `.cadstudio/logs/`. A failure to open is
@@ -686,11 +748,26 @@ fn open_log(root: &Path) -> Option<std::fs::File> {
 }
 
 impl TurnDriver {
-    /// Translate one raw stdout line (AgentSession.swift:104-145's `process`),
-    /// emitting EngineEvents and persisting session ids as they are learned.
+    /// Translate one raw stdout line (AgentSession.swift:104-109's
+    /// `handle`): the codex engine routes the line through the translator
+    /// (one line → zero or more events), the claude engine decodes it
+    /// directly — then each event goes through the same `process` below.
     async fn on_stdout_line(&mut self, line: &str) {
-        match parse_line(line) {
-            Some(StreamEvent::System(system)) => match system.kind {
+        let events: Vec<StreamEvent> = match self.state.engine {
+            AgentKind::Codex => self.state.translator.events(line),
+            AgentKind::Claude => parse_line(line).into_iter().collect(),
+        };
+        for event in events {
+            self.process(event).await;
+        }
+    }
+
+    /// Fold one decoded stream event into chat rows and metadata
+    /// (AgentSession.swift:110-145's `process`), emitting EngineEvents and
+    /// persisting session ids as they are learned.
+    async fn process(&mut self, event: StreamEvent) {
+        match event {
+            StreamEvent::System(system) => match system.kind {
                 SystemKind::Init => {
                     if let Some(session_id) = &system.session_id {
                         if self.metadata.session_id.as_deref() != Some(session_id) {
@@ -719,7 +796,7 @@ impl TurnDriver {
                 }
                 _ => {}
             },
-            Some(StreamEvent::Stream { event }) => match event.event {
+            StreamEvent::Stream { event } => match event.event {
                 InnerEvent::ContentStart { index, block } => {
                     // any block start closes the streaming text row
                     self.state.streaming_text.clear();
@@ -771,7 +848,7 @@ impl TurnDriver {
                 },
                 _ => {}
             },
-            Some(StreamEvent::Assistant(assistant)) => match assistant.block {
+            StreamEvent::Assistant(assistant) => match assistant.block {
                 ContentBlock::Text { text } => {
                     self.state.has_confirmed_text = true;
                     self.state.last_confirmed_text = text.clone();
@@ -792,7 +869,7 @@ impl TurnDriver {
                 }
                 _ => {}
             },
-            Some(StreamEvent::UserToolResult(result)) => {
+            StreamEvent::UserToolResult(result) => {
                 let output = match result.content {
                     ToolResultContent::Text(text) => text,
                     ToolResultContent::Blocks(blocks) => blocks
@@ -812,7 +889,7 @@ impl TurnDriver {
                     })
                     .await;
             }
-            Some(StreamEvent::Result(result)) => {
+            StreamEvent::Result(result) => {
                 if let Some(session_id) = &result.session_id {
                     self.metadata.session_id = Some(session_id.clone());
                     let _ = save_metadata(&self.root, &self.metadata);
@@ -821,8 +898,9 @@ impl TurnDriver {
                 self.state.turn_result = Some(result);
             }
             // decoded enough to be skippable: rate limits, unknown shapes,
-            // and process noise that is not a JSON object at all
-            Some(StreamEvent::RateLimit) | Some(StreamEvent::Unknown(_)) | None => {}
+            // (the claude decode's None — process noise that is not a JSON
+            // object at all — never reaches here; it becomes no events)
+            StreamEvent::RateLimit | StreamEvent::Unknown(_) => {}
         }
     }
 }

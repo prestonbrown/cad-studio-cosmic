@@ -6,10 +6,12 @@
 //! State machines are plain data the app layer folds messages into; the
 //! views render them.
 //!
-//! The AgentMissingSheet's custom-path field writes the ENGINE settings
-//! (`settings.claude_path`) — the single-writer law's one sanctioned path:
-//! the app itself saves the engine settings file. Verify re-locates and
-//! dismisses only when a working executable turns up.
+//! The AgentMissingSheet is per-engine (upstream presents one locator per
+//! engine; the sheet's `kind` picks the name, install commands, login
+//! command, and path field): the custom-path field writes the ENGINE
+//! settings key of that engine — the single-writer law's one sanctioned
+//! path: the app itself saves the engine settings file. Verify re-locates
+//! and dismisses only when a working executable turns up.
 //!
 //! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
 //! copy button; pickers are compact dropdowns. Sheets render as Dialog
@@ -29,30 +31,34 @@ use cosmic::iced::widget::container::Style as ContainerStyle;
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::widget::{Column, Row, Space, button, container, scrollable, text_input};
 use cosmic::{Element, Task};
-use engine::agent::locator::find_executable;
+use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
-
-use crate::activity::ENGINE_NAME;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
 /// [`Element`]s — see chat_view.rs).
 type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
 
-/// Both install commands the sheet shows for the Claude engine
-/// (AgentMissingSheet.swift:14-19 — the codex arm has no engine yet).
-pub const CLAUDE_INSTALL_COMMANDS: [&str; 2] = [
-    "curl -fsSL https://claude.ai/install.sh | bash",
-    "npm install -g @anthropic-ai/claude-code",
-];
-
-/// What to run to sign in (AgentEngine.loginCommand for claude).
-pub const LOGIN_COMMAND: &str = "claude";
+/// The install commands the sheet shows per engine
+/// (AgentMissingSheet.swift:14-19). The codex arm ports upstream's
+/// `npm install -g @openai/codex` ONLY — the second upstream line
+/// (`brew install --cask codex`) is macOS-only and does not port.
+pub fn install_commands(kind: AgentKind) -> &'static [&'static str] {
+    match kind {
+        AgentKind::Claude => &[
+            "curl -fsSL https://claude.ai/install.sh | bash",
+            "npm install -g @anthropic-ai/claude-code",
+        ],
+        AgentKind::Codex => &["npm install -g @openai/codex"],
+    }
+}
 
 /// The custom-path field's placeholder (upstream
 /// `"~/.local/bin/\(engine.command)"`).
-pub const CUSTOM_PATH_PLACEHOLDER: &str = "~/.local/bin/claude";
+pub fn custom_path_placeholder(kind: AgentKind) -> String {
+    format!("~/.local/bin/{}", kind.command())
+}
 
 // ─── agent-missing sheet ───────────────────────────────────────────────────
 
@@ -74,8 +80,12 @@ pub enum AgentMessage {
 /// AgentMissingSheet state.
 #[derive(Debug, Default)]
 pub struct AgentMissing {
-    /// The custom executable path field. Staged live; persisted into
-    /// `settings.claude_path` when Verify runs.
+    /// The engine the sheet presents install instructions for (upstream
+    /// one sheet per locator; the kind comes from the agent_engine setting
+    /// when the sheet goes up).
+    pub kind: AgentKind,
+    /// The custom executable path field. Staged live; persisted into the
+    /// engine's path setting (`claude_path`/`codex_path`) when Verify runs.
     pub custom_path: String,
     /// A Verify is in flight (upstream `locator.state == .checking`).
     pub checking: bool,
@@ -90,7 +100,7 @@ impl AgentMissing {
     /// Verify, the only moment the value is consumed).
     pub fn stage_custom_path(&self, settings: &mut Settings) {
         let trimmed = self.custom_path.trim();
-        settings.claude_path = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        settings.set_agent_path(self.kind, (!trimmed.is_empty()).then(|| trimmed.to_string()));
     }
 }
 
@@ -113,25 +123,27 @@ pub fn update_agent_missing(
 }
 
 /// AgentMissingSheet (AgentMissingSheet.swift:21-73): warning head, the
-/// instruction paragraph, both install command blocks, the custom-path
-/// field, the missing line, and Terminal / Close / Verify.
+/// instruction paragraph, the engine's install command blocks, the
+/// custom-path field, the missing line, and Terminal / Close / Verify.
 pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
+    let engine = sheet.kind.display_name();
     let head = Row::new()
         .spacing(8)
         .push(icon("dialog-warning", 20))
-        .push(bold(format!("{ENGINE_NAME} not found"), 18.0));
+        .push(bold(format!("{engine} not found"), 18.0));
     let intro = body(format!(
-        "CAD Studio uses {ENGINE_NAME} installed on this computer. Install it from a terminal with one of the commands below, then run `{LOGIN_COMMAND}` to sign in."
+        "CAD Studio uses {engine} installed on this computer. Install it from a terminal with one of the commands below, then run `{}` to sign in.",
+        sheet.kind.login_command()
     ));
 
     let mut stack = Column::new().spacing(14).push(head).push(intro);
-    for command in CLAUDE_INSTALL_COMMANDS {
+    for command in install_commands(sheet.kind) {
         stack = stack.push(code_block(command));
     }
     stack = stack
         .push(body("Path to the executable:".to_string()))
         .push(
-            text_input::text_input(CUSTOM_PATH_PLACEHOLDER, &sheet.custom_path)
+            text_input::text_input(custom_path_placeholder(sheet.kind), &sheet.custom_path)
                 .on_input(AgentMessage::CustomPath)
                 // Return runs Verify (upstream's default action)
                 .on_submit(|_| AgentMessage::Verify)
@@ -739,18 +751,40 @@ mod tests {
         settings.save(&path).unwrap();
         let reloaded = Settings::load(&path).unwrap();
         assert_eq!(reloaded.claude_path.as_deref(), Some("/opt/claude"));
+
+        // the codex sheet stages into the CODEX key and never touches
+        // claude's (upstream binds the field to engine.pathKey)
+        let mut sheet = AgentMissing {
+            kind: AgentKind::Codex,
+            custom_path: "  ~/.cargo/bin/codex  ".into(),
+            ..Default::default()
+        };
+        sheet.stage_custom_path(&mut settings);
+        assert_eq!(settings.codex_path.as_deref(), Some("~/.cargo/bin/codex"));
+        assert_eq!(settings.claude_path.as_deref(), Some("/opt/claude"));
+        sheet.custom_path.clear();
+        sheet.stage_custom_path(&mut settings);
+        assert_eq!(settings.codex_path, None);
     }
 
-    /// Both install command blocks are the upstream Claude pair, verbatim
-    /// (AgentMissingSheet.swift:16).
+    /// The install command blocks per engine (AgentMissingSheet.swift:14-19)
+    /// — the Claude pair verbatim; the codex arm upstream pairs
+    /// `npm install -g @openai/codex` with `brew install --cask codex`,
+    /// which is macOS-only and does not port (the LINUX ruling leaves npm
+    /// as the one codex command).
     #[test]
-    fn install_commands_match_upstream() {
+    fn install_commands_per_engine() {
         assert_eq!(
-            CLAUDE_INSTALL_COMMANDS,
+            install_commands(AgentKind::Claude),
             [
                 "curl -fsSL https://claude.ai/install.sh | bash",
                 "npm install -g @anthropic-ai/claude-code",
             ]
+        );
+        assert_eq!(
+            install_commands(AgentKind::Codex),
+            ["npm install -g @openai/codex"],
+            "brew is macOS-only; npm only on Linux"
         );
     }
 

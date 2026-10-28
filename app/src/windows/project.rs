@@ -437,6 +437,14 @@ impl ProjectWindow {
         }
     }
 
+    /// The engine display name the activity rows interpolate
+    /// (activity::engine_name), resolved fresh from the settings file so a
+    /// mid-conversation engine flip (Ruling 1: the setting is re-read per
+    /// turn) renames the next transition too.
+    fn engine_name(&self) -> &'static str {
+        activity::engine_name(&Settings::load(&self.settings_path).unwrap_or_default())
+    }
+
     /// Apply a structure change (preset switch, pane move): the grid
     /// rebuilds and both the project manifest and the global default
     /// layout persist eagerly (upstream `setLayout` → `persistLayout`).
@@ -739,7 +747,11 @@ impl ProjectWindow {
                     action: None,
                     attachments,
                 });
-                self.set_activity(activity::next(activity::Signal::TurnStarted, false));
+                self.set_activity(activity::next(
+                    activity::Signal::TurnStarted,
+                    false,
+                    self.engine_name(),
+                ));
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Event(event) => {
@@ -750,6 +762,7 @@ impl ProjectWindow {
                         self.set_activity(activity::next(
                             activity::Signal::ToolOpened(title.as_str()),
                             false,
+                            self.engine_name(),
                         ));
                     }
                     EngineEvent::TurnFinished(outcome) => {
@@ -760,6 +773,7 @@ impl ProjectWindow {
                         self.set_activity(activity::next(
                             activity::Signal::TurnFinished(outcome),
                             empty,
+                            self.engine_name(),
                         ));
                         // a turn end is an established layout save point
                         self.save_metadata();
@@ -769,7 +783,7 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Closed => {
-                self.set_activity(activity::next(activity::Signal::Closed, false));
+                self.set_activity(activity::next(activity::Signal::Closed, false, self.engine_name()));
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {

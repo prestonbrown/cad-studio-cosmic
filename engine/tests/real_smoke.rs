@@ -34,6 +34,7 @@ async fn real_agent_pong() {
         request: TurnRequest {
             prompt: "pong".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     }
     .apply(&mut session, &mut running);

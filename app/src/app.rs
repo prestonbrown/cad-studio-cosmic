@@ -164,7 +164,11 @@ impl Application for CadStudio {
         };
 
         // locate the agent off the UI thread; a miss presents the sheet
-        let locate = Task::future(locate_agent(app.settings.claude_path.clone()))
+        let engine = app.settings.agent_kind();
+        let locate = Task::future(locate_agent(
+            engine,
+            app.settings.agent_path(engine).map(str::to_string),
+        ))
             .map(|found| Action::App(Message::AgentLocated(found)));
         let sigterm = Task::stream(sigterm_stream()).map(Action::App);
         // the startup python check: its terminal folds into the sheet
@@ -219,6 +223,7 @@ impl Application for CadStudio {
                     // (AgentMissingSheet.swift:42 gates on
                     // `locator.state == .missing`, not on a Verify)
                     self.agent_missing = Some(sheets::AgentMissing {
+                        kind: self.settings.agent_kind(),
                         last_verified_missing: true,
                         ..sheets::AgentMissing::default()
                     });
@@ -518,7 +523,11 @@ impl CadStudio {
                 self.settings = settings.clone();
                 let _ = settings.save(&self.settings_file);
                 sheet.checking = true;
-                let future = locate_agent(self.settings.claude_path.clone());
+                let engine = self.settings.agent_kind();
+                let future = locate_agent(
+                    engine,
+                    self.settings.agent_path(engine).map(str::to_string),
+                );
                 return Task::future(async move {
                     let found = future.await;
                     Message::AgentSheet(sheets::AgentMessage::Verified(found))
@@ -870,12 +879,13 @@ fn key_events(
     Some(Message::KeyPressed(id, key, modifiers))
 }
 
-/// Locate the agent off the UI thread (upstream `AgentLocator.locate()`):
-/// the settings' custom path, then PATH, then the fixed candidates, each
-/// validated by `--version`.
-async fn locate_agent(custom_path: Option<String>) -> bool {
+/// Locate the agent off the UI thread (upstream `AgentLocator.locate()`,
+/// through `AgentLocator.current`, which picks the engine by the setting):
+/// the settings' custom path for THAT engine, then PATH, then the fixed
+/// candidates, each validated by `--version`.
+async fn locate_agent(kind: AgentKind, custom_path: Option<String>) -> bool {
     tokio::task::spawn_blocking(move || {
-        locator::find_agent(AgentKind::Claude, custom_path.as_deref()).is_some()
+        locator::find_agent(kind, custom_path.as_deref()).is_some()
     })
     .await
     .unwrap_or(false)

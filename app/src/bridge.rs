@@ -62,7 +62,7 @@ use engine::project::store::{self, Action, ChatMessage, ProjectMetadata, Role};
 use engine::project::versions::{self, ProjectVersion};
 use engine::python::env::{EnvState, interpreter_path, venv_dir};
 use engine::python::model::{BuildEvent, BuildHandle, BuildOutcome, run_model};
-use engine::settings::Settings;
+use engine::settings::{Settings, settings_path};
 use time::OffsetDateTime;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver as CmdReceiver, UnboundedSender as CmdSender};
@@ -359,7 +359,15 @@ impl Bridge {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = unbounded();
         let pipeline = Arc::new(Mutex::new(Pipeline::load(&root)));
-        let session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
+        let mut session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
+        // The per-turn settings re-read (the engine picker flips the runner
+        // mid-conversation, Ruling 1) — attached only when a real agent
+        // runs: a scripted agent under test (the CAD_TEST_CLAUDE seam)
+        // suspends it so the developer's own settings file cannot decide a
+        // test turn.
+        if std::env::var_os("CAD_TEST_CLAUDE").is_none() {
+            session = session.with_settings_file(settings_path());
+        }
         tokio::spawn(
             Drive::new(root.clone(), cmd_rx, msg_tx.clone(), Arc::clone(&pipeline)).run(session),
         );
@@ -984,6 +992,7 @@ impl Drive {
         let request = TurnRequest {
             prompt: send.prompt,
             attachments: send.attachments.iter().map(PathBuf::from).collect(),
+            images: Vec::new(),
         };
         let handle = session.send(&self.root, &request);
         Phase::Running { handle, transcript }

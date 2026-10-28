@@ -117,6 +117,7 @@ async fn run_dance(
         &TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     );
     let events = collect_until_finished(&mut handle).await;
@@ -415,6 +416,7 @@ async fn cancelled_turn_ends_cleanly() {
         &TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     );
 
@@ -507,6 +509,7 @@ async fn engine_command_drives_the_dance() {
         request: TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     }
     .apply(&mut session, &mut running);
@@ -551,6 +554,7 @@ async fn engine_command_drives_the_dance() {
         request: TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     }
     .apply(&mut session, &mut running);
@@ -635,6 +639,7 @@ async fn send_copies_attachments_into_the_prompt() {
         request: TurnRequest {
             prompt: String::new(),
             attachments: vec![source],
+            images: Vec::new(),
         },
     }
     .apply(&mut session, &mut running);

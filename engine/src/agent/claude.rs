@@ -19,6 +19,12 @@ use crate::settings::Settings;
 pub struct TurnRequest {
     pub prompt: String,
     pub attachments: Vec<PathBuf>,
+    /// Image attachments the CODEX argv carries as `-i` flags (upstream
+    /// `ClaudeRequest.images`, Project.swift:206: the `references/` copies,
+    /// root-resolved). Claude's argv consumes none — upstream
+    /// ClaudeRunner.swift:28-51 never reads the field (Ruling 2, M8 plan).
+    /// The bridge leaves it empty until M8 Task 4.
+    pub images: Vec<PathBuf>,
 }
 
 /// Everything [`render_system_prompt`] substitutes into the template.

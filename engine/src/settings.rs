@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::agent::locator::AgentKind;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MeasurementUnit {
     Millimeters,
@@ -218,6 +220,37 @@ pub enum SettingsError {
 }
 
 impl Settings {
+    /// The selected agent engine (upstream `AgentEngine.current`,
+    /// AgentLocator.swift:7-9: unknown strings read claude).
+    pub fn agent_kind(&self) -> AgentKind {
+        AgentKind::from_raw(&self.agent_engine)
+    }
+
+    /// The engine's custom executable path (AgentEngine.pathKey).
+    pub fn agent_path(&self, kind: AgentKind) -> Option<&str> {
+        match kind {
+            AgentKind::Claude => self.claude_path.as_deref(),
+            AgentKind::Codex => self.codex_path.as_deref(),
+        }
+    }
+
+    /// The engine's model override (AgentEngine.modelKey).
+    pub fn agent_model(&self, kind: AgentKind) -> Option<&str> {
+        match kind {
+            AgentKind::Claude => self.claude_model.as_deref(),
+            AgentKind::Codex => self.codex_model.as_deref(),
+        }
+    }
+
+    /// Stage the engine's custom executable path — the writer the
+    /// agent-missing sheet's field persists through.
+    pub fn set_agent_path(&mut self, kind: AgentKind, path: Option<String>) {
+        match kind {
+            AgentKind::Claude => self.claude_path = path,
+            AgentKind::Codex => self.codex_path = path,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, SettingsError> {
         match std::fs::read_to_string(path) {
             Ok(json) => Ok(serde_json::from_str(&json)?),

@@ -2,9 +2,12 @@
 //! executable and snapshots the login environment it spawns in;
 //! [`stream_event`] decodes the agent's stream-json stdout lines;
 //! [`tool_summary`] titles the tool-use rows those lines announce; [`claude`]
-//! assembles the runner's argv, system prompt, and turn requests; and
-//! [`session`] runs single turns and the busy/missing/auth lifecycle dance
-//! around them, over [`crate::processes`]' streamed child spawn and
+//! assembles the claude runner's argv, system prompt, and turn requests;
+//! [`codex`] the codex runner's argv plus its translator onto the same
+//! [`StreamEvent`] pipeline; [`attachments`] classifies attachment paths
+//! (the image allowlist both runners and the app's thumbnail widget share);
+//! and [`session`] runs single turns and the busy/missing/auth lifecycle
+//! dance around them, over [`crate::processes`]' streamed child spawn and
 //! SIGINT→SIGTERM interrupt.
 //!
 //! The surface the app drives that stack through is the
@@ -19,7 +22,9 @@
 //! translations, so an app that stops draining stalls the turn instead of
 //! cancelling it (carried in `docs/research/carry-forwards.md`, M4).
 
+pub mod attachments;
 pub mod claude;
+pub mod codex;
 pub mod locator;
 pub mod session;
 pub mod stream_event;
