@@ -840,8 +840,10 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
                     Binding::from_key_press(press)
                 }
             })
-            // iced's TextEditor takes only a pixel width (no Length::Fill),
-            // so the editor sizes to its content — placeholder included
+            // the editor's width DEFAULTS to Length::Fill (iced
+            // text_editor.rs leaves it Fill; the width() setter only
+            // takes pixels), so it already fills the row between the
+            // attach and send buttons
             .min_height(24)
             .max_height(140),
     );

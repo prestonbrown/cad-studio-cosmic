@@ -254,8 +254,6 @@ fn clamp_axis(disp: f64, view: f64, offset: f64) -> f64 {
     }
 }
 
-/// iced scroll deltas are pixels; the JS multiplies `deltaMode === 1`
-/// (lines) by 16 before using them (SVGWebView.swift:85).
 /// Secondary text at 65% of the ambient color — the empty-state hero's
 /// description (the welcome window's dim-text pattern).
 fn dim_text_class() -> cosmic::theme::Text {
@@ -269,6 +267,8 @@ fn dim_text_class() -> cosmic::theme::Text {
     })
 }
 
+/// iced scroll deltas are pixels; the JS multiplies `deltaMode === 1`
+/// (lines) by 16 before using them (SVGWebView.swift:85).
 pub fn wheel_pixels(delta: ScrollDelta) -> f64 {
     match delta {
         ScrollDelta::Pixels { y, .. } => y as f64,
