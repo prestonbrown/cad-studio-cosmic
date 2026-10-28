@@ -294,6 +294,7 @@ fn prompt_assembly_with_attachments_and_missing_note() {
     let req = TurnRequest {
         prompt: String::new(),
         attachments: vec![PathBuf::from("/tmp/sketch.png")],
+        images: Vec::new(),
     };
     // copy_attachments first (writes references/), then build_prompt
     let rels = copy_attachments(&req, &root);
@@ -321,6 +322,7 @@ fn prompt_assembly_with_attachments_and_missing_note() {
         &TurnRequest {
             prompt: "go".into(),
             attachments: vec![],
+            images: Vec::new(),
         },
         &root,
         &missing,
@@ -342,6 +344,7 @@ fn attachments_copied_with_timestamp_names() {
     let req = TurnRequest {
         prompt: "x".into(),
         attachments: vec![PathBuf::from("/tmp/cad-att-sketch.png")],
+        images: Vec::new(),
     };
     let rels = copy_attachments(&req, &root);
     let refs_dir = root.join("references");

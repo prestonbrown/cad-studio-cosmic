@@ -984,6 +984,7 @@ impl Drive {
         let request = TurnRequest {
             prompt: send.prompt,
             attachments: send.attachments.iter().map(PathBuf::from).collect(),
+            images: Vec::new(),
         };
         let handle = session.send(&self.root, &request);
         Phase::Running { handle, transcript }

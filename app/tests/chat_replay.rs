@@ -60,6 +60,7 @@ async fn replay(root: &Path, scenario: &Path, stderr: Option<&Path>) -> ChatStat
         &TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     );
     let mut state = ChatState::new(Vec::new());

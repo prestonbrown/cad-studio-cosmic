@@ -81,6 +81,7 @@ async fn run_fake_with(
         &TurnRequest {
             prompt: "please respond".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     );
     let events = collect_until_finished(&mut handle).await;
@@ -549,6 +550,7 @@ async fn cancel_mid_stream() {
         &TurnRequest {
             prompt: "slow please".into(),
             attachments: Vec::new(),
+            images: Vec::new(),
         },
     );
 
