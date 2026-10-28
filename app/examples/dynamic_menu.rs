@@ -25,6 +25,7 @@ enum Leaves {
     Static,
     Flat,
     Custom,
+    Mutate,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ impl app::Application for Demo {
         let leaves = match std::env::var("DYN_MENU_LEAVES").as_deref() {
             Ok("flat") => Leaves::Flat,
             Ok("custom") => Leaves::Custom,
+            Ok("mutate") => Leaves::Mutate,
             _ => Leaves::Static,
         };
         eprintln!("dynamic-menu repro: leaves={leaves:?}");
@@ -109,17 +111,19 @@ impl app::Application for Demo {
                     .map(|i| menu::Item::Button(format!("Item {i}"), None, NothingAction))
                     .collect::<Vec<_>>(),
             ),
-            Leaves::Custom => (0..self.items)
+            Leaves::Custom | Leaves::Mutate => (0..self.items)
                 .map(|i| {
+                    // Mutate: every EXISTING item's subtitle changes each
+                    // rebuild (the version menu's live per-frame time-ago)
+                    let churn = match self.leaves {
+                        Leaves::Mutate => format!("· {} ms ago", std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis()),
+                        _ => "· just now · Jan 1, 2027 at 1:00 PM".to_string(),
+                    };
                     let body = cosmic::widget::Column::new()
                         .spacing(2)
                         .push(text(format!("Item {i} head")))
-                        .push(
-                            text(format!(
-                                "Item {i} · just now · Jan 1, 2027 at 1:00 PM"
-                            ))
-                            .size(11),
-                        )
+                        .push(text(format!("Item {i} {churn}")).size(11))
                         .padding([6, 16]);
                     let leaf: Element<'_, Message> = button::custom(body)
                         .class(cosmic::theme::Button::MenuItem)
