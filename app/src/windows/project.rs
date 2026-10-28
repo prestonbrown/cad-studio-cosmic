@@ -1629,6 +1629,44 @@ mod tests {
         );
     }
 
+    /// A send the bridge accepts flips the window busy in the SAME update
+    /// call — no observable window where the stop button, streaming
+    /// indicator or header spinner lag a started send (upstream `send()`
+    /// sets .working synchronously, Project.swift:192-208). The rise
+    /// crosses through the Send arm's fold of the bridge's own activity —
+    /// `enqueue` opened the turn before returning — not through the
+    /// driver's later TurnStarted, which this test never folds.
+    #[tokio::test]
+    async fn successful_send_flips_busy_in_the_same_update() {
+        let root = std::env::temp_dir().join(format!("cad-busy-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        // the readiness the app's startup check owns in production —
+        // without it the send refuses (the refusal sibling) and nothing
+        // rises
+        window.bridge.mark_python_ready_for_test();
+        assert!(!window.is_busy());
+
+        let _ = window.update(Message::Chat(chat_view::Message::SetDraft(
+            "make the wall 4 mm".into(),
+        )));
+        let _ = window.update(Message::Chat(chat_view::Message::Send));
+
+        assert!(
+            window.is_busy(),
+            "a started send is busy in its own update call, got {:?}",
+            window.activity
+        );
+        assert_eq!(
+            window.chat.draft, "",
+            "the accepted text left the input bar (the Ok branch ran)"
+        );
+    }
+
     /// The metadata-clobber pin (T7 review F1): the window's save points
     /// (turn end, bookkeeping) must write project.json THROUGH the disk
     /// copy. The engine writes the session id into the same file mid-turn
