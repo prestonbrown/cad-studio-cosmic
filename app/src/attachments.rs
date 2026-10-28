@@ -1,13 +1,14 @@
 //! Attachment surfaces beyond the picker — the port of upstream
-//! Chat/Attachments.swift:9-32: what a clipboard read or a file drop
-//! delivers (file URLs first, PNG data second), the temp file a pasted
-//! image lands in, and the read-side rule that resolves a stored attachment
-//! string to the path a thumbnail opens. The MIME plumbing implements
-//! iced's [`AllowedMimeTypes`] so ONE type serves both content surfaces the
-//! pinned rev exposes: `clipboard::read_data` (paste, real on Wayland —
-//! the pin's window_clipboard answers arbitrary mimes over data-control;
-//! X11 and macOS backends answer nothing) and `widget::dnd_destination`
-//! (drag-drop, Wayland-native).
+//! Chat/Attachments.swift:4-33 (:4-7 `isImage` lives engine-side in
+//! `engine::agent::attachments`): what a clipboard read or a file drop
+//! delivers (file URLs first, PNG data second, :9-19), the temp file a
+//! pasted image lands in (:21-32), and the read-side rule that resolves a
+//! stored attachment string to the path a thumbnail opens. The MIME
+//! plumbing implements iced's [`AllowedMimeTypes`] so ONE type serves both
+//! content surfaces the pinned rev exposes: `clipboard::read_data` (paste,
+//! real on Wayland — the pin's window_clipboard answers arbitrary mimes
+//! over data-control; X11 and macOS backends answer nothing) and
+//! `widget::dnd_destination` (drag-drop, Wayland-native).
 
 use std::borrow::Cow;
 use std::io::Write as _;
