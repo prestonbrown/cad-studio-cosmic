@@ -15,7 +15,7 @@
 - Tests run on thelio, never mercury (battery law). Implementers: `cargo check -p <crate>`, `cargo build -p app`, and focused pure tests locally; full suites only via the controller's thelio gate.
 - `cargo build -p app` is the verification bar for app changes (codegen-only failures).
 - **Visual consistency is part of the bar**: every UI task cites its upstream fixture (`file:line`), records divergences in `docs/research/carry-forwards.md` BEFORE merge, and frame-verifies on the :99 rig when the difference is visual. The milestone close runs the visual match pass (Task 16).
-- Static menu roots only (cosmic menu overlay corrupts on dynamic item sets — `docs/research/libcosmic-menu-dynamic-items-bug.md`); dynamic dropdowns are popovers. Text-only item flips are gated on Task 2's probe.
+- Static menu roots only (cosmic menu overlay corrupts on dynamic item sets — `docs/research/libcosmic-menu-dynamic-items-bug.md`); dynamic dropdowns are popovers. Text-only item flips are ruled OUT (static labels) until M9 pins the corruption boundary — see struck Task 2.
 - No new workspace dependencies without a plan-level ruling (the ZIP task rules: subprocess, not a crate).
 - ONE settings writer per key (engine `settings.json` for engine-visible keys; cosmic-config for app-UI state).
 - Stage explicit paths; conventional commits; no heredoc-backtick text; pkill bracket discipline.
@@ -33,7 +33,7 @@
 1. **Engine flip mid-project** (inv §1): port upstream's re-read-per-turn verbatim — the code wins over the footer text; record as an upstream quirk note in the settings task's docs.
 2. **Codex images** ride `-i` flags; Claude gets none (upstream argv parity). **Task 3 owns the interface**: it adds `TurnRequest.images` (unit tests construct it directly; the bridge leaves it empty until Task 4) AND defines the shared `is_image` predicate — an extension allowlist (png/jpg/jpeg/tiff/webp/gif/bmp + the formats the picker and paste produce), porting upstream's UTType-conformance rule (Attachments.swift:4-7) — in an engine-side shared home; Task 4's thumbnail widget cites it. Wave 1 orders **3 before 4 and 6** (Task 6 consumes Task 3's settings readers).
 3. **Locator** grows the second instance + per-turn setting read (mirroring AgentLocator.swift:64-138); `find_agent` keeps one entry point with a kind.
-4. **Reference copies move to the bridge — at TURN START, bridge-side, before the user row is appended; queued sends copy when they START, not when queued** (upstream Project.swift:192-208: the copy runs inside `send()`, never at queue-append :177-190): the bridge calls the engine's pure `copy_attachments` before appending the user row, so rows persist COPY names and prompts see the same list. Engine's run_attempt stops copying (single writer). READ-SIDE ruling (review MINOR 1): stored attachment strings that are absolute (or contain a path separator) resolve as-is; relative `references/…` strings resolve against projectRoot — pre-M8 rows with original absolute paths keep working; the one-time transition note lands in carry-forwards with the copy-name change.
+4. **Reference copies move to the bridge — at TURN START, bridge-side, before the user row is appended; queued sends copy when they START, not when queued** (upstream Project.swift:192-208: the copy runs inside `send()`, never at queue-append :177-190): the bridge calls the engine's pure `copy_attachments` before appending the user row, so rows persist COPY names and prompts see the same list. Engine's run_attempt stops copying (single writer). READ-SIDE ruling (review MINOR 1): stored attachment strings that are ABSOLUTE paths resolve as-is; RELATIVE paths (the canonical `references/…` form) resolve against projectRoot — pre-M8 rows with original absolute paths keep working; the one-time transition note lands in carry-forwards with the copy-name change.
 5. **ZIP** = `/usr/bin/zip` subprocess, no shell, NOT-FOUND surfaces the failed activity string (dependency law; upstream parity). Save panel = xdg `SaveFile` portal (suggested `"<name>.zip"`, Downloads default).
 6. **Settings window** = a new cosmic window (the sheets precedent is body-replacement for modal gates; settings is non-modal — new window), four tabs per upstream. **ConfigureClaude presents the agent-missing sheet** (ChatView.swift:101-102 — upstream has NO settings path off that action or that sheet; the Agente-tab route would be an unrecorded divergence — review MAJOR 2). About = simple dialog with the credits key.
 7. **i18n**: regenerate from xcstrings with the upgraded extractor (placeables `{$arg}`, five real key names — `motion-value-row`, `version-timestamps`, `activity-accessibility-label`, `speed-option`, `settings-none` — landing in all four catalogs at once; literal `\n` stays; the `\"` branch fixed). Engine system rows emit stable ids; the app localizes on receipt (upstream parity route). Language setting: engine `settings.json` `language`, next-launch semantics (parity).
@@ -164,7 +164,7 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 ### Task 8: ToggleParameters menu entry
 
 **Files:** `app/src/windows/project.rs` (View menu build).
-- [ ] **Step 1:** STATIC label ("Mostra/nascondi parametri") + carry-forwards divergence entry — Ruling 9's safe branch, taken at plan review (the flip-label shape is unreachable evidence-wise while the corruption boundary is unpinned; struck Task 2).
+- [ ] **Step 1:** STATIC label ("Mostra/nascondi parametri") + carry-forwards divergence entry — Ruling 9's safe branch, taken at plan review (the flip-label shape, Commands.swift:69-73, is unreachable evidence-wise while the corruption boundary is unpinned; struck Task 2).
 - [ ] **Step 2:** Menu-construction test + ⌥⌘I still routed once (no double-fire with the app router).
 
 ### Task 9: Space-through-editor fix
@@ -173,7 +173,7 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 - [ ] **Step 1:** The router drops bare Space while any text editor holds focus; the pane's listener keeps Esc only. Focus surface: query the pin's editor-focus API first; if the pin exposes none, fall back to the app layer tracking chat-editor focus by routing (the chat pane knows its editor); if neither, record the divergence and keep the pane's animating-gate no-op.
 - [ ] **Step 2:** Tests: subscription-level (Space with editor focus → no TogglePlayback; without → reaches the pane) — the subscription-builds pattern plus whatever focus surface the probe finds; MotionControls.swift:19 citation.
 
-### Task 10: Speed-menu shape (ruled by Task 2)
+### Task 10: Speed-menu shape (closed at review)
 
 **Files:** `app/src/motion_controls.rs` (doc-only change).
 - [ ] **Step 1:** Close as RE-RULED divergence: the dropdown + adjacent loop button stands (Ruling 12's safe branch, taken at plan review — struck Task 2); update the module doc's divergence note to say ruled, not pending, and strike the carry-forward.
@@ -216,7 +216,7 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 
 ## Wave structure (dispatch order)
 
-- **Wave 0:** Tasks 0, 1, 2 (busy-state, i18n, probes — 0 and 2 parallel; 1 serialized alone, it touches every module).
+- **Wave 0:** Tasks 0, 1 (busy-state pin, then i18n serialized alone, it touches every module; Task 2 struck at review).
 - **Wave 1:** Tasks 3, 4, 5, 6 (codex, attachments, ZIP, settings — 4 after 1; 3 and 6 share the settings surface, stagger their merges).
 - **Wave 2:** Tasks 7-13 (parity polish + packaging; mostly independent — Tasks 7, 9, 11 ALL edit `app/src/viewer_pane.rs`: stagger those three merges, controller-serialized).
 - **Close:** Tasks 14-16 (accumulated harness, capstone, visual match).
