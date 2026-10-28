@@ -59,6 +59,7 @@
 //! settings-parity task).
 pub mod activity;
 pub mod app;
+pub mod attachments;
 pub mod bridge;
 pub mod camera_input;
 pub mod chat;

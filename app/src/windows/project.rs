@@ -33,6 +33,7 @@ use cosmic::iced::time::every;
 use cosmic::iced::{Color, Length, Size, Subscription, Task};
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::pane_grid::{self, DragEvent, ResizeEvent};
+use cosmic::widget::text_editor;
 use cosmic::widget::{Column, Row, Space, button, container, popover, text};
 use cosmic::{Element, Task as CosmicTask};
 use engine::agent::session::EngineEvent;
@@ -45,6 +46,7 @@ use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::camera::Preset;
 
 use crate::activity::{self, Activity, IssueKind};
+use crate::attachments::ClipboardContent;
 use crate::bridge::{self, Bridge};
 use crate::chat::ChatState;
 use crate::chat_view::{self, ChatPane, QueueItem};
@@ -583,7 +585,7 @@ impl ProjectWindow {
                     .into_iter()
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
-                self.chat.draft_attachments.extend(staged);
+                self.chat.attach(staged);
                 Task::none()
             }
             Message::AttachChosen(Err(_cancelled)) => Task::none(),
@@ -687,6 +689,46 @@ impl ProjectWindow {
             // the app layer runs the attach portal and feeds the result
             // back as AttachChosen
             chat_view::Message::Attach => {}
+            // upstream's keyDown monitor (ChatInputView.swift:62-73): read
+            // the clipboard's CONTENT; files or an image attach and the
+            // press is swallowed, anything else falls through to the
+            // editor's own text paste. The pin's read_data is real on
+            // Wayland (data-control); where a backend answers nothing the
+            // None arm IS the fall-through
+            chat_view::Message::Paste => {
+                return cosmic::iced::clipboard::read_data::<ClipboardContent>()
+                    .then(|content| match content {
+                        Some(content) => Task::done(Message::Chat(
+                            chat_view::Message::AttachContent(content),
+                        )),
+                        None => cosmic::iced::clipboard::read().map(|text| {
+                            Message::Chat(chat_view::Message::Draft(
+                                text_editor::Action::Edit(text_editor::Edit::Paste(
+                                    Arc::new(text.unwrap_or_default()),
+                                )),
+                            ))
+                        }),
+                    });
+            }
+            // pasted or dropped content becomes draft attachments — raw
+            // image bytes via upstream's savedImage temp file
+            // (Attachments.swift:21-32)
+            chat_view::Message::AttachContent(content) => {
+                let staged: Vec<String> = match content {
+                    ClipboardContent::Files(paths) => paths
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect(),
+                    ClipboardContent::Image(png) => crate::attachments::saved_image(&png)
+                        .map(|path| vec![path.to_string_lossy().into_owned()])
+                        .unwrap_or_default(),
+                };
+                if !staged.is_empty() {
+                    self.chat.attach(staged);
+                }
+            }
+            // the draft strip's remove button (ChatViewModel.swift:26-28)
+            chat_view::Message::Detach(path) => self.chat.detach(path),
             // a system row's Open Terminal action (MessageView.swift:71-77)
             chat_view::Message::RowAction(_, Action::OpenTerminal) => {
                 crate::app::launch_terminal();
@@ -1000,14 +1042,30 @@ impl ProjectWindow {
     fn view_grid(&self) -> Element<'_, Message> {
         let grid = pane_grid::PaneGrid::new(&self.grid, |_pane, kind: &PaneKind, _| {
             let body: Element<'_, Message> = match kind {
-                PaneKind::Chat => chat_view::view_chat(
-                    &self.chat_pane,
-                    &self.chat,
-                    self.is_busy(),
-                    &self.queue,
-                    self.queue_paused,
+                // upstream drops onto the WHOLE chat view
+                // (ChatView.swift:20-31); the Wayland-native destination
+                // the pin exposes wraps it, over the same mimes paste
+                // reads (winit has no Wayland file drops — the window-
+                // level FileDropped fallback covers X11 and macOS)
+                PaneKind::Chat => cosmic::widget::DndDestination::<Message>::for_data(
+                    chat_view::view_chat(
+                        &self.chat_pane,
+                        &self.chat,
+                        self.is_busy(),
+                        &self.queue,
+                        self.queue_paused,
+                        &self.root,
+                    )
+                    .map(Message::Chat),
+                    |content: Option<ClipboardContent>, _action| {
+                        // a drop that interpreted as nothing attaches
+                        // nothing, like upstream's providers that yield
+                        // no file URL and no image data
+                        let content = content.unwrap_or(ClipboardContent::Files(Vec::new()));
+                        Message::Chat(chat_view::Message::AttachContent(content))
+                    },
                 )
-                .map(Message::Chat),
+                .into(),
                 PaneKind::Model3D => {
                     // the compare wiring's shell half: the overlay's previous
                     // values, gate, and picker inputs are what only the
