@@ -28,8 +28,10 @@ Success = the README feature list works on thelio (Pop!_OS, COSMIC session):
 4. `just install` puts the app in the COSMIC app grid with the blueprint-cube
    icon; it launches and runs through the user's `claude` login.
 
-Non-goals (v1): Flatpak packaging, Wayland-other-than-COSMIC polish, translation
-activation beyond English, keeping agent turns alive across GUI restarts.
+Non-goals (v1): Flatpak packaging, Wayland-other-than-COSMIC polish, keeping agent
+  turns alive across GUI restarts. ~~Translation activation beyond English~~
+  **AMENDED (M4, recorded M8 2026-10-28): it/de/fr activation + corpus repair is M8
+  scope** — "English first" was sequencing, not exclusivity.
 
 ## 2. Decisions (all confirmed with Preston)
 
@@ -182,7 +184,7 @@ Modules mirror the upstream contract; public surface is
   sheet, Python-setup sheet; cosmic-config persistence.
 - i18n: fluent, `en` source; extractor script converts the 336 xcstrings keys
   to en/it/de/fr ftl at M0; only `en` activated in v1.
-- System: xdg-open (slicer/STEP/PDF), reveal via cosmic-files, ZIP export (zip
+- System: xdg-open (slicer/STEP/PDF), reveal via cosmic-files, ZIP export (zip subprocess per the §6 amendment
   crate), SIGTERM child cleanup, About.
 - Packaging: cosmic-app-template-derived justfile (build/run/test/install),
   `.desktop`, metainfo, blueprint-cube icon, install to `~/.local`.
@@ -225,7 +227,7 @@ Modules mirror the upstream contract; public surface is
 | `/bin/zsh -lc` PATH | `$SHELL -lc` + candidate dirs (§4.2 locator) |
 | NSWorkspace open/reveal | xdg-open / DBus FileManager.ShowItems |
 | NSOpenPanel/SNSavePanel | xdg-desktop-portal FileChooser |
-| `/usr/bin/zip` / `/usr/bin/unzip -p` | zip crate (both directions) |
+| `/usr/bin/zip` / `/usr/bin/unzip -p` | zip crate (both directions) — **AMENDED M8 (2026-10-28): the EXPORT direction ships as the `/usr/bin/zip` subprocess** (upstream Project.swift:435-451 parity, no new dependency; NOT-FOUND surfaces the failed activity). The unzip/parse direction keeps the existing crate path. |
 | WKWebView SVG | resvg widget + native zoom/pan |
 | PDFKit page count | lopdf |
 | Localizable.xcstrings (it source) | fluent ftl (en source) |
