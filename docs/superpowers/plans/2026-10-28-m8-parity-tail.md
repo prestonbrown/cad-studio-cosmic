@@ -52,7 +52,7 @@
 ## Pending inputs (folded before review dispatch)
 
 - ~~busy-state root cause~~ **FOLDED 2026-10-28** into Task 0: python-readiness refusal, silently surfaced (see Task 0's root-cause note).
-- **upstream gallery capture** (agent in flight 2026-10-28) → Task 16's comparison list.
+- ~~upstream gallery capture~~ **FOLDED 2026-10-28**: 11 states captured to `shots/upstream/` (setup-sheet, welcome, welcome-recents, new-project, project-model, project-empty, version-menu, parameters, parts, section, measure) — `.superpowers/sdd/upstream-gallery-report.md` documents the build + per-state capture. Task 16 compares against this set.
 
 ---
 
