@@ -161,3 +161,45 @@ fn print_guidelines_differ_per_printer_type() {
     assert!(resin.contains("0.8"));
     assert_ne!(fdm, resin);
 }
+
+// ─── agent-engine readers (M8 Task 3) ───────────────────────────────────────
+
+/// The engine readers the session, locator, and app share: the parsed
+/// engine, its custom path, its model, and the writer the agent-missing
+/// sheet stages through (upstream AgentEngine.pathKey/modelKey —
+/// AgentLocator.swift:39-51).
+#[test]
+fn agent_engine_readers_route_per_kind() {
+    use engine::agent::locator::AgentKind;
+    let mut s = Settings::default();
+    assert_eq!(s.agent_kind(), AgentKind::Claude, "default engine");
+    assert_eq!(s.agent_path(AgentKind::Claude), None);
+    assert_eq!(s.agent_path(AgentKind::Codex), None);
+    assert_eq!(s.agent_model(AgentKind::Claude), None);
+    assert_eq!(s.agent_model(AgentKind::Codex), None);
+
+    s.agent_engine = "codex".into();
+    s.codex_path = Some("~/.local/bin/codex".into());
+    s.codex_model = Some("gpt-5.2-codex".into());
+    s.claude_path = Some("/usr/bin/claude".into());
+    s.claude_model = Some("opus".into());
+    assert_eq!(s.agent_kind(), AgentKind::Codex);
+    assert_eq!(s.agent_path(AgentKind::Codex), Some("~/.local/bin/codex"));
+    assert_eq!(s.agent_model(AgentKind::Codex), Some("gpt-5.2-codex"));
+    // the OTHER engine's keys stay untouched
+    assert_eq!(s.agent_path(AgentKind::Claude), Some("/usr/bin/claude"));
+    assert_eq!(s.agent_model(AgentKind::Claude), Some("opus"));
+
+    // garbage engine strings read claude (AgentEngine(rawValue:) ?? .claude)
+    s.agent_engine = "assistant".into();
+    assert_eq!(s.agent_kind(), AgentKind::Claude);
+
+    // the sheet's staging writer: set per kind, clear on empty
+    s.agent_engine = "codex".into();
+    s.set_agent_path(AgentKind::Codex, Some("~/.cargo/bin/codex".into()));
+    assert_eq!(s.codex_path.as_deref(), Some("~/.cargo/bin/codex"));
+    s.set_agent_path(AgentKind::Codex, None);
+    assert_eq!(s.codex_path, None);
+    s.set_agent_path(AgentKind::Claude, Some("/x/claude".into()));
+    assert_eq!(s.claude_path.as_deref(), Some("/x/claude"));
+}

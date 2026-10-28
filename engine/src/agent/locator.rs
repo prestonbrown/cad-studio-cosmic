@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Which agent CLI to locate (upstream `AgentEngine`); Claude is the M2 agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which agent CLI to locate (upstream `AgentEngine`); Claude is the M2
+/// agent, Codex the M8 alternate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentKind {
+    #[default]
     Claude,
+    Codex,
 }
 
 impl AgentKind {
@@ -16,6 +19,33 @@ impl AgentKind {
     pub fn command(self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+        }
+    }
+
+    /// The user-facing engine name (AgentLocator.swift:11-16).
+    pub fn display_name(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude Code",
+            AgentKind::Codex => "Codex",
+        }
+    }
+
+    /// What the not-signed-in row tells the user to run
+    /// (AgentLocator.swift:25-30).
+    pub fn login_command(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex login",
+        }
+    }
+
+    /// `AgentEngine(rawValue:) ?? .claude`: unknown engine strings read
+    /// claude.
+    pub fn from_raw(raw: &str) -> Self {
+        match raw {
+            "codex" => AgentKind::Codex,
+            _ => AgentKind::Claude,
         }
     }
 }
@@ -40,27 +70,41 @@ pub fn expand_tilde(path: &str, home: &str) -> String {
     }
 }
 
-/// Fixed candidate executables in upstream order: `~/.claude/local/claude`
-/// first, then the user-local install dirs and system locations. Relative
-/// entries resolve against `home`.
-pub fn home_candidates(home: &Path) -> Vec<PathBuf> {
-    [
-        ".claude/local/claude",
-        ".local/bin/claude",
-        ".cargo/bin/claude",
-        ".npm-global/bin/claude",
-        "/usr/local/bin/claude",
-        "/usr/bin/claude",
-    ]
-    .into_iter()
-    .map(|rel| {
-        if rel.starts_with('/') {
-            PathBuf::from(rel)
-        } else {
-            home.join(rel)
-        }
-    })
-    .collect()
+/// Fixed candidate executables for `kind`, in upstream order
+/// (AgentLocator.swift:53-61), adapted for Linux like the claude list was:
+/// home-relative install dirs first, then the system locations —
+/// /opt/homebrew is macOS-only and does not port; /usr/bin joins. The codex
+/// set drops claude's `~/.claude/local` (claude's native installer's dir)
+/// and keeps the dirs codex's npm/cargo installers use. Relative entries
+/// resolve against `home`.
+pub fn home_candidates(kind: AgentKind, home: &Path) -> Vec<PathBuf> {
+    let candidates: &[&str] = match kind {
+        AgentKind::Claude => &[
+            ".claude/local/claude",
+            ".local/bin/claude",
+            ".cargo/bin/claude",
+            ".npm-global/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ],
+        AgentKind::Codex => &[
+            ".local/bin/codex",
+            ".npm-global/bin/codex",
+            ".cargo/bin/codex",
+            "/usr/local/bin/codex",
+            "/usr/bin/codex",
+        ],
+    };
+    candidates
+        .iter()
+        .map(|rel| {
+            if rel.starts_with('/') {
+                PathBuf::from(rel)
+            } else {
+                home.join(rel)
+            }
+        })
+        .collect()
 }
 
 /// Locate the agent: custom path (tilde-expanded, validated) → merged
@@ -78,7 +122,7 @@ pub fn find_agent(kind: AgentKind, custom_path: Option<&str>) -> Option<AgentPat
     if let Some(path) = env.get("PATH") {
         candidates.extend(path.split(':').map(|dir| Path::new(dir).join(name)));
     }
-    candidates.extend(home_candidates(Path::new(&home)));
+    candidates.extend(home_candidates(kind, Path::new(&home)));
 
     candidates
         .into_iter()

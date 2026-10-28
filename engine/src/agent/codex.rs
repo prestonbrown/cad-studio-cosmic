@@ -15,12 +15,11 @@
 //! (`/bin/zsh -lc '…'`) and is unwrapped before it reaches the tool row.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::agent::attachments::is_image;
-use crate::agent::claude::TurnRequest;
 use crate::agent::stream_event::{
     AssistantEvent, ContentBlock, InnerEvent, ResultEvent, StreamEvent, StreamInner, SystemEvent,
     SystemKind, ToolResult, ToolResultContent,
@@ -30,10 +29,14 @@ use crate::settings::Settings;
 /// The argv of one codex turn, in upstream order (CodexRunner.swift:19-40):
 /// the exec block with `-C <directory>`, the two `-c` overrides, the
 /// optional isolation/model/effort flags, `resume`, one `-i` per IMAGE
-/// attachment, then the prompt.
+/// attachment, then the prompt. `prompt` is the ASSEMBLED turn prompt —
+/// attachment list and missing-output notes included — exactly the string
+/// the claude argv carries (both runners append upstream's one
+/// `request.prompt`).
 pub fn build_args(
     s: &Settings,
-    req: &TurnRequest,
+    prompt: &str,
+    images: &[PathBuf],
     directory: &Path,
     system_prompt: &str,
     session_id: Option<&str>,
@@ -64,12 +67,12 @@ pub fn build_args(
     if let Some(session_id) = session_id {
         args.extend(["resume", session_id].map(String::from));
     }
-    for image in &req.images {
+    for image in images {
         if is_image(image) {
             args.extend(["-i", &image.to_string_lossy()].map(String::from));
         }
     }
-    args.push(req.prompt.clone());
+    args.push(prompt.to_string());
     args
 }
 
@@ -718,19 +721,15 @@ mod tests {
 
     // ─── build_args (CodexRunner.swift:19-40) ──────────────────────────────
 
-    fn req(images: &[&str]) -> TurnRequest {
-        TurnRequest {
-            prompt: "make a box".into(),
-            attachments: Vec::new(),
-            images: images.iter().map(Path::new).map(Path::to_path_buf).collect(),
-        }
+    fn images(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(Path::new).map(Path::to_path_buf).collect()
     }
 
     /// The whole argv, in upstream order, for the default flag combination.
     #[test]
     fn argv_default_full_vector() {
         let s = Settings::default(); // isolates_claude = true
-        let args = build_args(&s, &req(&[]), Path::new("/proj"), "SYS", None);
+        let args = build_args(&s, "make a box", &images(&[]), Path::new("/proj"), "SYS", None);
         assert_eq!(
             args,
             [
@@ -759,7 +758,8 @@ mod tests {
         s.claude_effort = Some("high".into());
         let args = build_args(
             &s,
-            &req(&["/p/shot.png", "/p/notes.txt"]),
+            "make a box",
+            &images(&["/p/shot.png", "/p/notes.txt"]),
             Path::new("/proj"),
             "line1\nline2",
             Some("th_7"),
@@ -798,7 +798,8 @@ mod tests {
         let s = Settings::default();
         let args = build_args(
             &s,
-            &req(&["/p/a.webp", "/p/b.PNG", "/p/c.pdf"]),
+            "make a box",
+            &images(&["/p/a.webp", "/p/b.PNG", "/p/c.pdf"]),
             Path::new("/proj"),
             "SYS",
             None,
