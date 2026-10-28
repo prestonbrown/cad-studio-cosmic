@@ -26,9 +26,9 @@
 //!   preview-less.
 //! - Thinking rows are block-boundary timed through the `apply_at` seam.
 //!
-//! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
-//! constant names its key (the engine crate's established pattern for pure
-//! modules — `fl!()` needs cosmic's runtime, which purity excludes).
+//! User-visible strings read through `fl!` at event time (the catalogs are
+//! `app/i18n/*/main.ftl`, en the file of record); the engine name and login
+//! command are data, not strings to translate.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -36,33 +36,19 @@ use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use engine::agent::session::{EngineEvent, TurnOutcome};
+use engine::agent::session::{EngineEvent, SystemRow, TurnOutcome};
 use engine::agent::tool_summary::{live_preview, live_title};
 use engine::project::store::{Action, ChatMessage, Role, ToolActivity, ToolState};
+
+use crate::fl;
 
 /// The sign-in command shown in the auth-failure row (AgentLocator.swift:25;
 /// the engine's display name "Claude Code" comes from AgentLocator.swift:12).
 const LOGIN_COMMAND: &str = "claude";
 
-/// `sta-ragionando`
-const THINKING_PLACEHOLDER: &str = "Claude Code is thinking…";
-/// `sta-ragionando-circa-token` — the catalog has no engine name, just the
-/// middle-dot form.
-const THINKING_TOKENS: &str = "Thinking · about {tokens} tokens";
-/// `ha-ragionato-per-lld-s`
-const THOUGHT_FOR: &str = "Thought for {seconds} s";
-/// `interrotto` — the cancelled turn's summary row and failure activity
-/// (the bridge's [`crate::bridge`] turn-terminal reuses it).
-pub const INTERRUPTED: &str = "Stopped";
-/// `non-autenticato-apri-il-terminale-ed-esegui-per-effettuare-l-accesso`
-/// (the en catalog's apostrophe is ASCII).
-const AUTH_ROW: &str = "Claude Code isn't signed in. Open Terminal and run `{command}` to sign in.";
-/// `ha-terminato-con-un-errore-codice-d`. Upstream's `%d` is Swift's
-/// non-optional exit status; the engine's `Option` has no code for signal
-/// deaths and never-spawned turns, which render code-less rather than
-/// inventing a number.
-const ERROR_ROW: &str = "Claude Code ended with an error (code {code}).";
-const ERROR_ROW_NO_CODE: &str = "Claude Code ended with an error.";
+/// The engine display name (AgentLocator.swift:12) — the `{$agent}` the
+/// auth/thinking/error rows fill in.
+const ENGINE_NAME: &str = "Claude Code";
 
 /// Upstream's live-preview throttle window (AgentSession.swift:179).
 const PREVIEW_THROTTLE: Duration = Duration::from_millis(150);
@@ -148,8 +134,8 @@ impl ChatState {
             } => {
                 self.complete_tool(id, output, *is_error);
             }
-            EngineEvent::System { text } => {
-                self.append_row(Role::System, text.clone());
+            EngineEvent::System { row } => {
+                self.append_row(Role::System, system_row_text(*row));
             }
             EngineEvent::TurnFinished(outcome) => self.turn_finished(outcome),
         }
@@ -211,7 +197,7 @@ impl ChatState {
 
     /// Upstream `startBlock`'s thinking case (AgentSession.swift:149-153).
     fn thinking_started(&mut self, now: Instant) {
-        let id = self.append_row(Role::Thinking, THINKING_PLACEHOLDER);
+        let id = self.append_row(Role::Thinking, fl!("sta-ragionando", agent = ENGINE_NAME));
         self.active_thinking_id = Some(id);
         self.thinking_started_at = Some(now);
     }
@@ -221,7 +207,7 @@ impl ChatState {
         if let Some(id) = self.active_thinking_id {
             self.set_text(
                 id,
-                THINKING_TOKENS.replace("{tokens}", &estimated_tokens.to_string()),
+                fl!("sta-ragionando-circa-token", tokens = estimated_tokens),
             );
         }
     }
@@ -236,7 +222,7 @@ impl ChatState {
             Some(start) => (now - start).as_secs_f64().round().max(1.0) as i64,
             None => 1,
         };
-        self.set_text(id, THOUGHT_FOR.replace("{seconds}", &seconds.to_string()));
+        self.set_text(id, fl!("ha-ragionato-per-lld-s", seconds = seconds));
     }
 
     /// Set the open streaming row's text to the snapshot, opening a row for a
@@ -380,11 +366,23 @@ impl ChatState {
                 exit_code,
             } => {
                 let text = if *auth {
-                    AUTH_ROW.replace("{command}", LOGIN_COMMAND)
+                    fl!(
+                        "non-autenticato-apri-il-terminale-ed-esegui-per-effettuare-l-accesso",
+                        agent = ENGINE_NAME,
+                        command = LOGIN_COMMAND
+                    )
                 } else {
                     match exit_code {
-                        Some(code) => ERROR_ROW.replace("{code}", &code.to_string()),
-                        None => ERROR_ROW_NO_CODE.to_string(),
+                        // `ha-terminato-con-un-errore-codice-d`; a code-less
+                        // failure (signal death, never spawned) reads the
+                        // port-added code-less row — upstream's status is
+                        // non-optional
+                        Some(code) => fl!(
+                            "ha-terminato-con-un-errore-codice-d",
+                            agent = ENGINE_NAME,
+                            code = code
+                        ),
+                        None => fl!("ha-terminato-con-un-errore", agent = ENGINE_NAME),
                     }
                 };
                 let id = Uuid::new_v4();
@@ -408,7 +406,7 @@ impl ChatState {
             // upstream's interrupted summary row; Busy/MissingSession never
             // reach the app (the engine's dance absorbs them)
             TurnOutcome::Cancelled => {
-                self.append_row(Role::Summary, INTERRUPTED);
+                self.append_row(Role::Summary, interrupted());
             }
             TurnOutcome::Busy | TurnOutcome::MissingSession => {}
         }
@@ -454,6 +452,28 @@ pub fn should_emit_preview(last_emit: Option<Instant>, now: Instant) -> bool {
     match last_emit {
         Some(last) => now - last > PREVIEW_THROTTLE,
         None => true,
+    }
+}
+
+/// `interrotto` — the cancelled turn's summary row and failure activity
+/// (the bridge's [`crate::bridge`] turn-terminal reuses it).
+pub fn interrupted() -> String {
+    fl!("interrotto")
+}
+
+/// The engine's system rows, localized (AgentSession.swift:81/:91). The
+/// engine emits stable [`SystemRow`] ids — it has no catalog — and this is
+/// the app boundary every System row folds through: the driver's transcript
+/// and the window's live state both apply events via [`ChatState::apply`],
+/// so the text resolves once here and chat.json persists it like any row.
+fn system_row_text(row: SystemRow) -> String {
+    match row {
+        SystemRow::BusyFreshContext => fl!(
+            "la-sessione-precedente-ancora-in-uso-da-un-altro-processo-il-contesto-della-conversazione-ripartito-ma-il-model-py-esistente-resta-la-base-del-lavoro"
+        ),
+        SystemRow::MissingSession => fl!(
+            "la-sessione-precedente-non-stata-trovata-il-contesto-della-conversazione-ripartito-ma-il-model-py-esistente-resta-la-base-del-lavoro"
+        ),
     }
 }
 
@@ -609,11 +629,12 @@ mod tests {
     /// The thinking row's three text forms and the ≥1 s duration rule.
     #[test]
     fn thinking_row_lifecycle() {
+        let _lang = crate::localize::pin_en();
         let t0 = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&started(), t0);
         state.apply_at(&EngineEvent::ThinkingStarted, t0);
-        assert_eq!(row_text(&state), [THINKING_PLACEHOLDER]);
+        assert_eq!(row_text(&state), ["Claude Code is thinking…"]);
         assert_eq!(state.messages[0].role, Role::Thinking);
         let thinking_id = state.messages[0].id;
         assert_eq!(state.active_thinking_id, Some(thinking_id));
@@ -657,6 +678,7 @@ mod tests {
     /// `system/thinking_tokens` with no thinking block at all).
     #[test]
     fn thinking_events_without_open_row_are_noops() {
+        let _lang = crate::localize::pin_en();
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&started(), now);
@@ -674,7 +696,7 @@ mod tests {
         state.apply_at(&success("done"), now);
         state.apply_at(&EngineEvent::ThinkingFinished, now);
         assert_eq!(state.active_thinking_id, None);
-        assert_eq!(row_text(&state), [THINKING_PLACEHOLDER, "done"]);
+        assert_eq!(row_text(&state), ["Claude Code is thinking…", "done"]);
     }
 
     // ─── tool rows ──────────────────────────────────────────────────────────
@@ -884,6 +906,7 @@ mod tests {
     /// open-terminal action, and both survive the chat.json round-trip.
     #[test]
     fn auth_row_persists_open_terminal_action() {
+        let _lang = crate::localize::pin_en();
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&failed("api error status 401", true, Some(1)), now);
@@ -914,6 +937,7 @@ mod tests {
     /// failure (signal, never spawned) renders without inventing one.
     #[test]
     fn non_auth_failure_row_carries_exit_code() {
+        let _lang = crate::localize::pin_en();
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&failed("the agent fell over", false, Some(3)), now);
@@ -939,10 +963,11 @@ mod tests {
     /// the engine never emits) still fail open without a row.
     #[test]
     fn cancelled_appends_summary_row() {
+        let _lang = crate::localize::pin_en();
         let now = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&EngineEvent::TurnFinished(TurnOutcome::Cancelled), now);
-        assert_eq!(row_text(&state), [INTERRUPTED]);
+        assert_eq!(row_text(&state), [interrupted()]);
         assert_eq!(state.messages[0].role, Role::Summary);
 
         state.apply_at(&EngineEvent::TurnFinished(TurnOutcome::Busy), now);
@@ -953,14 +978,21 @@ mod tests {
     /// System events append verbatim system rows.
     #[test]
     fn system_event_appends_row() {
+        let _lang = crate::localize::pin_en();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(
             &EngineEvent::System {
-                text: "context reset".into(),
+                row: SystemRow::MissingSession,
             },
             Instant::now(),
         );
-        assert_eq!(row_text(&state), ["context reset"]);
+        // the engine names the row; the reducer resolves the catalog text
+        assert_eq!(
+            row_text(&state),
+            [
+                "The previous session wasn’t found: the conversation context has been reset, but the existing model.py remains the basis of the work."
+            ]
+        );
         assert_eq!(state.messages[0].role, Role::System);
         assert_eq!(state.messages[0].action, None);
     }

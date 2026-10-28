@@ -17,7 +17,6 @@ use engine::agent::session::TurnOutcome;
 use engine::project::outputs::expected_outputs;
 
 use crate::fl;
-use crate::localize::substitute_placeholders;
 
 /// The engine display name (AgentLocator.swift:12 — upstream "Claude Code").
 pub const ENGINE_NAME: &str = "Claude Code";
@@ -37,11 +36,13 @@ impl Activity {
         matches!(self, Activity::Working(_))
     }
 
-    /// The status text (ActivityViewer.statusText; idle is "Ready").
-    pub fn text(&self) -> &str {
+    /// The status text (ActivityViewer.statusText; idle is `pronto`).
+    pub fn text(&self) -> String {
         match self {
-            Activity::Idle => "Ready",
-            Activity::Working(text) | Activity::Succeeded(text) | Activity::Failed(text) => text,
+            Activity::Idle => fl!("pronto"),
+            Activity::Working(text) | Activity::Succeeded(text) | Activity::Failed(text) => {
+                text.clone()
+            }
         }
     }
 }
@@ -67,9 +68,9 @@ pub struct Issue {
 
 /// The issue list (Project.swift:113-130): the build error first, one
 /// warning naming the missing output files, then the two motion branches —
-/// `motion_error` arrives already localized and substituted (the pane's
-/// reload), the collision count substitutes into the fl! text. The
-/// manifest warnings join at M8.
+/// `motion_error` arrives already localized (the pane's reload formats
+/// `animation-json-non-valido` itself), the collision count formats into
+/// the fl! text. The manifest warnings join at M8.
 pub fn issues(
     build_error: Option<&str>,
     missing_outputs: &[String],
@@ -86,7 +87,10 @@ pub fn issues(
     if !missing_outputs.is_empty() {
         out.push(Issue {
             kind: IssueKind::Warning,
-            message: format!("Missing output files: {}", missing_outputs.join(", ")),
+            message: fl!(
+                "file-di-output-mancanti",
+                files = missing_outputs.join(", ")
+            ),
         });
     }
     if let Some(error) = motion_error {
@@ -98,9 +102,9 @@ pub fn issues(
     if collision_frames > 0 {
         out.push(Issue {
             kind: IssueKind::Warning,
-            message: substitute_placeholders(
-                &fl!("l-animazione-ha-collisioni-tra-parti-in-lld-fotogrammi"),
-                &[&collision_frames.to_string()],
+            message: fl!(
+                "l-animazione-ha-collisioni-tra-parti-in-lld-fotogrammi",
+                frames = collision_frames
             ),
         });
     }
@@ -138,33 +142,33 @@ pub enum Signal<'a> {
 /// classifying, Project.swift:266-274).
 pub fn next(signal: Signal<'_>, missing_outputs_empty: bool) -> Activity {
     match signal {
-        Signal::TurnStarted => Activity::Working(format!("{ENGINE_NAME} is working…")),
+        Signal::TurnStarted => Activity::Working(fl!("sta-lavorando", agent = ENGINE_NAME)),
         Signal::ToolOpened(title) => {
-            Activity::Working(format!("{ENGINE_NAME} is working… · {title}"))
+            Activity::Working(fl!("sta-lavorando-2", agent = ENGINE_NAME, title = title))
         }
         Signal::TurnFinished(outcome) => match outcome {
             TurnOutcome::Success { .. } => {
                 if missing_outputs_empty {
-                    Activity::Succeeded("Model generated".to_string())
+                    Activity::Succeeded(fl!("modello-generato"))
                 } else {
-                    Activity::Succeeded("Response completed".to_string())
+                    Activity::Succeeded(fl!("risposta-completata"))
                 }
             }
             // upstream `agentDidFinish(.failed(...))` classifications
             // (AgentSession.swift:269, 294, 301)
             TurnOutcome::Failed { auth: true, .. } => {
-                Activity::Failed(format!("Sign-in to {ENGINE_NAME} required"))
+                Activity::Failed(fl!("accesso-a-richiesto", agent = ENGINE_NAME))
             }
-            TurnOutcome::Failed { .. } => Activity::Failed(format!("{ENGINE_NAME} error")),
-            TurnOutcome::Cancelled => Activity::Failed("Interrupted".to_string()),
+            TurnOutcome::Failed { .. } => Activity::Failed(fl!("errore-di", agent = ENGINE_NAME)),
+            TurnOutcome::Cancelled => Activity::Failed(crate::chat::interrupted()),
             // Busy/MissingSession never surface as events (the engine's
             // dance absorbs them); a caller driving raw turns still ends
             // failed rather than stuck working.
             TurnOutcome::Busy | TurnOutcome::MissingSession => {
-                Activity::Failed(format!("{ENGINE_NAME} error"))
+                Activity::Failed(fl!("errore-di", agent = ENGINE_NAME))
             }
         },
-        Signal::Closed => Activity::Failed(format!("{ENGINE_NAME} error")),
+        Signal::Closed => Activity::Failed(fl!("errore-di", agent = ENGINE_NAME)),
     }
 }
 
@@ -188,6 +192,7 @@ mod tests {
     /// working·title on each tool, and every end classification.
     #[test]
     fn activity_transitions_match_upstream() {
+        let _lang = crate::localize::pin_en();
         assert_eq!(
             next(Signal::TurnStarted, false),
             Activity::Working("Claude Code is working…".into())
@@ -240,7 +245,7 @@ mod tests {
         );
         assert_eq!(
             next(Signal::TurnFinished(&TurnOutcome::Cancelled), true),
-            Activity::Failed("Interrupted".into())
+            Activity::Failed("Stopped".into())
         );
         assert_eq!(
             next(Signal::Closed, true),
@@ -260,6 +265,7 @@ mod tests {
     /// report order; a full output directory produces none.
     #[test]
     fn missing_output_warning_lists_absent_files() {
+        let _lang = crate::localize::pin_en();
         let dir = output_dir("missing");
         assert_eq!(missing_output_files(&dir).len(), 7, "everything missing");
         for name in expected_outputs() {
@@ -298,7 +304,7 @@ mod tests {
     /// substituted into the fl! text; a clean study stays silent.
     #[test]
     fn motion_issues_render_both_upstream_branches() {
-        crate::localize::select("en");
+        let _lang = crate::localize::pin_en();
         let issues = crate::activity::issues(
             None,
             &[],

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use engine::agent::EngineCommand;
 use engine::agent::claude::TurnRequest;
-use engine::agent::session::{EngineEvent, Session, TurnHandle, TurnOutcome};
+use engine::agent::session::{EngineEvent, Session, SystemRow, TurnHandle, TurnOutcome};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
@@ -30,11 +30,10 @@ static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 const PONG_SID: &str = "94fcba3f-44f9-4003-b32d-c469499dc529";
 const BUSY_SID: &str = "11111111-2222-3333-4444-555555555555";
 
-/// AgentSession.swift:79-82's system row (English catalog value; the Swift
-/// literals are the Italian source strings).
-const BUSY_FRESH_MESSAGE: &str = "The previous session is still in use by another process: the conversation context started over, but the existing model.py is still the basis for the work.";
-/// AgentSession.swift:89-91's system row.
-const MISSING_MESSAGE: &str = "The previous session wasn’t found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
+/// AgentSession.swift:79-82's and :89-91's system rows — the engine emits
+/// stable ids; the app localizes at its boundary.
+const BUSY_FRESH_ROW: SystemRow = SystemRow::BusyFreshContext;
+const MISSING_ROW: SystemRow = SystemRow::MissingSession;
 
 fn fixture_fake(p: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -179,10 +178,10 @@ fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
         .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
-fn system_rows(events: &[EngineEvent], message: &str) -> Vec<usize> {
+fn system_rows(events: &[EngineEvent], row: SystemRow) -> Vec<usize> {
     positions(
         events,
-        |event| matches!(event, EngineEvent::System { text } if text == message),
+        |event| matches!(event, EngineEvent::System { row: r } if *r == row),
     )
 }
 
@@ -244,7 +243,7 @@ async fn busy_retries_once_then_fresh() {
 
     // the busy explanation arrives after the second collision, before the
     // fresh run starts
-    let system = system_rows(&events, BUSY_FRESH_MESSAGE);
+    let system = system_rows(&events, BUSY_FRESH_ROW);
     assert_eq!(system.len(), 1, "{events:?}");
     let started = positions(&events, |e| matches!(e, EngineEvent::Started { .. }));
     assert_eq!(
@@ -326,7 +325,7 @@ async fn missing_session_falls_back_fresh() {
             text: "pong".into()
         }
     );
-    let system = system_rows(&events, MISSING_MESSAGE);
+    let system = system_rows(&events, MISSING_ROW);
     assert_eq!(system.len(), 1, "{events:?}");
     let started = positions(&events, |e| matches!(e, EngineEvent::Started { .. }));
     assert_eq!(

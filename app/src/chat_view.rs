@@ -16,11 +16,10 @@
 //! SHELL's — it reads `ChatState` (e.g. `take_draft()`) and drives the
 //! bridge, then calls [`ChatPane::sent`] after a send consumed the draft.
 //!
-//! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
-//! constant names its key (the `fl!()` swap lands with the i18n scaffold in
-//! the windows task — `fl!()` needs cosmic's runtime). Icon names are
-//! freedesktop-theme approximations of upstream SF Symbols; the theme in
-//! play decides what actually shows (cosmetic — flagged for the shell task).
+//! User-visible strings read through `fl!` at render time (the key names
+//! the en/main.ftl entry). Icon names are freedesktop-theme approximations
+//! of upstream SF Symbols; the theme in play decides what actually shows
+//! (cosmetic — flagged for the shell task).
 //!
 //! Upstream pieces deliberately NOT here: `VersionMarker` rows (M5 — the
 //! versions model doesn't exist yet; summary rows render as plain caption
@@ -44,6 +43,7 @@ use engine::project::store::{Action, ChatMessage, Role, ToolState};
 use uuid::Uuid;
 
 use crate::chat::ChatState;
+use crate::fl;
 use crate::markdown::{self, MdStyle};
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
@@ -52,77 +52,14 @@ use crate::markdown::{self, MdStyle};
 /// every widget in one element tree must agree on a single lifetime.
 type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
 
-// ─── catalog strings (each constant names its en/main.ftl key) ─────────────
+// ─── catalog strings ────────────────────────────────────────────────────────
+// Every user-visible string reads through `fl!` at render time; the key
+// names the en/main.ftl entry. The engine display name is data, not a
+// string to translate.
 
-/// `descrivi-un-oggetto`
-const DESCRIBE_AN_OBJECT: &str = "Describe an object";
-/// `scrive-lo-script-cad-genera-il-modello-3d-e-la-tavola-tecnica` (`%@` is
-/// the engine display name).
-const ENGINE_WRITES: &str =
-    "%@ writes the CAD script and generates the 3D model and the technical drawing.";
 /// The engine display name (AgentLocator.swift:12 — the reducer's auth row
 /// uses the same "Claude Code").
 const ENGINE_NAME: &str = "Claude Code";
-/// `staffa-a-l-40-40-3-mm-con-due-fori-m4`
-const SUGGESTION_BRACKET: &str = "40×40×3 mm L bracket with two M4 holes";
-/// `scatola-60-40-25-mm-con-coperchio-a-incastro`
-const SUGGESTION_BOX: &str = "60×40×25 mm box with a snap-fit lid";
-/// `distanziale-cilindrico-12-mm-alto-15-mm-con-foro-m3`
-const SUGGESTION_SPACER: &str = "Cylindrical spacer Ø 12 mm, 15 mm tall, with an M3 hole";
-/// `supporto-per-smartphone-inclinato-a-60`
-const SUGGESTION_STAND: &str = "Smartphone stand tilted at 60°";
-/// `dettagli`
-const DETAILS: &str = "Details";
-/// `mostra-tutto`
-const SHOW_ALL: &str = "Show All";
-/// `copia`
-const COPY: &str = "Copy";
-/// `in-corso` (ToolActivityRow stateDescription)
-const TOOL_STATE_RUNNING: &str = "in progress";
-/// `completato`
-const TOOL_STATE_SUCCEEDED: &str = "completed";
-/// `non-riuscito`
-const TOOL_STATE_FAILED: &str = "failed";
-/// `apri-il-terminale` (MessageView title(for:))
-const ACTION_OPEN_TERMINAL: &str = "Open Terminal";
-/// `chiedi-all-agente-di-correggere`
-const ACTION_ASK_TO_FIX: &str = "Ask the agent to fix it";
-/// `configura-l-agente`
-const ACTION_CONFIGURE: &str = "Set up the agent…";
-/// `descrivi-l-oggetto-o-la-modifica`
-const PLACEHOLDER: &str = "Describe the object or the change…";
-/// `scrivi-il-prossimo-messaggio-partir-al-termine`
-const PLACEHOLDER_BUSY: &str = "Write the next message: it goes out when this one finishes…";
-/// `invia`
-const SEND: &str = "Send";
-/// `invia-invio`
-const SEND_TOOLTIP: &str = "Send (Return)";
-/// `aggiungi-alla-coda`
-const ADD_TO_QUEUE: &str = "Add to queue";
-/// `aggiungi-alla-coda-partir-al-termine-invio`
-const ADD_TO_QUEUE_TOOLTIP: &str = "Add to queue: it goes out when this one finishes (Return)";
-/// `stop`
-const STOP: &str = "Stop";
-/// `interrompi`
-const STOP_TOOLTIP: &str = "Stop (⌘.)";
-/// `allega-file`
-const ATTACH: &str = "Attach files";
-/// `allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v`
-const ATTACH_TOOLTIP: &str = "Attach reference images or files (you can also paste them with ⌘V)";
-/// `rimuovi`
-const REMOVE: &str = "Remove";
-/// `in-coda-partiranno-uno-alla-volta`
-const QUEUE_RUNNING: &str = "Queued, sent one at a time";
-/// `in-coda-in-pausa-dopo-l-ultimo-errore`
-const QUEUE_PAUSED: &str = "Queued, paused after the last error";
-/// `invia-ora`
-const SEND_NOW: &str = "Send now";
-/// `rimuovi-dalla-coda`
-const REMOVE_FROM_QUEUE: &str = "Remove from queue";
-/// `solo-immagini`
-const IMAGES_ONLY: &str = "Images only";
-/// `lld-immagini` (`%lld images`)
-const IMAGES_COUNT: &str = "images";
 
 /// Upstream caps the collapsed tool output at 1500 CHARACTERS before the
 /// "Show All" affordance (ToolActivityRow.swift:8, `output.count` /
@@ -401,7 +338,7 @@ fn attachment_chips<'a>(paths: &'a [String], removable: bool) -> Element<'a, Mes
             chip = chip.push(
                 button::icon(icon_handle("window-close", 12))
                     .on_press(Message::Detach(path.clone()))
-                    .name(REMOVE),
+                    .name(fl!("rimuovi")),
             );
         }
         chips = chips.push(
@@ -471,7 +408,7 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     stack = stack.push(head);
     if message.detail.is_some() {
         stack = stack.push(
-            button::text(DETAILS)
+            button::text(fl!("dettagli"))
                 .class(cosmic::theme::Button::Text)
                 .on_press(Message::ToggleDetail(message.id)),
         );
@@ -496,11 +433,11 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
 }
 
 /// Upstream `title(for:)` (MessageView.swift:71-77).
-fn action_title(action: Action) -> &'static str {
+fn action_title(action: Action) -> String {
     match action {
-        Action::AskClaudeToFix => ACTION_ASK_TO_FIX,
-        Action::OpenTerminal => ACTION_OPEN_TERMINAL,
-        Action::ConfigureClaude => ACTION_CONFIGURE,
+        Action::AskClaudeToFix => fl!("chiedi-all-agente-di-correggere"),
+        Action::OpenTerminal => fl!("apri-il-terminale"),
+        Action::ConfigureClaude => fl!("configura-l-agente"),
     }
 }
 
@@ -577,7 +514,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
                 body = body.push(code_block(&shown_output(output, full)));
                 if output.chars().count() > OUTPUT_PREVIEW_LEN && !full {
                     body = body.push(
-                        button::text(SHOW_ALL)
+                        button::text(fl!("mostra-tutto"))
                             .class(cosmic::theme::Button::Text)
                             .on_press(Message::ToggleFullOutput(message.id)),
                     );
@@ -604,9 +541,9 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
         ToolState::Failed => glyph("✗", STATE_ERR),
     };
     let description = match state {
-        ToolState::Running => TOOL_STATE_RUNNING,
-        ToolState::Succeeded => TOOL_STATE_SUCCEEDED,
-        ToolState::Failed => TOOL_STATE_FAILED,
+        ToolState::Running => fl!("in-corso"),
+        ToolState::Succeeded => fl!("completato"),
+        ToolState::Failed => fl!("non-riuscito"),
     };
     cosmic::widget::tooltip(
         mark,
@@ -653,7 +590,7 @@ fn code_block<'a>(code: &str) -> Element<'a, Message> {
         .push(
             button::icon(icon_handle("edit-copy", 14))
                 .on_press(Message::CopyCode(code.to_string()))
-                .name(COPY),
+                .name(fl!("copia")),
         )
         .spacing(8);
     container(body)
@@ -674,10 +611,10 @@ fn streaming_indicator() -> Element<'static, Message> {
 /// Upstream `ChatEmptyState` (ChatView.swift:107-154).
 fn empty_state() -> Element<'static, Message> {
     let suggestions = [
-        SUGGESTION_BRACKET,
-        SUGGESTION_BOX,
-        SUGGESTION_SPACER,
-        SUGGESTION_STAND,
+        fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
+        fl!("scatola-60-40-25-mm-con-coperchio-a-incastro"),
+        fl!("distanziale-cilindrico-12-mm-alto-15-mm-con-foro-m3"),
+        fl!("supporto-per-smartphone-inclinato-a-60"),
     ];
     let mut list = Column::new().spacing(6);
     for suggestion in suggestions {
@@ -704,8 +641,11 @@ fn empty_state() -> Element<'static, Message> {
         // upstream `cube.transparent`; package-x-generic is the Pop-theme
         // stand-in (preferences-desktop-3d exists in no Pop theme)
         .push(icon("package-x-generic", 40))
-        .push(body_text(DESCRIBE_AN_OBJECT).size(18))
-        .push(secondary_text(ENGINE_WRITES.replace("%@", ENGINE_NAME)))
+        .push(body_text(fl!("descrivi-un-oggetto")).size(18))
+        .push(secondary_text(fl!(
+            "scrive-lo-script-cad-genera-il-modello-3d-e-la-tavola-tecnica",
+            agent = ENGINE_NAME
+        )))
         .push(list)
         // upstream caps the column at 340 pt; Fill+max keeps a narrower
         // chat pane from overflowing its bounds
@@ -766,14 +706,14 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             14,
         ))
         .push(secondary_text(if paused {
-            QUEUE_PAUSED
+            fl!("in-coda-in-pausa-dopo-l-ultimo-errore")
         } else {
-            QUEUE_RUNNING
+            fl!("in-coda-partiranno-uno-alla-volta")
         }))
         .push(Space::new().width(Length::Fill));
     if paused && !busy {
         head = head.push(
-            button::text(SEND_NOW)
+            button::text(fl!("invia-ora"))
                 .class(cosmic::theme::Button::Text)
                 .on_press(Message::SendQueuedNow),
         );
@@ -782,13 +722,13 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
     for (index, item) in queue.iter().enumerate() {
         let mut body = Column::new().spacing(2);
         let preview = if item.text.is_empty() {
-            IMAGES_ONLY.to_string()
+            fl!("solo-immagini")
         } else {
             item.text.clone()
         };
         body = body.push(body_text(preview));
         if item.images > 0 {
-            body = body.push(secondary_text(format!("{} {}", item.images, IMAGES_COUNT)));
+            body = body.push(secondary_text(fl!("lld-immagini", count = item.images)));
         }
         items = items.push(
             container(
@@ -799,7 +739,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
                     .push(
                         button::icon(icon_handle("window-close", 14))
                             .on_press(Message::RemoveQueued(item.id))
-                            .name(REMOVE_FROM_QUEUE),
+                            .name(fl!("rimuovi-dalla-coda")),
                     ),
             )
             .padding([7.0, 10.0])
@@ -822,8 +762,10 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
     line = line.push(
         button::icon(icon_handle("mail-attachment", 14))
             .on_press(Message::Attach)
-            .name(ATTACH)
-            .description(ATTACH_TOOLTIP),
+            .name(fl!("allega-file"))
+            .description(fl!(
+                "allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"
+            )),
     );
     line = line.push(
         text_editor::text_editor(&pane.input)
@@ -837,7 +779,11 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
             // wrapper keeps rip+restore symmetric; the right-click menu
             // is the casualty until libcosmic stops forwarding id().
             .context_menu(false)
-            .placeholder(if busy { PLACEHOLDER_BUSY } else { PLACEHOLDER })
+            .placeholder(if busy {
+                fl!("scrivi-il-prossimo-messaggio-partir-al-termine")
+            } else {
+                fl!("descrivi-l-oggetto-o-la-modifica")
+            })
             .on_action(Message::Draft)
             // Return sends; shift/option+Return breaks the line
             // (ChatInputView.swift:39-47).
@@ -872,22 +818,22 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
             buttons = buttons.push(
                 button::icon(icon_handle("list-add", 15))
                     .on_press(Message::Send)
-                    .name(ADD_TO_QUEUE)
-                    .description(ADD_TO_QUEUE_TOOLTIP),
+                    .name(fl!("aggiungi-alla-coda"))
+                    .description(fl!("aggiungi-alla-coda-partir-al-termine-invio")),
             );
         }
         buttons = buttons.push(
             button::icon(icon_handle("media-playback-stop", 18))
                 .on_press(Message::Stop)
-                .name(STOP)
-                .description(STOP_TOOLTIP),
+                .name(fl!("stop"))
+                .description(fl!("interrompi")),
         );
     } else {
         buttons = buttons.push(
             button::icon(icon_handle("go-up", 18))
                 .on_press_maybe(chat.can_send().then_some(Message::Send))
-                .name(SEND)
-                .description(SEND_TOOLTIP),
+                .name(fl!("invia"))
+                .description(fl!("invia-invio")),
         );
     }
     buttons.into()

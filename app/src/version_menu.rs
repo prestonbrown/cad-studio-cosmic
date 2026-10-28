@@ -10,30 +10,19 @@
 //! `on_restore` closure, exactly how the parameters overlay's picker
 //! reports through its message.
 //!
-//! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
-//! constant names its key (the repo-wide `fl!()` swap is pending, the
-//! landed modules' convention). Icons are freedesktop-theme approximations
-//! of upstream SF Symbols (`clock.arrow.circlepath` →
-//! `document-open-recent`, `checkmark` → `object-select`).
+//! User-visible strings read through `fl!` at render time (the key names
+//! the en/main.ftl entry); the relative/abbreviated date halves stay
+//! hand-formatted English — upstream gets them from SwiftUI's
+//! locale-aware formatters, which no catalog key backs. Icons are
+//! freedesktop-theme approximations of upstream SF Symbols
+//! (`clock.arrow.circlepath` → `document-open-recent`, `checkmark` →
+//! `object-select`).
 
 use time::OffsetDateTime;
 
 use engine::project::versions::ProjectVersion;
 
-// ─── catalog strings (each constant names its en/main.ftl key) ─────────────
-
-/// `versione-lld-2` (VersionMenu.swift:17/19).
-const VERSION_LABEL: &str = "Version %lld · %@";
-/// `nessuna-versione-salvata` (VersionMenu.swift:9).
-const NO_SAVED_VERSIONS: &str = "No Saved Versions";
-/// `disponibili-al-termine-della-generazione` (VersionMenu.swift:11).
-const AVAILABLE_WHEN_DONE: &str = "Available when generation finishes";
-/// `torna-a-una-versione` (VersionMenu.swift:11).
-const GO_BACK_TO_A_VERSION: &str = "Go back to a version";
-/// `versioni` — the button's accessibility label (VersionMenu.swift:35).
-const VERSIONS: &str = "Versions";
-/// `storico-delle-versioni` (VersionMenu.swift:37).
-const VERSION_HISTORY: &str = "Version history";
+use crate::fl;
 
 /// Upstream's `clock.arrow.circlepath` (VersionMenu.swift:29).
 const CLOCK_ICON: &str = "document-open-recent";
@@ -129,13 +118,14 @@ pub fn abbreviated(at: OffsetDateTime) -> String {
     )
 }
 
-/// An entry's subtitle: the relative distance and the abbreviated date,
-/// joined by upstream's `·` (VersionMenu.swift:21).
+/// An entry's subtitle: the relative distance and the abbreviated date
+/// (VersionMenu.swift:21) formatted through `version-timestamps` (the
+/// renamed format-only `%@ · %@` key).
 fn subtitle(entry: &VersionEntry, now: OffsetDateTime) -> String {
-    format!(
-        "{} · {}",
-        relative(entry.created_at, now),
-        abbreviated(entry.created_at)
+    fl!(
+        "version-timestamps",
+        relative = relative(entry.created_at, now),
+        absolute = abbreviated(entry.created_at)
     )
 }
 
@@ -167,7 +157,7 @@ pub fn version_button<Message: Clone + 'static>(
         .push(cosmic::widget::icon::from_name(CLOCK_ICON).size(14).icon());
     if let Some(current) = current {
         label = label.push(
-            text(format!("v{current}"))
+            text(fl!("v-lld", version = current))
                 .size(12)
                 .font(cosmic::font::mono()),
         );
@@ -179,10 +169,10 @@ pub fn version_button<Message: Clone + 'static>(
             cosmic::theme::Button::Standard
         })
         .on_press(on_toggle)
-        .name(VERSIONS);
+        .name(fl!("versioni"));
     cosmic::widget::tooltip(
         root,
-        cosmic::widget::text(VERSION_HISTORY),
+        cosmic::widget::text(fl!("storico-delle-versioni")),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
@@ -209,9 +199,9 @@ pub fn view_versions<Message: Clone + 'static>(
             container(
                 cosmic::widget::Column::new()
                     .spacing(4)
-                    .push(text(NO_SAVED_VERSIONS.to_string()).size(12))
+                    .push(text(fl!("nessuna-versione-salvata")).size(12))
                     .push(
-                        text(AVAILABLE_WHEN_DONE.to_string())
+                        text(fl!("disponibili-al-termine-della-generazione"))
                             .size(11)
                             .class(dim_subtitle()),
                     ),
@@ -220,14 +210,11 @@ pub fn view_versions<Message: Clone + 'static>(
         );
     } else {
         list = list.push(
-            container(text(
-                if busy {
-                    AVAILABLE_WHEN_DONE
-                } else {
-                    GO_BACK_TO_A_VERSION
-                }
-                .to_string(),
-            ))
+            container(text(if busy {
+                fl!("disponibili-al-termine-della-generazione")
+            } else {
+                fl!("torna-a-una-versione")
+            }))
             .padding([10, 16, 6, 16]),
         );
         for entry in entries {
@@ -235,14 +222,13 @@ pub fn view_versions<Message: Clone + 'static>(
             let on_press = (!busy).then(move || restore(entry.number));
             let mut head = cosmic::widget::Row::new().spacing(6);
             if entry.is_current {
-                head =
-                    head.push(cosmic::widget::icon::from_name(CHECK_ICON).size(12).icon());
+                head = head.push(cosmic::widget::icon::from_name(CHECK_ICON).size(12).icon());
             }
-            head = head.push(text(
-                VERSION_LABEL
-                    .replace("%lld", &entry.number.to_string())
-                    .replace("%@", &entry.prompt_summary),
-            ));
+            head = head.push(text(fl!(
+                "versione-lld-2",
+                version = entry.number,
+                summary = entry.prompt_summary
+            )));
             let body = cosmic::widget::Column::new()
                 .spacing(2)
                 .push(head)
@@ -302,7 +288,10 @@ mod tests {
     fn relative_buckets_like_swiftui() {
         let now = OffsetDateTime::now_utc();
         assert_eq!(relative(now - time::Duration::seconds(30), now), "just now");
-        assert_eq!(relative(now - time::Duration::minutes(5), now), "5 minutes ago");
+        assert_eq!(
+            relative(now - time::Duration::minutes(5), now),
+            "5 minutes ago"
+        );
         assert_eq!(relative(now - time::Duration::hours(2), now), "2 hours ago");
         // a future timestamp clamps to "just now" (a clock skew guard)
         assert_eq!(relative(now + time::Duration::minutes(3), now), "just now");

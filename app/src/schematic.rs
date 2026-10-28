@@ -385,8 +385,8 @@ pub struct PageTabs {
 }
 
 impl PageTabs {
-    /// Titles pages from the manifest drawings; the fallback title is the
-    /// `pagina-lld` ftl key's English form until the shell wires i18n.
+    /// Titles pages from the manifest drawings; the fallback title reads
+    /// the `pagina-lld` catalog key.
     pub fn from_parts(files: &[PathBuf], manifest: Option<&Manifest>) -> Self {
         let pages = files
             .iter()
@@ -402,7 +402,7 @@ impl PageTabs {
                             })
                             .map(|drawing| drawing.title.clone())
                     })
-                    .unwrap_or_else(|| format!("Page {}", index + 1));
+                    .unwrap_or_else(|| fl!("pagina-lld", page = index + 1));
                 Page {
                     file: file.clone(),
                     title,
@@ -1119,7 +1119,12 @@ impl SchematicPane {
                 .unwrap_or_default();
             controls = controls
                 .push(button::text("<").on_press_maybe((index > 0).then_some(Message::PrevPage)))
-                .push(text(format!("{}/{} · {}", index + 1, pages, title)))
+                .push(text(fl!(
+                    "lld-lld",
+                    page = index + 1,
+                    total = pages,
+                    title = title
+                )))
                 .push(
                     button::text(">")
                         .on_press_maybe((index + 1 < pages).then_some(Message::NextPage)),
@@ -1128,7 +1133,7 @@ impl SchematicPane {
         controls = controls
             .push(button::text("-").on_press_maybe(has_sheet.then_some(Message::ZoomOut)))
             .push(button::text("+").on_press_maybe(has_sheet.then_some(Message::ZoomIn)))
-            .push(button::text("Fit").on_press_maybe(has_sheet.then_some(Message::Fit)));
+            .push(button::text(fl!("adatta")).on_press_maybe(has_sheet.then_some(Message::Fit)));
         container(
             Row::new()
                 .push(zoom)
@@ -1337,6 +1342,7 @@ mod tests {
 
     #[test]
     fn page_tabs_from_manifest_fixture() {
+        let _lang = crate::localize::pin_en();
         let manifest_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden/manifest.json");
         let manifest = Manifest::load(&manifest_path).unwrap();

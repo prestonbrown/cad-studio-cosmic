@@ -69,52 +69,11 @@ use tokio::sync::mpsc::{self, UnboundedReceiver as CmdReceiver, UnboundedSender 
 use uuid::Uuid;
 
 use crate::chat::ChatState;
+use crate::fl;
 
-/// The engine's display name (AgentLocator.swift:12) — the `%@` the activity
-/// catalog strings below fill in.
+/// The engine's display name (AgentLocator.swift:12) — the `{$agent}` the
+/// activity catalog strings fill in.
 const AGENT_NAME: &str = "Claude Code";
-
-/// `sta-lavorando` — the working activity a send opens (Project.swift:203).
-const WORKING: &str = "%@ is working…";
-/// `errore-di` — a failed turn's activity (AgentSession.swift:100). A
-/// cancelled turn's is `crate::chat::INTERRUPTED` (`interrotto`,
-/// AgentSession.swift:269 — the chat row's own text).
-const AGENT_ERROR: &str = "%@ error";
-/// `accesso-a-richiesto` — the auth failure's activity (AgentSession.swift:294).
-const SIGN_IN_REQUIRED: &str = "Sign-in to %@ required";
-/// `compilazione-di-model-py` (Project.swift:387).
-const BUILDING_MODEL: &str = "Building model.py…";
-/// `compilazione-interrotta` (Project.swift:398).
-const BUILD_STOPPED: &str = "Build stopped";
-/// `compilazione-manuale-di-model-py` (Project.swift:400).
-const MANUAL_BUILD: &str = "Manual build of model.py";
-/// `errore-nello-script` (Project.swift:383/405).
-const SCRIPT_ERROR: &str = "Script error";
-/// `la-compilazione-di-model-py-non-riuscita` (Project.swift:409).
-const MODEL_BUILD_FAILED: &str = "model.py failed to build.";
-/// `modello-generato` (Project.swift:270/399).
-const MODEL_GENERATED: &str = "Model generated";
-/// `risposta-completata` (Project.swift:272).
-const RESPONSE_COMPLETED: &str = "Response completed";
-/// `nessun-model-py-da-compilare` (Project.swift:380).
-const NO_MODEL_SCRIPT: &str = "No model.py to build";
-/// `parametro-non-trovato-in-model-py` (Project.swift:353).
-const PARAMETER_NOT_FOUND: &str = "Parameter %@ not found in model.py";
-/// `versione-lld` (Project.swift:329).
-const VERSION_ROW: &str = "Version %lld";
-/// `versione-lld-ripristinata` (Project.swift:318).
-const VERSION_RESTORED: &str = "Version %lld restored";
-/// `impossibile-ripristinare-la-versione-lld` (Project.swift:322).
-const CANNOT_RESTORE: &str = "Can’t restore version %lld";
-/// `l-esecuzione-di-model-py-non-riesce-con-questo-errore-correggi-lo-script`
-/// (Project.swift:258-260); upstream's `\n` escapes are real newlines.
-const ASK_FIX: &str = "Running model.py fails with this error. Fix the script:\n```\n%@\n```";
-/// The activity a python-readiness refusal leaves in the status line: the
-/// send was refused and the setup sheet (requested by the same refusal)
-/// is the recovery surface. Without it a refused send leaves no trace in
-/// the window — no row, no process, and the draft simply stays in the
-/// input bar as if nothing happened.
-const PYTHON_SETUP_REQUIRED: &str = "Python setup required";
 
 /// Upstream `Activity` (Project.swift:19-26): the status line the app
 /// renders, and the sole busy flag — `isBusy` is `activity.isWorking`.
@@ -220,7 +179,7 @@ impl Pipeline {
     /// care who started the turn.
     fn begin_turn(&mut self) {
         self.build_error = None;
-        self.activity = Activity::Working(WORKING.replace("%@", AGENT_NAME));
+        self.activity = Activity::Working(fl!("sta-lavorando", agent = AGENT_NAME));
     }
 }
 
@@ -444,7 +403,7 @@ impl Bridge {
             } else if !pipeline.python_ready() {
                 pipeline.draft = Some(prompt);
                 pipeline.sheet_requested = true;
-                pipeline.activity = Activity::Failed(PYTHON_SETUP_REQUIRED.to_string());
+                pipeline.activity = Activity::Failed(fl!("python-setup-required"));
                 let _ = self.out.unbounded_send(Message::PythonSheetRequested);
                 return Err(BuildRefusal::PythonNotReady);
             } else {
@@ -505,7 +464,7 @@ impl Bridge {
             }
             Err(ParameterError::NotFound { .. }) => {
                 self.pipeline().activity =
-                    Activity::Failed(PARAMETER_NOT_FOUND.replace("%@", name));
+                    Activity::Failed(fl!("parametro-non-trovato-in-model-py", name = name));
                 Ok(())
             }
             // the read above succeeded, so an io error now is the WRITE
@@ -532,20 +491,20 @@ impl Bridge {
                 // same surface as enqueue's refusal: without it a refused
                 // build/parameter commit leaves no status-line trace (the
                 // window folds this activity at both call sites)
-                pipeline.activity = Activity::Failed(PYTHON_SETUP_REQUIRED.to_string());
+                pipeline.activity = Activity::Failed(fl!("python-setup-required"));
                 let _ = self.out.unbounded_send(Message::PythonSheetRequested);
                 return Err(BuildRefusal::PythonNotReady);
             }
         }
         if !self.root.join("model.py").exists() {
-            self.pipeline().activity = Activity::Failed(NO_MODEL_SCRIPT.to_string());
+            self.pipeline().activity = Activity::Failed(fl!("nessun-model-py-da-compilare"));
             return Err(BuildRefusal::NoModelScript);
         }
         match run_model(&self.interpreter, &self.root) {
             Ok(handle) => {
                 {
                     let mut pipeline = self.pipeline();
-                    pipeline.activity = Activity::Working(BUILDING_MODEL.to_string());
+                    pipeline.activity = Activity::Working(fl!("compilazione-di-model-py"));
                     pipeline.build_error = None;
                 }
                 let _ = self.commands.send(Command::StartBuild {
@@ -559,7 +518,7 @@ impl Bridge {
             Err(err) => {
                 let mut pipeline = self.pipeline();
                 pipeline.build_error = Some(err.to_string());
-                pipeline.activity = Activity::Failed(SCRIPT_ERROR.to_string());
+                pipeline.activity = Activity::Failed(fl!("errore-nello-script"));
                 Ok(())
             }
         }
@@ -568,7 +527,13 @@ impl Bridge {
     /// The build-failure row's action (upstream `askClaudeToFix`,
     /// Project.swift:258-260): the traceback goes back as an ordinary turn.
     pub fn ask_agent_to_fix(&self, traceback: &str) -> Result<(), BuildRefusal> {
-        self.enqueue(ASK_FIX.replace("%@", traceback), Vec::new())
+        self.enqueue(
+            fl!(
+                "l-esecuzione-di-model-py-non-riesce-con-questo-errore-correggi-lo-script",
+                error = traceback
+            ),
+            Vec::new(),
+        )
     }
 
     /// Swap a recorded version back in (upstream `restore`,
@@ -598,7 +563,7 @@ impl Bridge {
                     .map(|()| version.session_id.clone())
                     .map_err(|err| err.to_string())
             })
-            .unwrap_or_else(|| Err(format!("version {number} is not in the history")));
+            .unwrap_or_else(|| Err(fl!("version-not-in-history", version = number)));
         match outcome {
             Ok(session_id) => {
                 let mut metadata = fresh_metadata(&self.root);
@@ -610,14 +575,16 @@ impl Bridge {
                 pipeline.missing_outputs = Vec::new();
                 pipeline.build_error = None;
                 pipeline.activity =
-                    Activity::Succeeded(VERSION_RESTORED.replace("%lld", &number.to_string()));
+                    Activity::Succeeded(fl!("versione-lld-ripristinata", version = number));
                 Ok(())
             }
             Err(err) => {
                 let mut pipeline = self.pipeline();
                 pipeline.build_error = Some(err);
-                pipeline.activity =
-                    Activity::Failed(CANNOT_RESTORE.replace("%lld", &number.to_string()));
+                pipeline.activity = Activity::Failed(fl!(
+                    "impossibile-ripristinare-la-versione-lld",
+                    version = number
+                ));
                 Ok(())
             }
         }
@@ -1136,7 +1103,7 @@ impl Drive {
     fn close_open_turn(&mut self, transcript: &mut ChatState) {
         transcript.fail_running_tools();
         let _ = store::save_chat(&self.root, &transcript.messages);
-        self.pipeline().activity = Activity::Failed(AGENT_ERROR.replace("%@", AGENT_NAME));
+        self.pipeline().activity = Activity::Failed(fl!("errore-di", agent = AGENT_NAME));
         let _ = self.out.unbounded_send(Message::Closed);
     }
 
@@ -1205,25 +1172,25 @@ impl Drive {
             let mut pipeline = self.pipeline();
             match &outcome {
                 BuildOutcome::Interrupted => {
-                    pipeline.activity = Activity::Failed(BUILD_STOPPED.to_string());
+                    pipeline.activity = Activity::Failed(fl!("compilazione-interrotta"));
                 }
                 BuildOutcome::Success => {
                     pipeline.parameters = refresh_parameters(&self.root);
                     pipeline.missing_outputs = missing_files(&self.root.join("output"));
-                    pipeline.activity = Activity::Succeeded(MODEL_GENERATED.to_string());
+                    pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
                 }
                 BuildOutcome::Failed { last_line, output } => {
                     pipeline.build_error = Some(
                         last_line
                             .clone()
-                            .unwrap_or_else(|| SCRIPT_ERROR.to_string()),
+                            .unwrap_or_else(|| fl!("errore-nello-script")),
                     );
-                    pipeline.activity = Activity::Failed(SCRIPT_ERROR.to_string());
+                    pipeline.activity = Activity::Failed(fl!("errore-nello-script"));
                     let mut chat = store::load_chat(&self.root).unwrap_or_default();
                     chat.push(ChatMessage {
                         id: Uuid::new_v4(),
                         role: Role::System,
-                        text: MODEL_BUILD_FAILED.to_string(),
+                        text: fl!("la-compilazione-di-model-py-non-riuscita"),
                         date: OffsetDateTime::now_utc(),
                         tool: None,
                         detail: Some(output.clone()),
@@ -1239,7 +1206,7 @@ impl Drive {
             // gate (upstream :397-401 against :269-271)
             let prompt = version_prompt
                 .clone()
-                .unwrap_or_else(|| MANUAL_BUILD.to_string());
+                .unwrap_or_else(|| fl!("compilazione-manuale-di-model-py"));
             self.record_version(&prompt);
         }
         let _ = self.out.unbounded_send(Message::BuildFinished {
@@ -1266,7 +1233,7 @@ impl Drive {
             pipeline.parameters = refresh_parameters(&self.root);
             pipeline.missing_outputs = missing_files(&self.root.join("output"));
             if pipeline.missing_outputs.is_empty() {
-                pipeline.activity = Activity::Succeeded(MODEL_GENERATED.to_string());
+                pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
                 record_prompt = Some(
                     transcript
                         .messages
@@ -1277,7 +1244,7 @@ impl Drive {
                         .unwrap_or_default(),
                 );
             } else {
-                pipeline.activity = Activity::Succeeded(RESPONSE_COMPLETED.to_string());
+                pipeline.activity = Activity::Succeeded(fl!("risposta-completata"));
                 record_prompt = None;
             }
         }
@@ -1308,7 +1275,7 @@ impl Drive {
         chat.push(ChatMessage {
             id: Uuid::new_v4(),
             role: Role::Summary,
-            text: VERSION_ROW.replace("%lld", &number.to_string()),
+            text: fl!("versione-lld", version = number),
             date: OffsetDateTime::now_utc(),
             tool: None,
             detail: Some(number.to_string()),
@@ -1351,9 +1318,11 @@ impl Drive {
 /// AgentSession.swift:48/100/269/294 — the engine name in each).
 fn turn_failure_activity(outcome: &TurnOutcome) -> String {
     match outcome {
-        TurnOutcome::Failed { auth, .. } if *auth => SIGN_IN_REQUIRED.replace("%@", AGENT_NAME),
-        TurnOutcome::Failed { .. } => AGENT_ERROR.replace("%@", AGENT_NAME),
-        TurnOutcome::Cancelled => crate::chat::INTERRUPTED.to_string(),
+        TurnOutcome::Failed { auth, .. } if *auth => {
+            fl!("accesso-a-richiesto", agent = AGENT_NAME)
+        }
+        TurnOutcome::Failed { .. } => fl!("errore-di", agent = AGENT_NAME),
+        TurnOutcome::Cancelled => crate::chat::interrupted(),
         // the engine's dance absorbs Busy/MissingSession before the app
         // hears them; Success never reaches a failure activity
         TurnOutcome::Busy | TurnOutcome::MissingSession | TurnOutcome::Success { .. } => {
@@ -1448,10 +1417,7 @@ mod tests {
 
     /// Drains bridge messages until `pred`, bounded (5 s) — never a fixed
     /// sleep (app/tests/build_pipeline.rs's helper, same shape).
-    async fn run_until(
-        messages: &mut UnboundedReceiver<Message>,
-        pred: impl Fn(&Message) -> bool,
-    ) {
+    async fn run_until(messages: &mut UnboundedReceiver<Message>, pred: impl Fn(&Message) -> bool) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match tokio::time::timeout_at(deadline, messages.next()).await {
@@ -1494,9 +1460,10 @@ mod tests {
             .expect("the first send after a cold start is not refused");
         run_until(&mut messages, |m| matches!(m, Message::TurnStarted { .. })).await;
         run_until(&mut messages, |m| {
-            matches!(m, Message::Event(EngineEvent::TurnFinished(
-                TurnOutcome::Success { .. }
-            )))
+            matches!(
+                m,
+                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Success { .. }))
+            )
         })
         .await;
 
@@ -1527,9 +1494,10 @@ mod tests {
             .expect("the second send after a cold start is not refused");
         run_until(&mut messages, |m| matches!(m, Message::TurnStarted { .. })).await;
         run_until(&mut messages, |m| {
-            matches!(m, Message::Event(EngineEvent::TurnFinished(
-                TurnOutcome::Success { .. }
-            )))
+            matches!(
+                m,
+                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Success { .. }))
+            )
         })
         .await;
         assert_eq!(
@@ -1552,6 +1520,7 @@ mod tests {
     /// draft and requests the setup sheet.
     #[tokio::test(flavor = "multi_thread")]
     async fn python_refusal_names_itself_in_the_activity() {
+        let _lang = crate::localize::pin_en();
         let root = std::env::temp_dir().join(format!("cad-refuse-{}", Uuid::new_v4()));
         store::create_project(
             root.parent().unwrap(),
@@ -1566,7 +1535,7 @@ mod tests {
         );
         assert_eq!(
             bridge.activity(),
-            Activity::Failed(PYTHON_SETUP_REQUIRED.to_string()),
+            Activity::Failed(fl!("python-setup-required")),
             "the refusal leaves its reason in the status line"
         );
         assert!(bridge.sheet_requested_for_test());
@@ -1802,6 +1771,7 @@ mod tests {
     /// tail's save would revert it — that is the regression pinned here).
     #[tokio::test(flavor = "multi_thread")]
     async fn turn_tail_record_keeps_engine_session_id() {
+        let _lang = crate::localize::pin_en();
         let root = std::env::temp_dir().join(format!("cad-bridge-rec-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("output")).unwrap();
         // every expected output on disk, so the tail records

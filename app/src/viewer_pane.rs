@@ -133,7 +133,6 @@ use viewer::tools::section::{self, SectionAxis};
 
 use crate::camera_input::CameraInput;
 use crate::fl;
-use crate::localize::substitute_placeholders;
 use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
@@ -965,9 +964,16 @@ impl ViewerPane {
             // icon + title + secondary description, centered mid-pane
             container(
                 Column::new()
-                    .push(cosmic::widget::icon::from_name("package-x-generic").size(40).icon())
+                    .push(
+                        cosmic::widget::icon::from_name("package-x-generic")
+                            .size(40)
+                            .icon(),
+                    )
                     .push(text(fl!("nessun-modello")).size(18))
-                    .push(text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare")).class(dim_text_class()))
+                    .push(
+                        text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
+                            .class(dim_text_class()),
+                    )
                     .spacing(8)
                     .align_x(cosmic::iced::alignment::Alignment::Center),
             )
@@ -1145,10 +1151,7 @@ impl ViewerPane {
                 }
                 Err(why) => {
                     self.study = None;
-                    self.motion_error = Some(substitute_placeholders(
-                        &fl!("animation-json-non-valido"),
-                        &[&why],
-                    ));
+                    self.motion_error = Some(fl!("animation-json-non-valido", error = why));
                 }
             }
         }
@@ -1942,12 +1945,9 @@ pub fn legend_dots(colors: &[[u8; 3]]) -> &[[u8; 3]] {
 }
 
 /// The legend's accessibility text (ModelPane.swift:212): the count of
-/// EVERY distinct color. The catalog key still carries upstream's
-/// Swift-style `%lld` placeholder (the M8 placeable sweep migrates it to a
-/// fluent `{$count}` arg); [`substitute_placeholders`] is the interim
-/// substitution recorded for that sweep.
+/// EVERY distinct color.
 pub fn legend_label(total: usize) -> String {
-    substitute_placeholders(&fl!("lld-colori"), &[&total.to_string()])
+    fl!("lld-colori", count = total)
 }
 
 /// A preset's picker label (CameraPreset.title,

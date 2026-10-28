@@ -229,6 +229,7 @@ async fn run_slice() -> SliceRun {
 /// The slice: prompt → agent → outputs → watcher → rebuilt panes.
 #[tokio::test(flavor = "multi_thread")]
 async fn prompt_to_rendered_model() {
+    app::localize::select("en");
     let SliceRun {
         root,
         events,

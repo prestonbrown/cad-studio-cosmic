@@ -36,8 +36,10 @@ From M1's reviews, for later milestones:
   both pane watchers open over it)
 - ~~M4: watcher wiring passes ~300 ms debounce (upstream 0.3 s).~~ (landed M4 —
   `WATCH_DEBOUNCE` in `viewer_pane` and the project window)
-- M8: `AppleLanguages` setting intentionally omitted in M1 (language override
-  lands with i18n).
+- ~~M8: `AppleLanguages` setting intentionally omitted in M1 (language
+  override lands with i18n).~~ Landed M8 T1 2026-10-28: `language` in
+  engine settings, read once at startup before any lookup, next-launch
+  semantics (upstream parity).
 
 ## M4 (app shell)
 

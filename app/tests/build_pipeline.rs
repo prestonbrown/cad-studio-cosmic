@@ -95,6 +95,7 @@ async fn run_until(messages: &mut UnboundedReceiver<Message>, pred: impl Fn(&Mes
 
 #[tokio::test]
 async fn slider_rebuild_rewrites_model_records_version_and_outputs() {
+    app::localize::select("en");
     let _guard = ENV_LOCK.lock().await;
     let root = project();
     // SAFETY: fake-python env holds this suite's ENV_LOCK.

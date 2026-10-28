@@ -301,12 +301,12 @@ pub fn badge_text(points: &[[f32; 3]], unit: MeasurementUnit) -> String {
                 (p1[2] - p0[2]).abs(),
             ];
             let total = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
-            format!(
-                "{} · ΔX {} · ΔY {} · ΔZ {}",
-                format_length(total as f64, unit, true),
-                format_length(delta[0] as f64, unit, true),
-                format_length(delta[1] as f64, unit, true),
-                format_length(delta[2] as f64, unit, true),
+            fl!(
+                "x-y-z",
+                total = format_length(total as f64, unit, true),
+                dx = format_length(delta[0] as f64, unit, true),
+                dy = format_length(delta[1] as f64, unit, true),
+                dz = format_length(delta[2] as f64, unit, true),
             )
         }
     }

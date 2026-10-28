@@ -54,8 +54,9 @@
 //! - [`windows`] — the welcome and project windows.
 //!
 //! The About and Settings windows are M8 (spec §4.4 packaging/Sys row);
-//! new modules read strings through `fl!` while the pre-M6 modules'
-//! constants await the swap.
+//! every module reads its user-visible strings through `fl!` (the sheets
+//! and welcome windows are the holdouts — their constants ride with the
+//! settings-parity task).
 pub mod activity;
 pub mod app;
 pub mod bridge;

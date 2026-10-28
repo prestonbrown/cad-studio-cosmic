@@ -2,8 +2,10 @@
 //! and the check/install drivers (PythonEnvironment.swift).
 //!
 //! GUI-free by the spec's engine rule: every user-visible string is an
-//! English const mirroring the en catalog value (house pattern:
-//! `BUSY_FRESH_MESSAGE` in agent::session), and process work flows through
+//! English const mirroring the en catalog value (the chat rows the session
+//! emits go one step further — stable
+//! [`SystemRow`][crate::agent::session::SystemRow] ids the app localizes on
+//! receipt), and process work flows through
 //! two injectable seams — [`Spawn`] for the streamed install steps and
 //! `check`'s verification, [`Probe`] for `--version` discovery — so tests
 //! script fakes and never run real uv/pip/build123d.

@@ -145,6 +145,7 @@ async fn tool_use_turn_builds_the_full_transcript() {
 /// the open-terminal action.
 #[tokio::test(flavor = "multi_thread")]
 async fn auth_error_rows_open_terminal() {
+    app::localize::select("en");
     let root = mk_project();
     let state = replay(
         &root,
@@ -170,6 +171,7 @@ async fn auth_error_rows_open_terminal() {
 /// A nonzero child exit names its code in the failure row.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_code_failure_names_code() {
+    app::localize::select("en");
     let root = mk_project();
     let state = replay(
         &root,
@@ -195,6 +197,7 @@ async fn exit_code_failure_names_code() {
 /// assistant row and the turn fails with "(code 0)".
 #[tokio::test(flavor = "multi_thread")]
 async fn error_result_confirms_text_and_fails() {
+    app::localize::select("en");
     let root = mk_project();
     let state = replay(&root, &fixture_fake("scenarios/error-result.jsonl"), None).await;
 

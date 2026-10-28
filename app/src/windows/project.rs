@@ -15,10 +15,9 @@
 //! table, [`project_shortcut`]; the header's menu renders the same
 //! commands.
 //!
-//! User-visible strings follow the landed modules' convention: plain
-//! English values, each named for its en/main.ftl key, pending the
-//! repo-wide `fl!()` swap — the M7 motion strings already read through
-//! `fl!()` (the placeholder-bearing catalog values).
+//! User-visible strings read through `fl!` at render time (the key names
+//! the en/main.ftl entry); the menu roots the port coined (File/View) use
+//! the port-added `menu-file`/`menu-view` keys.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -1093,7 +1092,7 @@ impl ProjectWindow {
             .push(text(self.name.clone()).size(12))
             .push(text("›".to_string()).size(12).class(dim_text()));
         row = match &self.activity {
-            Activity::Idle => row.push(text("Ready".to_string()).size(12).class(dim_text())),
+            Activity::Idle => row.push(text(fl!("pronto")).size(12).class(dim_text())),
             Activity::Working(_) => row
                 .push(cosmic::widget::progress_bar::indeterminate_circular())
                 .push(
@@ -1202,7 +1201,7 @@ impl ProjectWindow {
         }
         list = list.push(
             Row::new().push(Space::new().width(Length::Fill)).push(
-                button::text("Close")
+                button::text(fl!("chiudi"))
                     .class(cosmic::theme::Button::Standard)
                     .on_press(Message::ToggleIssues(None)),
             ),
@@ -1235,16 +1234,16 @@ impl ProjectWindow {
         use cosmic::widget::menu::{Item, ItemHeight, ItemWidth, items, root};
 
         let file_entries = vec![
-            Item::Button("New Project…", None, AppRequest::NewProject),
-            Item::Button("Open Project…", None, AppRequest::OpenProject),
-            Item::Button("Open Recent…", None, AppRequest::OpenRecent),
+            Item::Button(fl!("crea-nuovo-progetto"), None, AppRequest::NewProject),
+            Item::Button(fl!("apri-progetto"), None, AppRequest::OpenProject),
+            Item::Button(fl!("apri-recenti"), None, AppRequest::OpenRecent),
             Item::Divider,
-            Item::Button("Welcome Window", None, AppRequest::Welcome),
+            Item::Button(fl!("finestra-di-benvenuto"), None, AppRequest::Welcome),
         ];
         let file_binds = std::collections::HashMap::new();
         let file_tree = cosmic::widget::menu::Tree::with_children(
             {
-                let root_button: Element<'_, Message> = root("File").into();
+                let root_button: Element<'_, Message> = root(fl!("menu-file")).into();
                 root_button
             },
             items(&file_binds, file_entries),
@@ -1253,14 +1252,14 @@ impl ProjectWindow {
         // `compila-modello` (Commands.swift:115-119): disabled while busy,
         // like upstream's `.disabled(project?.isBusy == true)`
         let build_entry = if self.is_busy() {
-            Item::ButtonDisabled("Build Model", None, Command::Build)
+            Item::ButtonDisabled(fl!("compila-modello"), None, Command::Build)
         } else {
-            Item::Button("Build Model", None, Command::Build)
+            Item::Button(fl!("compila-modello"), None, Command::Build)
         };
         let model_binds = std::collections::HashMap::new();
         let model_tree = cosmic::widget::menu::Tree::with_children(
             {
-                let root_button: Element<'_, Message> = root("Model").into();
+                let root_button: Element<'_, Message> = root(fl!("modello")).into();
                 root_button
             },
             items(
@@ -1268,7 +1267,7 @@ impl ProjectWindow {
                 vec![
                     build_entry,
                     Item::Divider,
-                    Item::Button("Stop", None, Command::Stop),
+                    Item::Button(fl!("stop"), None, Command::Stop),
                 ],
             ),
         );
@@ -1276,50 +1275,66 @@ impl ProjectWindow {
         let entries = vec![
             Item::Button(
                 if self.chat_visible {
-                    "Hide Chat"
+                    fl!("nascondi-chat")
                 } else {
-                    "Show Chat"
+                    fl!("mostra-chat")
                 },
                 None,
                 Command::ShowChat,
             ),
             Item::Divider,
-            Item::Button("Go to Chat", None, Command::FocusChat),
-            Item::Button("Go to 3D Viewer", None, Command::FocusModel),
-            Item::Button("Go to 2D Schematic", None, Command::FocusSchematic),
+            Item::Button(fl!("vai-alla-chat"), None, Command::FocusChat),
+            Item::Button(fl!("vai-al-viewer-3d"), None, Command::FocusModel),
+            Item::Button(fl!("vai-alla-schematica-2d"), None, Command::FocusSchematic),
             Item::Divider,
             Item::Folder(
-                "Layout",
+                fl!("layout"),
                 vec![
-                    Item::Button("Chat on Left", None, Command::LayoutChatLeading),
-                    Item::Button("Chat on Right", None, Command::LayoutChatTrailing),
-                    Item::Button("Chat at Bottom", None, Command::LayoutChatBottom),
-                    Item::Button("Three Columns", None, Command::LayoutThreeColumns),
+                    Item::Button(fl!("chat-a-sinistra"), None, Command::LayoutChatLeading),
+                    Item::Button(fl!("chat-a-destra"), None, Command::LayoutChatTrailing),
+                    Item::Button(fl!("chat-in-basso"), None, Command::LayoutChatBottom),
+                    Item::Button(fl!("tre-colonne"), None, Command::LayoutThreeColumns),
                 ],
             ),
             Item::Folder(
-                "3D Viewer",
+                fl!("viewer-3d"),
                 vec![
-                    Item::Button("Isometric View", None, Command::ViewerPreset(Preset::Iso)),
-                    Item::Button("Front View", None, Command::ViewerPreset(Preset::Front)),
-                    Item::Button("Top View", None, Command::ViewerPreset(Preset::Top)),
-                    Item::Button("Right View", None, Command::ViewerPreset(Preset::Right)),
+                    Item::Button(
+                        fl!("vista-isometrica"),
+                        None,
+                        Command::ViewerPreset(Preset::Iso),
+                    ),
+                    Item::Button(
+                        fl!("vista-frontale"),
+                        None,
+                        Command::ViewerPreset(Preset::Front),
+                    ),
+                    Item::Button(
+                        fl!("vista-dall-alto"),
+                        None,
+                        Command::ViewerPreset(Preset::Top),
+                    ),
+                    Item::Button(
+                        fl!("vista-da-destra"),
+                        None,
+                        Command::ViewerPreset(Preset::Right),
+                    ),
                     Item::Divider,
-                    Item::Button("Fit to View", None, Command::ViewerFit),
+                    Item::Button(fl!("adatta-alla-vista"), None, Command::ViewerFit),
                 ],
             ),
             Item::Folder(
-                "2D Schematic",
+                fl!("schematica-2d"),
                 vec![
-                    Item::Button("Zoom In", None, Command::SchematicZoomIn),
-                    Item::Button("Zoom Out", None, Command::SchematicZoomOut),
+                    Item::Button(fl!("ingrandisci"), None, Command::SchematicZoomIn),
+                    Item::Button(fl!("riduci"), None, Command::SchematicZoomOut),
                     Item::Divider,
-                    Item::Button("Fit to Window", None, Command::SchematicFit),
+                    Item::Button(fl!("adatta-alla-finestra"), None, Command::SchematicFit),
                 ],
             ),
         ];
         let key_binds = std::collections::HashMap::new();
-        let root_button: Element<'_, Message> = root("View").into();
+        let root_button: Element<'_, Message> = root(fl!("menu-view")).into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
         // STATIC roots only: cosmic's menu overlay corrupts widget state

@@ -333,6 +333,7 @@ async fn auth_failure_pauses_queue_and_rows_action() {
 /// and no action, and the queue still pauses (any failure does).
 #[tokio::test(flavor = "multi_thread")]
 async fn auth_401_in_other_numbers_is_not_auth() {
+    app::localize::select("en");
     let root = mk_project();
     let scenario = scenario_dir(
         "nums",

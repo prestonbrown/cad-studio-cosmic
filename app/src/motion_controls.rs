@@ -5,13 +5,16 @@
 //! `formatted(...)` shapes it fills, pinned by test:
 //!
 //! - [`time_readout`] — the `time / duration s` readout
-//!   (MotionControls.swift:31, `fractionLength(2)`).
+//!   (MotionControls.swift:31, `fractionLength(2)`), formatted through the
+//!   `s` catalog key.
 //! - [`format_significant`] — `.precision(.significantDigits(min...max))`
 //!   for the values row (1...3, :58) and the collision volume (1...2, :86),
 //!   including thousands grouping.
-//! - [`speed_label`] — the speed menu's `\(speed)×` labels (:38, :44).
+//! - [`speed_label`] — the speed menu's `\(speed)×` labels (:38, :44)
+//!   formatted through the `speed-option` catalog key.
 //! - [`collision_text`] — the collision pairs line (:81-89); the `↔`,
-//!   `mm³`, and separators are upstream's literals.
+//!   `mm³`, and separators are upstream's literals (no catalog key backs
+//!   them).
 //!
 //! The pane floats the capsule bottom-center while animating (T7's
 //! mount, where the section controls mount); this module returns the
@@ -61,11 +64,15 @@ const WARNING_ICON: &str = "dialog-warning";
 /// (255, 59, 48)/255.
 const RED: Color = Color::from_rgb(1.0, 59.0 / 255.0, 48.0 / 255.0);
 
-/// The readout beside the scrub slider: both times at exactly two
-/// fraction digits, separated by upstream's literal `" / "` and `" s"`
+/// The readout beside the scrub slider: both times at exactly two fraction
+/// digits, joined by the `s` catalog key's separators
 /// (MotionControls.swift:31).
 pub fn time_readout(time: f64, duration: f64) -> String {
-    format!("{time:.2} / {duration:.2} s")
+    fl!(
+        "s",
+        time = format!("{time:.2}"),
+        duration = format!("{duration:.2}")
+    )
 }
 
 /// Swift's `.formatted(.number.precision(.significantDigits(min...max)))`
@@ -138,9 +145,10 @@ fn group_thousands(digits: &str) -> String {
 
 /// The speed menu's label for one speed: Rust's `Display` prints the
 /// shortest form, matching Swift's `\(speed.formatted())` — `1×`, not
-/// `1.0×` (MotionControls.swift:38,44).
+/// `1.0×` — with the `×` from the `speed-option` catalog key
+/// (MotionControls.swift:38,44).
 pub fn speed_label(speed: f64) -> String {
-    format!("{speed}×")
+    fl!("speed-option", speed = speed)
 }
 
 /// The collisions line: each pair's names joined by upstream's literal
@@ -215,7 +223,7 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
     let selected = SPEEDS.iter().position(|speed| *speed == player.speed);
     let speed = tooltip(
         dropdown(speeds, selected, |index| Message::SetSpeed(SPEEDS[index])),
-        text(fl!("velocit")), // upstream's menu title (:36)
+        text(fl!("velocit-di-riproduzione")), // the menu's help (:49)
         tooltip::Position::FollowCursor,
     );
     // The on-state shows through the class (the parts picker's idiom):
@@ -249,8 +257,14 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
     }
     for name in study.value_names() {
         if let Some(value) = state.values.get(name) {
-            row =
-                row.push(mono_dim(format!("{name} {}", format_significant(*value, 1, 3))).size(12));
+            row = row.push(
+                mono_dim(fl!(
+                    "motion-value-row",
+                    name = name,
+                    value = format_significant(*value, 1, 3)
+                ))
+                .size(12),
+            );
         }
     }
     if !state.collisions.is_empty() {

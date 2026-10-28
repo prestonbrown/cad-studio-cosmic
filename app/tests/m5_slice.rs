@@ -185,6 +185,7 @@ fn chat_has_row(window: &ProjectWindow, role: Role, text: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_check_through_slider_to_restore() {
+    app::localize::select("en");
     let guard = ENV_LOCK.lock().await;
 
     let root = project_with_script();
@@ -437,6 +438,7 @@ async fn startup_check_through_slider_to_restore() {
 /// `ask_agent_to_fix` as a real turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_build_renders_row_activity_and_fix_action() {
+    app::localize::select("en");
     let guard = ENV_LOCK.lock().await;
 
     let root = project_with_script();

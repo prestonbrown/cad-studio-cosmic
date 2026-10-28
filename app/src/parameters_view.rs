@@ -21,10 +21,9 @@
 //! mount's emitted `ParameterCommit` (`Bridge::set_parameter`). The pane
 //! mounts the overlay in [`crate::viewer_pane::ViewerPane::view_model_3d`].
 //!
-//! User-visible strings are the `app/i18n/en/main.ftl` catalog values; each
-//! constant names its key (the `fl!()` swap lands with the i18n scaffold in
-//! the windows task). Icon names are freedesktop-theme approximations of
-//! upstream SF Symbols; the theme in play decides what actually shows
+//! User-visible strings read through `fl!` at render time (the key names
+//! the en/main.ftl entry). Icon names are freedesktop-theme approximations
+//! of upstream SF Symbols; the theme in play decides what actually shows
 //! (cosmetic — flagged for the shell task). Also cosmetic and flagged: the
 //! panel has no drop shadow (no widget shadows in iced), and a busy row's
 //! slider keeps its colors while inert — the interactions themselves are
@@ -39,32 +38,12 @@ use cosmic::iced::{Color, Length};
 use cosmic::widget::{Column, Row, Space, button, container, text, text_input, tooltip};
 use engine::project::versions::ProjectVersion;
 
+use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
 
 /// This module's text widget, pinned to cosmic's theme/renderer (same
 /// invariance note as the chat pane's).
 type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
-
-// ─── catalog strings (each constant names its en/main.ftl key) ─────────────
-
-/// `parametri`
-const PARAMETRI: &str = "Parameters";
-/// `comprimi-i-parametri`
-const COLLAPSE_PARAMETERS: &str = "Collapse parameters";
-/// `espandi-i-parametri`
-const EXPAND_PARAMETERS: &str = "Expand parameters";
-/// `nascondi-parametri`
-const HIDE_PARAMETERS: &str = "Hide Parameters";
-/// `nascondi-parametri-i`
-const HIDE_PARAMETERS_SHORTCUT: &str = "Hide Parameters (⌥⌘I)";
-/// `confronta-con`
-const COMPARE_WITH: &str = "Compare with";
-/// `nessuna`
-const NONE: &str = "None";
-/// `valore-nella-versione-a-confronto`
-const PREVIOUS_TOOLTIP: &str = "Value in the compared version";
-/// `in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni`
-const COMPARE_CAPTION: &str = "Orange shows the shape of the chosen version. To see its colors, restore it from the Versions menu.";
 
 /// The panel's fixed width (ParametersOverlay.swift:109).
 const PANEL_WIDTH: f32 = 280.0;
@@ -180,13 +159,13 @@ fn collapsed_capsule() -> Element<'static, Message> {
     let label = Row::new()
         .spacing(6)
         .push(icon(SLIDER_ICON, 14))
-        .push(text(PARAMETRI).size(14));
+        .push(text(fl!("parametri")).size(14));
     let capsule = button::custom(container(label).padding([6.0, 10.0]))
         .class(cosmic::theme::Button::Standard)
         .on_press(Message::Collapse(false));
     tooltip(
         capsule,
-        text(EXPAND_PARAMETERS),
+        text(fl!("espandi-i-parametri")),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
@@ -199,20 +178,20 @@ fn header() -> Element<'static, Message> {
         Row::new()
             .spacing(6)
             .push(icon(SLIDER_ICON, 14))
-            .push(text(PARAMETRI).size(14))
+            .push(text(fl!("parametri")).size(14))
             .push(secondary_text("⌃").size(10)), // chevron.up stand-in
     )
     .class(cosmic::theme::Button::Text)
     .on_press(Message::Collapse(true));
     let collapse = tooltip(
         collapse,
-        text(COLLAPSE_PARAMETERS),
+        text(fl!("comprimi-i-parametri")),
         cosmic::widget::tooltip::Position::FollowCursor,
     );
     let close = button::icon(icon_handle("window-close", 12))
         .on_press(Message::Close)
-        .name(HIDE_PARAMETERS)
-        .description(HIDE_PARAMETERS_SHORTCUT);
+        .name(fl!("nascondi-parametri"))
+        .description(fl!("nascondi-parametri-i"));
     Row::new()
         .push(collapse)
         .push(Space::new().width(Length::Fill))
@@ -291,7 +270,7 @@ fn previous_value(value: f64) -> Element<'static, Message> {
     let struck = rich_text_element(struck);
     tooltip(
         struck,
-        text(PREVIOUS_TOOLTIP),
+        text(fl!("valore-nella-versione-a-confronto")),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
@@ -330,7 +309,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
     let bottom = if ctx.compare.is_some() { 4.0 } else { 8.0 };
     let mut footer = Row::new()
         .spacing(0)
-        .push(secondary_text(COMPARE_WITH))
+        .push(secondary_text(fl!("confronta-con")))
         .push(Space::new().width(Length::Fill));
     if ctx.versions.is_empty() {
         footer = footer.push(secondary_text(selected_label(ctx.compare)));
@@ -350,7 +329,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
             pick_list::PickList::new(options, selected, |option| {
                 Message::Compare(option.number())
             })
-            .placeholder(NONE),
+            .placeholder(fl!("nessuna")),
         );
     }
     footer.padding([8.0, 12.0, bottom, 12.0]).into()
@@ -360,7 +339,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
 /// (ParametersOverlay.swift:100-106).
 fn compare_caption() -> Element<'static, Message> {
     container(
-        secondary_text(COMPARE_CAPTION)
+        secondary_text(fl!("in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni"))
             .size(12)
             .wrapping(Wrapping::Word)
             .width(Length::Fill),
@@ -393,9 +372,9 @@ impl std::fmt::Display for CompareOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // `nessuna`
-            Self::NoVersion => write!(f, "{NONE}"),
+            Self::NoVersion => write!(f, "{}", fl!("nessuna")),
             // `versione-lld`
-            Self::Version(number) => write!(f, "Version {number}"),
+            Self::Version(number) => write!(f, "{}", fl!("versione-lld", version = number)),
         }
     }
 }

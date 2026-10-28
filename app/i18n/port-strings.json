@@ -1,0 +1,42 @@
+{
+  "python-setup-required": {
+    "localizations": {
+      "en": "Python setup required",
+      "it": "Configurazione di Python richiesta",
+      "de": "Python-Einrichtung erforderlich",
+      "fr": "Configuration de Python requise"
+    }
+  },
+  "ha-terminato-con-un-errore": {
+    "localizations": {
+      "en": "%@ ended with an error.",
+      "it": "%@ ha terminato con un errore.",
+      "de": "%@ wurde mit einem Fehler beendet.",
+      "fr": "%@ s’est terminé avec une erreur."
+    }
+  },
+  "menu-file": {
+    "localizations": {
+      "en": "File",
+      "it": "File",
+      "de": "Datei",
+      "fr": "Fichier"
+    }
+  },
+  "menu-view": {
+    "localizations": {
+      "en": "View",
+      "it": "Visualizzazione",
+      "de": "Darstellung",
+      "fr": "Présentation"
+    }
+  },
+  "version-not-in-history": {
+    "localizations": {
+      "en": "Version %d is not in the history",
+      "it": "La versione %d non è nella cronologia",
+      "de": "Version %d ist nicht im Verlauf",
+      "fr": "La version %d n’est pas dans l’historique"
+    }
+  }
+}

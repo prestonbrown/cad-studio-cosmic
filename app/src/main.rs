@@ -7,7 +7,14 @@ use cosmic::app as cosmic_app;
 use cosmic::iced::Size;
 
 fn main() -> cosmic::iced::Result {
-    app::localize::localize();
+    // The persisted language override applies at THIS launch boundary —
+    // upstream's `AppleLanguages` next-launch semantics: select before any
+    // fl! string resolves, never again (the settings window writes the
+    // field; a restart picks it up).
+    let language = engine::settings::Settings::load(&engine::settings::settings_path())
+        .ok()
+        .and_then(|settings| settings.language);
+    app::localize::localize_with_override(language.as_deref());
     let settings = cosmic_app::Settings::default().size(Size::new(
         app::windows::welcome::ACTIONS_WIDTH + app::windows::welcome::RECENTS_WIDTH,
         app::windows::welcome::WINDOW_HEIGHT,

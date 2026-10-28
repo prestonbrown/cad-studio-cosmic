@@ -168,6 +168,12 @@ pub struct Settings {
     pub parts_layout: PartsLayout,
     pub parts_collapsed: bool,
     pub parameters_collapsed: bool,
+    /// The persisted language override ("en", "it", …; `None` follows the
+    /// desktop request). Upstream keeps this in UserDefaults `AppleLanguages`
+    /// rather than an AppSettings key; the port's ONE-writer law puts it
+    /// here, and it applies at the NEXT launch — the app reads it once at
+    /// startup, before language selection, and no live re-render follows.
+    pub language: Option<String>,
 }
 
 impl Default for Settings {
@@ -192,6 +198,7 @@ impl Default for Settings {
             parts_layout: PartsLayout::Exploded,
             parts_collapsed: false,
             parameters_collapsed: false,
+            language: None,
         }
     }
 }

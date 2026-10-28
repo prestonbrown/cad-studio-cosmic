@@ -97,14 +97,18 @@ const LOG_TIMESTAMP: &[time::format_description::FormatItem] =
 /// (AgentSession.swift:75's 5 s; injectable for tests).
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// The system row announcing a busy collision escalated to a fresh context
-/// (AgentSession.swift:81; English catalog value — the Swift literal is the
-/// Italian source string).
-const BUSY_FRESH_MESSAGE: &str = "The previous session is still in use by another process: the conversation context started over, but the existing model.py is still the basis for the work.";
-
-/// The system row announcing the stored session is gone and the turn
-/// restarted fresh (AgentSession.swift:91; English catalog value).
-const MISSING_SESSION_MESSAGE: &str = "The previous session wasn’t found: the conversation context has been reset, but the existing model.py remains the basis of the work.";
+/// Which system chat row the lifecycle dance emits between attempts
+/// (upstream appends localized `role: .system` rows, AgentSession.swift:81
+/// and :91). The engine has no catalog, so it names the row and the app
+/// localizes at its boundary — the ids are the stable contract chat.json
+/// rows are keyed against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemRow {
+    /// A busy collision escalated to a fresh context.
+    BusyFreshContext,
+    /// The stored session is gone; the turn restarted fresh.
+    MissingSession,
+}
 
 /// One event of a running turn, in arrival order. Rows are identified by ids
 /// the app keeps; see the module docs for the translation semantics.
@@ -143,8 +147,9 @@ pub enum EngineEvent {
     },
     /// A system chat row the lifecycle dance emits between attempts
     /// (upstream `role: .system`): the busy and missing-session fallback
-    /// explanations. Nothing else in the engine produces one.
-    System { text: String },
+    /// explanations, as stable [`SystemRow`] ids the app localizes on
+    /// receipt. Nothing else in the engine produces one.
+    System { row: SystemRow },
     /// The process ended; no further events follow.
     TurnFinished(TurnOutcome),
 }
@@ -417,7 +422,7 @@ async fn full_dance(mut ctx: TurnCtx) {
                 let _ = ctx
                     .events
                     .send(EngineEvent::System {
-                        text: BUSY_FRESH_MESSAGE.to_string(),
+                        row: SystemRow::BusyFreshContext,
                     })
                     .await;
                 allows_resume = false;
@@ -428,7 +433,7 @@ async fn full_dance(mut ctx: TurnCtx) {
                 let _ = ctx
                     .events
                     .send(EngineEvent::System {
-                        text: MISSING_SESSION_MESSAGE.to_string(),
+                        row: SystemRow::MissingSession,
                     })
                     .await;
                 allows_resume = false;

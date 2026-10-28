@@ -31,7 +31,7 @@ use crate::agent::claude::TurnRequest;
 use crate::agent::session::{Session, TurnHandle};
 use crate::processes::reap_orphans;
 
-pub use crate::agent::session::EngineEvent;
+pub use crate::agent::session::{EngineEvent, SystemRow};
 
 /// One command to the agent engine — the app→engine half of the surface
 /// spec §4.2 draws; the engine answers on the launched turn's event
