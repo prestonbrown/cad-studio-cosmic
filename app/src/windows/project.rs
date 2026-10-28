@@ -369,7 +369,14 @@ impl ProjectWindow {
             chat_visible,
             grid,
             size: DEFAULT_SIZE,
-            chat: ChatState::new(store::load_chat(&root).unwrap_or_default()),
+            chat: {
+                // seed the engine from the settings snapshot so the empty
+                // transcript's placeholder names the engine that will run
+                // the first turn; each TurnStarted re-seeds per turn
+                let mut chat = ChatState::new(store::load_chat(&root).unwrap_or_default());
+                chat.engine = settings.agent_kind();
+                chat
+            },
             chat_pane: ChatPane::new(),
             viewer: {
                 let mut pane = ViewerPane::new(
@@ -698,7 +705,9 @@ impl ProjectWindow {
         let fresh = bridge::fresh_metadata(&self.root);
         self.metadata.session_id = fresh.session_id;
         self.metadata.current_version = fresh.current_version;
+        let engine = self.chat.engine;
         self.chat = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
+        self.chat.engine = engine;
         self.missing_outputs.clear();
         let parameters = self.bridge.parameters();
         self.viewer.sync_parameters(&parameters);
@@ -792,7 +801,11 @@ impl ProjectWindow {
             bridge::Message::TurnStarted {
                 prompt,
                 attachments,
+                engine,
             } => {
+                // the turn's engine names its rows from here on (the
+                // per-turn re-read's answer, resolved at turn start)
+                self.chat.engine = engine;
                 // the user row joins the visible transcript when the send
                 // actually starts (upstream appends it in `send`, before
                 // the agent runs — the bridge message's contract)
