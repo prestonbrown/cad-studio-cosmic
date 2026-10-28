@@ -276,6 +276,20 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
+- Spinner sizing (2026-10-28, Preston's play session): the header
+  ActivityViewer spinner and the chat thinking-row spinner render at the
+  widget default where upstream pins `.controlSize(.mini)`
+  (ActivityViewer.swift:44-46; ChatView.swift:170 — a 12pt-font, 24pt-tall
+  bar); both spinners are functionally parity (both show), only sized
+  large. M8: size to match if the pinned cosmic rev exposes a size handle.
+- Busy-state cold-start (2026-10-28, observed after the version-menu crash):
+  after a mid-turn crash, reopening the project appeared UNABLE to start new
+  turns — a UI-sent prompt produced no agent process and no visible error
+  (silently swallowed; suspected stale in-flight state or a silent refusal).
+  Root-cause in flight (2026-10-28); ALSO note the send-press gap:
+  update_chat's Send arm sets no local activity, so busy lags one
+  bridge-task round-trip where upstream Project.send sets .working
+  synchronously (Project.swift:192-208) — fix both in M8 wave 0.
 - Version-history chrome divergence (2026-10-28, 16ea45e): upstream's
   VersionMenu is a SwiftUI `Menu` dropdown; the port renders a popover
   card (the issue-list pattern) because cosmic's menu overlay corrupts
