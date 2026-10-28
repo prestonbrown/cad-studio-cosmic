@@ -54,6 +54,10 @@ pub enum AppShortcut {
 pub enum Message {
     Welcome(welcome::Message),
     Project(window::Id, project::Message),
+    /// The drive harness's chat send: stages the text as the project
+    /// window's draft and sends it through the real shell path — a
+    /// keyboard-free user turn (CAD_STUDIO_DRIVE's `chat` command).
+    DriveChat(String),
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -178,6 +182,26 @@ impl Application for CadStudio {
         match message {
             Message::Welcome(msg) => self.update_welcome(msg),
             Message::Project(id, msg) => self.update_project(id, msg),
+            Message::DriveChat(text) => self
+                .windows
+                .keys()
+                .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
+                .map(|id| {
+                    Task::batch([
+                        Task::done(Message::Project(
+                            *id,
+                            project::Message::Chat(crate::chat_view::Message::SetDraft(
+                                text.clone(),
+                            )),
+                        )),
+                        Task::done(Message::Project(
+                            *id,
+                            project::Message::Chat(crate::chat_view::Message::Send),
+                        )),
+                    ])
+                    .map(Action::App)
+                })
+                .unwrap_or_else(Task::none),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
             Message::PythonSheet(msg) => self.update_python_sheet(msg),

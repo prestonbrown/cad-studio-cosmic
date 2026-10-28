@@ -18,6 +18,9 @@
 //! sheet Cancel                    # the sheet's Cancel
 //! parent <dir>                    # the folder portal answering <dir>
 //! recent <path>                   # click a recents row
+//! chat <text…>                    # stage the text as the chat draft and
+//!                                 # SEND it through the real shell path
+//!                                 # (a keyboard-free user turn)
 //! project <id-less msg> …         # (future) project-window commands
 //! sleep <ms>                      # pause before the next line
 //! ```
@@ -102,6 +105,12 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             "recent" => Step::Msg(Message::Welcome(welcome::Message::OpenRecent(
                 PathBuf::from(rest),
             ))),
+            "chat" => {
+                if rest.is_empty() {
+                    return Err(format!("line {}: chat wants text", number + 1));
+                }
+                Step::Msg(Message::DriveChat(rest.to_string()))
+            }
             "python" => match rest {
                 "Close" => Step::Msg(Message::PythonSheet(sheets::PythonMessage::Close)),
                 _ => return Err(format!("line {}: unknown python command", number + 1)),
@@ -192,6 +201,16 @@ mod tests {
         assert!(parse("welcom NewProject").is_err());
         assert!(parse("sleep lots").is_err());
         assert!(parse("setup Explode").is_err());
+        assert!(parse("chat").is_err(), "chat wants text");
+    }
+
+    #[test]
+    fn chat_command_parses_a_full_user_turn() {
+        let steps = parse("chat animate the cap screwing onto the jar\n").unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::Msg(Message::DriveChat(text)) if text == "animate the cap screwing onto the jar"
+        ));
     }
 
     #[test]

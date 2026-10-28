@@ -194,6 +194,10 @@ pub enum Message {
     /// A suggestion tapped in the empty state; the payload goes out as a
     /// user turn.
     SendSuggestion(String),
+    /// REPLACE the input buffer wholesale (the drive harness's chat
+    /// command — no keyboard involved). The shell's tail sync mirrors it
+    /// into `ChatState::draft` like any edit.
+    SetDraft(String),
     ToggleToolRow(Uuid),
     ToggleFullOutput(Uuid),
     ToggleDetail(Uuid),
@@ -237,6 +241,7 @@ impl ChatPane {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Draft(action) => self.input.perform(action),
+            Message::SetDraft(text) => self.set_draft(&text),
             Message::ToggleToolRow(id) => toggle(&mut self.expanded, id),
             Message::ToggleFullOutput(id) => toggle(&mut self.full_output, id),
             Message::ToggleDetail(id) => toggle(&mut self.detail, id),
@@ -255,6 +260,12 @@ impl ChatPane {
     /// bound field).
     pub fn sent(&mut self) {
         self.input = Content::new();
+    }
+
+    /// Replace the input buffer in one step ([`Message::SetDraft`]'s arm —
+    /// the drive harness's keyboard-free chat entry).
+    pub fn set_draft(&mut self, text: &str) {
+        self.input = Content::with_text(text);
     }
 
     /// Bottom-anchor the transcript (upstream `defaultScrollAnchor(.bottom)`
@@ -1145,6 +1156,13 @@ mod tests {
             cosmic::iced::widget::text_editor::Edit::Insert('i'),
         )));
         assert_eq!(pane.draft(), "hi");
+        pane.sent();
+        assert_eq!(pane.draft(), "");
+
+        // SetDraft replaces the buffer wholesale (the drive harness's
+        // keyboard-free entry), and a later sent() still clears it
+        let _ = pane.update(Message::SetDraft("animate the cap".into()));
+        assert_eq!(pane.draft(), "animate the cap");
         pane.sent();
         assert_eq!(pane.draft(), "");
     }
