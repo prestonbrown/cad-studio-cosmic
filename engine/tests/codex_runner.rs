@@ -50,7 +50,7 @@ fn system_template() -> String {
 fn codex_request() -> TurnRequest {
     TurnRequest {
         prompt: "please respond".into(),
-        attachments: Vec::new(),
+        references: Vec::new(),
         images: Vec::new(),
     }
 }
@@ -268,7 +268,7 @@ async fn codex_argv_carries_upstream_flags() {
     let dump = root.join("argv-dump.jsonl");
     let request = TurnRequest {
         prompt: "please respond".into(),
-        attachments: Vec::new(),
+        references: Vec::new(),
         images: vec![
             PathBuf::from("/references/1-shot.png"),
             PathBuf::from("/references/2-notes.txt"),

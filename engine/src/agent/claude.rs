@@ -2,28 +2,35 @@
 //! and turn-prompt assembly, transcribed from the vendored Swift —
 //! fixtures/upstream-source/ClaudeRunner.swift for argv and the template
 //! substitutions, AgentSession.swift:197-217 for the {{ENVIRONMENT}} bullets,
-//! Project.swift:210-256 for the attachment copies and the two prompt notes.
+//! Project.swift:245-256 for the two prompt notes (the attachment COPIES
+//! themselves are the bridge's turn-start job, [`crate::agent::attachments`]).
 //! Nothing here spawns a process: the session pairs [`build_args`] with
 //! [`crate::processes::spawn_streaming`].
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::locator::AgentPath;
 use crate::project::outputs::{MissingCtx, missing_requirements};
 use crate::settings::Settings;
 
-/// One user turn: the raw prompt text and the attachment sources, copied
-/// into the project by [`copy_attachments`] before the prompt is assembled.
+/// One user turn: the raw prompt text plus the attachment facts the bridge
+/// established at turn start — the `references/<stamp>-<n>-<name>` names of
+/// the copies [`crate::agent::attachments::copy_attachments`] made (upstream
+/// threads the same list into the row, the prompt, and `images:`,
+/// Project.swift:201-206) and the root-resolved copies the codex argv
+/// filters for `-i`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnRequest {
     pub prompt: String,
-    pub attachments: Vec<PathBuf>,
+    /// The prompt-relative names of this turn's attachment copies. The
+    /// prompt lists exactly these (upstream `prompt(text:references:)`,
+    /// Project.swift:203-206); the engine never re-derives them from disk.
+    pub references: Vec<String>,
     /// Image attachments the CODEX argv carries as `-i` flags (upstream
     /// `ClaudeRequest.images`, Project.swift:206: the `references/` copies,
-    /// root-resolved). Claude's argv consumes none — upstream
-    /// ClaudeRunner.swift:28-51 never reads the field (Ruling 2, M8 plan).
-    /// The bridge leaves it empty until M8 Task 4.
+    /// root-resolved; the argv filters them to images). Claude's argv
+    /// consumes none — upstream ClaudeRunner.swift:28-51 never reads the
+    /// field (Ruling 2, M8 plan).
     pub images: Vec<PathBuf>,
 }
 
@@ -188,48 +195,23 @@ fn listing(dir: &Path) -> String {
     }
 }
 
-/// Copy the turn's attachments into `references/` as
-/// `<unix-seconds>-<index>-<name>` and return the prompt-relative paths
-/// (Project.swift:210-219). The index is 1-based, upstream's `index + 1`
-/// (Project.swift:214). Copies that fail are dropped from the list, as
-/// upstream's compactMap does.
-pub fn copy_attachments(req: &TurnRequest, root: &Path) -> Vec<String> {
-    if req.attachments.is_empty() {
-        return Vec::new();
-    }
-    let references = root.join("references");
-    // the directory is created only when there is something to copy
-    let _ = std::fs::create_dir_all(&references);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    req.attachments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, source)| {
-            let number = index + 1;
-            let name = format!("{stamp}-{number}-{}", source.file_name()?.to_string_lossy());
-            std::fs::copy(source, references.join(&name)).ok()?;
-            Some(format!("references/{name}"))
-        })
-        .collect()
-}
-
 /// The turn prompt: the text — or the attachment fallback when the text is
 /// empty — followed by the attachment list and the missing-output note,
 /// each separated by a blank line exactly as upstream does
-/// (Project.swift:245-256). `missing` reaches [`missing_requirements`]
+/// (Project.swift:245-256). The attachment list IS the request's
+/// `references` — the copies the bridge made at turn start, threaded
+/// straight through like upstream threads `copyReferences`' return
+/// (Project.swift:203). `missing` reaches [`missing_requirements`]
 /// verbatim.
-pub fn build_prompt(req: &TurnRequest, root: &Path, missing: &MissingCtx) -> String {
-    let references = copied_references(req, root);
-    let mut prompt = if req.prompt.is_empty() && !references.is_empty() {
+pub fn build_prompt(req: &TurnRequest, missing: &MissingCtx) -> String {
+    let mut prompt = if req.prompt.is_empty() && !req.references.is_empty() {
         "Create a model based on the attached files.".to_string()
     } else {
         req.prompt.clone()
     };
-    if !references.is_empty() {
+    if !req.references.is_empty() {
         prompt.push_str("\n\nAttached reference files:\n");
-        prompt.push_str(&bullets(&references));
+        prompt.push_str(&bullets(&req.references));
     }
     let missing = missing_requirements(missing);
     if !missing.is_empty() {
@@ -248,37 +230,4 @@ fn bullets(items: &[String]) -> String {
         .map(|item| format!("- {item}"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// The prompt-relative paths of this turn's attachment copies. Upstream
-/// threads the list `copyReferences` returns straight into the prompt;
-/// [`build_prompt`] only sees the request and the root, so it reads the
-/// copies back from references/: for the attachment numbered `index + 1`
-/// the copy is the newest `<stamp>-<number>-<name>` entry — the one
-/// [`copy_attachments`] just wrote — and an attachment with no copy on
-/// disk is left out, as upstream leaves out failed copies.
-fn copied_references(req: &TurnRequest, root: &Path) -> Vec<String> {
-    let entries: Vec<String> = std::fs::read_dir(root.join("references"))
-        .map(|dir| {
-            dir.flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    req.attachments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, source)| {
-            let tail = format!("{}-{}", index + 1, source.file_name()?.to_string_lossy());
-            let stamp_of = |entry: &str| -> Option<u64> {
-                let (stamp, rest) = entry.split_once('-')?;
-                (rest == tail).then(|| stamp.parse().ok())?
-            };
-            let (newest, _) = entries
-                .iter()
-                .filter_map(|entry| stamp_of(entry).map(|stamp| (entry, stamp)))
-                .max_by_key(|&(_, stamp)| stamp)?;
-            Some(format!("references/{newest}"))
-        })
-        .collect()
 }

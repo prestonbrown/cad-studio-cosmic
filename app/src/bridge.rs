@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use cosmic::iced::futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use engine::agent::attachments;
 use engine::agent::claude::TurnRequest;
 use engine::agent::session::{EngineEvent, Session, TurnHandle, TurnOutcome};
 use engine::project::manifest::Manifest;
@@ -217,6 +218,9 @@ const QUEUE_DELAY: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// A send actually started (never a queued one): append the user row.
+    /// `attachments` carries the `references/<stamp>-<n>-<name>` COPY names
+    /// the bridge just made (upstream's row stores the copies,
+    /// Project.swift:201) — render them root-relative.
     TurnStarted {
         prompt: String,
         attachments: Vec<String>,
@@ -271,9 +275,10 @@ enum Command {
 }
 
 /// A queued send (upstream `QueuedMessage`): the FIFO entry the queue holds
-/// while a turn runs. The id is the identity the queue list renders and
-/// [`Bridge::remove_queued`] addresses (upstream's items are full
-/// `ChatMessage`s with UUIDs).
+/// while a turn runs, carrying the ORIGINAL request paths — the copies are
+/// made when the turn starts, never at enqueue (Project.swift:177-190). The
+/// id is the identity the queue list renders and [`Bridge::remove_queued`]
+/// addresses (upstream's items are full `ChatMessage`s with UUIDs).
 #[derive(Debug, Clone, PartialEq)]
 struct QueuedSend {
     id: Uuid,
@@ -961,15 +966,22 @@ impl Drive {
         }
     }
 
-    /// Start a turn (upstream `send`, Project.swift:192-208): append the user
-    /// row, save, announce, and hand the request to the engine's lifecycle
-    /// dance — every turn-start path lands here (a direct send, the 1 s
-    /// auto-run, a resume), so this is where busy rises for turns the
-    /// handle never marked. The transcript reloads from disk — the last
-    /// turn's save is this turn's base, exactly the crash-recovery shape
-    /// `load_chat`'s `unwrap_or_default` gives a fresh project.
+    /// Start a turn (upstream `send`, Project.swift:192-208): copy the
+    /// attachments into `references/` FIRST — before the user row is
+    /// appended, exactly upstream's order — then append the row carrying
+    /// the COPY names, save, announce, and hand the request to the engine's
+    /// lifecycle dance. Every turn-start path lands here (a direct send, the
+    /// 1 s auto-run, a resume), so a QUEUED send's copies are made here, at
+    /// its own start, never at enqueue (Project.swift:177-190). The bridge
+    /// is the single writer of `references/`: the engine's session consumes
+    /// the names and writes nothing. The transcript reloads from disk — the
+    /// last turn's save is this turn's base, exactly the crash-recovery
+    /// shape `load_chat`'s `unwrap_or_default` gives a fresh project.
     fn start_turn(&mut self, session: &mut Session, send: QueuedSend) -> Phase {
         self.pipeline().begin_turn();
+        let sources: Vec<PathBuf> = send.attachments.iter().map(PathBuf::from).collect();
+        let references = attachments::copy_attachments(&sources, &self.root);
+        let images: Vec<PathBuf> = references.iter().map(|name| self.root.join(name)).collect();
         let mut transcript = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
         transcript.append(ChatMessage {
             id: Uuid::new_v4(),
@@ -979,20 +991,18 @@ impl Drive {
             tool: None,
             detail: None,
             action: None,
-            // upstream lists the references/ copies here; the engine owns
-            // the copy inside the turn and does not surface the names, so
-            // the persisted row carries the request's paths as given
-            attachments: send.attachments.clone(),
+            // the references/ copies upstream's row stores (Project.swift:201)
+            attachments: references.clone(),
         });
         let _ = store::save_chat(&self.root, &transcript.messages);
         let _ = self.out.unbounded_send(Message::TurnStarted {
             prompt: send.prompt.clone(),
-            attachments: send.attachments.clone(),
+            attachments: references.clone(),
         });
         let request = TurnRequest {
             prompt: send.prompt,
-            attachments: send.attachments.iter().map(PathBuf::from).collect(),
-            images: Vec::new(),
+            references,
+            images,
         };
         let handle = session.send(&self.root, &request);
         Phase::Running { handle, transcript }
@@ -1426,7 +1436,10 @@ mod tests {
 
     /// Drains bridge messages until `pred`, bounded (5 s) — never a fixed
     /// sleep (app/tests/build_pipeline.rs's helper, same shape).
-    async fn run_until(messages: &mut UnboundedReceiver<Message>, pred: impl Fn(&Message) -> bool) {
+    async fn run_until(
+        messages: &mut UnboundedReceiver<Message>,
+        mut pred: impl FnMut(&Message) -> bool,
+    ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match tokio::time::timeout_at(deadline, messages.next()).await {
@@ -1770,6 +1783,185 @@ mod tests {
             "queued items expose preview text and the image count"
         );
         drop(cmd_tx);
+    }
+
+    /// The send's attachments are copied into `references/` at TURN START,
+    /// before anything else happens (upstream `copyReferences` inside
+    /// `send`, Project.swift:199-201): the persisted user row, the
+    /// [`Message::TurnStarted`] announcement, and the child's prompt all
+    /// carry the `references/<stamp>-<n>-<name>` COPY names — never the
+    /// original request paths.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_rows_carry_reference_copy_names() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-bridge-refs-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let source = std::env::temp_dir().join(format!("cad-src-{}.png", Uuid::new_v4()));
+        std::fs::write(&source, b"png").unwrap();
+        let leaf = source.file_name().unwrap().to_string_lossy().into_owned();
+        let argv_out = root.join("argv-out");
+
+        let guard = ENV_LOCK.lock().await;
+        // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+        unsafe {
+            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+            std::env::set_var(
+                "CAD_FAKE_SCENARIO",
+                fake_agent().parent().unwrap().join("scenarios/pong.jsonl"),
+            );
+            std::env::set_var("CAD_FAKE_ARGV_OUT", &argv_out);
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        }
+        let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
+        bridge.mark_python_ready_for_test();
+        bridge
+            .enqueue(
+                "model this".into(),
+                vec![source.to_string_lossy().into_owned()],
+            )
+            .expect("the send starts");
+
+        // the announcement carries copy names, not request paths
+        let mut announced = Vec::new();
+        run_until(&mut messages, |m| {
+            if let Message::TurnStarted { attachments, .. } = m {
+                announced = attachments.clone();
+                true
+            } else {
+                false
+            }
+        })
+        .await;
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert!(
+            announced[0].starts_with("references/") && announced[0].ends_with(&format!("-1-{leaf}")),
+            "the copy name is upstream's <stamp>-1-<name>: {}",
+            announced[0]
+        );
+        // the copy is on disk BEFORE the row is even read by the app
+        assert!(root.join(&announced[0]).is_file(), "{}", announced[0]);
+
+        run_until(&mut messages, |m| {
+            matches!(
+                m,
+                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Success { .. }))
+            )
+        })
+        .await;
+        drop(guard);
+        unsafe {
+            std::env::remove_var("CAD_TEST_CLAUDE");
+            std::env::remove_var("CAD_FAKE_SCENARIO");
+            std::env::remove_var("CAD_FAKE_ARGV_OUT");
+            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        }
+
+        // the persisted row carries the same names
+        let chat = load_chat(&root).unwrap();
+        let row = chat
+            .iter()
+            .find(|row| row.role == Role::User)
+            .expect("the send's user row");
+        assert_eq!(row.attachments, announced, "row and announcement agree");
+        // and the prompt the child received names the same copy
+        let argv = std::fs::read_to_string(&argv_out).unwrap();
+        let prompt = argv.lines().next().unwrap();
+        assert!(prompt.contains(&announced[0]), "prompt: {prompt}");
+        assert!(
+            !prompt.contains(source.to_string_lossy().as_ref()),
+            "the original path never reaches the prompt"
+        );
+    }
+
+    /// A QUEUED send copies when it STARTS, not when it is queued (Ruling 4:
+    /// upstream's queue holds pre-copy urls — Project.swift:177-190 — and
+    /// `sendNextQueued` runs the same copy-on-send path as a direct send).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_send_copies_when_it_starts_not_when_queued() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-bridge-qrefs-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let source = std::env::temp_dir().join(format!("cad-qsrc-{}.png", Uuid::new_v4()));
+        std::fs::write(&source, b"png").unwrap();
+        let leaf = source.file_name().unwrap().to_string_lossy().into_owned();
+
+        let guard = ENV_LOCK.lock().await;
+        // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+        unsafe {
+            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+            std::env::set_var(
+                "CAD_FAKE_SCENARIO",
+                fake_agent().parent().unwrap().join("scenarios/pong.jsonl"),
+            );
+            std::env::set_var("CAD_FAKE_ARGV_OUT", root.join("argv-out"));
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        }
+        let (mut drive, _cmd_tx, mut messages) = harness(&root);
+
+        // absorbed mid-drain, the enqueue only queues: nothing is copied
+        drive.absorb(
+            Command::Enqueue {
+                prompt: "model this".into(),
+                attachments: vec![source.to_string_lossy().into_owned()],
+            },
+            &|| {},
+        );
+        assert!(
+            !root.join("references").exists(),
+            "queueing copies nothing upstream-side"
+        );
+
+        // the turn START makes the copy and the row together
+        let mut session = Session::new(Settings::default()).with_system_template(SYSTEM_TEMPLATE);
+        let phase = drive.send_next_queued(&mut session);
+        assert!(matches!(phase, Phase::Running { .. }));
+        let names: Vec<String> = std::fs::read_dir(root.join("references"))
+            .expect("references/ exists once the queued turn starts")
+            .flatten()
+            .map(|entry| entry.file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].ends_with(&format!("-1-{leaf}")), "{names:?}");
+
+        // the announcement carries the copy name (start_turn announces
+        // synchronously; the queue's own announcements precede it)
+        let mut announced = Vec::new();
+        run_until(&mut messages, |m| {
+            if let Message::TurnStarted { attachments, .. } = m {
+                announced = attachments.clone();
+                true
+            } else {
+                false
+            }
+        })
+        .await;
+        assert_eq!(
+            announced,
+            vec![format!("references/{}", names[0])],
+            "the queued turn's row carries the copy made at its start"
+        );
+        let chat = load_chat(&root).unwrap();
+        assert_eq!(
+            chat[0].role,
+            Role::User,
+            "the queued turn's user row persisted"
+        );
+        assert_eq!(chat[0].attachments, vec![format!("references/{}", names[0])]);
+        drop(guard);
+        unsafe {
+            std::env::remove_var("CAD_TEST_CLAUDE");
+            std::env::remove_var("CAD_FAKE_SCENARIO");
+            std::env::remove_var("CAD_FAKE_ARGV_OUT");
+            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        }
     }
 
     /// A successful turn's tail records a version whose snapshot carries the

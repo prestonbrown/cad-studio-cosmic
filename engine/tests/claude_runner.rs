@@ -4,8 +4,9 @@
 //! (AgentSession.swift:197-217) and turn-prompt assembly with the attachment
 //! and missing-output notes (Project.swift:210-256).
 
+use engine::agent::attachments::copy_attachments;
 use engine::agent::claude::{
-    PromptCtx, TurnRequest, build_args, build_prompt, copy_attachments, environment_bullets,
+    PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets,
     render_system_prompt,
 };
 use engine::agent::locator::AgentPath;
@@ -291,14 +292,16 @@ fn prompt_assembly_with_attachments_and_missing_note() {
     // temp project: model.py present, output/ has model.3mf only
     let root = mk_project(&["model.py"], &["model.3mf"]);
     std::fs::write("/tmp/sketch.png", b"png").unwrap();
+    // the bridge's turn start: copy first, then the request carries the
+    // copy names (Project.swift:199-203)
+    let sources = vec![PathBuf::from("/tmp/sketch.png")];
+    let rels = copy_attachments(&sources, &root);
+    assert_eq!(rels.len(), 1);
     let req = TurnRequest {
         prompt: String::new(),
-        attachments: vec![PathBuf::from("/tmp/sketch.png")],
+        references: rels,
         images: Vec::new(),
     };
-    // copy_attachments first (writes references/), then build_prompt
-    let rels = copy_attachments(&req, &root);
-    assert_eq!(rels.len(), 1);
     // a ctx over a root without model.py reports nothing missing (the
     // missing_requirements gate), so the attachment sections stand alone
     let no_missing = engine::project::outputs::MissingCtx {
@@ -308,9 +311,9 @@ fn prompt_assembly_with_attachments_and_missing_note() {
         printer_model: None,
         manifest: None,
     };
-    let p = build_prompt(&req, &root, &no_missing);
+    let p = build_prompt(&req, &no_missing);
     assert!(p.contains("Create a model based on the attached files."));
-    assert!(p.contains(&rels[0]));
+    assert!(p.contains(&req.references[0]));
     let missing = engine::project::outputs::MissingCtx {
         project_root: &root,
         output_dir: &root.join("output"),
@@ -321,10 +324,9 @@ fn prompt_assembly_with_attachments_and_missing_note() {
     let p2 = build_prompt(
         &TurnRequest {
             prompt: "go".into(),
-            attachments: vec![],
+            references: Vec::new(),
             images: Vec::new(),
         },
-        &root,
         &missing,
     );
     assert!(
@@ -341,12 +343,8 @@ fn prompt_assembly_with_attachments_and_missing_note() {
 fn attachments_copied_with_timestamp_names() {
     let root = mk_project(&[], &[]);
     std::fs::write("/tmp/cad-att-sketch.png", b"png").unwrap();
-    let req = TurnRequest {
-        prompt: "x".into(),
-        attachments: vec![PathBuf::from("/tmp/cad-att-sketch.png")],
-        images: Vec::new(),
-    };
-    let rels = copy_attachments(&req, &root);
+    let sources = vec![PathBuf::from("/tmp/cad-att-sketch.png")];
+    let rels = copy_attachments(&sources, &root);
     let refs_dir = root.join("references");
     let names: Vec<_> = std::fs::read_dir(&refs_dir).unwrap().flatten().collect();
     assert_eq!(names.len(), 1);
