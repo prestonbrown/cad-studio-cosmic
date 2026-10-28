@@ -1,6 +1,8 @@
-# Fact pack: libcosmic menu overlay corrupts widget state when item sets change
-# (notes for a human-authored upstream report — same attestation stance as
-# libcosmic-texteditor-id-bug.md: verify before writing, write in your own words)
+# Engineering record: libcosmic menu overlay corrupts widget state when item sets change
+# (INTERNAL — not filed upstream: pop-os/COSMIC rejects AI-assisted bug reports
+# outright, Preston's ruling 2026-10-28. Kept as the workaround's rationale,
+# the repro boundary (a bare app does NOT reproduce — the corruption needs our
+# full window context), and the evidence trail if the pin ever moves.)
 
 ## The claim
 

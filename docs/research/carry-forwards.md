@@ -282,7 +282,7 @@ From the M4 T3 bridge review (2026-10-13):
   widget state when the item set changes between rebuilds — the crash
   Preston hit twice and the driven repro captured ("Downcast widget
   state", iced tree.rs:507 via menu_inner/RcWrapper; fact pack
-  docs/research/libcosmic-menu-dynamic-items-bug.md). Content is
+  docs/research/libcosmic-menu-dynamic-items-bug.md — internal engineering record; pop-os rejects AI-assisted bug reports so nothing is filed upstream, Preston's ruling 2026-10-28). Content is
   faithful (same trigger/labels/two-line rows/checkmark/busy gating);
   the divergences: popover-vs-menu chrome, and relative timestamps
   FROZEN at open (a live per-frame time-ago is rebuild churn). If

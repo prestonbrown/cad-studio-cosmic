@@ -1,6 +1,7 @@
-# Fact pack: libcosmic text_editor id-forwarding tree corruption
-# (notes for a human-authored upstream report — NOT paste-ready issue text.
-# Every claim below is independently verifiable; verify before writing.)
+# Engineering record: libcosmic text_editor id-forwarding tree corruption
+# (INTERNAL — pop-os/COSMIC rejects AI-assisted bug reports outright, so this
+# is not filed upstream; Preston's ruling 2026-10-28. Kept as the workaround's
+# rationale and repro evidence for whenever the pin moves or the bug resurfaces.)
 
 ## The claim
 `cosmic::widget::text_editor` in context-menu mode (the default when
