@@ -8,10 +8,10 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (the M4 subset plus Compila ⌘B and M7's parameters ⌥⌘I):
-//! show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout presets, viewer
-//! presets + fit, schematic zoom/fit, build, stop, reveal, open-in-slicer.
-//! No export/output command (M8). The keyboard bindings are one pure
+//! Commands (the M4 subset plus Compila ⌘B, M7's parameters ⌥⌘I, and M8's
+//! export ⇧⌘E): show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout
+//! presets, viewer presets + fit, schematic zoom/fit, build, stop, export,
+//! reveal, open-in-slicer. The keyboard bindings are one pure
 //! table, [`project_shortcut`]; the header's menu renders the same
 //! commands.
 //!
@@ -70,7 +70,8 @@ const GRID_SPACING: f32 = 8.0;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// The commands the M4 project window exposes (upstream AppCommands +
-/// ProjectToolbar, M4 subset + M5's Compila + M7's parameters toggle).
+/// ProjectToolbar, M4 subset + M5's Compila + M7's parameters toggle +
+/// M8's export).
 /// Doubles as the menu action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -94,6 +95,9 @@ pub enum Command {
     /// "Compila modello" ⌘B (Commands.swift:115-119): build model.py now.
     Build,
     Stop,
+    /// "Esporta pacchetto…" ⇧⌘E (Commands.swift:130-132): zip model.py +
+    /// the non-dot outputs to a chosen destination.
+    Export,
     Reveal,
     OpenInSlicer,
 }
@@ -137,6 +141,13 @@ pub enum Message {
     Dragged(DragEvent),
     /// The attach portal answered.
     AttachChosen(Result<Vec<PathBuf>, String>),
+    /// The export save portal answered (`Err` = cancelled — upstream's
+    /// `guard let destination … else { return }`); the drive harness's
+    /// `saveas` injects the `Ok` arm directly, the portal needing a user.
+    ExportChosen(Result<PathBuf, String>),
+    /// The zip finished: `Some(destination)` on status 0 (revealed), `None`
+    /// on anything else — zip missing included (the failed activity row).
+    ExportDone(Option<PathBuf>),
     /// An issue button opened/closed its list (`None` closes).
     ToggleIssues(Option<IssueKind>),
     /// The header's close button (the app layer closes the window).
@@ -268,6 +279,29 @@ fn drawing_pages(output_dir: &Path) -> Vec<PathBuf> {
         pages.insert(0, first);
     }
     pages
+}
+
+/// The export set (upstream `exportPackage`, Project.swift:437-441):
+/// `model.py` first, then every non-dot entry of `output/`, each filtered
+/// to what exists on disk — the exact file list `/usr/bin/zip -j`
+/// receives. The output entries sort by name so the archive is
+/// deterministic; upstream's directory order is unspecified and the SET
+/// is what matters.
+fn export_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = vec![root.join("model.py")];
+    if let Ok(entries) = std::fs::read_dir(root.join("output")) {
+        let mut outputs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+            })
+            .collect();
+        outputs.sort();
+        files.extend(outputs);
+    }
+    files.into_iter().filter(|path| path.exists()).collect()
 }
 
 impl ProjectWindow {
@@ -587,6 +621,31 @@ impl ProjectWindow {
                 Task::none()
             }
             Message::AttachChosen(Err(_cancelled)) => Task::none(),
+            // upstream exportPackage's body, Project.swift:436-444: a
+            // cancelled panel returns; the chosen destination zips
+            // model.py + the non-dot outputs (the spawn is the app
+            // layer's — argv only, destination removed first)
+            Message::ExportChosen(Err(_cancelled)) => Task::none(),
+            Message::ExportChosen(Ok(destination)) => {
+                let files = export_files(&self.root);
+                CosmicTask::future(async move {
+                    Message::ExportDone(crate::app::zip_package(destination, files).await)
+                })
+            }
+            // status 0 → the succeeded row + the reveal
+            // (activateFileViewerSelecting); anything else → the failed
+            // row — including zip not being installed
+            Message::ExportDone(Some(destination)) => {
+                self.set_activity(Activity::Succeeded(fl!("pacchetto-esportato")));
+                CosmicTask::future(async move {
+                    crate::app::reveal_path(destination).await;
+                    Message::Tick
+                })
+            }
+            Message::ExportDone(None) => {
+                self.set_activity(Activity::Failed(fl!("esportazione-non-riuscita")));
+                Task::none()
+            }
             Message::ToggleIssues(kind) => {
                 self.shown_issues = kind;
                 // the window's popover is a single slot: the two cards are
@@ -916,6 +975,20 @@ impl ProjectWindow {
                 self.set_activity(self.bridge.activity().into());
                 Task::none()
             }
+            Command::Export => {
+                // The menu item this shortcut rides is disabled without
+                // model.3mf (Commands.swift:131's hasThreeMF gate) and NOT
+                // while busy — upstream's menu/toolbar split, copied as-is.
+                // The keybind is the menu item's, so the arm repeats only
+                // its gate.
+                if !self.output_dir().join("model.3mf").exists() {
+                    return Task::none();
+                }
+                let name = self.name.clone();
+                CosmicTask::future(async move {
+                    Message::ExportChosen(crate::app::choose_save_file(&name).await)
+                })
+            }
             Command::Reveal => {
                 let root = self.root.clone();
                 CosmicTask::future(async move {
@@ -1046,7 +1119,7 @@ impl ProjectWindow {
     }
 
     /// The toolbar (ProjectToolbar.swift, M4 subset): chat toggle + stop |
-    /// ActivityViewer | commands menu + reveal + slicer.
+    /// ActivityViewer | commands menu + reveal + export + slicer.
     fn view_header(&self) -> Element<'_, Message> {
         let chat_toggle = button::icon(
             cosmic::widget::icon::from_name("view-column")
@@ -1070,6 +1143,27 @@ impl ProjectWindow {
 
         // upstream gates the slicer button on output.hasThreeMF
         let has_3mf = self.output_dir().join("model.3mf").exists();
+
+        // "Esporta pacchetto" (ProjectWindow.swift:135-140) — upstream's
+        // share glyph; disabled !hasThreeMF || isBusy (the toolbar's
+        // STRICTER gate — the menu entry above stays clickable while busy,
+        // upstream's split, copied as-is). The tooltip is upstream's
+        // `.help` naming the archive's contents.
+        let export = button::icon(
+            cosmic::widget::icon::from_name("emblem-shared")
+                .size(16)
+                .handle(),
+        )
+        .on_press_maybe((has_3mf && !self.is_busy()).then_some(Message::Command(Command::Export)))
+        .name(fl!("esporta-pacchetto"));
+        let export = cosmic::widget::tooltip(
+            export,
+            cosmic::widget::text(fl!(
+                "esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"
+            )),
+            cosmic::widget::tooltip::Position::FollowCursor,
+        );
+
         let slicer = button::icon(
             cosmic::widget::icon::from_name("document-export")
                 .size(16)
@@ -1091,6 +1185,7 @@ impl ProjectWindow {
             ))
             .end(self.view_menu())
             .end(reveal)
+            .end(export)
             .end(slicer)
             .into()
     }
@@ -1241,7 +1336,8 @@ impl ProjectWindow {
     /// The commands menu bar (the M4 subset of upstream AppCommands plus M5's
     /// Model root and version menu): a "File" root bubbling the app-level
     /// commands, a "View" root over the pane/layout/viewer/schematic
-    /// commands, a "Model" root (upstream "Modello": Compila + Stop), and
+    /// commands, a "Model" root (upstream "Modello": Compila + Stop +
+    /// Esporta), and
     /// the version menu root (VersionMenu.swift) trailing before the reveal
     /// and slicer buttons.
     fn view_menu(&self) -> Element<'static, Message> {
@@ -1270,6 +1366,15 @@ impl ProjectWindow {
         } else {
             Item::Button(fl!("compila-modello"), None, Command::Build)
         };
+        // `esporta-pacchetto-2` ("Esporta pacchetto…", Commands.swift:130-132):
+        // gated on hasThreeMF only — the menu does NOT gate on busy
+        // (upstream's menu/toolbar split). Button↔ButtonDisabled keeps the
+        // item SET fixed — the static-roots law's build_entry precedent.
+        let export_entry = if self.output_dir().join("model.3mf").exists() {
+            Item::Button(fl!("esporta-pacchetto-2"), None, Command::Export)
+        } else {
+            Item::ButtonDisabled(fl!("esporta-pacchetto-2"), None, Command::Export)
+        };
         let model_binds = std::collections::HashMap::new();
         let model_tree = cosmic::widget::menu::Tree::with_children(
             {
@@ -1282,6 +1387,8 @@ impl ProjectWindow {
                     build_entry,
                     Item::Divider,
                     Item::Button(fl!("stop"), None, Command::Stop),
+                    Item::Divider,
+                    export_entry,
                 ],
             ),
         );
@@ -1497,6 +1604,8 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
         (true, false, false, ".") => Some(Stop),
         // ⌘B build (Commands.swift:118-120)
         (true, false, false, "b") => Some(Build),
+        // ⇧⌘E export package (Commands.swift:130-132)
+        (true, false, true, "e") => Some(Export),
         (true, false, true, "r") => Some(Reveal),
         _ => None,
     }
@@ -1508,8 +1617,7 @@ mod tests {
 
     /// Every shortcut in the table is a command the window implements, and
     /// the upstream bindings land on the expected commands
-    /// (Commands.swift:48-137); the M8 export binding is deliberately
-    /// absent.
+    /// (Commands.swift:48-137).
     #[test]
     fn shortcut_table_matches_upstream() {
         let ctrl = Modifiers::CTRL;
@@ -1573,20 +1681,87 @@ mod tests {
             project_shortcut(&Key::Character("r".into()), &ctrl_shift),
             Some(Command::Reveal)
         );
-        // ⌘B builds the model (Commands.swift:118-120); ⇧⌘E (export, M8)
-        // is deliberately absent
+        // ⌘B builds the model (Commands.swift:118-120)
         assert_eq!(
             project_shortcut(&Key::Character("b".into()), &ctrl),
             Some(Command::Build)
         );
+        // ⇧⌘E exports the package (Commands.swift:130-132)
         assert_eq!(
             project_shortcut(&Key::Character("e".into()), &ctrl_shift),
-            None
+            Some(Command::Export)
+        );
+        assert_eq!(
+            project_shortcut(&Key::Character("e".into()), &ctrl),
+            None,
+            "export needs the shift"
         );
         assert_eq!(
             project_shortcut(&Key::Character("1".into()), &Modifiers::empty()),
             None,
             "no binding without Ctrl"
+        );
+    }
+
+    /// The export set matches upstream's package (Project.swift:437-441):
+    /// model.py leads, output's non-dot entries follow (sorted — the
+    /// archive is deterministic; upstream's directory order is arbitrary),
+    /// and only files that exist make the list.
+    #[test]
+    fn export_files_builds_the_upstream_package_set() {
+        let root = std::env::temp_dir().join(format!("cad-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        for name in [
+            "model.3mf",
+            "model.stl",
+            "drawing.pdf",
+            ".DS_Store",
+            ".hidden.tmp",
+        ] {
+            std::fs::write(root.join("output").join(name), b"x").unwrap();
+        }
+        let names: Vec<_> = export_files(&root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "model.py".to_string(),
+                "drawing.pdf".to_string(),
+                "model.3mf".to_string(),
+                "model.stl".to_string(),
+            ],
+            "model.py first, non-dot outputs sorted after it, dotfiles excluded"
+        );
+    }
+
+    /// A model.py that does not exist drops out of the set (upstream's
+    /// existence filter); with no model and an empty output directory the
+    /// export has nothing to zip.
+    #[test]
+    fn export_files_filters_missing_model_and_survives_empty_output() {
+        let root = std::env::temp_dir().join(format!("cad-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        std::fs::write(root.join("output").join("model.3mf"), b"x").unwrap();
+        let names: Vec<_> = export_files(&root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["model.3mf".to_string()],
+            "the absent model.py drops out; the surviving output stays"
+        );
+
+        // no model.py anywhere and nothing in output/: the empty package
+        // (zip then fails "Nothing to do!" → the failed activity)
+        let bare = std::env::temp_dir().join(format!("cad-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(
+            export_files(&bare).is_empty(),
+            "a project with neither model.py nor outputs exports nothing"
         );
     }
 
@@ -1693,6 +1868,46 @@ mod tests {
         assert_eq!(
             window.chat.draft, "",
             "the accepted text left the input bar (the Ok branch ran)"
+        );
+    }
+
+    /// The export outcome lands on the activity model exactly as
+    /// upstream's Task does (Project.swift:445-450): a zero zip status →
+    /// the succeeded row (the reveal rides the returned task); anything
+    /// else → the failed row. A cancelled panel answers
+    /// [`Message::ExportChosen`] with `Err` and changes nothing.
+    #[tokio::test]
+    async fn export_outcome_drives_the_activity_row() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-export-ui-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+
+        // a cancelled save panel is upstream's `guard … else { return }`
+        let _ = window.update(Message::ExportChosen(Err("cancelled".into())));
+        assert_eq!(
+            window.activity,
+            Activity::Idle,
+            "a cancel leaves the row idle"
+        );
+
+        let destination = std::env::temp_dir().join("cad-export-out.zip");
+        let _ = window.update(Message::ExportDone(Some(destination)));
+        assert_eq!(
+            window.activity,
+            Activity::Succeeded("Package exported".into()),
+            "a zero zip status is the succeeded row"
+        );
+
+        let _ = window.update(Message::ExportDone(None));
+        assert_eq!(
+            window.activity,
+            Activity::Failed("Export failed".into()),
+            "any other status (or no zip at all) is the failed row"
         );
     }
 

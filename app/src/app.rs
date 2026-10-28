@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ashpd::desktop::file_chooser::SelectedFiles;
+use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use cosmic::app::ApplicationExt;
 use cosmic::app::Core;
 use cosmic::cosmic_config::Config;
@@ -30,6 +30,7 @@ use engine::python::env::{
 };
 use engine::settings::{Settings as EngineSettings, settings_path};
 
+use crate::fl;
 use crate::recents::{self, Recents};
 use crate::sheets;
 use crate::windows::project::{self, ProjectWindow};
@@ -58,6 +59,12 @@ pub enum Message {
     /// window's draft and sends it through the real shell path — a
     /// keyboard-free user turn (CAD_STUDIO_DRIVE's `chat` command).
     DriveChat(String),
+    /// The drive harness's export answer: feeds the focused project window
+    /// the SaveFile portal's destination directly (CAD_STUDIO_DRIVE's
+    /// `saveas` command) — the portal itself needs a user, so a scripted
+    /// export never opens it; the zip + activity + reveal path downstream
+    /// is the real one.
+    DriveSaveAs(PathBuf),
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -206,6 +213,18 @@ impl Application for CadStudio {
                     .map(Action::App)
                 })
                 .unwrap_or_else(Task::none),
+            Message::DriveSaveAs(path) => self
+                .windows
+                .keys()
+                .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
+                .map(|id| {
+                    Task::done(Message::Project(
+                        *id,
+                        project::Message::ExportChosen(Ok(path)),
+                    ))
+                })
+                .unwrap_or_else(Task::none)
+                .map(Action::App),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
             Message::PythonSheet(msg) => self.update_python_sheet(msg),
@@ -975,6 +994,57 @@ pub async fn choose_files(title: &str) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// Ask the xdg-desktop-portal where to save the export (upstream
+/// `chooseExportDestination`, ProjectPanels.swift:24-33): suggested name
+/// `"<project>.zip"`, starting in Downloads, ZIP-only filter, the accept
+/// button is upstream's "Esporta" prompt. `Err` is a cancelled panel.
+pub async fn choose_save_file(suggested_name: &str) -> Result<PathBuf, String> {
+    let title = fl!("esporta-pacchetto-2");
+    let accept = fl!("esporta");
+    let current_name = format!("{suggested_name}.zip");
+    let mut request = SelectedFiles::save_file()
+        .title(title.as_str())
+        .accept_label(accept.as_str())
+        .current_name(current_name.as_str())
+        .filter(FileFilter::new("ZIP").mimetype("application/zip"));
+    if let Some(downloads) = dirs::download_dir() {
+        request = request
+            .current_folder(downloads)
+            .map_err(|why| why.to_string())?;
+    }
+    let response = request.send().await.map_err(|why| why.to_string())?;
+    let files = response.response().map_err(|why| why.to_string())?;
+    files
+        .uris()
+        .first()
+        .and_then(|uri| uri.to_file_path().ok())
+        .ok_or_else(|| "no destination".to_string())
+}
+
+/// Run upstream's export subprocess — `/usr/bin/zip -j -q <dest>
+/// <files…>` (Project.swift:444, argv only, never a shell) — after
+/// REMOVING a pre-existing destination: `zip -j` into an existing archive
+/// adds or updates entries, leaving stale ones behind. Status 0 →
+/// `Some(destination)` for the reveal; anything else — zip not installed
+/// included — `None` (the caller's "Esportazione non riuscita"). The
+/// removal takes files only: upstream's removeItem would also rmtree a
+/// directory at the destination, and a portal-confirmed overwrite only
+/// ever names a file.
+pub async fn zip_package(destination: PathBuf, files: Vec<PathBuf>) -> Option<PathBuf> {
+    let _ = std::fs::remove_file(&destination);
+    let status = tokio::process::Command::new("/usr/bin/zip")
+        .arg("-j")
+        .arg("-q")
+        .arg(&destination)
+        .args(&files)
+        .status()
+        .await;
+    match status {
+        Ok(status) if status.success() => Some(destination),
+        _ => None,
+    }
+}
+
 /// Reveal `path` in the file manager: DBus `org.freedesktop.FileManager1`
 /// `ShowItems` (upstream `NSWorkspace.activateFileViewerSelecting`), with
 /// an `xdg-open` of the parent directory as the fallback.
@@ -1025,6 +1095,48 @@ pub fn open_url(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `zip_package` rebuilds the destination from scratch every run —
+    /// `zip -j` into an existing archive would ADD or UPDATE entries,
+    /// leaving the stale ones behind (Project.swift:444's removeItem).
+    /// Re-exporting a different file set must leave exactly the new set:
+    /// the first round's entry may not survive the second round. Skipped
+    /// where `/usr/bin/zip` is not installed (the failed-activity path is
+    /// that machine's reality).
+    #[tokio::test]
+    async fn zip_package_replaces_a_pre_existing_destination() {
+        if !Path::new("/usr/bin/zip").exists() {
+            eprintln!("skipping: /usr/bin/zip not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cad-zip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one.txt"), b"one").unwrap();
+        std::fs::write(dir.join("two.txt"), b"two").unwrap();
+        let destination = dir.join("package.zip");
+
+        let first = zip_package(destination.clone(), vec![dir.join("one.txt")])
+            .await
+            .expect("the first export zips");
+        assert_eq!(first, destination);
+        let second = zip_package(destination.clone(), vec![dir.join("two.txt")])
+            .await
+            .expect("the second export zips over the first");
+        assert_eq!(second, destination);
+
+        let archive = std::fs::read(&destination).unwrap();
+        let mut names: Vec<String> = zip::ZipArchive::new(std::io::Cursor::new(archive))
+            .unwrap()
+            .file_names()
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["two.txt".to_string()],
+            "the rebuilt archive carries exactly the second round's set — the stale one.txt is gone"
+        );
+    }
 
     /// The app-level bindings (Commands.swift:16-49): ⌘N, ⌘O, ⇧⌘1 — and
     /// nothing on bare keys.

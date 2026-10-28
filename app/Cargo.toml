@@ -42,8 +42,14 @@ ashpd = "0.12"
 zbus = { version = "5.15", default-features = false, features = ["tokio"] }
 i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
 rust-embed = "8.11.0"
+# the export portal's default folder (upstream's Downloads directory,
+# ProjectPanels.swift:28); already in the tree at cosmic-config's pin
+dirs = "6"
 
 [dev-dependencies]
 # the slice's offscreen screenshot test drives the viewer's surfaceless
 # harness directly (render_headless.rs pattern)
 wgpu.workspace = true
+# the export test reads the written archive back (the replace-before-zip
+# law's assertion side); the engine already pins the version workspace-wide
+zip.workspace = true
