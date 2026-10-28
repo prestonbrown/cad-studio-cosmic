@@ -496,6 +496,7 @@ impl ProjectWindow {
                         fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
                         Vec::new(),
                     );
+                    self.set_activity(self.bridge.activity().into());
                 }
                 Task::none()
             }
@@ -660,10 +661,15 @@ impl ProjectWindow {
                             self.bridge.clear_parked_draft();
                         }
                     }
+                    // the pipeline's activity crosses now — the working
+                    // status of a send that started, or the refusal's
+                    // reason for one that did not (the Build arm's fold)
+                    self.set_activity(self.bridge.activity().into());
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
                 let _ = self.bridge.enqueue(suggestion.clone(), Vec::new());
+                self.set_activity(self.bridge.activity().into());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
             chat_view::Message::RemoveQueued(id) => {
@@ -690,6 +696,7 @@ impl ProjectWindow {
                     .and_then(|row| row.detail.clone())
                     .unwrap_or_default();
                 let _ = self.bridge.ask_agent_to_fix(&traceback);
+                self.set_activity(self.bridge.activity().into());
             }
             // ConfigureClaude is the M8 settings window
             chat_view::Message::RowAction(_, Action::ConfigureClaude) => {}
@@ -1582,6 +1589,43 @@ mod tests {
                 "schematic-10.svg".to_string(),
             ],
             "schematic.svg leads, numbered pages sort numerically, non-pages excluded"
+        );
+    }
+
+    /// A send the bridge refuses names itself in the window's status line
+    /// and keeps the draft in the input bar — a refusal must not vanish
+    /// (no row opens, no process spawns, and the status line is the one
+    /// surface that says why).
+    #[tokio::test]
+    async fn refused_send_surfaces_in_the_status_line() {
+        let root = std::env::temp_dir().join(format!("cad-refuse-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        // the bridge opens unverified: the app-level check has not landed
+        assert!(!window.bridge.python_ready());
+        assert!(!window.is_busy());
+
+        let _ = window.update(Message::Chat(chat_view::Message::SetDraft(
+            "animate the cap".into(),
+        )));
+        let _ = window.update(Message::Chat(chat_view::Message::Send));
+
+        assert!(
+            matches!(window.activity, Activity::Failed(_)),
+            "the refusal's reason reaches the status line, got {:?}",
+            window.activity
+        );
+        assert!(
+            window.chat.messages.is_empty(),
+            "a refused send opens no row"
+        );
+        assert_eq!(
+            window.chat.draft, "animate the cap",
+            "the refused text stays in the input bar"
         );
     }
 

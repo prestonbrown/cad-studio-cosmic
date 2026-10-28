@@ -109,6 +109,12 @@ const CANNOT_RESTORE: &str = "Can’t restore version %lld";
 /// `l-esecuzione-di-model-py-non-riesce-con-questo-errore-correggi-lo-script`
 /// (Project.swift:258-260); upstream's `\n` escapes are real newlines.
 const ASK_FIX: &str = "Running model.py fails with this error. Fix the script:\n```\n%@\n```";
+/// The activity a python-readiness refusal leaves in the status line: the
+/// send was refused and the setup sheet (requested by the same refusal)
+/// is the recovery surface. Without it a refused send leaves no trace in
+/// the window — no row, no process, and the draft simply stays in the
+/// input bar as if nothing happened.
+const PYTHON_SETUP_REQUIRED: &str = "Python setup required";
 
 /// Upstream `Activity` (Project.swift:19-26): the status line the app
 /// renders, and the sole busy flag — `isBusy` is `activity.isWorking`.
@@ -176,7 +182,14 @@ struct Pipeline {
 
 impl Pipeline {
     /// The observed state a fresh project opens with: the version history,
-    /// the manifest's parameter list, and the outputs still missing.
+    /// the manifest's parameter list, and the outputs still missing. The
+    /// activity opens Idle by construction: nothing persists in-flight turn
+    /// state (a mid-turn crash leaves only the chat's trailing user row and
+    /// the stored session id), and a previous process's agent subprocess
+    /// cannot exist by the time this loads — the app reaps orphans at
+    /// startup — so a cold start never believes a turn is in flight.
+    /// [`crate::bridge::tests::cold_start_over_crashed_store_starts_turns`]
+    /// pins the whole law end to end.
     fn load(root: &Path) -> Self {
         Self {
             python_state: EnvState::Unknown,
@@ -418,9 +431,11 @@ impl Bridge {
 
     /// Send a message: runs immediately when no turn is running, joins the
     /// queue FIFO otherwise (upstream `sendDraft`). Refused while python is
-    /// not ready — the draft is kept and the setup sheet requested (upstream
-    /// `send`, Project.swift:192-196). The prompt is the user's text
-    /// verbatim — the engine builds the full turn prompt around it.
+    /// not ready — the draft is kept, the setup sheet requested, and the
+    /// refusal named in the activity (upstream `send`, Project.swift:192-196,
+    /// plus the status line every other refusal here already gets). The
+    /// prompt is the user's text verbatim — the engine builds the full turn
+    /// prompt around it.
     pub fn enqueue(&self, prompt: String, attachments: Vec<String>) -> Result<(), BuildRefusal> {
         {
             let mut pipeline = self.pipeline();
@@ -429,6 +444,7 @@ impl Bridge {
             } else if !pipeline.python_ready() {
                 pipeline.draft = Some(prompt);
                 pipeline.sheet_requested = true;
+                pipeline.activity = Activity::Failed(PYTHON_SETUP_REQUIRED.to_string());
                 let _ = self.out.unbounded_send(Message::PythonSheetRequested);
                 return Err(BuildRefusal::PythonNotReady);
             } else {
@@ -513,6 +529,10 @@ impl Bridge {
             }
             if !pipeline.python_ready() {
                 pipeline.sheet_requested = true;
+                // same surface as enqueue's refusal: without it a refused
+                // build/parameter commit leaves no status-line trace (the
+                // window folds this activity at both call sites)
+                pipeline.activity = Activity::Failed(PYTHON_SETUP_REQUIRED.to_string());
                 let _ = self.out.unbounded_send(Message::PythonSheetRequested);
                 return Err(BuildRefusal::PythonNotReady);
             }
@@ -1349,6 +1369,220 @@ mod tests {
     use engine::agent::tool_summary::live_title;
     use engine::project::store::{ToolActivity, ToolState, load_chat};
     use std::path::Path;
+
+    /// The fakes read their env at spawn time and parallel tests share one
+    /// process: every setter/clearer of a CAD_FAKE_*/CAD_TEST_CLAUDE var
+    /// holds this lock for the whole test (house pattern — app/tests/
+    /// build_pipeline.rs, engine/tests/session_lifecycle.rs).
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    fn fake_agent() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent/fake_claude.py")
+    }
+
+    /// The crash-recovery shape a mid-turn app crash leaves behind
+    /// (/tmp/crash-repro-jar on thelio, 2026-10-28): metadata holding the
+    /// dead turn's session id and version pointer, a chat whose LAST row is
+    /// the dead turn's user message, a recorded version, and stale turn
+    /// logs — no busy flag anywhere, which is what the test asserts against.
+    fn crashed_project() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("cad-crash-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 2\n").unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let mut history = Vec::new();
+        engine::project::versions::record(
+            &root,
+            &mut history,
+            "a 20 mm cylinder jar",
+            Some("97bfe962-15dd-46a0-93ca-e38aeaaf3515"),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let mut metadata = store::load_metadata(&root).unwrap();
+        metadata.session_id = Some("97bfe962-15dd-46a0-93ca-e38aeaaf3515".into());
+        metadata.current_version = Some(1);
+        store::save_metadata(&root, &metadata).unwrap();
+        // the dead in-flight turn: ...assistant, summary, then the user row
+        // that never got an answer
+        let rows = [
+            ChatMessage {
+                id: Uuid::new_v4(),
+                role: Role::Assistant,
+                text: "I made a 20 mm x 100 mm container.".into(),
+                date: OffsetDateTime::now_utc(),
+                tool: None,
+                detail: None,
+                action: None,
+                attachments: Vec::new(),
+            },
+            ChatMessage {
+                id: Uuid::new_v4(),
+                role: Role::Summary,
+                text: "Version 1".into(),
+                date: OffsetDateTime::now_utc(),
+                tool: None,
+                detail: None,
+                action: None,
+                attachments: Vec::new(),
+            },
+            ChatMessage {
+                id: Uuid::new_v4(),
+                role: Role::User,
+                text: "Animate how this mechanism moves, with a physics simulation.".into(),
+                date: OffsetDateTime::now_utc(),
+                tool: None,
+                detail: None,
+                action: None,
+                attachments: Vec::new(),
+            },
+        ];
+        store::save_chat(&root, &rows).unwrap();
+        root
+    }
+
+    /// Drains bridge messages until `pred`, bounded (5 s) — never a fixed
+    /// sleep (app/tests/build_pipeline.rs's helper, same shape).
+    async fn run_until(
+        messages: &mut UnboundedReceiver<Message>,
+        pred: impl Fn(&Message) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, messages.next()).await {
+                Ok(Some(message)) if pred(&message) => return,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("message stream ended before predicate"),
+                Err(_) => panic!("timed out waiting for predicate"),
+            }
+        }
+    }
+
+    /// A cold start over the crashed store must not believe a turn is in
+    /// flight: the first send starts a turn (spawns the agent, appends its
+    /// user row), resumes the stored session, and a second send after the
+    /// first lands starts another — nothing queues or wedges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_start_over_crashed_store_starts_turns() {
+        let _guard = ENV_LOCK.lock().await;
+        let root = crashed_project();
+        let argv_out = root.join("argv-out");
+        // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+        unsafe {
+            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+            std::env::set_var(
+                "CAD_FAKE_SCENARIO",
+                fake_agent().parent().unwrap().join("scenarios/pong.jsonl"),
+            );
+            std::env::set_var("CAD_FAKE_ARGV_OUT", &argv_out);
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        }
+
+        let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
+        assert!(
+            !bridge.activity().is_working(),
+            "a cold start opens idle over the crashed store"
+        );
+        bridge.mark_python_ready_for_test();
+        bridge
+            .enqueue("Animate how this mechanism moves.".into(), Vec::new())
+            .expect("the first send after a cold start is not refused");
+        run_until(&mut messages, |m| matches!(m, Message::TurnStarted { .. })).await;
+        run_until(&mut messages, |m| {
+            matches!(m, Message::Event(EngineEvent::TurnFinished(
+                TurnOutcome::Success { .. }
+            )))
+        })
+        .await;
+
+        let argv_lines = std::fs::read_to_string(&argv_out).unwrap();
+        let spawns: Vec<&str> = argv_lines.lines().collect();
+        assert_eq!(spawns.len(), 1, "exactly one agent process: {argv_lines}");
+        assert!(
+            spawns[0].contains("97bfe962-15dd-46a0-93ca-e38aeaaf3515")
+                && spawns[0].contains("--resume")
+                && spawns[0].contains("--fork-session"),
+            "the cold start resumes the stored session: {}",
+            spawns[0]
+        );
+        let chat = load_chat(&root).unwrap();
+        // 3 crashed-store rows + the new user row + the fake's thinking and
+        // assistant rows
+        assert_eq!(chat.len(), 6, "the new send's user row appended");
+        assert_eq!(chat[3].role, Role::User);
+        assert_eq!(
+            chat[3].text, "Animate how this mechanism moves.",
+            "the send's user row is the one the UI handed over"
+        );
+        assert_eq!(chat.last().unwrap().role, Role::Assistant);
+
+        // the second send must land too — the queue never wedged
+        bridge
+            .enqueue("Now make it printable.".into(), Vec::new())
+            .expect("the second send after a cold start is not refused");
+        run_until(&mut messages, |m| matches!(m, Message::TurnStarted { .. })).await;
+        run_until(&mut messages, |m| {
+            matches!(m, Message::Event(EngineEvent::TurnFinished(
+                TurnOutcome::Success { .. }
+            )))
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&argv_out).unwrap().lines().count(),
+            2,
+            "the second turn spawned its own agent process"
+        );
+
+        unsafe {
+            std::env::remove_var("CAD_TEST_CLAUDE");
+            std::env::remove_var("CAD_FAKE_SCENARIO");
+            std::env::remove_var("CAD_FAKE_ARGV_OUT");
+            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        }
+    }
+
+    /// A python-readiness refusal names itself in the status line — the
+    /// one surface a refused send otherwise lacks (no row opens, no
+    /// process spawns, the draft stays in the bar) — and still parks the
+    /// draft and requests the setup sheet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn python_refusal_names_itself_in_the_activity() {
+        let root = std::env::temp_dir().join(format!("cad-refuse-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        // python_state opens Unknown: the app-level check has not landed
+        let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
+        assert_eq!(
+            bridge.enqueue("make a bracket".into(), Vec::new()),
+            Err(BuildRefusal::PythonNotReady)
+        );
+        assert_eq!(
+            bridge.activity(),
+            Activity::Failed(PYTHON_SETUP_REQUIRED.to_string()),
+            "the refusal leaves its reason in the status line"
+        );
+        assert!(bridge.sheet_requested_for_test());
+        assert_eq!(
+            bridge.draft_text_for_test().as_deref(),
+            Some("make a bracket"),
+            "the refused text stays parked for the input bar"
+        );
+        let mut sheet_requested = false;
+        while let Ok(message) = messages.try_recv() {
+            if matches!(message, Message::PythonSheetRequested) {
+                sheet_requested = true;
+            }
+        }
+        assert!(sheet_requested, "the setup sheet request still travels");
+    }
 
     /// The CAD contract resource is present and is the upstream fixture
     /// byte-for-byte: an empty or drifted template means agent turns run
