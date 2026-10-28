@@ -147,53 +147,24 @@ fn subtitle(entry: &VersionEntry, now: OffsetDateTime) -> String {
 /// two-line entry per version — label line, checkmark on the current one,
 /// subtitle below — each inert while busy (upstream `.disabled(isBusy)`).
 ///
-/// A menu-bar root rather than a hand-rolled popover so the dropdown
-/// anchors under the button and closes on outside click for free. The
-/// shell passes its own message constructor; the returned tree is dropped
-/// into the same menu bar as the command roots (with
-/// [`cosmic::widget::menu::ItemHeight::Dynamic`] — the two-line leaves
-/// carry their own heights).
-pub fn version_tree<Message>(
-    entries: &[VersionEntry],
+/// The toolbar's clock button (upstream's VersionMenu trigger): clock icon
+/// plus the current version's tag, opening the history card. NOT a
+/// menu-bar root — cosmic's menu overlay corrupts widget state when the
+/// item set changes between rebuilds (a version landing mid-turn turned
+/// the closed menu's item texts into stateless shells; the next overlay
+/// layout panicked "Downcast widget state" at iced tree.rs:507 — the
+/// same corruption class as the text-editor id bug, through menu_inner's
+/// RcWrapper). The static command roots are safe in the bar; anything
+/// whose items change lives in a popover like this one.
+pub fn version_button<Message: Clone + 'static>(
     current: Option<i64>,
-    busy: bool,
-    on_restore: impl Fn(i64) -> Message + Clone + 'static,
-) -> cosmic::widget::menu::Tree<Message>
-where
-    Message: Clone + 'static,
-{
-    use cosmic::widget::menu::Tree;
-    use cosmic::widget::{button, container, text};
-
-    let children: Vec<Tree<Message>> = if entries.is_empty() {
-        let empty: cosmic::Element<'static, Message> =
-            container(text(NO_SAVED_VERSIONS.to_string()).size(12))
-                .padding([8, 16])
-                .into();
-        vec![Tree::new(empty)]
-    } else {
-        let header: cosmic::Element<'static, Message> = container(text(
-            if busy {
-                AVAILABLE_WHEN_DONE
-            } else {
-                GO_BACK_TO_A_VERSION
-            }
-            .to_string(),
-        ))
-        .padding([8, 16])
-        .into();
-        let mut list = vec![Tree::new(header)];
-        list.extend(
-            entries
-                .iter()
-                .map(|entry| entry_leaf(entry, busy, utc_now(), on_restore.clone())),
-        );
-        list
-    };
-
+    open: bool,
+    on_toggle: Message,
+) -> cosmic::Element<'static, Message> {
+    use cosmic::widget::{button, text};
     let mut label = cosmic::widget::Row::new()
         .spacing(4)
-        .push(cosmic::widget::icon::from_name(CLOCK_ICON).size(16).icon());
+        .push(cosmic::widget::icon::from_name(CLOCK_ICON).size(14).icon());
     if let Some(current) = current {
         label = label.push(
             text(format!("v{current}"))
@@ -201,55 +172,101 @@ where
                 .font(cosmic::font::mono()),
         );
     }
-    let root_button = button::custom(container(label).padding([4, 10]))
-        .class(cosmic::theme::Button::MenuRoot)
+    let root = button::custom(label.padding([4, 10]))
+        .class(if open {
+            cosmic::theme::Button::Suggested
+        } else {
+            cosmic::theme::Button::Standard
+        })
+        .on_press(on_toggle)
         .name(VERSIONS);
-    let root: cosmic::Element<'static, Message> = cosmic::widget::tooltip(
-        root_button,
-        text(VERSION_HISTORY),
+    cosmic::widget::tooltip(
+        root,
+        cosmic::widget::text(VERSION_HISTORY),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
-    .into();
-    Tree::with_children(root, children).width(MENU_WIDTH)
+    .into()
 }
 
-/// One version's leaf: the label line (checkmark + "Version N · summary")
-/// over the subtitle (relative · abbreviated date), pressing — unless busy
-/// — restores that version.
-fn entry_leaf<Message>(
-    entry: &VersionEntry,
+/// The history card the popover shows: header, then one row per version
+/// newest-first — the label line (checkmark + "Version N · summary") over
+/// the subtitle (relative · abbreviated date), pressing — unless busy —
+/// restores that version. `now` is the CALLER-supplied clock, frozen
+/// while the card is open: a live per-frame time-ago would rebuild every
+/// row's text every second.
+pub fn view_versions<Message: Clone + 'static>(
+    entries: &[VersionEntry],
     busy: bool,
     now: OffsetDateTime,
     on_restore: impl Fn(i64) -> Message + Clone + 'static,
-) -> cosmic::widget::menu::Tree<Message>
-where
-    Message: Clone + 'static,
-{
-    use cosmic::widget::menu::Tree;
-    use cosmic::widget::{button, text};
+) -> cosmic::Element<'static, Message> {
+    use cosmic::iced::Length;
+    use cosmic::widget::{button, container, scrollable, text};
 
-    let restore = on_restore.clone();
-    let on_press = (!busy).then(move || restore(entry.number));
-    let mut head = cosmic::widget::Row::new().spacing(6);
-    if entry.is_current {
-        head = head.push(cosmic::widget::icon::from_name(CHECK_ICON).size(12).icon());
+    let mut list = cosmic::widget::Column::new().spacing(2);
+    if entries.is_empty() {
+        list = list.push(
+            container(
+                cosmic::widget::Column::new()
+                    .spacing(4)
+                    .push(text(NO_SAVED_VERSIONS.to_string()).size(12))
+                    .push(
+                        text(AVAILABLE_WHEN_DONE.to_string())
+                            .size(11)
+                            .class(dim_subtitle()),
+                    ),
+            )
+            .padding([10, 16]),
+        );
+    } else {
+        list = list.push(
+            container(text(
+                if busy {
+                    AVAILABLE_WHEN_DONE
+                } else {
+                    GO_BACK_TO_A_VERSION
+                }
+                .to_string(),
+            ))
+            .padding([10, 16, 6, 16]),
+        );
+        for entry in entries {
+            let restore = on_restore.clone();
+            let on_press = (!busy).then(move || restore(entry.number));
+            let mut head = cosmic::widget::Row::new().spacing(6);
+            if entry.is_current {
+                head =
+                    head.push(cosmic::widget::icon::from_name(CHECK_ICON).size(12).icon());
+            }
+            head = head.push(text(
+                VERSION_LABEL
+                    .replace("%lld", &entry.number.to_string())
+                    .replace("%@", &entry.prompt_summary),
+            ));
+            let body = cosmic::widget::Column::new()
+                .spacing(2)
+                .push(head)
+                .push(text(subtitle(entry, now)).size(11).class(dim_subtitle()))
+                .padding([6, 16]);
+            list = list.push(
+                button::custom(body)
+                    .class(cosmic::theme::Button::Standard)
+                    .on_press_maybe(on_press)
+                    .width(Length::Fill),
+            );
+        }
     }
-    head = head.push(text(
-        VERSION_LABEL
-            .replace("%lld", &entry.number.to_string())
-            .replace("%@", &entry.prompt_summary),
-    ));
-    let body = cosmic::widget::Column::new()
-        .spacing(2)
-        .push(head)
-        .push(text(subtitle(entry, now)).size(11).class(dim_subtitle()))
-        .padding([6, 16]);
-    let leaf: cosmic::Element<'static, Message> = button::custom(body)
-        .class(cosmic::theme::Button::MenuItem)
-        .on_press_maybe(on_press)
-        .width(cosmic::iced::Length::Fill)
-        .into();
-    Tree::new(leaf)
+    container(
+        scrollable(
+            cosmic::widget::Column::new()
+                .push(list)
+                .width(Length::Fixed(MENU_WIDTH as f32)),
+        )
+        .height(Length::Shrink),
+    )
+    .max_height(360.0)
+    .class(cosmic::theme::Container::Dialog(false))
+    .into()
 }
 
 /// The subtitle's dimmed text (the pane modules' shared secondary style;
@@ -265,6 +282,55 @@ fn dim_subtitle() -> cosmic::theme::Text {
     })
 }
 
-fn utc_now() -> OffsetDateTime {
-    OffsetDateTime::now_utc()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(number: i64, minutes_ago: i64) -> VersionEntry {
+        VersionEntry {
+            number,
+            created_at: OffsetDateTime::now_utc() - time::Duration::minutes(minutes_ago),
+            prompt_summary: "a bracket".into(),
+            is_current: false,
+        }
+    }
+
+    /// SwiftUI's relative presentation buckets: "just now" under a minute,
+    /// named units above (VersionMenu.swift renders `.relative(presentation:
+    /// .named)`).
+    #[test]
+    fn relative_buckets_like_swiftui() {
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(relative(now - time::Duration::seconds(30), now), "just now");
+        assert_eq!(relative(now - time::Duration::minutes(5), now), "5 minutes ago");
+        assert_eq!(relative(now - time::Duration::hours(2), now), "2 hours ago");
+        // a future timestamp clamps to "just now" (a clock skew guard)
+        assert_eq!(relative(now + time::Duration::minutes(3), now), "just now");
+    }
+
+    /// The subtitle carries both halves: "5 minutes ago · Oct 13, 2026 at
+    /// 3:24 PM" (VersionMenu.swift:19-21).
+    #[test]
+    fn subtitle_joins_relative_and_abbreviated() {
+        let e = entry(1, 5);
+        let s = subtitle(&e, OffsetDateTime::now_utc());
+        assert!(s.starts_with("5 minutes ago · "), "{s}");
+        assert!(s.contains(", 202"), "abbreviated date present: {s}");
+    }
+
+    /// The card builds in every shape: empty, idle, busy (Element
+    /// construction is pure; the tree-corruption history makes view-build
+    /// tests load-bearing).
+    #[test]
+    fn card_builds_in_every_shape() {
+        let now = OffsetDateTime::now_utc();
+        let _ = view_versions(&[], false, now, |n| n);
+        let _ = view_versions(&[], true, now, |n| n);
+        let mut current = entry(2, 1);
+        current.is_current = true;
+        let _ = view_versions(&[current.clone(), entry(1, 300)], false, now, |n| n);
+        let _ = view_versions(&[current, entry(1, 300)], true, now, |n| n);
+        let _ = version_button(None, false, ());
+        let _ = version_button(Some(2), true, ());
+    }
 }

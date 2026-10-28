@@ -148,6 +148,11 @@ pub enum Message {
     /// A version menu entry was picked (VersionMenu.swift:14): restore that
     /// snapshot.
     Restore(i64),
+    /// The toolbar's clock button — open/close the version history card
+    /// (a popover, NOT a menu root: cosmic's menu overlay corrupts widget
+    /// state when the item set changes; version_menu's module doc has the
+    /// panic chain).
+    ToggleVersionCard,
 }
 
 /// App-level commands the project window's File menu bubbles up
@@ -191,6 +196,11 @@ pub struct ProjectWindow {
     pub missing_outputs: Vec<String>,
     /// The issue button's open list, if any.
     pub shown_issues: Option<IssueKind>,
+    /// The version history card's open state, carrying the FROZEN clock its
+    /// relative labels read (captured at open — a live per-frame time-ago
+    /// would rebuild every row's text every second; version_menu's
+    /// view_versions doc).
+    version_card: Option<time::OffsetDateTime>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
     /// The last reported grid size (the report dedup).
@@ -347,6 +357,7 @@ impl ProjectWindow {
             work_started_at: None,
             missing_outputs: activity::missing_output_files(&output_dir),
             shown_issues: None,
+            version_card: None,
             focus_flash: None,
             last_size: Arc::new(Mutex::new(Size::default())),
             watch,
@@ -570,13 +581,33 @@ impl ProjectWindow {
             Message::AttachChosen(Err(_cancelled)) => Task::none(),
             Message::ToggleIssues(kind) => {
                 self.shown_issues = kind;
+                // the window's popover is a single slot: the two cards are
+                // mutually exclusive by construction
+                if self.shown_issues.is_some() {
+                    self.version_card = None;
+                }
+                Task::none()
+            }
+            Message::ToggleVersionCard => {
+                self.version_card = if self.version_card.is_some() {
+                    None
+                } else {
+                    Some(time::OffsetDateTime::now_utc())
+                };
+                if self.version_card.is_some() {
+                    self.shown_issues = None;
+                }
                 Task::none()
             }
             // the app layer acts (PresentSetupSheet's one producer — the
             // bridge's PythonSheetRequested forward — already lands there;
             // re-emitting it here would loop the variant back into itself)
             Message::CloseRequested | Message::App(_) | Message::PresentSetupSheet => Task::none(),
-            Message::Restore(number) => self.restore(number),
+            Message::Restore(number) => {
+                // restoring dismisses the card it was picked from
+                self.version_card = None;
+                self.restore(number)
+            }
         }
     }
 
@@ -928,9 +959,17 @@ impl ProjectWindow {
             .height(Length::Fill)
             .into();
 
-        // the issue list rides as a non-modal popover over the content
+        // the issue list and the version history card ride as non-modal
+        // popovers over the content — one slot, mutually exclusive
         let mut pop = popover(base);
-        if let Some(kind) = self.shown_issues {
+        if let Some(now) = self.version_card {
+            pop = pop.popup(crate::version_menu::view_versions(
+                &version_menu::menu_entries(&self.bridge.versions(), self.metadata.current_version),
+                self.is_busy(),
+                now,
+                Message::Restore,
+            ));
+        } else if let Some(kind) = self.shown_issues {
             pop = pop.popup(self.view_issue_list(kind));
         }
         pop.into()
@@ -1025,6 +1064,11 @@ impl ProjectWindow {
             .start(chat_toggle)
             .start(stop)
             .center(self.view_activity())
+            .end(crate::version_menu::version_button(
+                self.metadata.current_version,
+                self.version_card.is_some(),
+                Message::ToggleVersionCard,
+            ))
             .end(self.view_menu())
             .end(reveal)
             .end(slicer)
@@ -1222,13 +1266,6 @@ impl ProjectWindow {
             ),
         );
 
-        let version_tree = version_menu::version_tree(
-            &version_menu::menu_entries(&self.bridge.versions(), self.metadata.current_version),
-            self.metadata.current_version,
-            self.is_busy(),
-            Message::Restore,
-        );
-
         let entries = vec![
             Item::Button(
                 if self.chat_visible {
@@ -1278,9 +1315,12 @@ impl ProjectWindow {
         let root_button: Element<'_, Message> = root("View").into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
-        // Static/Dynamic sizing: the standard roots keep the 150 px default
-        // while the version menu's two-line leaves carry their own
-        cosmic::widget::menu::bar(vec![file_tree, tree, model_tree, version_tree])
+        // STATIC roots only: cosmic's menu overlay corrupts widget state
+        // when an item set changes between rebuilds (the version menu
+        // panicked "Downcast widget state" the moment a version landed
+        // mid-turn; version_menu's module doc carries the chain). Dynamic
+        // dropdowns — the version history — live as popovers instead.
+        cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
             .item_width(ItemWidth::Static(150))
             .item_height(ItemHeight::Dynamic(30))
             .into()
