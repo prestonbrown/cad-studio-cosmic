@@ -367,7 +367,9 @@ async fn engine_flip_mid_conversation_resumes_engine_blind() {
     assert_eq!(started_sid(&first[0]), Some(PONG_SID), "{first:?}");
     assert!(matches!(finished(&first), TurnOutcome::Success { .. }));
 
-    // flip the setting on disk — no new Session, mid-conversation
+    // flip the setting on disk mid-conversation: run_turn builds a
+    // fresh Session per turn (what persists is root/metadata + the
+    // settings file), so the flip e2e proves the RE-READ is decisive
     let mut codex_settings = Settings::default();
     codex_settings.agent_engine = "codex".into();
     codex_settings.save(&settings_file).unwrap();

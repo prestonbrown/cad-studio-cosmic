@@ -68,9 +68,16 @@ fn codex_candidates_under_fake_home() {
 
 /// find_agent locates a codex binary by name with the same validation the
 /// claude arm runs (one --version probe, first working candidate wins).
+/// HOME mutators serialize: the harness runs this file's tests in
+/// parallel, and two set_var("HOME") windows racing fall through to real
+/// PATH binaries (the codex_runner ENV_LOCK pattern).
+static HOME_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
 #[test]
 fn codex_discovery_validates_version() {
-    // ONE unsafe block, serial by construction (single test):
+    let _home = HOME_LOCK.lock().unwrap();
+    // serial under HOME_LOCK across this file's tests
     unsafe {
         let home = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
@@ -117,7 +124,8 @@ fn candidates_follow_upstream_order_under_fake_home() {
 
 #[test]
 fn discovery_uses_custom_path_then_candidates() {
-    // ONE unsafe block, serial by construction (single test):
+    let _home = HOME_LOCK.lock().unwrap();
+    // serial under HOME_LOCK across this file's tests
     unsafe {
         let home = std::env::temp_dir().join(format!("cad-loc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(home.join(".claude/local")).unwrap();
