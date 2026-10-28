@@ -276,6 +276,19 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
+- Version-history chrome divergence (2026-10-28, 16ea45e): upstream's
+  VersionMenu is a SwiftUI `Menu` dropdown; the port renders a popover
+  card (the issue-list pattern) because cosmic's menu overlay corrupts
+  widget state when the item set changes between rebuilds — the crash
+  Preston hit twice and the driven repro captured ("Downcast widget
+  state", iced tree.rs:507 via menu_inner/RcWrapper; fact pack
+  docs/research/libcosmic-menu-dynamic-items-bug.md). Content is
+  faithful (same trigger/labels/two-line rows/checkmark/busy gating);
+  the divergences: popover-vs-menu chrome, and relative timestamps
+  FROZEN at open (a live per-frame time-ago is rebuild churn). If
+  libcosmic fixes the menu bug, restoring the menu root is a small
+  revert; until then the menu bar keeps static roots only.
+
 - ~~Smoke-run visual nits (2026-10-15, first live project window)~~
   **FIXED 2026-10-26 (0a9c41a + review minors 5f6c1ed), pending Preston's
   eyeball verdict.** Root causes: (1) the "blank gray boxes" were the chat
