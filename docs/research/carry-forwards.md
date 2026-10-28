@@ -276,13 +276,27 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
-- Smoke-run visual nits (2026-10-15, first live project window): the
-  "No model – Describe an object in the chat" empty state appears TWICE
-  (status-bar slot AND mid-canvas hero, overlapping); a column of blank
-  gray placeholder boxes floats on the left with no labels (the parts
-  overlay with no model?); chat input sits flush against the bottom
-  edge with truncated styling. Pre-existing polish items, now visible
-  for the first time — owner: next app-wave (M8 fixwave shape).
+- ~~Smoke-run visual nits (2026-10-15, first live project window)~~
+  **FIXED 2026-10-26 (0a9c41a + review minors 5f6c1ed), pending Preston's
+  eyeball verdict.** Root causes: (1) the "blank gray boxes" were the chat
+  empty state's SUGGESTION BUTTONS — text under a `Button::Transparent`
+  renders invisible: cosmic's transparent style resolves its inherited text
+  color from TRANSPARENT_COMPONENT (every color rgba(0,0,0,0),
+  theme/mod.rs:32-45) and iced Text inherits it (iced/core text.rs:883);
+  explicit ambient-color classes now sit on all text under Transparent
+  (chat suggestions, welcome recents names) and the python sheet's
+  disclosure moved to `Button::Text`. (2) the duplicated "No model" hero:
+  both pane heroes now center mid-pane ContentUnavailableView-style with
+  per-pane icons (package-x-generic / x-office-document) + fl! strings —
+  upstream shows both too, but centered and icon-distinct. (3) the chat
+  input card floats (outer inset) instead of clipping the pane's bottom
+  edge. OPEN follow-ups from the fix review: the input row's send area
+  should be eyeballed for width starvation (the editor's width DEFAULTS
+  to Length::Fill — iced text_editor.rs:159 — and if iced's flex pass
+  starves later Shrink children the send button collapses; reviewer's
+  hypothesis, unverified live); six hand-copies of the two text-color
+  rules across four modules (one shared styling module due when a 7th
+  copy appears).
 - **FIXED (2026-10-15): project window panicked on its 2nd frame —
   `Downcast on stateless state`** (iced tree.rs:505) at TextEditor layout
   inside the chat pane. Root cause (proven by instrumenting
