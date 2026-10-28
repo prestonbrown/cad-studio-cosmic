@@ -961,14 +961,21 @@ impl ViewerPane {
         // button on isBusy, ModelPane.swift:144).
         let busy = overlay.as_ref().map_or(false, |ctx| ctx.busy);
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
-            Column::new()
-                .push(text("No model").size(18))
-                .push(text("Describe an object in the chat to get started"))
-                .spacing(8)
-                .align_x(cosmic::iced::alignment::Alignment::Center)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            // upstream ContentUnavailableView (ModelPane.swift:108-112):
+            // icon + title + secondary description, centered mid-pane
+            container(
+                Column::new()
+                    .push(cosmic::widget::icon::from_name("package-x-generic").size(40).icon())
+                    .push(text(fl!("nessun-modello")).size(18))
+                    .push(text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare")).class(dim_text_class()))
+                    .spacing(8)
+                    .align_x(cosmic::iced::alignment::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(cosmic::iced::alignment::Horizontal::Center)
+            .align_y(cosmic::iced::alignment::Vertical::Center)
+            .into()
         } else {
             self.view_canvas()
         };
@@ -1952,6 +1959,19 @@ fn preset_label(preset: Preset) -> String {
         Preset::Top => fl!("alto"),
         Preset::Right => fl!("destra"),
     }
+}
+
+/// Secondary text at 65% of the ambient color — the empty-state hero's
+/// description (the welcome window's dim-text pattern).
+fn dim_text_class() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|theme| {
+        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
+        color.a *= 0.65;
+        cosmic::iced::widget::text::Style {
+            color: Some(color),
+            ..Default::default()
+        }
+    })
 }
 
 /// The status bar's color legend (ModelPane.swift:202-213): ten-pixel

@@ -41,6 +41,8 @@ use cosmic::iced::{Length, Padding, Point, Rectangle, Size, Subscription, Task};
 use cosmic::widget::{Column, Image, Row, Space, button, container, mouse_area, text};
 use engine::project::manifest::Manifest;
 
+use crate::fl;
+
 // ---------------------------------------------------------------------------
 // Parity constants (pinned to the Swift sources)
 // ---------------------------------------------------------------------------
@@ -254,6 +256,19 @@ fn clamp_axis(disp: f64, view: f64, offset: f64) -> f64 {
 
 /// iced scroll deltas are pixels; the JS multiplies `deltaMode === 1`
 /// (lines) by 16 before using them (SVGWebView.swift:85).
+/// Secondary text at 65% of the ambient color — the empty-state hero's
+/// description (the welcome window's dim-text pattern).
+fn dim_text_class() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|theme| {
+        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
+        color.a *= 0.65;
+        cosmic::iced::widget::text::Style {
+            color: Some(color),
+            ..Default::default()
+        }
+    })
+}
+
 pub fn wheel_pixels(delta: ScrollDelta) -> f64 {
     match delta {
         ScrollDelta::Pixels { y, .. } => y as f64,
@@ -969,14 +984,29 @@ impl SchematicPane {
 
     pub fn view(&self) -> Element<'_, Message> {
         let content: Element<'_, Message> = if self.tabs.is_empty() {
-            Column::new()
-                .push(text("No model").size(18))
-                .push(text("Describe an object in the chat to get started"))
-                .spacing(8)
-                .align_x(Alignment::Center)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            // upstream ContentUnavailableView (SchematicPane.swift:43-47):
+            // icon + title + secondary description, centered mid-pane —
+            // `doc.text.image`; x-office-document is the Pop-theme stand-in
+            container(
+                Column::new()
+                    .push(
+                        cosmic::widget::icon::from_name("x-office-document")
+                            .size(40)
+                            .icon(),
+                    )
+                    .push(text(fl!("nessun-modello")).size(18))
+                    .push(
+                        text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
+                            .class(dim_text_class()),
+                    )
+                    .spacing(8)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(cosmic::iced::alignment::Vertical::Center)
+            .into()
         } else {
             self.view_sheet()
         };

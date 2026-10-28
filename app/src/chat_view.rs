@@ -672,10 +672,17 @@ fn empty_state() -> Element<'static, Message> {
     for suggestion in suggestions {
         list = list.push(
             button::custom(
-                container(body_text(suggestion.to_string()).width(Length::Fill))
-                    .padding([6.0, 10.0])
-                    .width(Length::Fill)
-                    .class(subtle_style(6.0, 0.6)),
+                // the label needs an explicit color class: under a
+                // Transparent button the inherited one is fully transparent
+                // (see ambient_text_class)
+                container(
+                    body_text(suggestion.to_string())
+                        .width(Length::Fill)
+                        .class(ambient_text_class()),
+                )
+                .padding([6.0, 10.0])
+                .width(Length::Fill)
+                .class(subtle_style(6.0, 0.6)),
             )
             .class(cosmic::theme::Button::Transparent)
             .on_press(Message::SendSuggestion(suggestion.to_string())),
@@ -683,11 +690,16 @@ fn empty_state() -> Element<'static, Message> {
     }
     Column::new()
         .spacing(16)
-        .push(icon("preferences-desktop-3d", 40))
+        // upstream `cube.transparent`; package-x-generic is the Pop-theme
+        // stand-in (preferences-desktop-3d exists in no Pop theme)
+        .push(icon("package-x-generic", 40))
         .push(body_text(DESCRIBE_AN_OBJECT).size(18))
         .push(secondary_text(ENGINE_WRITES.replace("%@", ENGINE_NAME)))
         .push(list)
-        .width(340)
+        // upstream caps the column at 340 pt; Fill+max keeps a narrower
+        // chat pane from overflowing its bounds
+        .width(Length::Fill)
+        .max_width(340)
         .padding(20)
         .align_x(cosmic::iced::alignment::Alignment::Center)
         .into()
@@ -717,11 +729,17 @@ fn input_bar<'a>(
     }
     stack = stack.push(input_row(pane, chat, busy));
 
-    container(stack)
-        .width(Length::Fill)
-        .padding(10)
-        .class(subtle_style(8.0, 1.0))
-        .into()
+    // the card floats inside the pane: the outer inset keeps its rounded
+    // corners off the pane edge instead of clipping against it
+    container(
+        container(stack)
+            .width(Length::Fill)
+            .padding(10)
+            .class(subtle_style(8.0, 1.0)),
+    )
+    .width(Length::Fill)
+    .padding([0.0, 6.0, 6.0, 6.0])
+    .into()
 }
 
 /// Upstream `QueueList` (ChatInputView.swift:186-248).
@@ -822,6 +840,8 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
                     Binding::from_key_press(press)
                 }
             })
+            // iced's TextEditor takes only a pixel width (no Length::Fill),
+            // so the editor sizes to its content — placeholder included
             .min_height(24)
             .max_height(140),
     );
@@ -861,6 +881,19 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
 }
 
 // ─── shared bits ───────────────────────────────────────────────────────────
+
+/// The ambient readable text color at full strength. For text inside a
+/// `Button::Transparent`: cosmic's transparent button style resolves its
+/// inherited text color from a component whose every color is
+/// `(0,0,0,0)` (theme TRANSPARENT_COMPONENT), and iced's `Text` uses the
+/// inherited color when none is set — so un-colored text under a
+/// Transparent button renders invisible. An explicit class opts back in.
+fn ambient_text_class() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+        color: Some(theme.cosmic().background(false).on.into()),
+        ..Default::default()
+    })
+}
 
 /// Default-body text that wraps at word boundaries. The owned binding keeps
 /// iced's invariant `Text<'a>` at `'static` — a borrowed `&str` would tie the
@@ -1138,5 +1171,28 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].role, Role::System);
         assert_eq!(rows[0].action, Some(Action::OpenTerminal));
+    }
+
+    /// The pane builds in every shape: empty (the suggestion-button empty
+    /// state), populated, busy, with a queue. Element construction is pure
+    /// — but it instantiates every widget class the runtime would, which
+    /// is where tree-shape regressions surface first (the always-scrollable
+    /// hardening's lesson).
+    #[test]
+    fn view_chat_builds_in_every_shape() {
+        let pane = ChatPane::new();
+        let empty = ChatState::new(Vec::new());
+        let _ = view_chat(&pane, &empty, false, &[], false);
+        let _ = view_chat(&pane, &empty, true, &[], false);
+
+        let mut busy = ChatState::new(Vec::new());
+        busy.append(user_row("make a bracket"));
+        let queue = vec![QueueItem {
+            id: Uuid::new_v4(),
+            text: "next up".into(),
+            images: 1,
+        }];
+        let _ = view_chat(&pane, &busy, true, &queue, true);
+        let _ = view_chat(&pane, &busy, false, &queue, false);
     }
 }

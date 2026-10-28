@@ -531,10 +531,13 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         );
     }
     // the disclosure (upstream DisclosureGroup): the label toggles the
-    // mono log's visibility and stays "Show Details" either way
+    // mono log's visibility and stays "Show Details" either way — the
+    // Text class, not Transparent: cosmic's transparent style carries a
+    // fully-transparent inherited text color, which renders
+    // button::text's self-colored label invisible
     stack = stack.push(
         button::text(PYTHON_SHOW_DETAILS.to_string())
-            .class(cosmic::theme::Button::Transparent)
+            .class(cosmic::theme::Button::Text)
             .on_press(PythonMessage::ToggleLog),
     );
     if sheet.shows_log {

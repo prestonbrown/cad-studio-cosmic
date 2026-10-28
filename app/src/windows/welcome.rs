@@ -341,7 +341,10 @@ impl Welcome {
             .push(
                 Column::new()
                     .spacing(2)
-                    .push(text(name.clone()).size(14))
+                    // the name needs the explicit class: it sits under a
+                    // Transparent button, whose inherited text color is
+                    // fully transparent
+                    .push(text(name.clone()).size(14).class(primary_text()))
                     .push(text(parent).size(11).class(dim_text())),
             )
             .padding([3, 6])
@@ -447,6 +450,17 @@ fn dim_text() -> cosmic::theme::Text {
             color: Some(color),
             ..Default::default()
         }
+    })
+}
+
+/// The ambient text color at full strength. For text under a
+/// `Button::Transparent`: cosmic's transparent style carries a
+/// fully-transparent inherited text color, so un-colored text inside a
+/// Transparent button (the recents rows) renders invisible.
+fn primary_text() -> cosmic::theme::Text {
+    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+        color: Some(theme.cosmic().background(false).on.into()),
+        ..Default::default()
     })
 }
 
