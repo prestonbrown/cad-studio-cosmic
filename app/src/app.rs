@@ -1472,3 +1472,20 @@ mod tests {
         );
     }
 }
+
+
+/// The grouping identity law: the app id, the icon lookups (sheets'
+/// APP_ICON), and the desktop file's StartupWMClass/Icon must all be the
+/// same string or COSMIC window grouping breaks silently. tests/ cannot
+/// reach cosmic's types, so the pin lives here.
+#[cfg(test)]
+mod packaging_identity {
+    #[test]
+    fn app_id_equals_icon_lookup_name() {
+        assert_eq!(
+            super::CadStudio::APP_ID,
+            crate::sheets::APP_ICON,
+            "APP_ID and the sheets' icon-lookup name drifted — grouping and icon resolution both break"
+        );
+    }
+}
