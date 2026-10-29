@@ -81,13 +81,16 @@ From M2's agent-lifecycle work (task 9 wrap):
   failure whose chat row carries the `openTerminal` action hint
   (upstream's auth system message instructs running `claude` / `codex
   login` in a terminal; upstream-contract.md:41).
-- The auth classifier's `"401"` needle: the port appends
+- ~~The auth classifier's `"401"` needle: the port appends
   `api error status {status}` to `TurnOutcome::Failed`'s details, so a 401
   status classifies deterministically — strictly better than upstream's
   substring luck. The needle still substring-matches token counts or other
   numbers in the joined details on nonzero exits (usage objects, durations)
   — upstream-inherited (AgentSession.swift:321, documented in T8's report);
-  word-boundary it when M4 touches it, with a test.
+  word-boundary it when M4 touches it, with a test.~~ (landed M4 —
+  2617c65's `contains_word` boundary with
+  `auth_401_word_boundary_engine` in engine/tests/session_turn.rs; the M8
+  inventory's "Additional" row had re-found it as open)
 - A `user` line with MULTIPLE tool_result blocks decodes only the FIRST
   (probe-shaped; upstream reads every block). A second would leave a tool
   row open — M4 fails still-open rows at TurnFinished per upstream's
@@ -175,12 +178,16 @@ From the M4 whole-branch review's minors (2026-10-13, ownerless until now):
 
 From the M5 T7 review (2026-10-13):
 
-- Overlay parameter rows must sync on `ParameterCommitted` and
+- ~~Overlay parameter rows must sync on `ParameterCommitted` and
   `BuildFinished` too (the in-code comment at the project-window arms names
   the triggers); restore already wires sync_parameters — the build/slider
   paths need the same call when their full wiring lands (M6 T10 was the
   owner and landed the refresh seam WITHOUT these triggers — the arms still
-  `Task::none()` beside their naming comment; still owed).
+  `Task::none()` beside their naming comment; still owed).~~ (landed M8 —
+  T11: both arms sync from the pipeline's refreshed set; the window-state
+  test `parameter_commit_and_build_finish_sync_the_overlay_rows` pins them.
+  Open still populates nothing — the events are the overlay's only
+  population path besides restore)
 
 - ~~Winding parity assumes consistently-wound closed meshes; real STL imports
   with flipped facets will produce stray caps/holes — winding robustness
@@ -203,12 +210,16 @@ From the M5 T7 review (2026-10-13):
 
 From the M6 T10 review (2026-10-13):
 
-- Fit frames the tracked framing reference; the `Fit` arm never re-points
+- ~~Fit frames the tracked framing reference; the `Fit` arm never re-points
   it, so a reload while in a non-assembled layout leaves Fit framing the
   staged assembled box (upstream's fitToView frames the CURRENT arranged
   mesh, ModelViewer.swift:322-337). One-liner if parity is wanted:
   `set_framing_reference(self.frame_aabb)` in the `Fit` arm (one line +
-  test update).
+  test update).~~ (landed M8 — T11: the arm re-points the reference. The
+  divergence's real shape was explode/hidden changes, which move
+  `frame_aabb` through apply_arrangement WITHOUT touching the reference
+  (scene swaps re-point it themselves) — the rewritten
+  `preset_message_drives_the_scene_pose` tail pins the explode case)
 - The frozen-grid stamp keys on scene Arc identity, so plate-view
   hidden/isolate toggles MOVE the grid: the re-staged filtered plate is a
   fresh Arc, the stamp moves, and the grid recaptures from the shrunken
@@ -233,8 +244,24 @@ minors, each with its owner:
   toggles playback too. M8's command system owns the revisit (the pane's
   module doc has the detail).
 - Keyboard-driven scrub pauses: upstream pauses only on drag-start
-  (`onEditingChanged`, MotionControls.swift:24-30), which iced's slider
-  does not surface — every `Scrub` message pauses, drag or keys.
+  (`onEditingChanged`, MotionControls.swift:24-30). CORRECTED at the M8 T11
+  probe (2026-10-28): the pinned iced slider (dbc62f2) DOES emit on_change
+  from arrow keys (widget/src/slider.rs:503-519, while the cursor hovers
+  the handle) and ctrl+wheel (:485-502) — so the port's every-`Scrub`
+  -pauses arm really pauses keyboard/wheel scrubs that upstream would not
+  (the M7 note's "no keyboard scrub at all" premise was wrong at this pin).
+  Pause-gating per upstream semantics is not implementable here: the slider
+  publishes drag and keyboard changes on ONE on_change channel;
+  mouse_area wrappers cannot observe drag-begin (children update first and
+  captured events return early — iced/widget/src/mouse_area.rs:265-279);
+  `on_release` fires at drag END only; `listen_with` exposes capture status
+  but not which widget consumed; and widget messages flush before
+  subscription broadcasts in the same batch (iced/winit/src/lib.rs
+  :1408-1417 then :1498-1506), so a pointer-down flag arrives after the
+  first scrub of every drag — gating on it would drop the pause for
+  click-to-seek (which upstream pauses at mouseDown) to fix the rarer
+  keyboard path. Accepted divergence; revisit only if the fork grows an
+  editing-changed signal.
 - The speed control is a dropdown plus an adjacent loop button where
   upstream nests the picker and the Ripeti toggle in ONE menu (:35-49) —
   one menu's worth of popover machinery for a two-item menu
