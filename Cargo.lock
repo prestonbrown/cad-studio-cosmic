@@ -204,6 +204,7 @@ dependencies = [
  "image",
  "libcosmic",
  "pulldown-cmark",
+ "quick-xml",
  "resvg",
  "rust-embed",
  "serde_json",

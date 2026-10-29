@@ -24,6 +24,9 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --wo
 GUI: from a terminal inside the COSMIC session: `just run` (or `just render-spike` for the
 viewer spike). Headless render tests: `just headless`. The recipes run through
 [`just`](https://github.com/casey/just) — any machine expected to run them needs it
-installed (thelio has it). Fixtures: generated once by
+installed (thelio has it). User-local install (the freedesktop packaging story,
+`app/resources/packaging/`): `just install` builds the app and lays the binary,
+desktop entry, metainfo, and 128/256/512 hicolor icons into `~/.local`;
+`just uninstall` removes exactly those. Fixtures: generated once by
 `fixtures/generator/model.py` with the venv at `~/.local/share/cad-studio/venv` (uv) —
 do not regenerate casually; they are committed goldens.

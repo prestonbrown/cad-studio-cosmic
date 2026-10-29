@@ -57,3 +57,6 @@ wgpu.workspace = true
 # the export test reads the written archive back (the replace-before-zip
 # law's assertion side); the engine already pins the version workspace-wide
 zip.workspace = true
+# the packaging test parses the metainfo XML (engine's own pin — the tree
+# carries one copy)
+quick-xml.workspace = true

@@ -786,6 +786,32 @@ impl CadStudio {
         }
     }
 
+    /// Settings for a `window::open` secondary window. libcosmic seeds only
+    /// the MAIN window's platform identity: its `app::run` copies
+    /// `Application::APP_ID` into the main window's Wayland app_id / X11
+    /// WM_CLASS, while every window opened through `window::open` defaults
+    /// to an EMPTY `application_id` (iced hands each window's own settings
+    /// to winit verbatim). Without this, the project/settings/About windows
+    /// report no class and the dock splits them from the welcome window's
+    /// group; seeding APP_ID here makes every window report the class the
+    /// desktop entry's `StartupWMClass` names (packaging under
+    /// `app/resources/packaging/`).
+    fn window_settings(
+        size: cosmic::iced::Size,
+        min_size: Option<cosmic::iced::Size>,
+    ) -> window::Settings {
+        window::Settings {
+            size,
+            min_size,
+            #[cfg(target_os = "linux")]
+            platform_specific: window::PlatformSpecific {
+                application_id: Self::APP_ID.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     // ─── the settings + About windows ──────────────────────────────────────
 
     /// Open (or focus) the settings window at `tab` (upstream's ⌘,
@@ -806,10 +832,10 @@ impl CadStudio {
         }
         let mut state = SettingsState::new(&self.settings);
         state.update(&settings::Message::Tab(tab));
-        let (id, spawn) = window::open(window::Settings {
-            size: cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
-            ..Default::default()
-        });
+        let (id, spawn) = window::open(Self::window_settings(
+            cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
+            None,
+        ));
         self.windows.insert(id, WindowKind::Settings(state));
         let title = self.set_window_title(fl!("settings"), id);
         let locates = settings::ENGINES.map(|kind| {
@@ -834,10 +860,10 @@ impl CadStudio {
             let focus = *id;
             return window::gain_focus(focus).map(Action::App);
         }
-        let (id, spawn) = window::open(window::Settings {
-            size: cosmic::iced::Size::new(settings::ABOUT_WIDTH, settings::ABOUT_HEIGHT),
-            ..Default::default()
-        });
+        let (id, spawn) = window::open(Self::window_settings(
+            cosmic::iced::Size::new(settings::ABOUT_WIDTH, settings::ABOUT_HEIGHT),
+            None,
+        ));
         self.windows.insert(id, WindowKind::About);
         let title = self.set_window_title(fl!("informazioni-su-cad-studio"), id);
         Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
@@ -961,14 +987,13 @@ impl CadStudio {
         }
         let (window, bridge_task) = ProjectWindow::new(root.clone(), &self.settings);
         let name = window.name.clone();
-        let (id, spawn) = window::open(window::Settings {
-            size: cosmic::iced::Size::new(project::DEFAULT_SIZE.0, project::DEFAULT_SIZE.1),
-            min_size: Some(cosmic::iced::Size::new(
+        let (id, spawn) = window::open(Self::window_settings(
+            cosmic::iced::Size::new(project::DEFAULT_SIZE.0, project::DEFAULT_SIZE.1),
+            Some(cosmic::iced::Size::new(
                 project::MIN_SIZE.0,
                 project::MIN_SIZE.1,
             )),
-            ..Default::default()
-        });
+        ));
         self.windows.insert(id, WindowKind::Project(window));
         // the window inherits the app-level python state (a check that
         // finished before the window opened — upstream's shared singleton)
@@ -1017,13 +1042,13 @@ impl CadStudio {
             let focus = *welcome_id;
             return window::gain_focus(focus).map(Action::App);
         }
-        let (id, spawn) = window::open(window::Settings {
-            size: cosmic::iced::Size::new(
+        let (id, spawn) = window::open(Self::window_settings(
+            cosmic::iced::Size::new(
                 welcome::ACTIONS_WIDTH + welcome::RECENTS_WIDTH,
                 welcome::WINDOW_HEIGHT,
             ),
-            ..Default::default()
-        });
+            None,
+        ));
         self.windows.insert(id, WindowKind::Welcome);
         let title = self.set_window_title("Welcome to CAD Studio".to_string(), id);
         Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
@@ -1457,6 +1482,23 @@ mod tests {
             app_shortcut(&Key::Character(",".into()), &Modifiers::empty()),
             None,
             "bare comma is just typing"
+        );
+    }
+}
+
+
+/// The grouping identity law: the app id, the icon lookups (sheets'
+/// APP_ICON), and the desktop file's StartupWMClass/Icon must all be the
+/// same string or COSMIC window grouping breaks silently. tests/ cannot
+/// reach cosmic's types, so the pin lives here.
+#[cfg(test)]
+mod packaging_identity {
+    #[test]
+    fn app_id_equals_icon_lookup_name() {
+        assert_eq!(
+            super::CadStudio::APP_ID,
+            crate::sheets::APP_ICON,
+            "APP_ID and the sheets' icon-lookup name drifted — grouping and icon resolution both break"
         );
     }
 }
