@@ -18,10 +18,8 @@
 //! cards (opaque, rounded, shadowed) in a modal popover, with scrollable
 //! content and pinned action rows so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
-//! mono log. The print-preferences section reads through `fl!` (the
-//! settings window shares it); the remaining sheet strings are plain
-//! English values named for their en/main.ftl keys, pending the repo-wide
-//! `fl!()` swap.
+//! mono log. User-visible strings read through `fl!` at render time (the
+//! key names the en/main.ftl entry).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -58,9 +56,9 @@ pub fn install_commands(kind: AgentKind) -> &'static [&'static str] {
 }
 
 /// The custom-path field's placeholder (upstream
-/// `"~/.local/bin/\(engine.command)"`).
+/// `"~/.local/bin/\(engine.command)"`, catalog `local-bin`).
 pub fn custom_path_placeholder(kind: AgentKind) -> String {
-    format!("~/.local/bin/{}", kind.command())
+    fl!("local-bin", command = kind.command())
 }
 
 // ─── agent-missing sheet ───────────────────────────────────────────────────
@@ -136,10 +134,11 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
     let head = Row::new()
         .spacing(8)
         .push(icon("dialog-warning", 20))
-        .push(bold(format!("{engine} not found"), 18.0));
-    let intro = body(format!(
-        "CAD Studio uses {engine} installed on this computer. Install it from a terminal with one of the commands below, then run `{}` to sign in.",
-        sheet.kind.login_command()
+        .push(bold(fl!("non-trovato", agent = engine), 18.0));
+    let intro = body(fl!(
+        "cad-studio-usa-installato-su-questo-mac-installalo-dal-terminale-con-uno-dei-comandi-seguenti-poi-esegui-per-effettuare-l-accesso",
+        arg = engine,
+        arg_2 = sheet.kind.login_command()
     ));
 
     let mut stack = Column::new().spacing(14).push(head).push(intro);
@@ -147,7 +146,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         stack = stack.push(code_block(command));
     }
     stack = stack
-        .push(body("Path to the executable:".to_string()))
+        .push(body(fl!("percorso-dell-eseguibile")))
         .push(
             text_input::text_input(custom_path_placeholder(sheet.kind), &sheet.custom_path)
                 .on_input(AgentMessage::CustomPath)
@@ -157,25 +156,25 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .size(14),
         )
         .push_maybe(
-            sheet
-                .last_verified_missing
-                .then(|| body("No working executable found.".to_string()).class(error_text())),
+            sheet.last_verified_missing.then(|| {
+                body(fl!("nessun-eseguibile-funzionante-trovato")).class(error_text())
+            }),
         );
     let actions = Row::new()
         .spacing(8)
         .push(
-            button::text("Open Terminal")
+            button::text(fl!("apri-il-terminale"))
                 .class(cosmic::theme::Button::Standard)
                 .on_press(AgentMessage::OpenTerminal),
         )
         .push(Space::new().width(Length::Fill))
         .push(
-            button::text("Close")
+            button::text(fl!("chiudi"))
                 .class(cosmic::theme::Button::Standard)
                 .on_press(AgentMessage::Close),
         )
         .push(
-            button::text("Verify")
+            button::text(fl!("verifica"))
                 .class(cosmic::theme::Button::Suggested)
                 .on_press_maybe((!sheet.checking).then_some(AgentMessage::Verify)),
         );
@@ -349,10 +348,10 @@ pub fn view_print_preferences<'a>(
 pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     let head = Column::new()
         .spacing(4)
-        .push(bold("Welcome to CAD Studio".to_string(), 18.0))
-        .push(body(
-            "Tell us how you print: you can change this any time in Settings.".to_string(),
-        ));
+        .push(bold(fl!("benvenuto-in-cad-studio"), 18.0))
+        .push(body(fl!(
+            "indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"
+        )));
 
     let form = view_print_preferences(sheet.printer_type, &sheet.printer_model, sheet.unit).map(
         |message| match message {
@@ -366,7 +365,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     // Continue stays pinned below it, never scrolled away.
     let stack = Column::new().spacing(14).push(head).push(form);
     let actions = Row::new().push(Space::new().width(Length::Fill)).push(
-        button::text("Continue")
+        button::text(fl!("continua"))
             .class(cosmic::theme::Button::Suggested)
             .on_press(SetupMessage::Continue),
     );
@@ -382,23 +381,6 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
 }
 
 // ─── python setup sheet ─────────────────────────────────────────────────────
-
-/// EN catalog `installazione-componenti` (PythonSetupSheet.swift:15).
-pub const PYTHON_SETUP_HEADER: &str = "Installing Components";
-/// EN catalog
-/// `cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-…`
-/// (PythonSetupSheet.swift:17).
-pub const PYTHON_SETUP_DESCRIPTION: &str = "CAD Studio uses a dedicated Python environment with build123d, matplotlib and numpy to generate models and technical drawings. The installation downloads about 200 MB.";
-/// EN catalog `mostra-dettagli` (the disclosure's label, :37).
-pub const PYTHON_SHOW_DETAILS: &str = "Show Details";
-/// EN catalog `fine` (the ready state's button, :65).
-pub const PYTHON_DONE: &str = "Done";
-/// EN catalog `pi-tardi` (:73).
-pub const PYTHON_LATER: &str = "Later";
-/// EN catalog `installa` (:77).
-pub const PYTHON_INSTALL: &str = "Install";
-/// EN catalog `installazione-in-corso` (the disabled busy button, :70).
-pub const PYTHON_INSTALLING: &str = "Installing…";
 
 /// The app icon's freedesktop name (upstream shows
 /// NSApp.applicationIconImage; the freedesktop lookup resolves once the
@@ -555,8 +537,13 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         .push(
             Column::new()
                 .spacing(4)
-                .push(bold(PYTHON_SETUP_HEADER.to_string(), 18.0))
-                .push(body(PYTHON_SETUP_DESCRIPTION.to_string()).class(secondary_text())),
+                .push(bold(fl!("installazione-componenti"), 18.0))
+                .push(
+                    body(fl!(
+                        "cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-per-generare-modelli-e-tavole-tecniche-l-installazione-scarica-circa-200-mb"
+                    ))
+                    .class(secondary_text()),
+                ),
         );
     let state = &sheet.state;
     let mut stack = Column::new().spacing(14).push(head);
@@ -588,7 +575,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
     // fully-transparent inherited text color, which renders
     // button::text's self-colored label invisible
     stack = stack.push(
-        button::text(PYTHON_SHOW_DETAILS.to_string())
+        button::text(fl!("mostra-dettagli"))
             .class(cosmic::theme::Button::Text)
             .on_press(PythonMessage::ToggleLog),
     );
@@ -629,20 +616,20 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
 /// button carries no press handler, matching upstream's `.disabled(true)`.
 fn python_buttons(state: &EnvState) -> Element<'static, PythonMessage> {
     match buttons(state) {
-        SetupButtons::Done => button::text(PYTHON_DONE.to_string())
+        SetupButtons::Done => button::text(fl!("fine"))
             .class(cosmic::theme::Button::Suggested)
             .on_press(PythonMessage::Close)
             .into(),
-        SetupButtons::Busy => button::text(PYTHON_INSTALLING.to_string()).into(),
+        SetupButtons::Busy => button::text(fl!("installazione-in-corso")).into(),
         SetupButtons::LaterAndInstall => Row::new()
             .spacing(8)
             .push(
-                button::text(PYTHON_LATER.to_string())
+                button::text(fl!("pi-tardi"))
                     .class(cosmic::theme::Button::Standard)
                     .on_press(PythonMessage::Close),
             )
             .push(
-                button::text(PYTHON_INSTALL.to_string())
+                button::text(fl!("installa"))
                     .class(cosmic::theme::Button::Suggested)
                     .on_press(PythonMessage::Install),
             )
@@ -730,7 +717,7 @@ fn code_block(code: &str) -> Element<'static, AgentMessage> {
                         .handle(),
                 )
                 .on_press(AgentMessage::Copy(code.to_string()))
-                .name("copy"),
+                .name(fl!("copia")),
             ),
     )
     .padding(8)

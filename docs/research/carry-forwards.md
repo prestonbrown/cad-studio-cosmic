@@ -511,3 +511,14 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   agent_path underneath it (stale display, no lost write). Cosmetic notes:
   mirror-fold on a failed persist save; Python tab interpreter not
   tilde-abbreviated; About unreachable from welcome-only (recorded).
+
+- Python-sheet progress steps stay English in every locale (M8 i18n-completion
+  review): sheets.rs renders engine-side STEP_* consts verbatim
+  (engine/src/python/env.rs:70-78, cross-crate data) while all eight catalog
+  keys exist ×4 — the engine-emits-ids pattern (T1's SystemRow route) is the
+  fix shape; owner M9 i18n polish.
+- New-project sheet: Return on an empty/invalid name still advances
+  (on_submit fires regardless; upstream guards isNameValid at
+  NewProjectSheet.swift:57) — pre-existing divergence, made VISIBLE by the
+  portal title now carrying the project name placeable ("Choose where to
+  create the folder \\"\\""). Owner: M9 polish or the next sheets touch.

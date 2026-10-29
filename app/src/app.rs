@@ -485,11 +485,11 @@ impl Application for CadStudio {
                 id,
                 focused,
                 Column::new()
-                    .push(text("CAD Studio".to_string()))
+                    .push(text(fl!("cad-studio")))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into(),
-                "CAD Studio",
+                &fl!("cad-studio"),
             ),
         }
     }
@@ -561,9 +561,12 @@ impl CadStudio {
         }
         match &msg {
             welcome::Message::OpenExisting => {
-                let future = choose_folder("Choose a project folder");
-                return Task::future(async move { Message::OpenFolderChosen(future.await) })
-                    .map(Action::App);
+                let title = fl!("scegli-la-cartella-del-progetto-da-aprire");
+                return Task::future(async move {
+                    let future = choose_folder(&title);
+                    Message::OpenFolderChosen(future.await)
+                })
+                .map(Action::App);
             }
             welcome::Message::OpenRecent(path) => {
                 let path = path.clone();
@@ -590,9 +593,18 @@ impl CadStudio {
                     // fold the sheet state (awaiting_parent), then ask
                     // where to create — the name already validated
                     let _ = self.welcome.update(msg.clone());
-                    let future = choose_folder("Choose where to create the project");
-                    return Task::future(async move { Message::ParentFolderChosen(future.await) })
-                        .map(Action::App);
+                    let name = self
+                        .welcome
+                        .creating
+                        .as_ref()
+                        .map(|sheet| sheet.trimmed_name().to_string())
+                        .unwrap_or_default();
+                    let title = fl!("scegli-dove-creare-la-cartella", name = name);
+                    return Task::future(async move {
+                        let future = choose_folder(&title);
+                        Message::ParentFolderChosen(future.await)
+                    })
+                    .map(Action::App);
                 }
                 welcome::new_project::Message::Created(_)
                 | welcome::new_project::Message::Name(_) => {}
@@ -1493,6 +1505,8 @@ mod tests {
 /// reach cosmic's types, so the pin lives here.
 #[cfg(test)]
 mod packaging_identity {
+    use cosmic::Application;
+
     #[test]
     fn app_id_equals_icon_lookup_name() {
         assert_eq!(

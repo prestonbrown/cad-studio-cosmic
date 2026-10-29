@@ -5,9 +5,8 @@
 //! the sheet owns the name, the app runs the parent-folder portal and
 //! `create_project`.
 //!
-//! User-visible strings follow the landed modules' convention: plain
-//! English values, each named for its en/main.ftl key, pending the
-//! repo-wide `fl!()` swap.
+//! User-visible strings read through `fl!` at render time (the key names
+//! the en/main.ftl entry).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +18,8 @@ use cosmic::widget::menu::{Item, items};
 use cosmic::widget::{Column, Row, Space, button, container, scrollable, text, text_input};
 use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
+
+use crate::fl;
 
 /// Upstream's welcome geometry (WelcomeWindow.swift:14-21): a 480 px
 /// actions pane beside a 300 px recents list, 460 px tall. The port runs
@@ -92,10 +93,10 @@ pub mod new_project {
         let valid = sheet.validation_error().is_none();
         let mut stack = Column::new()
             .spacing(16)
-            .push(text("Choose the options for the new project:").size(18))
+            .push(text(fl!("scegli-le-opzioni-per-il-nuovo-progetto")).size(18))
             .push(
-                Column::new().spacing(6).push(text("Project name:")).push(
-                    text_input::text_input("L bracket", &sheet.name)
+                Column::new().spacing(6).push(text(fl!("nome-progetto-2"))).push(
+                    text_input::text_input(fl!("staffa-a-l"), &sheet.name)
                         .on_input(Message::Name)
                         // Return runs Avanti (upstream `.onSubmit(create)`,
                         // NewProjectSheet.swift:27)
@@ -104,25 +105,29 @@ pub mod new_project {
                 ),
             )
             .push(
-                text("In the next step you will choose where to create the project folder.")
-                    .class(dim_text()),
+                text(fl!(
+                    "nel-passaggio-successivo-sceglierai-dove-creare-la-cartella-del-progetto"
+                ))
+                .class(dim_text()),
             );
         if let Some(error) = &sheet.error {
-            stack = stack.push(text(format!("Cannot create the project: {error}")).class(
-                cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.90, 0.32, 0.32)),
-            ));
+            stack = stack.push(
+                text(format!("{}: {error}", fl!("impossibile-creare-il-progetto"))).class(
+                    cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.90, 0.32, 0.32)),
+                ),
+            );
         }
         stack = stack.push(
             Row::new()
                 .push(Space::new().width(Length::Fill))
                 .push(
-                    button::text("Cancel")
+                    button::text(fl!("annulla"))
                         .class(cosmic::theme::Button::Standard)
                         .on_press(Message::Cancel),
                 )
                 .push(Space::new().width(8))
                 .push(
-                    button::text("Next")
+                    button::text(fl!("avanti"))
                         .class(cosmic::theme::Button::Suggested)
                         .on_press_maybe(valid.then_some(Message::Advance)),
                 )
@@ -239,7 +244,7 @@ impl Welcome {
             .push(Space::new().height(Length::Fill))
             .push_maybe(app_icon().map(|h| cosmic::widget::image(h).width(128).height(128)))
             .push(
-                text("CAD Studio".to_string())
+                text(fl!("cad-studio"))
                     .size(36)
                     .font(cosmic::iced::font::Font {
                         weight: cosmic::iced::font::Weight::Bold,
@@ -247,19 +252,22 @@ impl Welcome {
                     }),
             )
             .push(
-                container(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).class(dim_text()))
-                    .padding([2, 0, 0, 0]),
+                container(
+                    text(fl!("versione", version = env!("CARGO_PKG_VERSION")))
+                        .class(dim_text()),
+                )
+                .padding([2, 0, 0, 0]),
             )
             .push(Space::new().height(Length::Fill))
             .push(action_button(
                 "list-add",
-                "Create New Project…",
+                &fl!("crea-nuovo-progetto"),
                 Message::NewProject,
             ))
             .push(Space::new().height(8))
             .push(action_button(
                 "folder",
-                "Open Existing Project…",
+                &fl!("apri-progetto-esistente"),
                 Message::OpenExisting,
             ))
             .push(Space::new().height(Length::Fill))
@@ -283,7 +291,7 @@ impl Welcome {
     fn view_recents(&self, recents: &[PathBuf]) -> Element<'_, Message> {
         let list: Element<'_, Message> = if recents.is_empty() {
             container(
-                text("No recent projects".to_string())
+                text(fl!("nessun-progetto-recente"))
                     .class(dim_text())
                     .width(Length::Fill),
             )
@@ -361,10 +369,10 @@ impl Welcome {
         let menu_items = items(
             &std::collections::HashMap::new(),
             vec![
-                Item::Button("Open", None, actions(RecentMenuKind::Open)),
-                Item::Button("Reveal", None, actions(RecentMenuKind::Reveal)),
+                Item::Button(fl!("apri"), None, actions(RecentMenuKind::Open)),
+                Item::Button(fl!("mostra-nel-finder"), None, actions(RecentMenuKind::Reveal)),
                 Item::Divider,
-                Item::Button("Remove from List", None, actions(RecentMenuKind::Remove)),
+                Item::Button(fl!("rimuovi-dalla-lista"), None, actions(RecentMenuKind::Remove)),
             ],
         );
         cosmic::widget::context_menu(button, Some(menu_items)).into()
@@ -532,6 +540,21 @@ mod tests {
             "/opt",
             "paths outside home are untouched"
         );
+    }
+
+    /// Element construction is pure (the python sheet's established
+    /// pattern): the sheet renders in both alert states, the window in
+    /// both recents states.
+    #[test]
+    fn welcome_views_build_in_every_state() {
+        let mut sheet = new_project::NewProject::default();
+        let _ = new_project::view(&sheet);
+        sheet.error = Some("already exists".into());
+        let _ = new_project::view(&sheet);
+
+        let window = Welcome::new();
+        let _ = window.view(&[]);
+        let _ = window.view(&[PathBuf::from("/tmp/bracket")]);
     }
 
     /// A real PNG decodes into a handle; a missing file stays the fallback
