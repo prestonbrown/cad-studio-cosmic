@@ -356,7 +356,7 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   ruling — untested hazard, same owner (M9 boundary pin or a fixwave
   that statics its label the same way).
 
-- APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.
+- ~~APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.~~ SIGNED OFF 2026-10-29 — the ID stands.
 - Fluent: 5 placeholder-only keys sanitized to key/key-2..key-5 need mapping;
   52 values carry % placeholders needing fluent placeable conversion; 2 values
   per file carry literal \n; esc()'s `\"` branch would emit literal backslash
