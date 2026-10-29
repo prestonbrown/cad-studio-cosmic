@@ -24,12 +24,18 @@
 //! chat <text…>                    # stage the text as the chat draft and
 //!                                 # SEND it through the real shell path
 //!                                 # (a keyboard-free user turn)
+//! versioncard                     # toggle the project window's version-
+//!                                 # history card open/closed — the
+//!                                 # toolbar clock button's message (the
+//!                                 # frame pass's card capture)
+//! python Close                    # the python setup sheet's Close
+//! agent Close                     # the agent-missing sheet's Close
 //! settings <tab name>             # open (or focus) the settings window
 //!                                 # at Generale/Agente/Python/Avanzate —
 //!                                 # the ⌘, route without a keyboard
 //!                                 # (the :99 frame pass's per-tab capture)
 //! about                           # open the About window
-//! project <id-less msg> …         # (future) project-window commands
+//! noop                            # a no-op message (forces a view pass)
 //! sleep <ms>                      # pause before the next line
 //! ```
 //!
@@ -128,6 +134,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 }
                 Step::Msg(Message::DriveChat(rest.to_string()))
             }
+            "versioncard" => Step::Msg(Message::DriveVersionCard),
             "python" => match rest {
                 "Close" => Step::Msg(Message::PythonSheet(sheets::PythonMessage::Close)),
                 _ => return Err(format!("line {}: unknown python command", number + 1)),
@@ -284,5 +291,78 @@ mod tests {
             ))
         ));
         assert!(parse("settings Impostazioni").is_err());
+    }
+
+    /// `versioncard` flips the project window's version-history card
+    /// open/closed — the toolbar clock button's message, so the frame
+    /// pass can capture the card up.
+    #[test]
+    fn versioncard_command_toggles_the_card() {
+        let steps = parse("versioncard\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::DriveVersionCard)
+        ));
+    }
+
+    /// The arms the smoke-flow test executes but never asserts, plus
+    /// `PrinterModel` and `Cancel` which no test touched at all.
+    #[test]
+    fn printer_model_welcome_and_cancel_arms_parse() {
+        let steps = parse(
+            "setup PrinterModel Bambu P1S\n\
+             welcome NewProject\n\
+             sheet Advance\n\
+             sheet Cancel\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::Msg(Message::SetupSheet(sheets::SetupMessage::PrinterModel(model)))
+                if model == "Bambu P1S"
+        ));
+        assert!(matches!(
+            steps[1],
+            Step::Msg(Message::Welcome(welcome::Message::NewProject))
+        ));
+        assert!(matches!(
+            steps[2],
+            Step::Msg(Message::Welcome(welcome::Message::NewSheet(
+                welcome::new_project::Message::Advance
+            )))
+        ));
+        assert!(matches!(
+            steps[3],
+            Step::Msg(Message::Welcome(welcome::Message::NewSheet(
+                welcome::new_project::Message::Cancel
+            )))
+        ));
+    }
+
+    /// `recent` clicks a recents row; `python`/`agent` Close their
+    /// sheets; `noop` feeds the loop a harmless ack (forces a view pass).
+    #[test]
+    fn recent_python_agent_and_noop_arms_parse() {
+        let steps = parse(
+            "recent /tmp/smoke/bracket.proj\n\
+             python Close\n\
+             agent Close\n\
+             noop\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::Msg(Message::Welcome(welcome::Message::OpenRecent(path)))
+                if path == &PathBuf::from("/tmp/smoke/bracket.proj")
+        ));
+        assert!(matches!(
+            steps[1],
+            Step::Msg(Message::PythonSheet(sheets::PythonMessage::Close))
+        ));
+        assert!(matches!(
+            steps[2],
+            Step::Msg(Message::AgentSheet(sheets::AgentMessage::Close))
+        ));
+        assert!(matches!(steps[3], Step::Msg(Message::Noop)));
     }
 }

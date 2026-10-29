@@ -73,6 +73,11 @@ pub enum Message {
     /// export never opens it; the zip + activity + reveal path downstream
     /// is the real one.
     DriveSaveAs(PathBuf),
+    /// The drive harness's version-card toggle: flips the project window's
+    /// version-history card open/closed (CAD_STUDIO_DRIVE's `versioncard`
+    /// command) — the toolbar clock button's own message, so the frame
+    /// pass can capture the card presented.
+    DriveVersionCard,
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -223,19 +228,17 @@ impl Application for CadStudio {
             Message::Welcome(msg) => self.update_welcome(msg),
             Message::Project(id, msg) => self.update_project(id, msg),
             Message::DriveChat(text) => self
-                .windows
-                .keys()
-                .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
+                .project_window()
                 .map(|id| {
                     Task::batch([
                         Task::done(Message::Project(
-                            *id,
+                            id,
                             project::Message::Chat(crate::chat_view::Message::SetDraft(
                                 text.clone(),
                             )),
                         )),
                         Task::done(Message::Project(
-                            *id,
+                            id,
                             project::Message::Chat(crate::chat_view::Message::Send),
                         )),
                     ])
@@ -243,14 +246,14 @@ impl Application for CadStudio {
                 })
                 .unwrap_or_else(Task::none),
             Message::DriveSaveAs(path) => self
-                .windows
-                .keys()
-                .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
+                .project_window()
+                .map(|id| Task::done(Message::Project(id, project::Message::ExportChosen(Ok(path)))))
+                .unwrap_or_else(Task::none)
+                .map(Action::App),
+            Message::DriveVersionCard => self
+                .project_window()
                 .map(|id| {
-                    Task::done(Message::Project(
-                        *id,
-                        project::Message::ExportChosen(Ok(path)),
-                    ))
+                    Task::done(Message::Project(id, project::Message::ToggleVersionCard))
                 })
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
@@ -523,6 +526,16 @@ impl Application for CadStudio {
 // ─── app-level update arms ─────────────────────────────────────────────────
 
 impl CadStudio {
+    /// The project window's id — the drive harness's windowless commands
+    /// (chat, saveas, versioncard) all target it; new-project is
+    /// open-or-focus, so there is at most one.
+    fn project_window(&self) -> Option<window::Id> {
+        self.windows
+            .keys()
+            .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
+            .copied()
+    }
+
     fn update_welcome(&mut self, msg: welcome::Message) -> Task<Action<Message>> {
         // the new-project command presents the sheet AND makes sure the
         // welcome window carrying it is on screen (upstream ⌘N:
