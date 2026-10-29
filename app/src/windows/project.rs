@@ -1873,6 +1873,7 @@ mod tests {
             !window.viewer.parameters_visible,
             "the command fired — the static-set assert below is not vacuous"
         );
+        window.bridge.mark_python_ready_for_test();
         assert_eq!(
             before,
             describe(&window.view_entries()),
@@ -2027,6 +2028,7 @@ mod tests {
             "the refusal's reason reaches the status line, got {:?}",
             window.activity
         );
+        window.bridge.mark_python_ready_for_test();
         assert!(
             window.chat.messages.is_empty(),
             "a refused send opens no row"
@@ -2069,6 +2071,7 @@ mod tests {
             "a started send is busy in its own update call, got {:?}",
             window.activity
         );
+        window.bridge.mark_python_ready_for_test();
         assert_eq!(
             window.chat.draft, "",
             "the accepted text left the input bar (the Ok branch ran)"
@@ -2098,6 +2101,7 @@ mod tests {
             Activity::Idle,
             "a cancel leaves the row idle"
         );
+        window.bridge.mark_python_ready_for_test();
 
         let destination = std::env::temp_dir().join("cad-export-out.zip");
         let _ = window.update(Message::ExportDone(Some(destination)));
@@ -2174,6 +2178,7 @@ mod tests {
             Some(2),
             "the driver's version pointer survives the window's save points"
         );
+        window.bridge.mark_python_ready_for_test();
         assert_eq!(
             saved.session_id.as_deref(),
             Some("engine-session-2"),
@@ -2248,6 +2253,7 @@ mod tests {
             Some(1),
             "the bridge holds the selection"
         );
+        window.bridge.mark_python_ready_for_test();
         assert!(window.viewer.comparing);
         let ghost = window.viewer.scene.ghost.as_ref().unwrap();
         // the current scene's floor is model z 0 (the grounded box), so the
