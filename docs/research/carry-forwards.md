@@ -278,6 +278,18 @@ From the M4 T3 bridge review (2026-10-13):
 
 ## M9 / general
 
+- Attachments divergences (M8 T4 review, 2026-10-28): (a) paste reads
+  uri-list + PNG only — upstream also pastes TIFF (Attachments.swift:15-18);
+  TIFF paste falls through to text. (b) non-image tiles use the generic
+  text-x-generic icon where upstream's NSWorkspace.icon(forFile:) is
+  per-file-type (cosmetic). (c) saved_image stages undecodable bytes with no
+  decode gate (upstream's NSImage(data:) refuses at paste) — a mislabeled
+  paste ships to the agent as a reference; gate or accept. Owner: M9 polish /
+  T11 fixwave if cheap. Also: the frame pass owes one real COSMIC Files
+  drag-drop (T4's own open probe) and the queue-count nuance (upstream labels
+  all attachments "N immagini"; port counts images only — pre-existing).
+
+
 - Spinner sizing (2026-10-28, Preston's play session): the header
   ActivityViewer spinner and the chat thinking-row spinner render at the
   widget default where upstream pins `.controlSize(.mini)`
