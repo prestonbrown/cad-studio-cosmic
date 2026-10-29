@@ -227,11 +227,17 @@ From the M6 T10 review (2026-10-13):
 From the M7 wrap (2026-10-13) — the accepted divergences and deferred
 minors, each with its owner:
 
-- Space focus: upstream's Space shortcut (MotionControls.swift:19) is a
+- ~~Space focus: upstream's Space shortcut (MotionControls.swift:19) is a
   SwiftUI button shortcut, inert while a text field has focus; iced's
   global listener cannot see focus, so Space typed into the chat draft
   toggles playback too. M8's command system owns the revisit (the pane's
-  module doc has the detail).
+  module doc has the detail).~~ (no divergence — M8 T9's probe of the pin
+  found the recorded behavior impossible: `keyboard::listen` delivers only
+  widget-IGNORED events, and a focused text editor/input captures bare
+  Space as an insert, so the pane's listener never sees editor-typed
+  Space. The M7 entry was a design-time inference, never observed live;
+  viewer_pane's module doc now states the mechanism and a test pins the
+  editor binding)
 - Keyboard-driven scrub pauses: upstream pauses only on drag-start
   (`onEditingChanged`, MotionControls.swift:24-30), which iced's slider
   does not surface — every `Scrub` message pauses, drag or keys.
