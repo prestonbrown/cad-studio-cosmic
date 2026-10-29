@@ -51,12 +51,12 @@
 //!   error and collision counts feed the header's issues.
 //! - [`viewer_tools`] — the ModelViewerState port: the 3D pane's tool
 //!   state (grid/wireframe/measure/section/layout/explode/hidden) (M6).
-//! - [`windows`] — the welcome and project windows.
+//! - [`windows`] — the welcome, project, settings, and About windows.
 //!
-//! The About and Settings windows are M8 (spec §4.4 packaging/Sys row);
-//! every module reads its user-visible strings through `fl!` (the sheets
-//! and welcome windows are the holdouts — their constants ride with the
-//! settings-parity task).
+//! Every module reads its user-visible strings through `fl!`; the sheets'
+//! print-preferences section and the whole settings/About window landed
+//! with M8's settings parity. The remaining sheet and welcome literals
+//! ride with the repo-wide swap.
 pub mod activity;
 pub mod app;
 pub mod bridge;
