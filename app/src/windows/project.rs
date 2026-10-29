@@ -940,11 +940,15 @@ impl ProjectWindow {
             // behind the window's back, so both terminal arms reload the
             // transcript fresh — keeping the input bar's draft — and the
             // activity folds from the pipeline, the same source that
-            // classified the outcome. `ParameterCommitted`/`BuildFinished`
-            // as overlay sync_parameters triggers remain the carry-forward
-            // (docs/research/carry-forwards.md, M6 section); restore
-            // already syncs.
-            bridge::Message::ParameterCommitted { .. } => Task::none(),
+            // classified the outcome. Both also sync the overlay's
+            // parameter rows from the pipeline's refreshed set (the M6
+            // carry-forward landed; restore's sync): BuildFinished re-read
+            // the manifest, ParameterCommitted moved a row's value.
+            bridge::Message::ParameterCommitted { .. } => {
+                let parameters = self.bridge.parameters();
+                self.viewer.sync_parameters(&parameters);
+                Task::none()
+            }
             // upstream's build is buffered (ModelBuilder.build returns one
             // result, no per-line surface) — the events exist for the drain
             bridge::Message::BuildEventBridge(_) => Task::none(),
@@ -959,6 +963,8 @@ impl ProjectWindow {
                 let fresh = bridge::fresh_metadata(&self.root);
                 self.metadata.session_id = fresh.session_id;
                 self.metadata.current_version = fresh.current_version;
+                let parameters = self.bridge.parameters();
+                self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity().into());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
@@ -1297,7 +1303,10 @@ impl ProjectWindow {
         row = match &self.activity {
             Activity::Idle => row.push(text(fl!("pronto")).size(12).class(dim_text())),
             Activity::Working(_) => row
-                .push(cosmic::widget::progress_bar::indeterminate_circular())
+                // .controlSize(.mini) (ActivityViewer.swift:44-46) — the
+                // 12pt bar's spinner at the ~12px mini size, matching the
+                // succeeded/failed icons beside it (cosmic's default is 48)
+                .push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
                 .push(
                     text(self.activity.text().to_string())
                         .size(12)
@@ -1339,6 +1348,7 @@ impl ProjectWindow {
         let issues = activity::issues(
             self.bridge.build_error().as_deref(),
             &self.missing_outputs,
+            self.viewer.manifest_warnings(),
             self.viewer.motion_error(),
             self.viewer.collision_frames(),
         );
@@ -1379,6 +1389,7 @@ impl ProjectWindow {
         let issues = activity::issues(
             self.bridge.build_error().as_deref(),
             &self.missing_outputs,
+            self.viewer.manifest_warnings(),
             self.viewer.motion_error(),
             self.viewer.collision_frames(),
         );
@@ -2116,6 +2127,77 @@ mod tests {
             window.activity,
             Activity::Failed("Export failed".into()),
             "any other status (or no zip at all) is the failed row"
+        );
+    }
+
+    /// The header's ActivityViewer constructs in every activity state —
+    /// including the Working row's mini spinner (construction is pure; the
+    /// ring only reaches the GPU at draw time).
+    #[tokio::test]
+    async fn view_activity_constructs_in_every_state() {
+        let root = std::env::temp_dir().join(format!("cad-act-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        for activity in [
+            Activity::Idle,
+            Activity::Working("working".into()),
+            Activity::Succeeded("done".into()),
+            Activity::Failed("nope".into()),
+        ] {
+            window.activity = activity;
+            let _ = window.view_activity();
+        }
+    }
+
+    /// The overlay-sync triggers the M6 review owed (carry-forwards M6):
+    /// the two terminal bridge events drive `sync_parameters` —
+    /// `BuildFinished` because the build refreshed the manifest's parameter
+    /// set, `ParameterCommitted` because a commit moved a row's value — so
+    /// the overlay's rows follow the bridge without a restore (the only
+    /// other sync; open populates nothing).
+    #[tokio::test]
+    async fn parameter_commit_and_build_finish_sync_the_overlay_rows() {
+        let root = std::env::temp_dir().join(format!("cad-parm-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        std::fs::write(
+            root.join("output/manifest.json"),
+            r#"{"parameters": {"wall": 3}}"#,
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        assert!(
+            window.viewer.parameters.sliders.is_empty(),
+            "open syncs nothing; the two events own the overlay's population"
+        );
+
+        // the build's drain: the manifest's set is what the panel shows
+        let _ = window.update(Message::Bridge(bridge::Message::BuildFinished {
+            outcome: engine::python::model::BuildOutcome::Success,
+            version_prompt: None,
+        }));
+        assert_eq!(window.viewer.parameters.sliders.len(), 1);
+        assert_eq!(window.viewer.parameters.sliders[0].0, "wall");
+        assert_eq!(window.viewer.parameters.sliders[0].1.value, 3.0);
+
+        // a slider commit: the bridge moved the pipeline's row (and rewrote
+        // model.py) before broadcasting — the overlay follows the new value
+        let _ = window.bridge.set_parameter("wall", 4.0);
+        let _ = window.update(Message::Bridge(bridge::Message::ParameterCommitted {
+            name: "wall".into(),
+            value: 4.0,
+        }));
+        assert_eq!(
+            window.viewer.parameters.sliders[0].1.value, 4.0,
+            "the overlay's row follows the committed value"
         );
     }
 

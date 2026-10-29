@@ -22,6 +22,8 @@ ssh thelio 'bash -lc "cd ~/Code/cad-studio-cosmic && git pull && cargo test --wo
 ```
 
 GUI: from a terminal inside the COSMIC session: `just run` (or `just render-spike` for the
-viewer spike). Headless render tests: `just headless`. Fixtures: generated once by
+viewer spike). Headless render tests: `just headless`. The recipes run through
+[`just`](https://github.com/casey/just) — any machine expected to run them needs it
+installed (thelio has it). Fixtures: generated once by
 `fixtures/generator/model.py` with the venv at `~/.local/share/cad-studio/venv` (uv) —
 do not regenerate casually; they are committed goldens.

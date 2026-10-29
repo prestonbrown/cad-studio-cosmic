@@ -608,6 +608,12 @@ impl ViewerPane {
                 self.sync_pose();
             }
             Message::Fit => {
+                // frame the CURRENT arrangement (upstream fitToView,
+                // ModelViewer.swift:322-337): explode/hidden moves
+                // frame_aabb without touching the framing reference, so
+                // re-point it here rather than frame whatever a layout
+                // change or scene swap last pushed
+                self.input.set_framing_reference(self.frame_aabb);
                 self.input.fit();
                 self.sync_pose();
             }
@@ -810,6 +816,13 @@ impl ViewerPane {
     /// Project.swift:126-128) — zero with no study.
     pub fn collision_frames(&self) -> usize {
         self.study.as_ref().map_or(0, MotionStudy::collision_count)
+    }
+
+    /// The loaded manifest's warnings (upstream `output.manifest?.warnings`,
+    /// Project.swift:120) — the pane reloads the manifest on every
+    /// output change, so this is the fresh copy the issue list reads.
+    pub fn manifest_warnings(&self) -> &[String] {
+        self.manifest.as_ref().map_or(&[], |m| &m.warnings)
     }
 
     /// The pane's subscriptions: the output-event relay plus keyboard
@@ -2312,14 +2325,27 @@ mod tests {
         assert!((pane.scene.pitch - pane.input.pitch).abs() < 1e-6);
         assert!((pane.scene.yaw - pane.input.yaw).abs() < 1e-6);
 
-        // Fit frames the tracked reference; pin the layout so that
-        // reference IS the staged scene's own box (settings default the
-        // pane to Exploded, whose arranged frame is wider)
-        let _ = pane.update(Message::SetLayout(PartsLayout::Assembled));
+        // Fit frames the CURRENT arranged box (upstream fitToView,
+        // ModelViewer.swift:322-337): an explode change moves the arranged
+        // box through apply_arrangement WITHOUT touching the framing
+        // reference (only a layout change or scene swap does), so the Fit
+        // arm must re-point the reference at frame_aabb itself — else the
+        // spread model frames at its pre-explode size
+        let _ = pane.update(Message::SetExplode(2.0));
         let _ = pane.update(Message::Fit);
-        let (_, distance) =
-            viewer::render::camera::frame(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
-        assert!((pane.scene.distance - distance).abs() < 1e-4);
+        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.0, pane.frame_aabb.1);
+        assert!(
+            (pane.scene.distance - spread).abs() < 1e-4,
+            "Fit frames the exploded arrangement, not the pre-explode reference"
+        );
+        let (_, staged) = viewer::render::camera::frame(
+            pane.scene.scene.aabb_min,
+            pane.scene.scene.aabb_max,
+        );
+        assert!(
+            (spread - staged).abs() > 1e-4,
+            "this fixture's spread and staged boxes differ (else the pin is void)"
+        );
     }
 
     #[test]
