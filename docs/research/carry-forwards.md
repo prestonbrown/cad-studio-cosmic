@@ -285,17 +285,17 @@ minors, each with its owner:
   to M8's command system (the T8 review's minor).~~ (landed M8 T8
   2026-10-28: the View root carries the entry — static label per Ruling
   9, divergence recorded in the M8 section)
-- The no-model whole-bar disable is absent: upstream disables the ENTIRE
+~~- The no-model whole-bar disable is absent: upstream disables the ENTIRE
   controls row when `output.mesh == nil` (ModelPane.swift:151); the port's
   bar keeps preset/toggles clickable with no model. M6 T9 provenance
   (pre-existing at M7's base); fixwave-shaped — an `on_press_maybe` sweep
   across the whole bar, including the port-specific MSAA toggle upstream
-  cannot answer.
-- Exact-tie rounding: `format_significant`'s headroom path formats
+  cannot answer.~~ (landed M8 T7, bar_on_press seam — capstone strike 2026-10-29)
+~~- Exact-tie rounding: `format_significant`'s headroom path formats
   ties-to-even (Rust `{:.N}`) where Swift/ICU rounds half-up — e.g.
   `0.125(1,2)` → "0.12" vs "0.13". Unpinned by the brief and contrived
   for real study values; a note for future formatter hardening (the T5
-  review's minor).
+  review's minor).~~ (landed M8 T11, half-up tie-break + test — capstone strike 2026-10-29)
 
 ## M8 (parity tail)
 

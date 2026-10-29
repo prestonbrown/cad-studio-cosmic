@@ -56,6 +56,12 @@ Evidence from a real app hit by this (cad-studio port, pin dbc62f2):
 - make the wrapper's state-tag/self-id path rebuild instead of
   restoring a ripped-None state
 
+## Re-probe (2026-10-29, riding M8 T12's bump to 95236a9 / upstream HEAD)
+
+The wrapper still forwards `id()` from the inner editor (text_editor.rs:448-449
+at 95236a9) — the bug is live at HEAD alongside the menu corruption. The
+`.context_menu(false)` workaround stays until the pin moves for good.
+
 ## Our workaround
 `.context_menu(false)` on the affected editor (cost: no right-click menu
 on that one editor).

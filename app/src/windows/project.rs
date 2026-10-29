@@ -883,7 +883,11 @@ impl ProjectWindow {
                 self.set_activity(activity::next(
                     activity::Signal::TurnStarted,
                     false,
-                    self.engine_name(),
+                    // msg.engine — NOT a fresh file read: the turn's engine
+                    // is in hand beside us, and re-reading here could label
+                    // this turn's status line with the NEXT turn's engine
+                    // after a picker flip (capstone minor)
+                    engine.display_name(),
                 ));
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
