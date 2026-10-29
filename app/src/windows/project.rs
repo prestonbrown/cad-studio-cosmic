@@ -1980,13 +1980,6 @@ mod tests {
         );
     }
 
-    /// The metadata-clobber pin (T7 review F1): the window's save points
-    /// (turn end, bookkeeping) must write project.json THROUGH the disk
-    /// copy. The engine writes the session id into the same file mid-turn
-    /// and `record_version` the version pointer — both BEHIND the window's
-    /// back — so a save from the window's open-time copy reverts them. The
-    /// restore-then-bookkeeping tail pins the same law after a restore
-    /// moves both fields.
     /// The header's ActivityViewer constructs in every activity state —
     /// including the Working row's mini spinner (construction is pure; the
     /// ring only reaches the GPU at draw time).
@@ -2058,6 +2051,13 @@ mod tests {
         );
     }
 
+    /// The metadata-clobber pin (T7 review F1): the window's save points
+    /// (turn end, bookkeeping) must write project.json THROUGH the disk
+    /// copy. The engine writes the session id into the same file mid-turn
+    /// and `record_version` the version pointer — both BEHIND the window's
+    /// back — so a save from the window's open-time copy reverts them. The
+    /// restore-then-bookkeeping tail pins the same law after a restore
+    /// moves both fields.
     #[tokio::test]
     async fn bookkeeping_saves_through_the_bridge_s_metadata() {
         use engine::agent::session::TurnOutcome;
