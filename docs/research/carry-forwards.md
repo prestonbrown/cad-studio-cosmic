@@ -252,8 +252,10 @@ minors, each with its owner:
 - Keyboard-driven scrub pauses: upstream pauses only on drag-start
   (`onEditingChanged`, MotionControls.swift:24-30). CORRECTED at the M8 T11
   probe (2026-10-28): the pinned iced slider (dbc62f2) DOES emit on_change
-  from arrow keys (widget/src/slider.rs:503-519, while the cursor hovers
-  the handle) and ctrl+wheel (:485-502) — so the port's every-`Scrub`
+  from arrow keys (widget/src/slider.rs:503-519, while the cursor is
+  anywhere over the whole track — the guard is
+  cursor.is_over(layout.bounds()), not the handle) and ctrl+wheel
+  (:485-502) — so the port's every-`Scrub`
   -pauses arm really pauses keyboard/wheel scrubs that upstream would not
   (the M7 note's "no keyboard scrub at all" premise was wrong at this pin).
   Pause-gating per upstream semantics is not implementable here: the slider
@@ -480,6 +482,10 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
 
+- Parameters overlay populates NOTHING at window open (upstream fills it
+  from ProjectOutput.reload at open — M8 T11's finding); the landed syncs
+  (ParameterCommitted/BuildFinished) are its only population paths today.
+  Owner: M9 or the next fixwave pass.
 - Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
   keyboard listener rides `keyboard::listen()`, which drops the window tag —
   with TWO project windows open, an editor-unfocused Space/Esc reaches BOTH
