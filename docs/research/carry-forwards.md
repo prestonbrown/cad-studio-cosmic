@@ -243,9 +243,11 @@ minors, each with its owner:
   depth-write off) where SceneKit sorts transparents back-to-front —
   cosmetic; the offscreen playback shots are the eyeball-verdict venue
   (the M0/M6 pattern).
-- `ToggleParameters` is the only keybound command without a menu entry —
+- ~~`ToggleParameters` is the only keybound command without a menu entry —
   upstream surfaces it as a menu button (Commands.swift:69-73). Deferred
-  to M8's command system (the T8 review's minor).
+  to M8's command system (the T8 review's minor).~~ (landed M8 T8
+  2026-10-28: the View root carries the entry — static label per Ruling
+  9, divergence recorded in the M8 section)
 - The no-model whole-bar disable is absent: upstream disables the ENTIRE
   controls row when `output.mesh == nil` (ModelPane.swift:151); the port's
   bar keeps preset/toggles clickable with no model. M6 T9 provenance
@@ -299,6 +301,23 @@ M8 T4 attachments divergences (2026-10-28):
   engine's ONE image allowlist; `heic` drops out of the count (the
   engine-side ruling records the allowlist as the formats the attach
   surfaces produce).
+
+M8 T8 parameters menu entry divergence (2026-10-28):
+
+- The View menu's ⌥⌘I parameters toggle carries ONE STATIC label —
+  upstream's own tooltip phrasing "Mostra o nascondi i parametri (⌥⌘I)"
+  (`mostra-o-nascondi-i-parametri-i`, ProjectWindow.swift:159) — where
+  upstream's menu button flips "Mostra parametri"/"Nascondi parametri"
+  with `areParametersVisible` (Commands.swift:69-73). Ruling 9's safe
+  branch, taken at plan review: the menu-corruption record names label
+  churn inside the corruption family and the boundary is UNPINNED, so
+  text-only item flips are ruled out until M9 certifies them
+  (docs/research/libcosmic-menu-dynamic-items-bug.md; the plan's struck
+  Task 2 records why no probe can certify it today). Revisit only if M9
+  pins the boundary. The pre-existing mostra/nascondi-chat View-root
+  flip (M4 vintage) is the one remaining text-only flip against that
+  ruling — untested hazard, same owner (M9 boundary pin or a fixwave
+  that statics its label the same way).
 
 - APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.
 - Fluent: 5 placeholder-only keys sanitized to key/key-2..key-5 need mapping;
