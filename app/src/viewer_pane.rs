@@ -96,7 +96,12 @@
 //! and the legend (:136-147): the Animazione toggle when motion is
 //! available, else the ask-the-agent icon button (busy-gated) for a
 //! multi-part model. Animating disables the measure/section toggles and
-//! the parts layout picker (:133-135; PartsOverlay.swift:23).
+//! the parts layout picker (:133-135; PartsOverlay.swift:23). With no
+//! model the WHOLE bar is disabled (:151 — `.disabled(output.mesh ==
+//! nil)`, the port's drawn-`parts.is_empty()`, which a parse failure
+//! also leaves): every pressable routes through [`bar_on_press`], the
+//! port-specific MSAA toggle included (upstream has no opinion there;
+//! disabled with the row for consistency).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -1616,33 +1621,41 @@ impl ViewerPane {
         // the four toggles (misura/sezione disabled while animating,
         // :133-135), the animation slot (:136-147), the color legend — then
         // the port-specific MSAA toggle at the row's end, the info label
-        // right.
+        // right. The row itself is disabled with no model (:151): every
+        // pressable routes its message through bar_on_press.
+        let parts_empty = self.scene.scene.parts.is_empty();
         let mut bar = Row::new()
             .spacing(8)
-            .push(self.preset_picker())
+            .push(self.preset_picker(parts_empty))
             .push(tool_toggle(
                 self.tools.shows_grid,
                 fl!("griglia"),
                 fl!("mostra-la-griglia"),
-                Some(Message::ToggleGrid),
+                bar_on_press(parts_empty, Some(Message::ToggleGrid)),
             ))
             .push(tool_toggle(
                 self.tools.wireframe,
                 fl!("wireframe"),
                 fl!("mostra-il-wireframe"),
-                Some(Message::ToggleWireframe),
+                bar_on_press(parts_empty, Some(Message::ToggleWireframe)),
             ))
             .push(tool_toggle(
                 self.tools.measuring,
                 fl!("misura"),
                 fl!("misura-la-distanza-tra-due-punti"),
-                (!self.tools.animating).then_some(Message::ToggleMeasure),
+                bar_on_press(
+                    parts_empty,
+                    (!self.tools.animating).then_some(Message::ToggleMeasure),
+                ),
             ))
             .push(tool_toggle(
                 self.tools.sectioning,
                 fl!("sezione"),
                 fl!("mostra-una-sezione-del-modello"),
-                (!self.tools.animating).then_some(Message::ToggleSection),
+                bar_on_press(
+                    parts_empty,
+                    (!self.tools.animating).then_some(Message::ToggleSection),
+                ),
             ));
         // The animation slot (ModelPane.swift:136-147): the Animazione
         // toggle when motion is available, else the ask-the-agent button
@@ -1651,16 +1664,16 @@ impl ViewerPane {
             .tools
             .motion_available(self.model_parts.len(), self.study.is_some())
         {
-            bar = bar.push(self.animation_toggle());
+            bar = bar.push(self.animation_toggle(parts_empty));
         } else if self.model_parts.len() > 1 {
-            bar = bar.push(self.ask_animation_button(busy));
+            bar = bar.push(self.ask_animation_button(busy, parts_empty));
         }
         bar = bar
             .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
-            .push(self.msaa_toggle())
+            .push(self.msaa_toggle(parts_empty))
             .push(Space::new().width(Length::Fill))
             .push(text(status_info(
-                (!self.scene.scene.parts.is_empty())
+                (!parts_empty)
                     .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
                 self.unit,
             )));
@@ -1673,8 +1686,9 @@ impl ViewerPane {
     /// `Picker("Vista")`, ModelPane.swift:121-131): one button per preset,
     /// the selected one in the suggested style. The segmented-control
     /// widget's model borrows its owner, which a per-view rebuild cannot
-    /// satisfy — four stateless buttons carry the same selection.
-    fn preset_picker(&self) -> Element<'_, Message> {
+    /// satisfy — four stateless buttons carry the same selection. Inside
+    /// the controls row, so the no-model disable gates it (:151).
+    fn preset_picker(&self, parts_empty: bool) -> Element<'_, Message> {
         const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
         let mut bar = Row::new().spacing(4);
         for preset in PRESETS {
@@ -1685,32 +1699,37 @@ impl ViewerPane {
                     } else {
                         cosmic::theme::Button::Standard
                     })
-                    .on_press(Message::Preset(preset)),
+                    .on_press_maybe(bar_on_press(parts_empty, Some(Message::Preset(preset)))),
             );
         }
         bar.into()
     }
 
     /// The MSAA opt-in: shows the active sample count, clicks flip 1× ↔ 4×
-    /// (the `with_msaa` pipeline set, rebuilt in place).
-    fn msaa_toggle(&self) -> Element<'_, Message> {
+    /// (the `with_msaa` pipeline set, rebuilt in place). Upstream has no
+    /// opinion on this port-specific control; it rides the controls row's
+    /// no-model disable (:151) for consistency — a live button over an
+    /// empty canvas would be the row's one exception.
+    fn msaa_toggle(&self, parts_empty: bool) -> Element<'_, Message> {
         button::text(format!("{}×", self.scene.msaa))
-            .on_press(Message::ToggleMsaa)
+            .on_press_maybe(bar_on_press(parts_empty, Some(Message::ToggleMsaa)))
             .into()
     }
 
     /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
     /// stops the study — the preset picker's pattern for a selected-state
     /// text button (suggested class while on), the help text as the
-    /// description.
-    fn animation_toggle(&self) -> Element<'static, Message> {
+    /// description. No own gate (upstream leaves this toggle ungated
+    /// inside the row); the row disable reaches it through
+    /// [`bar_on_press`].
+    fn animation_toggle(&self, parts_empty: bool) -> Element<'static, Message> {
         button::text(fl!("animazione"))
             .class(if self.tools.animating {
                 cosmic::theme::Button::Suggested
             } else {
                 cosmic::theme::Button::Standard
             })
-            .on_press(Message::ToggleAnimation)
+            .on_press_maybe(bar_on_press(parts_empty, Some(Message::ToggleAnimation)))
             .description(fl!("riproduci-l-animazione-con-la-simulazione-fisica"))
             .into()
     }
@@ -1719,14 +1738,18 @@ impl ViewerPane {
     /// than one part — an icon button that asks the agent (the SHELL
     /// intercepts [`Message::RequestMotionStudy`]). Busy is upstream's
     /// `.disabled(project.isBusy)`: a button built without `on_press` is
-    /// iced's disabled state.
-    fn ask_animation_button(&self, busy: bool) -> Element<'static, Message> {
+    /// iced's disabled state — composed with the row's no-model disable
+    /// through [`bar_on_press`].
+    fn ask_animation_button(&self, busy: bool, parts_empty: bool) -> Element<'static, Message> {
         let ask = button::icon(
             cosmic::widget::icon::from_name("media-playback-start")
                 .size(16)
                 .handle(),
         )
-        .on_press_maybe((!busy).then_some(Message::RequestMotionStudy))
+        .on_press_maybe(bar_on_press(
+            parts_empty,
+            (!busy).then_some(Message::RequestMotionStudy),
+        ))
         .description(fl!("crea-animazione"));
         tooltip(
             ask,
@@ -1794,6 +1817,19 @@ pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit) -> String {
         ),
         None => String::new(),
     }
+}
+
+/// The controls row's no-model disable (ModelPane.swift:151): upstream
+/// wraps the whole controls `HStack` in `.disabled(output.mesh == nil)` —
+/// nothing parsed yet OR a parse failure, both leaving the drawn scene's
+/// parts empty (the expression the info label already keys on) — composed
+/// with each pressable's own gate (`own`: misura/sezione's animating
+/// disable, :133-135; the ask button's busy disable, :144). A disabled row
+/// makes a control inert even when its own gate would allow the press, so
+/// the message survives only when BOTH allow it: `None` builds the button
+/// without `on_press`, iced's disabled state.
+fn bar_on_press(parts_empty: bool, own: Option<Message>) -> Option<Message> {
+    if parts_empty { None } else { own }
 }
 
 /// Parse the output directory's model: `model.3mf` preferred (one part per
@@ -3361,6 +3397,54 @@ mod tests {
         let _ = pane2.view_status_bar(false);
         let _ = pane2.update(Message::ToggleAnimation);
         let _ = pane2.view_model_3d(None); // animating: motion controls mounted
+    }
+
+    #[test]
+    fn no_model_disables_every_bar_pressable() {
+        // ModelPane.swift:151 — one .disabled(output.mesh == nil) over the
+        // whole controls row: with the staged parts empty (nothing parsed
+        // yet OR a parse failure) every pressable in the bar builds without
+        // on_press, whatever its own gate says.
+        let pressables = [
+            Message::Preset(Preset::Iso),
+            Message::Preset(Preset::Front),
+            Message::Preset(Preset::Top),
+            Message::Preset(Preset::Right),
+            Message::ToggleGrid,
+            Message::ToggleWireframe,
+            Message::ToggleMeasure,
+            Message::ToggleSection,
+            Message::ToggleAnimation,
+            Message::RequestMotionStudy,
+            Message::ToggleMsaa,
+        ];
+        for message in pressables {
+            assert!(
+                bar_on_press(true, Some(message)).is_none(),
+                "the row disable wins over any own gate"
+            );
+        }
+        // row live: the own gate passes through unchanged — and the own
+        // gates the row composes with (animating misura/sezione :133-135,
+        // the busy ask :144) still close on their own
+        assert!(matches!(
+            bar_on_press(false, Some(Message::ToggleGrid)),
+            Some(Message::ToggleGrid)
+        ));
+        assert!(bar_on_press(false, None).is_none());
+    }
+
+    #[test]
+    fn status_bar_builds_with_no_model_in_both_busy_states() {
+        // The row-disabled bar through the real pane: no model files in
+        // output/, every slot's gated arm constructs (the behavior pin is
+        // no_model_disables_every_bar_pressable; this one keeps the empty
+        // path building, the study tests keep the model path building).
+        let (_root, pane) = pane("bar-empty", &[], &[]);
+        assert!(pane.scene.scene.parts.is_empty());
+        let _ = pane.view_model_3d(None);
+        let _ = pane.view_status_bar(false);
+        let _ = pane.view_status_bar(true);
     }
 
     #[test]
