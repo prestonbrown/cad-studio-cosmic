@@ -53,6 +53,7 @@ use std::time::Duration;
 use cosmic::iced::futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use engine::agent::attachments;
 use engine::agent::claude::TurnRequest;
+use engine::agent::locator::AgentKind;
 use engine::agent::session::{EngineEvent, Session, TurnHandle, TurnOutcome};
 use engine::project::manifest::Manifest;
 use engine::project::outputs::missing_files;
@@ -72,9 +73,39 @@ use uuid::Uuid;
 use crate::chat::ChatState;
 use crate::fl;
 
-/// The engine's display name (AgentLocator.swift:12) — the `{$agent}` the
-/// activity catalog strings fill in.
-const AGENT_NAME: &str = "Claude Code";
+/// Where a turn's engine name comes from: the settings file re-read at turn
+/// start (Ruling 1 — the engine picker's write is decisive for the NEXT
+/// turn, not the next project), falling back to the launch snapshot when
+/// the test seam suspends the re-read. Mirrors the engine's own
+/// `Session::with_settings_file` rule: a scripted agent must not have the
+/// developer's real settings file decide its turn's name.
+#[derive(Debug, Clone)]
+struct EngineSource {
+    /// The settings file re-read per turn; `None` under the test seam.
+    file: Option<PathBuf>,
+    /// The launch snapshot's engine — the answer when `file` is `None`.
+    fallback: AgentKind,
+}
+
+impl EngineSource {
+    fn at_launch(settings: &Settings) -> Self {
+        Self {
+            file: (std::env::var_os("CAD_TEST_CLAUDE").is_none()).then(settings_path),
+            fallback: settings.agent_kind(),
+        }
+    }
+
+    /// The engine the next turn runs under. A missing settings file reads
+    /// as a fresh install (claude, `Settings::load`'s rule — NOT the
+    /// snapshot); the snapshot answers only when the re-read is suspended
+    /// or the read actually errors.
+    fn current(&self) -> AgentKind {
+        self.file
+            .as_deref()
+            .and_then(|path| Settings::load(path).ok())
+            .map_or(self.fallback, |settings| settings.agent_kind())
+    }
+}
 
 /// Upstream `Activity` (Project.swift:19-26): the status line the app
 /// renders, and the sole busy flag — `isBusy` is `activity.isWorking`.
@@ -174,13 +205,14 @@ impl Pipeline {
     }
 
     /// Upstream `send()`'s pre-task state (Project.swift:201-203): the stale
-    /// build error clears and the working activity opens. EVERY turn start
-    /// runs this — a handle-issued send, the 1 s auto-run, and a resume all
-    /// go through the same `send()` upstream, and the busy flag must not
-    /// care who started the turn.
-    fn begin_turn(&mut self) {
+    /// build error clears and the working activity opens, naming the engine
+    /// the turn runs under. EVERY turn start runs this — a handle-issued
+    /// send, the 1 s auto-run, and a resume all go through the same
+    /// `send()` upstream, and the busy flag must not care who started the
+    /// turn.
+    fn begin_turn(&mut self, engine: AgentKind) {
         self.build_error = None;
-        self.activity = Activity::Working(fl!("sta-lavorando", agent = AGENT_NAME));
+        self.activity = Activity::Working(fl!("sta-lavorando", agent = engine.display_name()));
     }
 }
 
@@ -220,10 +252,13 @@ pub enum Message {
     /// A send actually started (never a queued one): append the user row.
     /// `attachments` carries the `references/<stamp>-<n>-<name>` COPY names
     /// the bridge just made (upstream's row stores the copies,
-    /// Project.swift:201) — render them root-relative.
+    /// Project.swift:201) — render them root-relative. `engine` is the
+    /// engine the turn runs under — the per-turn re-read's answer at turn
+    /// start, so the window names the turn's rows with it.
     TurnStarted {
         prompt: String,
         attachments: Vec<String>,
+        engine: AgentKind,
     },
     /// One engine event, in arrival order — apply to the chat state.
     Event(EngineEvent),
@@ -316,6 +351,7 @@ pub struct Bridge {
     pipeline: Arc<Mutex<Pipeline>>,
     root: PathBuf,
     interpreter: PathBuf,
+    engine_source: EngineSource,
 }
 
 /// [`Bridge::with_interpreter`]'s pending launch — a named construction seam
@@ -364,17 +400,25 @@ impl Bridge {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = unbounded();
         let pipeline = Arc::new(Mutex::new(Pipeline::load(&root)));
+        let engine_source = EngineSource::at_launch(&settings);
         let mut session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
         // The per-turn settings re-read (the engine picker flips the runner
         // mid-conversation, Ruling 1) — attached only when a real agent
         // runs: a scripted agent under test (the CAD_TEST_CLAUDE seam)
         // suspends it so the developer's own settings file cannot decide a
-        // test turn.
+        // test turn. The app-side name source follows the same rule.
         if std::env::var_os("CAD_TEST_CLAUDE").is_none() {
             session = session.with_settings_file(settings_path());
         }
         tokio::spawn(
-            Drive::new(root.clone(), cmd_rx, msg_tx.clone(), Arc::clone(&pipeline)).run(session),
+            Drive::new(
+                root.clone(),
+                cmd_rx,
+                msg_tx.clone(),
+                Arc::clone(&pipeline),
+                engine_source.clone(),
+            )
+            .run(session),
         );
         (
             Self {
@@ -383,6 +427,7 @@ impl Bridge {
                 pipeline,
                 root,
                 interpreter,
+                engine_source,
             },
             msg_rx,
         )
@@ -424,7 +469,7 @@ impl Bridge {
                 // busy HERE keeps the flag ahead of the driver's turn start
                 // (the driver-side half lives in start_turn, which every
                 // turn-start path reaches)
-                pipeline.begin_turn();
+                pipeline.begin_turn(self.engine_source.current());
                 pipeline.draft = None;
             }
         }
@@ -777,6 +822,7 @@ struct Drive {
     cmds: CmdReceiver<Command>,
     out: UnboundedSender<Message>,
     pipeline: Arc<Mutex<Pipeline>>,
+    engine_source: EngineSource,
 }
 
 impl Drive {
@@ -785,6 +831,7 @@ impl Drive {
         cmds: CmdReceiver<Command>,
         out: UnboundedSender<Message>,
         pipeline: Arc<Mutex<Pipeline>>,
+        engine_source: EngineSource,
     ) -> Self {
         Self {
             root,
@@ -793,6 +840,7 @@ impl Drive {
             cmds,
             out,
             pipeline,
+            engine_source,
         }
     }
 
@@ -974,15 +1022,21 @@ impl Drive {
     /// 1 s auto-run, a resume), so a QUEUED send's copies are made here, at
     /// its own start, never at enqueue (Project.swift:177-190). The bridge
     /// is the single writer of `references/`: the engine's session consumes
-    /// the names and writes nothing. The transcript reloads from disk — the
-    /// last turn's save is this turn's base, exactly the crash-recovery
-    /// shape `load_chat`'s `unwrap_or_default` gives a fresh project.
+    /// the names and writes nothing. The turn's ENGINE is resolved here too
+    /// (the per-turn re-read, Ruling 1) and rides the transcript and the
+    /// announcement, so the turn's rows and activity name the engine that
+    /// actually runs them, whatever the settings say by the time they land.
+    /// The transcript reloads from disk — the last turn's save is this
+    /// turn's base, exactly the crash-recovery shape `load_chat`'s
+    /// `unwrap_or_default` gives a fresh project.
     fn start_turn(&mut self, session: &mut Session, send: QueuedSend) -> Phase {
-        self.pipeline().begin_turn();
+        let engine = self.engine_source.current();
+        self.pipeline().begin_turn(engine);
         let sources: Vec<PathBuf> = send.attachments.iter().map(PathBuf::from).collect();
         let references = attachments::copy_attachments(&sources, &self.root);
         let images: Vec<PathBuf> = references.iter().map(|name| self.root.join(name)).collect();
         let mut transcript = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
+        transcript.engine = engine;
         transcript.append(ChatMessage {
             id: Uuid::new_v4(),
             role: Role::User,
@@ -998,6 +1052,7 @@ impl Drive {
         let _ = self.out.unbounded_send(Message::TurnStarted {
             prompt: send.prompt.clone(),
             attachments: references.clone(),
+            engine,
         });
         let request = TurnRequest {
             prompt: send.prompt,
@@ -1099,7 +1154,8 @@ impl Drive {
             transcript.apply(&event);
             if let EngineEvent::TurnFinished(outcome) = &event {
                 let succeeded = matches!(outcome, TurnOutcome::Success { .. });
-                let failure = (!succeeded).then(|| turn_failure_activity(outcome));
+                let failure =
+                    (!succeeded).then(|| turn_failure_activity(outcome, transcript.engine));
                 // the terminal saves BEFORE it forwards: a consumer that saw
                 // the TurnFinished message can read chat.json immediately
                 // (upstream's agentDidFinish saves before the UI hears)
@@ -1122,7 +1178,8 @@ impl Drive {
     fn close_open_turn(&mut self, transcript: &mut ChatState) {
         transcript.fail_running_tools();
         let _ = store::save_chat(&self.root, &transcript.messages);
-        self.pipeline().activity = Activity::Failed(fl!("errore-di", agent = AGENT_NAME));
+        self.pipeline().activity =
+            Activity::Failed(fl!("errore-di", agent = transcript.engine.display_name()));
         let _ = self.out.unbounded_send(Message::Closed);
     }
 
@@ -1334,13 +1391,13 @@ impl Drive {
 }
 
 /// The failure activity a turn's terminal reports (upstream
-/// AgentSession.swift:48/100/269/294 — the engine name in each).
-fn turn_failure_activity(outcome: &TurnOutcome) -> String {
+/// AgentSession.swift:48/100/269/294 — the turn's engine name in each).
+fn turn_failure_activity(outcome: &TurnOutcome, engine: AgentKind) -> String {
     match outcome {
         TurnOutcome::Failed { auth, .. } if *auth => {
-            fl!("accesso-a-richiesto", agent = AGENT_NAME)
+            fl!("accesso-a-richiesto", agent = engine.display_name())
         }
-        TurnOutcome::Failed { .. } => fl!("errore-di", agent = AGENT_NAME),
+        TurnOutcome::Failed { .. } => fl!("errore-di", agent = engine.display_name()),
         TurnOutcome::Cancelled => crate::chat::interrupted(),
         // the engine's dance absorbs Busy/MissingSession before the app
         // hears them; Success never reaches a failure activity
@@ -1596,6 +1653,137 @@ mod tests {
         );
     }
 
+    /// The turn's engine source re-reads the settings file every ask
+    /// (Ruling 1: a picker flip written mid-conversation decides the NEXT
+    /// turn), and the launch snapshot answers only when the file is
+    /// suspended (the scripted-agent test seam) or unreadable.
+    #[test]
+    fn engine_source_rereads_the_file_per_turn() {
+        let dir = std::env::temp_dir().join(format!("cad-src-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+
+        let mut codex = Settings::default();
+        codex.agent_engine = "codex".into();
+        codex.save(&file).unwrap();
+
+        let source = EngineSource {
+            file: Some(file.clone()),
+            fallback: AgentKind::Claude,
+        };
+        assert_eq!(source.current(), AgentKind::Codex, "the file decides");
+
+        Settings::default().save(&file).unwrap();
+        assert_eq!(
+            source.current(),
+            AgentKind::Claude,
+            "a flip on disk redirects the next turn"
+        );
+
+        let suspended = EngineSource {
+            file: None,
+            fallback: AgentKind::Codex,
+        };
+        assert_eq!(
+            suspended.current(),
+            AgentKind::Codex,
+            "the snapshot answers when the re-read is suspended"
+        );
+
+        let unreadable = EngineSource {
+            file: Some(dir.join("absent-settings.json")),
+            fallback: AgentKind::Codex,
+        };
+        assert_eq!(
+            unreadable.current(),
+            AgentKind::Claude,
+            "a missing settings file is a fresh install, not the snapshot"
+        );
+    }
+
+    /// A codex turn announces its engine on TurnStarted and names itself in
+    /// the working and failure activities — the Claude-only constants the
+    /// T3 follow-up retired. The scripted-agent seam suspends the settings
+    /// re-read, so the launch snapshot's engine is the turn's engine here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn codex_turn_announces_its_engine_and_names_its_activities() {
+        let _guard = ENV_LOCK.lock().await;
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-codex-name-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+            std::env::set_var(
+                "CAD_FAKE_SCENARIO",
+                fake_agent()
+                    .parent()
+                    .unwrap()
+                    .join("scenarios/auth-error.jsonl"),
+            );
+            std::env::set_var(
+                "CAD_FAKE_STDERR",
+                fake_agent()
+                    .parent()
+                    .unwrap()
+                    .join("scenarios/auth-error.stderr"),
+            );
+            std::env::set_var("CAD_FAKE_ARGV_OUT", root.join("argv-out"));
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        }
+
+        let mut settings = Settings::default();
+        settings.agent_engine = "codex".into();
+        let (bridge, mut messages) = Bridge::launch(settings, root.clone());
+        bridge.mark_python_ready_for_test();
+        assert_eq!(
+            bridge.activity(),
+            Activity::Idle,
+            "the activity starts idle, not pre-named"
+        );
+        bridge
+            .enqueue("make a bracket".into(), Vec::new())
+            .expect("the send is not refused");
+        run_until(&mut messages, |m| {
+            matches!(
+                m,
+                Message::TurnStarted {
+                    engine: AgentKind::Codex,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(
+            bridge.activity(),
+            Activity::Working(fl!("sta-lavorando", agent = "Codex")),
+            "the working activity names the turn's engine"
+        );
+        run_until(&mut messages, |m| {
+            matches!(
+                m,
+                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Failed { .. }))
+            )
+        })
+        .await;
+        assert_eq!(
+            bridge.activity(),
+            Activity::Failed(fl!("accesso-a-richiesto", agent = "Codex")),
+            "the auth failure names the turn's engine"
+        );
+
+        unsafe {
+            std::env::remove_var("CAD_TEST_CLAUDE");
+            std::env::remove_var("CAD_FAKE_SCENARIO");
+            std::env::remove_var("CAD_FAKE_STDERR");
+            std::env::remove_var("CAD_FAKE_ARGV_OUT");
+            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        }
+    }
+
     fn tool_row(id: &str) -> ChatMessage {
         ChatMessage {
             id: Uuid::new_v4(),
@@ -1627,6 +1815,10 @@ mod tests {
                 cmd_rx,
                 msg_tx,
                 Arc::new(Mutex::new(Pipeline::load(root))),
+                EngineSource {
+                    file: None,
+                    fallback: AgentKind::Claude,
+                },
             ),
             cmd_tx,
             msg_rx,

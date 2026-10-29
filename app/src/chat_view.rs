@@ -62,10 +62,6 @@ type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Ren
 // names the en/main.ftl entry. The engine display name is data, not a
 // string to translate.
 
-/// The engine display name (AgentLocator.swift:12 — the reducer's auth row
-/// uses the same "Claude Code").
-const ENGINE_NAME: &str = "Claude Code";
-
 /// Upstream caps the collapsed tool output at 1500 CHARACTERS before the
 /// "Show All" affordance (ToolActivityRow.swift:8, `output.count` /
 /// `String(prefix:)`).
@@ -267,7 +263,7 @@ pub fn view_chat<'a>(
     // stateless widget tree on the first message, which iced's positional
     // tree diff cannot reconcile (panic: "Downcast on stateless state").
     let body: Element<'_, Message> = if chat.messages.is_empty() {
-        container(empty_state())
+        container(empty_state(chat.engine))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(cosmic::iced::alignment::Horizontal::Center)
@@ -718,8 +714,12 @@ fn streaming_indicator() -> Element<'static, Message> {
         .into()
 }
 
-/// Upstream `ChatEmptyState` (ChatView.swift:107-154).
-fn empty_state() -> Element<'static, Message> {
+/// Upstream `ChatEmptyState` (ChatView.swift:107-154). The engine line
+/// names the engine that will run the first turn (upstream reads
+/// `AgentEngine.current` at render; the port seeds ChatState's engine from
+/// the settings at window build — an empty transcript means no turn ran to
+/// re-seed it).
+fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Message> {
     let suggestions = [
         fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
         fl!("scatola-60-40-25-mm-con-coperchio-a-incastro"),
@@ -754,7 +754,7 @@ fn empty_state() -> Element<'static, Message> {
         .push(body_text(fl!("descrivi-un-oggetto")).size(18))
         .push(secondary_text(fl!(
             "scrive-lo-script-cad-genera-il-modello-3d-e-la-tavola-tecnica",
-            agent = ENGINE_NAME
+            agent = engine.display_name()
         )))
         .push(list)
         // upstream caps the column at 340 pt; Fill+max keeps a narrower

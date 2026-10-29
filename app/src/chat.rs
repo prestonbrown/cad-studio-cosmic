@@ -36,19 +36,12 @@ use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use engine::agent::locator::AgentKind;
 use engine::agent::session::{EngineEvent, SystemRow, TurnOutcome};
 use engine::agent::tool_summary::{live_preview, live_title};
 use engine::project::store::{Action, ChatMessage, Role, ToolActivity, ToolState};
 
 use crate::fl;
-
-/// The sign-in command shown in the auth-failure row (AgentLocator.swift:25;
-/// the engine's display name "Claude Code" comes from AgentLocator.swift:12).
-const LOGIN_COMMAND: &str = "claude";
-
-/// The engine display name (AgentLocator.swift:12) — the `{$agent}` the
-/// auth/thinking/error rows fill in.
-const ENGINE_NAME: &str = "Claude Code";
 
 /// Upstream's live-preview throttle window (AgentSession.swift:179).
 const PREVIEW_THROTTLE: Duration = Duration::from_millis(150);
@@ -73,6 +66,14 @@ pub struct ChatState {
     /// An assistant text block was confirmed this turn (upstream `hasText`);
     /// reset by [`EngineEvent::Started`].
     pub turn_had_confirmed_text: bool,
+    /// The engine this conversation's turns run under — the name the
+    /// thinking/auth/error rows interpolate and the login command the auth
+    /// row shows (AgentLocator.swift:11-30). Set at turn start from the
+    /// per-turn settings re-read (Ruling 1) so a flipped engine names its
+    /// own rows from its first turn; the window seeds it from the settings
+    /// so the empty transcript's placeholder names the engine that will
+    /// run the first turn. Defaults claude, like `AgentEngine(rawValue:)`.
+    pub engine: AgentKind,
     /// The input bar's draft (upstream `ChatViewModel.draft`).
     pub draft: String,
     /// The draft's attachment references (upstream `draftAttachments`).
@@ -95,6 +96,7 @@ impl ChatState {
             thinking_started_at: None,
             unconfirmed: Vec::new(),
             turn_had_confirmed_text: false,
+            engine: AgentKind::Claude,
             draft: String::new(),
             draft_attachments: Vec::new(),
             tool_last_emit: HashMap::new(),
@@ -214,7 +216,10 @@ impl ChatState {
 
     /// Upstream `startBlock`'s thinking case (AgentSession.swift:149-153).
     fn thinking_started(&mut self, now: Instant) {
-        let id = self.append_row(Role::Thinking, fl!("sta-ragionando", agent = ENGINE_NAME));
+        let id = self.append_row(
+            Role::Thinking,
+            fl!("sta-ragionando", agent = self.engine.display_name()),
+        );
         self.active_thinking_id = Some(id);
         self.thinking_started_at = Some(now);
     }
@@ -385,8 +390,8 @@ impl ChatState {
                 let text = if *auth {
                     fl!(
                         "non-autenticato-apri-il-terminale-ed-esegui-per-effettuare-l-accesso",
-                        agent = ENGINE_NAME,
-                        command = LOGIN_COMMAND
+                        agent = self.engine.display_name(),
+                        command = self.engine.login_command()
                     )
                 } else {
                     match exit_code {
@@ -396,10 +401,13 @@ impl ChatState {
                         // non-optional
                         Some(code) => fl!(
                             "ha-terminato-con-un-errore-codice-d",
-                            agent = ENGINE_NAME,
+                            agent = self.engine.display_name(),
                             code = code
                         ),
-                        None => fl!("ha-terminato-con-un-errore", agent = ENGINE_NAME),
+                        None => fl!(
+                            "ha-terminato-con-un-errore",
+                            agent = self.engine.display_name()
+                        ),
                     }
                 };
                 let id = Uuid::new_v4();
@@ -945,6 +953,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raw[0]["action"], "openTerminal");
+    }
+
+    /// A codex conversation names Codex, not Claude Code: the thinking row,
+    /// the auth row (engine name AND login command — `codex login`), and
+    /// both error rows interpolate the turn's engine
+    /// (AgentLocator.swift:11-30; the name and command are per-engine data,
+    /// never catalog text).
+    #[test]
+    fn codex_turn_names_codex_in_rows() {
+        let _lang = crate::localize::pin_en();
+        let now = Instant::now();
+        let mut state = ChatState::new(Vec::new());
+        state.engine = AgentKind::Codex;
+        assert_eq!(state.engine, AgentKind::Codex);
+
+        state.apply_at(&started(), now);
+        state.apply_at(&EngineEvent::ThinkingStarted, now);
+        assert_eq!(row_text(&state), ["Codex is thinking…"]);
+
+        let mut auth = ChatState::new(Vec::new());
+        auth.engine = AgentKind::Codex;
+        auth.apply_at(&failed("401 unauthorized", true, Some(1)), now);
+        assert_eq!(
+            row_text(&auth),
+            ["Codex isn't signed in. Open Terminal and run `codex login` to sign in."]
+        );
+
+        let mut errored = ChatState::new(Vec::new());
+        errored.engine = AgentKind::Codex;
+        errored.apply_at(&failed("spawn failed", false, Some(3)), now);
+        assert_eq!(row_text(&errored), ["Codex ended with an error (code 3)."]);
+        errored.apply_at(&started(), now);
+        errored.apply_at(&failed("killed", false, None), now);
+        assert_eq!(
+            row_text(&errored).last(),
+            Some(&"Codex ended with an error.")
+        );
+
+        // the claude default is unchanged
+        let mut claude = ChatState::new(Vec::new());
+        claude.apply_at(&failed("401", true, Some(1)), now);
+        assert_eq!(
+            row_text(&claude),
+            ["Claude Code isn't signed in. Open Terminal and run `claude` to sign in."]
+        );
     }
 
     /// The non-auth failure row carries the child's exit code; a code-less

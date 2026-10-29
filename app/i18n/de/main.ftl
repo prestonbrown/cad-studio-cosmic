@@ -349,3 +349,5 @@ menu-file = Datei
 menu-view = Darstellung
 # Port addition (no upstream key).
 version-not-in-history = Version {$version} ist nicht im Verlauf
+# Port addition (no upstream key).
+settings = Einstellungen

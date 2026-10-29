@@ -34,21 +34,29 @@ use crate::fl;
 use crate::recents::{self, Recents};
 use crate::sheets;
 use crate::windows::project::{self, ProjectWindow};
+use crate::windows::settings::{self, SettingsState};
 use crate::windows::welcome::{self, Welcome};
 
 /// Which window a [`window::Id`] names.
 pub enum WindowKind {
     Welcome,
     Project(ProjectWindow),
+    /// The settings window (upstream's `Settings` scene — Ruling 6: a new
+    /// non-modal window, not a body-replacing sheet).
+    Settings(SettingsState),
+    /// The About window (upstream `orderFrontStandardAboutPanel`).
+    About,
 }
 
 /// App-level commands reachable from any window (upstream's global
-/// CommandGroups; ⌘→Ctrl, ⇧⌘1 keeps upstream's Welcome binding).
+/// CommandGroups; ⌘→Ctrl, ⇧⌘1 keeps upstream's Welcome binding, ⌘, the
+/// standard Settings scene's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppShortcut {
     NewProject,
     OpenProject,
     Welcome,
+    Settings,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +80,23 @@ pub enum Message {
     /// The python setup sheet (PythonSetupSheet + the driver events it
     /// reduces).
     PythonSheet(sheets::PythonMessage),
+    /// A settings-window interaction (tab switches, field writes, the
+    /// effect requests the app performs).
+    Settings(window::Id, settings::Message),
+    /// Open (or focus) the settings window at one tab — the ⌘, command,
+    /// the File-menu item, and the drive harness's route.
+    OpenSettings(settings::Tab),
+    /// Open (or focus) the About window — the app-info command group
+    /// (Commands.swift:10-14).
+    OpenAbout,
+    /// A settings-tab locate finished for one engine.
+    SettingsLocated(locator::AgentKind, Option<locator::AgentPath>),
+    /// The folder portal answered the settings tab's Scegli….
+    SettingsLocationChosen(Result<Vec<PathBuf>, String>),
+    /// A chat row's "Configura l'agente…" action: present the
+    /// agent-missing sheet (ChatView.swift:101-102 — upstream routes to
+    /// the sheet, NOT to settings; Ruling 6).
+    PresentAgentSheet,
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),
     /// A window's header close button: libcosmic's `on_close` is
@@ -180,7 +205,7 @@ impl Application for CadStudio {
             engine,
             app.settings.agent_path(engine).map(str::to_string),
         ))
-            .map(|found| Action::App(Message::AgentLocated(found)));
+        .map(|found| Action::App(Message::AgentLocated(found)));
         let sigterm = Task::stream(sigterm_stream()).map(Action::App);
         // the startup python check: its terminal folds into the sheet
         // state (a missing/failed venv presents the sheet once first-run
@@ -232,6 +257,53 @@ impl Application for CadStudio {
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
             Message::PythonSheet(msg) => self.update_python_sheet(msg),
+            Message::Settings(id, msg) => self.update_settings(id, msg),
+            Message::OpenSettings(tab) => self.open_settings(tab),
+            Message::OpenAbout => self.open_about(),
+            Message::SettingsLocated(kind, found) => {
+                // the one settings window's locate row resolves (open-or-
+                // focus means there is at most one)
+                for window in self.windows.values_mut() {
+                    if let WindowKind::Settings(state) = window {
+                        state.update(&settings::Message::Located(kind, found.clone()));
+                    }
+                }
+                Task::none()
+            }
+            Message::SettingsLocationChosen(result) => match result {
+                Ok(paths) => paths
+                    .first()
+                    .map(|path| {
+                        let msg = settings::Message::LocationChosen(path.clone());
+                        let task = self.update_settings_any(msg.clone());
+                        self.fold_settings_state(&msg);
+                        task
+                    })
+                    .unwrap_or_else(Task::none),
+                Err(_cancelled) => Task::none(),
+            },
+            Message::PresentAgentSheet => {
+                // ChatView.swift:101-102: `AgentLocator.current
+                // .isMissingSheetPresented = true` — the sheet, never the
+                // settings window. The field seeds from the persisted
+                // custom path (upstream's @AppStorage binding shows the
+                // stored value), and no red missing line: this action
+                // rides an auth-failed row, whose engine by definition
+                // ran.
+                if self.agent_missing.is_none() {
+                    let kind = self.settings.agent_kind();
+                    self.agent_missing = Some(sheets::AgentMissing {
+                        kind,
+                        custom_path: self
+                            .settings
+                            .agent_path(kind)
+                            .unwrap_or_default()
+                            .to_string(),
+                        ..sheets::AgentMissing::default()
+                    });
+                }
+                Task::none()
+            }
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
             Message::DragWindow(id) => cosmic::iced::window::drag(id),
@@ -245,8 +317,17 @@ impl Application for CadStudio {
                     // the missing line shows from first presentation
                     // (AgentMissingSheet.swift:42 gates on
                     // `locator.state == .missing`, not on a Verify)
+                    let kind = self.settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
-                        kind: self.settings.agent_kind(),
+                        kind,
+                        // the field opens on the persisted custom path
+                        // (upstream's @AppStorage binding), so an untouched
+                        // Verify cannot clear a stored path
+                        custom_path: self
+                            .settings
+                            .agent_path(kind)
+                            .unwrap_or_default()
+                            .to_string(),
                         last_verified_missing: true,
                         ..sheets::AgentMissing::default()
                     });
@@ -385,6 +466,18 @@ impl Application for CadStudio {
                     .class(cosmic::theme::Container::WindowBackground)
                     .into()
             }
+            // upstream's sheets attach to ProjectWindow only
+            // (ProjectWindow.swift:59-68), so the settings and About
+            // windows carry no sheets of their own.
+            Some(WindowKind::Settings(state)) => {
+                let body = settings::view(state, &self.python.state.state)
+                    .map(move |m| Message::Settings(id, m));
+                self.decorate(id, focused, body, &fl!("settings"))
+            }
+            Some(WindowKind::About) => {
+                let body: cosmic::Element<'_, Message> = settings::view_about();
+                self.decorate(id, focused, body, &fl!("informazioni-su-cad-studio"))
+            }
             None => self.decorate(
                 id,
                 focused,
@@ -522,6 +615,9 @@ impl CadStudio {
             self.python.presented = true;
             return Task::none();
         }
+        if matches!(msg, project::Message::PresentAgentSheet) {
+            return self.update(Message::PresentAgentSheet);
+        }
         if let project::Message::App(request) = msg {
             let translated = match request {
                 project::AppRequest::NewProject => welcome::Message::NewProject,
@@ -530,6 +626,10 @@ impl CadStudio {
                 project::AppRequest::OpenRecent | project::AppRequest::Welcome => {
                     return self.show_welcome();
                 }
+                project::AppRequest::Settings => {
+                    return self.open_settings(settings::Tab::General);
+                }
+                project::AppRequest::About => return self.open_about(),
             };
             return self.update_welcome(translated);
         }
@@ -557,10 +657,8 @@ impl CadStudio {
                 let _ = settings.save(&self.settings_file);
                 sheet.checking = true;
                 let engine = self.settings.agent_kind();
-                let future = locate_agent(
-                    engine,
-                    self.settings.agent_path(engine).map(str::to_string),
-                );
+                let future =
+                    locate_agent(engine, self.settings.agent_path(engine).map(str::to_string));
                 return Task::future(async move {
                     let found = future.await;
                     Message::AgentSheet(sheets::AgentMessage::Verified(found))
@@ -675,6 +773,131 @@ impl CadStudio {
         }
     }
 
+    // ─── the settings + About windows ──────────────────────────────────────
+
+    /// Open (or focus) the settings window at `tab` (upstream's ⌘,
+    /// Settings scene — `Settings { SettingsView() }`,
+    /// CADStudioApp.swift:31-33). A fresh open seeds the mirror from the
+    /// current settings and kicks BOTH engines' locates — upstream's
+    /// per-section auto-locate on appear (SettingsView.swift:163-167),
+    /// run eagerly so whichever section shows is already resolving.
+    fn open_settings(&mut self, tab: settings::Tab) -> Task<Action<Message>> {
+        if let Some((id, WindowKind::Settings(state))) = self
+            .windows
+            .iter_mut()
+            .find(|(_, kind)| matches!(kind, WindowKind::Settings(_)))
+        {
+            state.update(&settings::Message::Tab(tab));
+            let focus = *id;
+            return window::gain_focus(focus).map(Action::App);
+        }
+        let mut state = SettingsState::new(&self.settings);
+        state.update(&settings::Message::Tab(tab));
+        let (id, spawn) = window::open(window::Settings {
+            size: cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
+            ..Default::default()
+        });
+        self.windows.insert(id, WindowKind::Settings(state));
+        let title = self.set_window_title(fl!("settings"), id);
+        let locates = settings::ENGINES.map(|kind| {
+            let custom = self.settings.agent_path(kind).map(str::to_string);
+            Task::future(locate_agent_path(kind, custom))
+                .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
+        });
+        Task::batch(
+            [spawn.map(|_id| Action::App(Message::Noop)), title]
+                .into_iter()
+                .chain(locates),
+        )
+    }
+
+    /// Open (or focus) the About window (upstream's app-info command).
+    fn open_about(&mut self) -> Task<Action<Message>> {
+        if let Some((id, _)) = self
+            .windows
+            .iter()
+            .find(|(_, kind)| matches!(kind, WindowKind::About))
+        {
+            let focus = *id;
+            return window::gain_focus(focus).map(Action::App);
+        }
+        let (id, spawn) = window::open(window::Settings {
+            size: cosmic::iced::Size::new(settings::ABOUT_WIDTH, settings::ABOUT_HEIGHT),
+            ..Default::default()
+        });
+        self.windows.insert(id, WindowKind::About);
+        let title = self.set_window_title(fl!("informazioni-su-cad-studio"), id);
+        Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
+    }
+
+    /// One settings-window message: fold the mirror, perform the write
+    /// (load-modify-save, the ONE-writer law), then the effects.
+    fn update_settings(&mut self, id: window::Id, msg: settings::Message) -> Task<Action<Message>> {
+        if !matches!(self.windows.get(&id), Some(WindowKind::Settings(_))) {
+            return Task::none();
+        }
+        let task = self.update_settings_any(msg.clone());
+        self.fold_settings_state(&msg);
+        task
+    }
+
+    /// Fold one message into the open settings window's mirror (there is
+    /// at most one — open-or-focus).
+    fn fold_settings_state(&mut self, msg: &settings::Message) {
+        for window in self.windows.values_mut() {
+            if let WindowKind::Settings(state) = window {
+                state.update(msg);
+            }
+        }
+    }
+
+    /// The write + effects of one settings message, against whichever
+    /// settings window is open (there is at most one; the portal's answer
+    /// arrives here when the window that asked has since closed).
+    fn update_settings_any(&mut self, msg: settings::Message) -> Task<Action<Message>> {
+        // the write: load-modify-save, engine settings.json only
+        let mut persisted = EngineSettings::load(&self.settings_file).unwrap_or_default();
+        if settings::stage(&msg, &mut persisted) {
+            match persisted.save(&self.settings_file) {
+                Ok(()) => self.settings = persisted,
+                Err(why) => eprintln!("cad-studio: settings save failed: {why}"),
+            }
+        }
+        match msg {
+            settings::Message::ChooseLocation(starting) => {
+                let title = fl!("scegli-la-cartella-del-progetto-da-aprire");
+                Task::future(async move {
+                    let future = choose_folder_at(&title, Some(&starting));
+                    Message::SettingsLocationChosen(future.await)
+                })
+                .map(Action::App)
+            }
+            settings::Message::Verify(kind) => {
+                let custom = self.settings.agent_path(kind).map(str::to_string);
+                Task::future(locate_agent_path(kind, custom))
+                    .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
+            }
+            // the Python tab's Verifica: the environment check re-run —
+            // the manual retry a failed startup check lacked (its
+            // follow-up's close). A failed terminal presents the sheet
+            // over the project windows exactly like the startup one
+            // (PythonEnvironment.swift:38,45 — every check presents).
+            settings::Message::PythonCheck => {
+                self.python.state.begin_checking();
+                python_events(check(&venv_dir(), &streaming_spawn()))
+            }
+            // Reinstalla…: the sheet over the project windows + the
+            // reinstall kick (SettingsView.swift:201-204 — upstream sets
+            // the flag then reinstalls; the install guard refusals while
+            // one already runs)
+            settings::Message::PythonReinstall => {
+                self.python.presented = true;
+                self.update_python_sheet(sheets::PythonMessage::Install)
+            }
+            _ => Task::none(),
+        }
+    }
+
     /// Route an unconsumed key press: app-level shortcuts act globally,
     /// project commands go to the window the key landed in.
     fn update_key_press(
@@ -692,6 +915,9 @@ impl CadStudio {
             }
             Some(AppShortcut::Welcome) => {
                 return self.show_welcome();
+            }
+            Some(AppShortcut::Settings) => {
+                return self.open_settings(settings::Tab::General);
             }
             None => {}
         }
@@ -874,7 +1100,8 @@ impl CadStudio {
     }
 }
 
-/// The app-level shortcut table (upstream's global commands; ⌘→Ctrl).
+/// The app-level shortcut table (upstream's global commands; ⌘→Ctrl, ⌘,
+/// the standard Settings scene's binding).
 pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppShortcut> {
     let ctrl = modifiers.control();
     let shift = modifiers.shift();
@@ -887,6 +1114,7 @@ pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppShortcut> {
         (true, false, false, "n") => Some(AppShortcut::NewProject),
         (true, false, false, "o") => Some(AppShortcut::OpenProject),
         (true, true, false, "1") => Some(AppShortcut::Welcome),
+        (true, false, false, ",") => Some(AppShortcut::Settings),
         _ => None,
     }
 }
@@ -922,13 +1150,21 @@ fn key_events(
 /// Locate the agent off the UI thread (upstream `AgentLocator.locate()`,
 /// through `AgentLocator.current`, which picks the engine by the setting):
 /// the settings' custom path for THAT engine, then PATH, then the fixed
-/// candidates, each validated by `--version`.
+/// candidates, each validated by `--version`. The settings tab's rows and
+/// Verifica consume the located path + version; the startup/agent-sheet
+/// checks only need the verdict.
+async fn locate_agent_path(
+    kind: AgentKind,
+    custom_path: Option<String>,
+) -> Option<locator::AgentPath> {
+    tokio::task::spawn_blocking(move || locator::find_agent(kind, custom_path.as_deref()))
+        .await
+        .unwrap_or(None)
+}
+
+/// [`locate_agent_path`] as the sheets' boolean verdict.
 async fn locate_agent(kind: AgentKind, custom_path: Option<String>) -> bool {
-    tokio::task::spawn_blocking(move || {
-        locator::find_agent(kind, custom_path.as_deref()).is_some()
-    })
-    .await
-    .unwrap_or(false)
+    locate_agent_path(kind, custom_path).await.is_some()
 }
 
 /// Stream one python driver's events to the app as sheet messages — every
@@ -991,9 +1227,18 @@ pub fn launch_terminal() {
 // ─── platform integrations (the app layer owns all I/O the windows need) ──
 
 /// Ask the xdg-desktop-portal for one directory (upstream
-/// `NSOpenPanel`/`chooseParentFolder`).
-pub async fn choose_folder(title: &str) -> Result<Vec<PathBuf>, String> {
-    let request = SelectedFiles::open_file().title(title).directory(true);
+/// `NSOpenPanel`/`chooseParentFolder`), optionally starting somewhere
+/// (upstream `chooseFolder(startingAt:)`, SettingsView.swift:34).
+pub async fn choose_folder_at(
+    title: &str,
+    starting_at: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut request = SelectedFiles::open_file().title(title).directory(true);
+    if let Some(folder) = starting_at {
+        request = request
+            .current_folder(folder.to_path_buf())
+            .map_err(|why| why.to_string())?;
+    }
     let response = request.send().await.map_err(|why| why.to_string())?;
     let files = response.response().map_err(|why| why.to_string())?;
     Ok(files
@@ -1001,6 +1246,11 @@ pub async fn choose_folder(title: &str) -> Result<Vec<PathBuf>, String> {
         .iter()
         .filter_map(|uri| uri.to_file_path().ok())
         .collect())
+}
+
+/// [`choose_folder_at`] with no starting directory.
+pub async fn choose_folder(title: &str) -> Result<Vec<PathBuf>, String> {
+    choose_folder_at(title, None).await
 }
 
 /// Ask the xdg-desktop-portal for files (the chat attach button).
@@ -1159,7 +1409,8 @@ mod tests {
         );
     }
 
-    /// The app-level bindings (Commands.swift:16-49): ⌘N, ⌘O, ⇧⌘1 — and
+    /// The app-level bindings (Commands.swift:16-49): ⌘N, ⌘O, ⇧⌘1, ⌘,
+    /// (the standard Settings scene, CADStudioApp.swift:31-33) — and
     /// nothing on bare keys.
     #[test]
     fn app_shortcut_table_matches_upstream() {
@@ -1180,9 +1431,19 @@ mod tests {
             "⇧⌘1 is the welcome window command"
         );
         assert_eq!(
+            app_shortcut(&Key::Character(",".into()), &ctrl),
+            Some(AppShortcut::Settings),
+            "⌘, opens the settings window"
+        );
+        assert_eq!(
             app_shortcut(&Key::Character("1".into()), &Modifiers::empty()),
             None
         );
         assert_eq!(app_shortcut(&Key::Character("q".into()), &ctrl), None);
+        assert_eq!(
+            app_shortcut(&Key::Character(",".into()), &Modifiers::empty()),
+            None,
+            "bare comma is just typing"
+        );
     }
 }

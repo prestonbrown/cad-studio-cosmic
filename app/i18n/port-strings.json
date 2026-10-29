@@ -38,5 +38,13 @@
       "de": "Version %d ist nicht im Verlauf",
       "fr": "La version %d n’est pas dans l’historique"
     }
+  },
+  "settings": {
+    "localizations": {
+      "en": "Settings",
+      "it": "Impostazioni",
+      "de": "Einstellungen",
+      "fr": "Paramètres"
+    }
   }
 }
