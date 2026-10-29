@@ -462,3 +462,17 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   routing (the pane has no window-focus knowledge today) — a later-milestone
   design, recorded here until then. The single-window case is unaffected
   (T9 verified the editor-capture mechanism end-to-end).
+
+- Settings-window follow-ups (M8 T6 review, 2026-10-29, all LOW): (a)
+  ConfigureClaude parity is one half short — upstream auto-presents the
+  agent-missing sheet PER TURN on a missing executable (AgentSession.swift:
+  41-47) and appends the .configureClaude row; the port auto-presents at
+  startup only, and a mid-session bad custom path (reachable via the new
+  Agente tab) yields a plain error row with no action — the engine marker
+  (T3's flagged wiring) and the per-turn auto-present file together; (b) the
+  empty-transcript placeholder engine name seeds at window build, stale
+  across a mid-session flip until the next turn (upstream reads at render);
+  (c) an open settings window doesn't re-seed when the agent sheet writes
+  agent_path underneath it (stale display, no lost write). Cosmetic notes:
+  mirror-fold on a failed persist save; Python tab interpreter not
+  tilde-abbreviated; About unreachable from welcome-only (recorded).
