@@ -270,10 +270,12 @@ minors, each with its owner:
   click-to-seek (which upstream pauses at mouseDown) to fix the rarer
   keyboard path. Accepted divergence; revisit only if the fork grows an
   editing-changed signal.
-- The speed control is a dropdown plus an adjacent loop button where
-  upstream nests the picker and the Ripeti toggle in ONE menu (:35-49) —
-  one menu's worth of popover machinery for a two-item menu
-  (motion_controls' module doc).
+- ~~The speed control is a dropdown plus an adjacent loop button where
+  upstream nests the picker and the Ripeti toggle in ONE menu (:35-49)~~
+  RULED CLOSED at M8 plan review (Ruling 12's safe branch — the
+  single-menu shape is unreachable evidence-wise while the menu-corruption
+  boundary is unpinned; struck plan Task 2, the bug record). Revisit only
+  if M9 pins the boundary; motion_controls' module doc carries the ruling.
 - Translucent parts composite in slot order (no sort among translucents,
   depth-write off) where SceneKit sorts transparents back-to-front —
   cosmetic; the offscreen playback shots are the eyeball-verdict venue

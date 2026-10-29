@@ -23,7 +23,12 @@
 //!
 //! - Upstream nests the speed picker and the Ripeti toggle in ONE menu
 //!   (:35-49); the port shows the speed dropdown with an adjacent loop
-//!   button — one menu's worth of popover machinery for a two-item menu.
+//!   button — RULED at M8 plan review (Ruling 12's safe branch): cosmic's
+//!   menu overlay corrupts widget state on dynamic-ish content while the
+//!   corruption boundary is unpinned (docs/research/
+//!   libcosmic-menu-dynamic-items-bug.md, struck plan Task 2), so the
+//!   single-menu shape is unreachable evidence-wise. Revisit only if M9
+//!   pins the boundary.
 //! - iced sliders and cosmic dropdowns carry no accessibility text at the
 //!   pinned rev, so their descriptions render as tooltips (the parts
 //!   overlay's slider pattern); buttons get real descriptions.
