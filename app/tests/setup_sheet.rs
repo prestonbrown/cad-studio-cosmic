@@ -137,20 +137,31 @@ fn dismissal_blocked_only_while_installing() {
     }
 }
 
-/// The sheet's strings are the en catalog values for their keys
-/// (PythonSetupSheet.swift:15-17, 37, 63-80), verbatim.
+/// The sheet's strings read through `fl!`; their keys resolve to the en
+/// catalog values for the sheet's surfaces (PythonSetupSheet.swift:15-17,
+/// 37, 63-80), verbatim. `select("en")` pins the shared loader so the host
+/// locale cannot decide the outcome.
 #[test]
 fn sheet_strings_match_the_en_catalog() {
-    assert_eq!(app::sheets::PYTHON_SETUP_HEADER, "Installing Components");
+    app::localize::select("en");
     assert_eq!(
-        app::sheets::PYTHON_SETUP_DESCRIPTION,
+        app::localize::lookup("installazione-componenti"),
+        "Installing Components"
+    );
+    assert_eq!(
+        app::localize::lookup(
+            "cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-per-generare-modelli-e-tavole-tecniche-l-installazione-scarica-circa-200-mb"
+        ),
         "CAD Studio uses a dedicated Python environment with build123d, matplotlib and numpy to generate models and technical drawings. The installation downloads about 200 MB."
     );
-    assert_eq!(app::sheets::PYTHON_SHOW_DETAILS, "Show Details");
-    assert_eq!(app::sheets::PYTHON_DONE, "Done");
-    assert_eq!(app::sheets::PYTHON_LATER, "Later");
-    assert_eq!(app::sheets::PYTHON_INSTALL, "Install");
-    assert_eq!(app::sheets::PYTHON_INSTALLING, "Installing…");
+    assert_eq!(app::localize::lookup("mostra-dettagli"), "Show Details");
+    assert_eq!(app::localize::lookup("fine"), "Done");
+    assert_eq!(app::localize::lookup("pi-tardi"), "Later");
+    assert_eq!(app::localize::lookup("installa"), "Install");
+    assert_eq!(
+        app::localize::lookup("installazione-in-corso"),
+        "Installing…"
+    );
 }
 
 /// Element construction is pure (the viewer pane's established pattern):
