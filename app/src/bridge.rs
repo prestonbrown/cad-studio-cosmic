@@ -1707,8 +1707,14 @@ mod tests {
     /// re-read, so the launch snapshot's engine is the turn's engine here.
     #[tokio::test(flavor = "multi_thread")]
     async fn codex_turn_announces_its_engine_and_names_its_activities() {
-        let _guard = ENV_LOCK.lock().await;
+        // LOCK ORDER: pin_en BEFORE ENV_LOCK, uniformly with every other
+        // dual-lock test — the previous ENV→pin order here inverted against
+        // the pin→ENV tests and deadlocked the suite intermittently (ABBA:
+        // this test parked on pin_en while a pin→ENV test parked on
+        // ENV_LOCK; every pin_en waiter — including pure sync tests — hung
+        // behind the never-released guard)
         let _lang = crate::localize::pin_en();
+        let _guard = ENV_LOCK.lock().await;
         let root = std::env::temp_dir().join(format!("cad-codex-name-{}", Uuid::new_v4()));
         store::create_project(
             root.parent().unwrap(),
