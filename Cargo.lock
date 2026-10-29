@@ -5456,6 +5456,7 @@ dependencies = [
  "glam 0.33.12",
  "iced",
  "image",
+ "naga",
  "pollster",
  "resvg",
  "wgpu",

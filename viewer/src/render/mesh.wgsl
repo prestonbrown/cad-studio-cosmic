@@ -39,6 +39,7 @@ const LIT_MAX: f32 = @LIT_MAX@;
 const COLLISION_R: f32 = @COLLISION_R@;
 const COLLISION_G: f32 = @COLLISION_G@;
 const COLLISION_B: f32 = @COLLISION_B@;
+@TARGET_SPACE@
 
 struct Vin {
     @location(0) pos: vec3<f32>,
@@ -82,7 +83,7 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
     if (model.collision > 0.5) {
         // upstream's collision material: emissive systemRed — flat from
         // every normal, opaque even on a would-be-translucent part
-        return vec4<f32>(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B), 1.0);
+        return vec4<f32>(to_target(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B)), 1.0);
     }
-    return vec4<f32>(in.color * clamp(lit, 0.0, LIT_MAX), model.alpha);
+    return vec4<f32>(to_target(in.color * clamp(lit, 0.0, LIT_MAX)), model.alpha);
 }

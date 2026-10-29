@@ -17,6 +17,8 @@ struct Camera {
 // Rust-side constants (see `ghost_wgsl_source` in mod.rs); a surviving
 // marker is invalid WGSL and fails compilation loudly.
 
+@TARGET_SPACE@
+
 @vertex
 fn vs_ghost(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     return camera.view_proj * vec4<f32>(pos, 1.0);
@@ -24,5 +26,5 @@ fn vs_ghost(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_ghost() -> @location(0) vec4<f32> {
-    return vec4<f32>(@GHOST_R@, @GHOST_G@, @GHOST_B@, @GHOST_ALPHA@);
+    return vec4<f32>(to_target(vec3<f32>(@GHOST_R@, @GHOST_G@, @GHOST_B@)), @GHOST_ALPHA@);
 }

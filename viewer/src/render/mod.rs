@@ -206,20 +206,21 @@ struct CapVertex {
 /// The section cap's color: upstream's cut-face material —
 /// `systemRed.blended(withFraction: 0.15, of: .black)` (ModelViewer.swift:
 /// 363) = sRGB `(0.85, 0.85·59/255, 0.85·48/255)` through the exact EOTF —
-/// LINEAR, the space the unlit cap shader writes into the sRGB target (the
-/// same once-only crossing every staged triangle color makes). The Rust
-/// constant is the one definition: `cap_wgsl_source` substitutes it into
-/// cap.wgsl, and the cap-color test reads it back against this value.
+/// LINEAR, the space the unlit cap shader writes, encoded for the target
+/// by `to_target` (the same once-only crossing every staged triangle color
+/// makes). The Rust constant is the one definition: `cap_wgsl_source`
+/// substitutes it into cap.wgsl, and the cap-color test reads it back
+/// against this value.
 pub const CUT_FACE_LINEAR: [f32; 3] = [0.6920, 0.0321, 0.0220];
 
 /// The motion collision material's color: systemRed straight through the
 /// exact EOTF (the same red [`CUT_FACE_LINEAR`] blends 15% black for the
 /// cut face; the collision material uses it unblended as BOTH baseColor
 /// and emissiveColor, ModelViewer.swift:275-279 — hence flat, unlit).
-/// LINEAR, the space the mesh shader writes into the sRGB target. The
-/// Rust constant is the one definition: `mesh_wgsl_source` substitutes it
-/// into mesh.wgsl, and the collision-color test reads it back against
-/// this value.
+/// LINEAR, the space the mesh shader writes, encoded for the target by
+/// `to_target`. The Rust constant is the one definition:
+/// `mesh_wgsl_source` substitutes it into mesh.wgsl, and the
+/// collision-color test reads it back against this value.
 pub const COLLISION_LINEAR: [f32; 3] = [1.0, 0.0437, 0.0295];
 
 /// The translucent static-parts material's opacity
@@ -732,12 +733,41 @@ pub struct MeshPipeline {
     ghost_upload_count: u32,
 }
 
-/// mesh.wgsl with the lighting constants substituted from [`lights`] and
-/// the collision color from [`COLLISION_LINEAR`] — the one definition the
-/// shader and the shading tests share. The @NAME@ markers are not valid
-/// WGSL, so a missed substitution breaks shader compilation instead of
-/// silently rendering numbers the tests do not assert against.
-fn mesh_wgsl_source() -> String {
+/// The output-space block substituted as `@TARGET_SPACE@` into every
+/// color-writing shader: the viewer's colors are LINEAR (staged through
+/// [`parts::srgb_to_linear`], lit in linear), and whether the pipeline must
+/// encode them on the way out depends on the target — an sRGB-tagged
+/// format stores the encode in hardware, a plain one (what iced's
+/// compositor picks under libcosmic's `web-colors` build, where
+/// `GAMMA_CORRECTION` is false and every iced primitive writes
+/// display-space values itself) does not, so the shader carries the curve.
+/// `SRGB_ENCODE` is 1.0 only in the second case, and the curve is the
+/// exact inverse of [`parts::srgb_to_linear_f`] (its Rust twin
+/// [`parts::linear_to_srgb_f`] is what the tests pin against).
+fn target_space_wgsl(target_format: wgpu::TextureFormat) -> String {
+    let flag = if target_format.is_srgb() { 0.0 } else { 1.0 };
+    format!(
+        "// Substituted from target_space_wgsl: a plain (non-sRGB) target\n\
+         // stores no encode in hardware, so the shader carries the curve.\n\
+         const SRGB_ENCODE: f32 = {flag:.1};\n\
+         fn encode_target(c: f32) -> f32 {{\n\
+         \x20   let e = select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);\n\
+         \x20   return clamp(e, 0.0, 1.0);\n\
+         }}\n\
+         fn to_target(rgb: vec3<f32>) -> vec3<f32> {{\n\
+         \x20   if (SRGB_ENCODE < 0.5) {{ return rgb; }}\n\
+         \x20   return vec3<f32>(encode_target(rgb.r), encode_target(rgb.g), encode_target(rgb.b));\n\
+         }}"
+    )
+}
+
+/// mesh.wgsl with the lighting constants substituted from [`lights`], the
+/// collision color from [`COLLISION_LINEAR`], and the output-space block
+/// for `target_format` — the one definition the shader and the shading
+/// tests share. The @NAME@ markers are not valid WGSL, so a missed
+/// substitution breaks shader compilation instead of silently rendering
+/// numbers the tests do not assert against.
+fn mesh_wgsl_source(target_format: wgpu::TextureFormat) -> String {
     let vec3 = |p: [f32; 3]| format!("vec3<f32>({}, {}, {})", p[0], p[1], p[2]);
     include_str!("mesh.wgsl")
         .replace("@KEY_POS@", &vec3(lights::KEY_POS))
@@ -749,30 +779,41 @@ fn mesh_wgsl_source() -> String {
         .replace("@COLLISION_R@", &COLLISION_LINEAR[0].to_string())
         .replace("@COLLISION_G@", &COLLISION_LINEAR[1].to_string())
         .replace("@COLLISION_B@", &COLLISION_LINEAR[2].to_string())
+        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
 }
 
-/// cap.wgsl with the cut-face color substituted from [`CUT_FACE_LINEAR`] —
-/// the mesh_wgsl_source pattern: the @CAP_@ markers are not valid WGSL, so
-/// a missed substitution breaks shader compilation instead of silently
-/// rendering a color the tests do not assert against.
-fn cap_wgsl_source() -> String {
+/// cap.wgsl with the cut-face color substituted from [`CUT_FACE_LINEAR`]
+/// and the output-space block for `target_format` — the mesh_wgsl_source
+/// pattern: the @CAP_@ markers are not valid WGSL, so a missed
+/// substitution breaks shader compilation instead of silently rendering a
+/// color the tests do not assert against.
+fn cap_wgsl_source(target_format: wgpu::TextureFormat) -> String {
     include_str!("cap.wgsl")
         .replace("@CAP_R@", &CUT_FACE_LINEAR[0].to_string())
         .replace("@CAP_G@", &CUT_FACE_LINEAR[1].to_string())
         .replace("@CAP_B@", &CUT_FACE_LINEAR[2].to_string())
+        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
 }
 
-/// ghost.wgsl with the ghost color substituted from [`markers::ORANGE`]
-/// and [`GHOST_ALPHA`] — the mesh_wgsl_source pattern: the @GHOST_@
-/// markers are not valid WGSL, so a missed substitution breaks shader
-/// compilation instead of silently rendering a color the tests do not
-/// assert against.
-fn ghost_wgsl_source() -> String {
+/// grid.wgsl with the output-space block for `target_format` — the
+/// mesh_wgsl_source pattern over the unlit overlay's passthrough fragment
+/// (rgb encoded, alpha carried as staged).
+fn grid_wgsl_source(target_format: wgpu::TextureFormat) -> String {
+    include_str!("grid.wgsl").replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
+}
+
+/// ghost.wgsl with the ghost color substituted from [`markers::ORANGE`],
+/// [`GHOST_ALPHA`], and the output-space block for `target_format` — the
+/// mesh_wgsl_source pattern: the @GHOST_@ markers are not valid WGSL, so a
+/// missed substitution breaks shader compilation instead of silently
+/// rendering a color the tests do not assert against.
+fn ghost_wgsl_source(target_format: wgpu::TextureFormat) -> String {
     include_str!("ghost.wgsl")
         .replace("@GHOST_R@", &markers::ORANGE[0].to_string())
         .replace("@GHOST_G@", &markers::ORANGE[1].to_string())
         .replace("@GHOST_B@", &markers::ORANGE[2].to_string())
         .replace("@GHOST_ALPHA@", &GHOST_ALPHA.to_string())
+        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
 }
 
 /// The sample-count-dependent render pipelines, rebuilt as a set by
@@ -941,7 +982,7 @@ impl MeshPipeline {
     ) -> Pipelines {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source().into()),
+            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source(target_format).into()),
         });
         let vlayout = [
             wgpu::VertexAttribute {
@@ -1035,7 +1076,7 @@ impl MeshPipeline {
         // Camera-only (camera_layout): the cap has no per-part transform.
         let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cap.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(cap_wgsl_source().into()),
+            source: wgpu::ShaderSource::Wgsl(cap_wgsl_source(target_format).into()),
         });
         let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("section cap"),
@@ -1263,7 +1304,7 @@ impl MeshPipeline {
         // ([`overlay_depth_stencil`]).
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grid.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(grid_wgsl_source(target_format).into()),
         });
         let grid_vlayout = [
             wgpu::VertexAttribute {
@@ -1323,7 +1364,7 @@ impl MeshPipeline {
         // the mesh occludes the ghost, the ghost occludes nothing after it.
         let ghost_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ghost.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(ghost_wgsl_source().into()),
+            source: wgpu::ShaderSource::Wgsl(ghost_wgsl_source(target_format).into()),
         });
         let ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("compare ghost"),
@@ -1803,7 +1844,8 @@ impl MeshPipeline {
     /// Vertex uploads since pipeline creation (test visibility): counts
     /// vertex uploads only — the camera, cap, and per-part model uniforms
     /// legitimately write every frame and never count.
-    #[cfg(test)]
+    
+#[cfg(test)]
     pub(crate) fn upload_count_for_tests(&self) -> u32 {
         self.upload_count
     }
@@ -3106,5 +3148,184 @@ mod tests {
         for a in 0..3 {
             assert!((s[a] - foreign.parts[0].vertices[0].pos[a]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn framed_iso_model_fills_the_pane() {
+        // The pane-fill contract of frame() (ModelViewer.swift:328-337):
+        // the framed distance puts the scene's bounding sphere at
+        // sin(half-FOV)/1.15 of the camera — 86.6 % of the half-view — and
+        // the golden fixture's box (scene 60×26×60, radius √7876/2) fills
+        // ~two thirds of the viewport height at the iso preset, at ANY
+        // aspect (the projection's y extent is aspect-free). If the 1.15
+        // headroom, the half-diagonal radius, or the target rule changes,
+        // these ratios move and the fill visibly changes with them.
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        let half_fov = camera::FOV / 2.0;
+        let angular_fill = (radius / distance).asin() / half_fov;
+        assert!(
+            (angular_fill - 0.866).abs() < 0.005,
+            "sphere fills {angular_fill:.3} of the half-view, not 86.6 %"
+        );
+        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
+        let corners = |a: f32| {
+            let view_proj =
+                glam::Mat4::from_cols_array_2d(&camera::orbit(distance, yaw, pitch, target, a));
+            let mut span = (f32::MAX, f32::MIN);
+            for i in 0..8 {
+                let p = [
+                    [scene.aabb_min[0], scene.aabb_max[0]][i & 1],
+                    [scene.aabb_min[1], scene.aabb_max[1]][i >> 1 & 1],
+                    [scene.aabb_min[2], scene.aabb_max[2]][i >> 2 & 1],
+                    1.0,
+                ];
+                let clip = view_proj * glam::Vec4::from_array(p);
+                let ndc_y = clip.y / clip.w;
+                span.0 = span.0.min(ndc_y);
+                span.1 = span.1.max(ndc_y);
+            }
+            (span.1 - span.0) / 2.0 // fraction of the viewport height
+        };
+        let (square, wide) = (corners(1.0), corners(2.16));
+        for (aspect, fill) in [(1.0, square), (2.16, wide)] {
+            assert!(
+                (0.60..=0.75).contains(&fill),
+                "aspect {aspect}: the framed box fills {fill:.2} of the viewport height"
+            );
+        }
+        assert!(
+            (square - wide).abs() < 0.005,
+            "the y fill is aspect-free: {square:.4} vs {wide:.4}"
+        );
+    }
+
+    /// The output-space contract: iced's compositor under libcosmic's
+    /// `web-colors` build picks a PLAIN (non-sRGB) surface and every iced
+    /// primitive writes display-space values itself, so the viewer's
+    /// linear-light output must be encoded in-shader there — and must stay
+    /// linear for an sRGB-tagged target (the headless tests' format,
+    /// where the hardware owns the encode).
+    #[test]
+    fn shader_sources_encode_only_for_plain_targets() {
+        let plain = mesh_wgsl_source(wgpu::TextureFormat::Bgra8Unorm);
+        assert!(
+            plain.contains("SRGB_ENCODE: f32 = 1.0"),
+            "a plain target turns the in-shader encode on"
+        );
+        let srgb = mesh_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert!(
+            srgb.contains("SRGB_ENCODE: f32 = 0.0"),
+            "an sRGB target keeps the hardware encode"
+        );
+        for (name, source) in [
+            ("mesh", mesh_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
+            ("cap", cap_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
+            ("grid", grid_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
+            ("ghost", ghost_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
+            (
+                "mesh/srgb",
+                mesh_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
+            ),
+            (
+                "cap/srgb",
+                cap_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
+            ),
+            (
+                "grid/srgb",
+                grid_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
+            ),
+            (
+                "ghost/srgb",
+                ghost_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
+            ),
+        ] {
+            // the real markers this shader must have substituted (WGSL's
+            // own @group/@location decorators and the docs' @NAME@ example
+            // are not markers); a genuine survivor is caught here AND by
+            // the parse test, since a marker is invalid WGSL
+            for marker in [
+                "@KEY_POS@",
+                "@KEY_COEFF@",
+                "@FILL_POS@",
+                "@FILL_COEFF@",
+                "@AMBIENT@",
+                "@LIT_MAX@",
+                "@COLLISION_R@",
+                "@COLLISION_G@",
+                "@COLLISION_B@",
+                "@CAP_R@",
+                "@CAP_G@",
+                "@CAP_B@",
+                "@GHOST_R@",
+                "@GHOST_G@",
+                "@GHOST_B@",
+                "@GHOST_ALPHA@",
+                "@TARGET_SPACE@",
+            ] {
+                assert!(
+                    !source.contains(marker),
+                    "{name}: substitution marker {marker} survived"
+                );
+            }
+            assert!(
+                source.contains("to_target("),
+                "{name}: a color-writing shader must route through to_target"
+            );
+        }
+    }
+
+    /// The substituted sources must be valid WGSL for BOTH target kinds —
+    /// a marker that survives, a bad declaration order, or a malformed
+    /// encode block is a parse error here, not a silent dark render.
+    #[test]
+    fn substituted_shaders_parse_as_wgsl() {
+        let mut flags = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        );
+        for format in [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            for source in [
+                mesh_wgsl_source(format),
+                cap_wgsl_source(format),
+                grid_wgsl_source(format),
+                ghost_wgsl_source(format),
+            ] {
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|e| panic!("parse {format:?}: {e}"));
+                flags
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("validate {format:?}: {e}"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod target_space_tests {
+    use super::*;
+
+    /// The WGSL encode string's curve constants must match the Rust twin
+    /// exactly (review F1: a typo in the string passes every pure test —
+    /// only the GPU test would catch it, which runs on one machine).
+    #[test]
+    fn wgsl_encode_constants_match_the_rust_twin() {
+        let src = target_space_wgsl(wgpu::TextureFormat::Bgra8Unorm);
+        for constant in ["0.0031308", "12.92", "1.055", "2.4", "0.055"] {
+            assert!(src.contains(constant), "the WGSL curve lost {constant}: {src}");
+        }
+        // and the sRGB path is the identity (no curve at all)
+        let identity = target_space_wgsl(wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(identity.contains("SRGB_ENCODE: f32 = 0.0"));
+        // the twin and the string implement the same function at the knee
+        // and mid-range (the knee's both branches + a gamma-branch value)
+        let knee = parts::linear_to_srgb_f(0.003);
+        assert!((knee - 0.003 * 12.92).abs() < 1e-6);
+        let mid = parts::linear_to_srgb_f(0.5);
+        assert!((mid - (1.055 * 0.5f32.powf(1.0 / 2.4) - 0.055)).abs() < 1e-6);
     }
 }

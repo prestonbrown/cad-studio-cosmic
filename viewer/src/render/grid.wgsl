@@ -27,7 +27,10 @@ fn vs_grid(in: Vin) -> Vout {
     return out;
 }
 
+@TARGET_SPACE@
+
 @fragment
 fn fs_grid(in: Vout) -> @location(0) vec4<f32> {
-    return in.color;
+    // rgb encoded for the target, alpha carried as staged (facts #34)
+    return vec4<f32>(to_target(in.color.rgb), in.color.a);
 }

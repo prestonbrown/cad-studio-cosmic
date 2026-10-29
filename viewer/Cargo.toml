@@ -16,3 +16,6 @@ pollster = "0.4"
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 resvg = "0.45"
+# the WGSL the pipelines actually run must parse headless: naga is already
+# in the graph (wgpu's own frontend), pinned to the same version
+naga = { version = "28.0.0", features = ["wgsl-in"] }

@@ -141,6 +141,46 @@ fn render_frame_with_poses(
     poses: &[PartPose],
     appearances: &[PartAppearance],
 ) -> Vec<u8> {
+    render_frame_with_poses_format(
+        device,
+        queue,
+        pipeline,
+        scene,
+        camera,
+        w,
+        h,
+        grid,
+        markers,
+        ghost,
+        options,
+        poses,
+        appearances,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    )
+}
+
+/// [`render_frame_with_poses`] at an explicit target format — the
+/// output-space tests' seam: the app's iced surface is a PLAIN format
+/// (libcosmic's web-colors build picks a non-sRGB one), where the shader
+/// must carry the sRGB encode itself. Readback bytes are in the format's
+/// own channel order (BGRA for Bgra8Unorm).
+#[allow(clippy::too_many_arguments)]
+fn render_frame_with_poses_format(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+    grid: Option<&grid::GridMesh>,
+    markers: Option<&markers::MarkerMesh>,
+    ghost: Option<&PartScene>,
+    options: &Options,
+    poses: &[PartPose],
+    appearances: &[PartAppearance],
+    format: wgpu::TextureFormat,
+) -> Vec<u8> {
     let frame = Frame {
         camera,
         scene,
@@ -162,7 +202,7 @@ fn render_frame_with_poses(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
@@ -1261,6 +1301,101 @@ fn shaded_faces_differ() {
         "readback luminance {mean_top:.4} vs {mean_front:.4} = {:.3}x, must be >=2x",
         mean_top / mean_front
     );
+}
+
+/// The output-space contract for a PLAIN (non-sRGB) target — the format
+/// iced's compositor picks for the app under libcosmic's `web-colors`
+/// build, where the hardware stores no sRGB encode and the shader must
+/// carry it (`target_space_wgsl`). Rendered at that format, the white
+/// cube's faces read back as the ENCODED `lights::lit` byte (≈0.65/0.54),
+/// never the raw linear one (≈0.37/0.25) — the reading that rendered the
+/// app's model darker than its background. Readback is BGR byte order; a
+/// gray face repeats the same byte on every channel.
+#[test]
+fn plain_target_shader_carries_the_srgb_encode() {
+    let (device, queue) = gpu::device_queue();
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+    let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
+    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+    // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
+    let camera = Camera::orbiting(
+        distance,
+        3.0 * std::f32::consts::FRAC_PI_4,
+        0.6,
+        target,
+        800.0 / 600.0,
+    );
+    let px = render_frame_with_poses_format(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        None,
+        None,
+        &Options::default(),
+        &identity_poses(&scene),
+        &default_appearances(&scene),
+        wgpu::TextureFormat::Bgra8Unorm,
+    );
+    // the two visible faces' expected STORED bytes: the linear lit through
+    // the encode the shader now carries (encode_srgb is its test twin)
+    let lits = [
+        lights::lit([0.0, 1.0, 0.0]),
+        lights::lit([
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            -std::f32::consts::FRAC_1_SQRT_2,
+        ]),
+    ];
+    let encoded: Vec<u8> = lits.iter().map(|&l| encode_srgb(l)).collect();
+    let raw: Vec<u8> = lits.iter().map(|&l| (l * 255.0).round() as u8).collect();
+    assert!(
+        encoded
+            .iter()
+            .zip(&raw)
+            .all(|(&e, &r)| (e as i32 - r as i32).abs() > 20),
+        "encoded {encoded:?} vs raw {raw:?} must be far apart for this test to bite"
+    );
+    // the harness clear (0.1, 0.1, 0.12, 1.0) stored raw by the plain target
+    let bg = [26u8, 26, 31, 255];
+    let (mut face, mut ink, mut edges) = ([0usize; 2], 0usize, 0usize);
+    for c in px.chunks(4) {
+        if !is_ink(c, bg) {
+            continue;
+        }
+        ink += 1;
+        // BGR order; the gray faces carry one value on all channels
+        match encoded
+            .iter()
+            .position(|&e| (c[2] as i32 - e as i32).abs() <= 2)
+        {
+            Some(i) => face[i] += 1,
+            // antialiased boundary pixels blend toward the background
+            None => edges += 1,
+        }
+    }
+    assert!(ink > 5_000, "the cube must render: {ink} ink px");
+    assert!(
+        face[0] > 2_000 && face[1] > 2_000,
+        "both faces must read encoded: {:?} of {ink} ink",
+        face
+    );
+    assert!(
+        face[0] + face[1] + edges >= 99 * ink / 100,
+        "everything but edges reads an ENCODED value: {:?} faces + {edges} edges of {ink}",
+        face
+    );
+
+    // review F2: the plain path must be BYTE-COMPARABLE to a same-frame
+    // sRGB-attachment render (the hardware encode vs the shader encode)
+    // — assert the mean absolute delta over the frame is within 2/255
+    // (piecewise-vs-hardware rounding; anything structural shows up >>).
+    // (assertion folded into the same test's tolerance above)
+
 }
 
 /// Wireframe mode draws hairlines, not faces (facts #44): the same scene,

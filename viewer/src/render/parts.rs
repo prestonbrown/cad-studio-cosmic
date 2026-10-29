@@ -58,6 +58,20 @@ pub fn srgb_to_linear(c: u8) -> f32 {
     srgb_to_linear_f(c as f32 / 255.0)
 }
 
+/// Exact inverse of [`srgb_to_linear_f`] (the sRGB OETF), clamped to the
+/// unit range — the curve `to_target` in the color-writing shaders applies
+/// when the pipeline's target format is not sRGB-tagged (see
+/// [`crate::render::target_space_wgsl`]). The Rust twin of that WGSL block,
+/// so tests pin one curve both sides run.
+pub fn linear_to_srgb_f(l: f32) -> f32 {
+    let e = if l <= 0.0031308 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    e.clamp(0.0, 1.0)
+}
+
 /// A triangle's u8 sRGB color -> linear; `None` paints the `neutral`.
 fn stage_color(color: TriangleColor, neutral: [f32; 3]) -> [f32; 3] {
     color.map_or(neutral, |c| {
@@ -327,4 +341,38 @@ fn floor_pin(parts: &[Part]) -> [f32; 3] {
     }
     pin[1] = -mn[1];
     pin
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The staged colors cross srgb_to_linear once at build; the shader
+    /// curves them back through linear_to_srgb on a plain target — the
+    /// pair must be exact inverses (to the f32 rounding of two powfs), and
+    /// both must be the identity-fixed at the endpoints and the sRGB
+    /// standard's own knee pair (0.04045 sRGB ↔ 0.0031308 linear).
+    #[test]
+    fn linear_to_srgb_inverts_the_staging_eotf() {
+        let knee = 0.04045f32;
+        assert!((srgb_to_linear_f(knee) - knee / 12.92).abs() < 1e-7);
+        assert!((linear_to_srgb_f(knee / 12.92) - knee).abs() < 1e-6);
+        assert_eq!(linear_to_srgb_f(0.0), 0.0);
+        // 1.055 − 0.055 is one ulp shy of 1 in f32
+        assert!((linear_to_srgb_f(1.0) - 1.0).abs() < 1e-6);
+        // the sRGB OETF's own reference pair
+        assert!((linear_to_srgb_f(0.5) - 0.7354).abs() < 1e-4);
+        // roundtrip over the whole byte range: u8 -> linear -> u8 is exact
+        for b in 0u8..=255 {
+            let there = srgb_to_linear(b);
+            let back = linear_to_srgb_f(there) * 255.0;
+            assert!(
+                (back - b as f32).abs() <= 0.5,
+                "b {b}: linear {there:.6} -> {back:.3}"
+            );
+        }
+        // out-of-range input clamps, never NaN
+        assert_eq!(linear_to_srgb_f(1.2), 1.0);
+        assert_eq!(linear_to_srgb_f(-0.1), 0.0);
+    }
 }

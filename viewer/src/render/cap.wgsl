@@ -20,8 +20,10 @@ fn vs_cap(@location(0) corner: vec3<f32>) -> @builtin(position) vec4<f32> {
 // EOTF. The @CAP_@ markers are not valid WGSL: a missed substitution fails
 // shader compilation loudly.
 const CAP_COLOR: vec3<f32> = vec3<f32>(@CAP_R@, @CAP_G@, @CAP_B@);
+@TARGET_SPACE@
 
 @fragment
 fn fs_cap() -> @location(0) vec4<f32> {
-    return vec4<f32>(CAP_COLOR, 1.0); // upstream's blended-red cut face
+    // upstream's blended-red cut face — LINEAR, encoded for the target
+    return vec4<f32>(to_target(CAP_COLOR), 1.0);
 }
