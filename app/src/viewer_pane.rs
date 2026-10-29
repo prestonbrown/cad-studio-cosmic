@@ -83,11 +83,14 @@
 //! parts render translucent, colliding parts flat red. Upstream's timer
 //! keeps firing while paused (those ticks are posedTime no-ops); the pane
 //! instead mounts the subscription only while playing — behavior-identical,
-//! without waking the runtime 60×/s for nothing. One recorded divergence:
-//! upstream's Space shortcut (MotionControls.swift:19) is a SwiftUI button
-//! shortcut, inert while a text field has focus; iced's global listener
-//! cannot see focus, so Space typed into the chat draft toggles playback
-//! too — revisit at M8's command system.
+//! without waking the runtime 60×/s for nothing. Upstream's Space shortcut
+//! (MotionControls.swift:19) is a SwiftUI button shortcut, inert while a
+//! text field has focus — and the pane's listener is scoped the same way
+//! by the pin itself, no focus query needed: `keyboard::listen` delivers
+//! only widget-IGNORED key events, and a focused text editor or input
+//! consumes bare Space as an insert (captured), so Space typed into the
+//! chat draft never reaches this listener — only editor-unfocused Space
+//! does, which is exactly upstream's rule.
 //!
 //! The mounts: the bottom-center overlay slot is upstream's either/or
 //! (ModelPane.swift:39-45) — animating with a study floats
@@ -828,9 +831,12 @@ impl ViewerPane {
             // Space with no modifiers toggles playback while animating
             // (MotionControls.swift:19) — the update arm's animating gate
             // no-ops it on an idle pane. winit reports no Named::Space;
-            // the logical key is the character " ". DIVERGENCE (module
-            // docs): SwiftUI button shortcuts stay inert while a text
-            // field has focus; iced's global listener cannot see focus.
+            // the logical key is the character " ". Only editor-IGNORED
+            // Space ever reaches this filter: listen() drops captured
+            // events, and a focused text editor/input captures bare Space
+            // as an insert — SwiftUI's inert-while-a-text-field-has-focus
+            // rule, via capture status rather than a focus query (module
+            // docs).
             keyboard::Event::KeyPressed {
                 key: keyboard::Key::Character(c),
                 modifiers,
@@ -3373,6 +3379,46 @@ mod tests {
         let _ = pane.subscription();
         let _ = pane.update(Message::ToggleAnimation);
         let _ = pane.subscription();
+    }
+
+    /// The Space/focus parity (module docs) rests on the pin's editor
+    /// behavior: `keyboard::listen` delivers only widget-IGNORED events,
+    /// and the FOCUSED editor's binding for bare Space is an insert —
+    /// captured, so it never reaches the pane's filter.
+    /// `Binding::from_key_press` is that editor decision function (the
+    /// chat draft's `key_binding` falls through to it for every
+    /// non-shortcut character), so pinning it here guards the pin's
+    /// BINDING half: an editor rev that stopped *binding* Space (mapping
+    /// it to something else, or nothing) trips this test. The other two
+    /// halves — the binding arm's capture call and listen()'s
+    /// Ignored-only filter — are doc-only coverage (untestable without a
+    /// GUI at this repo's test bar); if either ever changes, re-derive
+    /// the module doc's mechanism paragraph with them.
+    #[test]
+    fn focused_editor_consumes_bare_space_unfocused_does_not() {
+        use cosmic::widget::text_editor::{Binding, KeyPress, Status};
+        let space_press = |status: Status| KeyPress {
+            key: keyboard::Key::Character(" ".into()),
+            modified_key: keyboard::Key::Character(" ".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Space),
+            modifiers: Modifiers::empty(),
+            text: Some(" ".into()),
+            status,
+        };
+        // focused: an insert binding — the editor captures the press and
+        // listen() drops it; Space in the chat draft cannot toggle playback
+        assert!(matches!(
+            Binding::<Message>::from_key_press(space_press(Status::Focused {
+                is_hovered: false
+            })),
+            Some(Binding::Insert(' '))
+        ));
+        // unfocused: no binding — the press stays ignored and reaches the
+        // pane's filter, where the animating gate decides (upstream's rule)
+        assert!(matches!(
+            Binding::<Message>::from_key_press(space_press(Status::Active)),
+            None
+        ));
     }
 
     #[test]

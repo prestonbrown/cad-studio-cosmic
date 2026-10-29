@@ -227,11 +227,17 @@ From the M6 T10 review (2026-10-13):
 From the M7 wrap (2026-10-13) — the accepted divergences and deferred
 minors, each with its owner:
 
-- Space focus: upstream's Space shortcut (MotionControls.swift:19) is a
+- ~~Space focus: upstream's Space shortcut (MotionControls.swift:19) is a
   SwiftUI button shortcut, inert while a text field has focus; iced's
   global listener cannot see focus, so Space typed into the chat draft
   toggles playback too. M8's command system owns the revisit (the pane's
-  module doc has the detail).
+  module doc has the detail).~~ (no divergence — M8 T9's probe of the pin
+  found the recorded behavior impossible: `keyboard::listen` delivers only
+  widget-IGNORED events, and a focused text editor/input captures bare
+  Space as an insert, so the pane's listener never sees editor-typed
+  Space. The M7 entry was a design-time inference, never observed live;
+  viewer_pane's module doc now states the mechanism and a test pins the
+  editor binding)
 - Keyboard-driven scrub pauses: upstream pauses only on drag-start
   (`onEditingChanged`, MotionControls.swift:24-30), which iced's slider
   does not surface — every `Scrub` message pauses, drag or keys.
@@ -446,3 +452,13 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   on thelio only (~/.local/share/{applications,icons}) for the dock;
   needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
+
+- Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
+  keyboard listener rides `keyboard::listen()`, which drops the window tag —
+  with TWO project windows open, an editor-unfocused Space/Esc reaches BOTH
+  panes' subscriptions (playback toggles in the background window) where
+  SwiftUI's shortcuts fire in the key window only. Reachable (open_project
+  dedups by root; two roots = two windows); the fix is window-tagged event
+  routing (the pane has no window-focus knowledge today) — a later-milestone
+  design, recorded here until then. The single-window case is unaffected
+  (T9 verified the editor-capture mechanism end-to-end).
