@@ -77,6 +77,20 @@ issue lists — those never corrupt). The menu bar keeps only static
 roots. Cost: none functionally; the popover is anchored and styled like
 the menu it replaces.
 
+## Re-probe (2026-10-29, M8 T12): NOT FIXED at upstream HEAD
+
+libcosmic 95236a9 (upstream HEAD as of 2026-10-27; iced at both pins wants
+wgpu 28.0, so the pin constraint binds nothing): the exact panic —
+"Downcast widget state", tree.rs:507, the menu_inner init_root_menu →
+get_children_layout stack — reproduced after a jar-project turn recorded a
+version and the version menu root was clicked. The probe had to restore
+the pre-workaround menu root (16ea45e's arrangement) in a throwaway
+worktree to expose the surface; the popover UI cannot test the bug at all.
+The popover workaround and this watch carry to M9. The M4 pinch watch also
+re-probed: NO PinchGesture arm anywhere in the bumped rev's iced/winit
+(conversion.rs has no gesture arm; winit 0.31.0-beta.2). Evidence:
+thelio:/tmp/m8t12-evidence-run.log; report in this repo's SDD workspace.
+
 ## Evidence preserved
 
 - /tmp/crash-repro-jar on the reporting machine: the exact project state
