@@ -95,14 +95,17 @@ pub mod new_project {
             .spacing(16)
             .push(text(fl!("scegli-le-opzioni-per-il-nuovo-progetto")).size(18))
             .push(
-                Column::new().spacing(6).push(text(fl!("nome-progetto-2"))).push(
-                    text_input::text_input(fl!("staffa-a-l"), &sheet.name)
-                        .on_input(Message::Name)
-                        // Return runs Avanti (upstream `.onSubmit(create)`,
-                        // NewProjectSheet.swift:27)
-                        .on_submit(|_| Message::Advance)
-                        .size(14),
-                ),
+                Column::new()
+                    .spacing(6)
+                    .push(text(fl!("nome-progetto-2")))
+                    .push(
+                        text_input::text_input(fl!("staffa-a-l"), &sheet.name)
+                            .on_input(Message::Name)
+                            // Return runs Avanti (upstream `.onSubmit(create)`,
+                            // NewProjectSheet.swift:27)
+                            .on_submit(|_| Message::Advance)
+                            .size(14),
+                    ),
             )
             .push(
                 text(fl!(
@@ -112,9 +115,13 @@ pub mod new_project {
             );
         if let Some(error) = &sheet.error {
             stack = stack.push(
-                text(format!("{}: {error}", fl!("impossibile-creare-il-progetto"))).class(
-                    cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.90, 0.32, 0.32)),
-                ),
+                text(format!(
+                    "{}: {error}",
+                    fl!("impossibile-creare-il-progetto")
+                ))
+                .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(
+                    0.90, 0.32, 0.32,
+                ))),
             );
         }
         stack = stack.push(
@@ -253,8 +260,7 @@ impl Welcome {
             )
             .push(
                 container(
-                    text(fl!("versione", version = env!("CARGO_PKG_VERSION")))
-                        .class(dim_text()),
+                    text(fl!("versione", version = env!("CARGO_PKG_VERSION"))).class(dim_text()),
                 )
                 .padding([2, 0, 0, 0]),
             )
@@ -276,7 +282,9 @@ impl Welcome {
 
         let recents_list = self.view_recents(recents);
         Row::new()
-            .push(container(actions).width(ACTIONS_WIDTH).padding([0, 40]))
+            // upstream's pane is the bare frame — `actions.frame(width: 480)`
+            // (WelcomeWindow.swift:15-16), no horizontal padding
+            .push(container(actions).width(ACTIONS_WIDTH))
             .push(container(
                 cosmic::widget::divider::vertical::default().height(Length::Fill),
             ))
@@ -370,9 +378,17 @@ impl Welcome {
             &std::collections::HashMap::new(),
             vec![
                 Item::Button(fl!("apri"), None, actions(RecentMenuKind::Open)),
-                Item::Button(fl!("mostra-nel-finder"), None, actions(RecentMenuKind::Reveal)),
+                Item::Button(
+                    fl!("mostra-nel-finder"),
+                    None,
+                    actions(RecentMenuKind::Reveal),
+                ),
                 Item::Divider,
-                Item::Button(fl!("rimuovi-dalla-lista"), None, actions(RecentMenuKind::Remove)),
+                Item::Button(
+                    fl!("rimuovi-dalla-lista"),
+                    None,
+                    actions(RecentMenuKind::Remove),
+                ),
             ],
         );
         cosmic::widget::context_menu(button, Some(menu_items)).into()
@@ -433,10 +449,21 @@ fn action_button<'a>(icon_name: &str, label: &str, message: Message) -> Element<
     button::custom(
         Row::new()
             .spacing(10)
+            // upstream's HStack+frame centers the pair; iced Rows
+            // cross-align Start by default, leaving the glyph top-hung
+            // ~10px in the 40px button (review F5)
+            .align_y(cosmic::iced::alignment::Alignment::Center)
             .push(
-                cosmic::widget::icon::from_name(icon_name.to_string())
-                    .size(18)
-                    .icon(),
+                // the icon sits in a fixed 24 px column
+                // (`Image.frame(width: 24)`, WelcomeWindow.swift:101) so the
+                // two buttons' labels start on one x
+                container(
+                    cosmic::widget::icon::from_name(icon_name.to_string())
+                        .size(18)
+                        .icon(),
+                )
+                .width(24)
+                .align_x(cosmic::iced::alignment::Alignment::Center),
             )
             .push(text(label.to_string()))
             .push(Space::new().width(Length::Fill))
