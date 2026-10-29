@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=CAD Studio
+Comment=Describe a part, get a printable model
+# The BIN placeholder in Exec is rewritten by `just install` to the
+# installed binary's absolute path (a session PATH without ~/.local/bin
+# would otherwise fail to launch from the dock).
+Exec=@BIN@
+Icon=net.brownhouse.CadStudio
+Terminal=false
+Categories=Utility;Engineering;
+# COSMIC groups windows by their Wayland app_id, matched against this
+# file's id: libcosmic seeds the main window's app_id from
+# CadStudio::APP_ID and app.rs's `window_settings` seeds every
+# window::open secondary with the same value. StartupWMClass is the
+# X11/XWayland belt for the same identity.
+StartupWMClass=net.brownhouse.CadStudio

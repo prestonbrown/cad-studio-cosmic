@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The version placeholder in the release element below is rewritten to
+     the workspace version by `just install`; bump the release date
+     together with the version. -->
+<component type="desktop-application">
+  <id>net.brownhouse.CadStudio</id>
+  <name>CAD Studio</name>
+  <summary>Describe a part, get a printable model</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Describe a part, get a printable model. CAD Studio drives your locally installed Claude Code (or Codex) and build123d to turn a description into a printable 3D model and its technical drawing.</p>
+  </description>
+  <launchable type="desktop-id">net.brownhouse.CadStudio.desktop</launchable>
+  <releases>
+    <release version="@CARGO_PKG_VERSION@" date="2026-10-28"/>
+  </releases>
+</component>
