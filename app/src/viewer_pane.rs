@@ -810,6 +810,13 @@ impl ViewerPane {
         self.study.as_ref().map_or(0, MotionStudy::collision_count)
     }
 
+    /// The loaded manifest's warnings (upstream `output.manifest?.warnings`,
+    /// Project.swift:120) — the pane reloads the manifest on every
+    /// output change, so this is the fresh copy the issue list reads.
+    pub fn manifest_warnings(&self) -> &[String] {
+        self.manifest.as_ref().map_or(&[], |m| &m.warnings)
+    }
+
     /// The pane's subscriptions: the output-event relay plus keyboard
     /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag),
     /// Space while animating, Esc (clears an in-flight measurement,

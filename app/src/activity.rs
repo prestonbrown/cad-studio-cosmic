@@ -8,7 +8,7 @@
 //! (`Bridge::build_error`, wired M5 T8); the missing-output warning is
 //! the upstream home of output warnings. The motion-error and collision
 //! warnings joined at M7 (the pane-derived pair); the manifest warnings
-//! remain M8's (the ActivityViewer full port).
+//! join through the pane's reload-fresh copy of the manifest.
 
 use std::path::Path;
 
@@ -74,13 +74,14 @@ pub struct Issue {
 }
 
 /// The issue list (Project.swift:113-130): the build error first, one
-/// warning naming the missing output files, then the two motion branches —
-/// `motion_error` arrives already localized (the pane's reload formats
-/// `animation-json-non-valido` itself), the collision count formats into
-/// the fl! text. The manifest warnings join at M8.
+/// warning naming the missing output files, the manifest's warnings one
+/// warning each, then the two motion branches — `motion_error` arrives
+/// already localized (the pane's reload formats `animation-json-non-valido`
+/// itself), the collision count formats into the fl! text.
 pub fn issues(
     build_error: Option<&str>,
     missing_outputs: &[String],
+    manifest_warnings: &[String],
     motion_error: Option<&str>,
     collision_frames: usize,
 ) -> Vec<Issue> {
@@ -100,6 +101,10 @@ pub fn issues(
             ),
         });
     }
+    out.extend(manifest_warnings.iter().map(|warning| Issue {
+        kind: IssueKind::Warning,
+        message: warning.clone(),
+    }));
     if let Some(error) = motion_error {
         out.push(Issue {
             kind: IssueKind::Warning,
@@ -320,13 +325,13 @@ mod tests {
         }
         assert!(missing_output_files(&dir).is_empty());
 
-        let all_present = issues(None, &missing_output_files(&dir), None, 0);
+        let all_present = issues(None, &missing_output_files(&dir), &[], None, 0);
         assert!(all_present.is_empty());
 
         std::fs::remove_file(dir.join("model.3mf")).unwrap();
         let missing = missing_output_files(&dir);
         assert_eq!(missing, vec!["model.3mf".to_string()]);
-        let warnings_only = issues(None, &missing, None, 0);
+        let warnings_only = issues(None, &missing, &[], None, 0);
         assert_eq!(warnings_only.len(), 1);
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);
         assert_eq!(warnings_only[0].message, "Missing output files: model.3mf");
@@ -340,7 +345,7 @@ mod tests {
             "the app twin delegates to the engine twin"
         );
 
-        let both = issues(Some("SyntaxError: invalid syntax"), &missing, None, 0);
+        let both = issues(Some("SyntaxError: invalid syntax"), &missing, &[], None, 0);
         assert_eq!(both[0].kind, IssueKind::Error, "the build error leads");
         assert_eq!(both.len(), 2);
     }
@@ -352,19 +357,14 @@ mod tests {
     #[test]
     fn motion_issues_render_both_upstream_branches() {
         let _lang = crate::localize::pin_en();
-        let issues = crate::activity::issues(
-            None,
-            &[],
-            Some("animation.json is not valid: expected a comma"),
-            0,
-        );
+        let issues = crate::activity::issues(None, &[], &[], Some("animation.json is not valid: expected a comma"), 0);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, IssueKind::Warning);
         assert_eq!(
             issues[0].message,
             "animation.json is not valid: expected a comma"
         );
-        let issues = crate::activity::issues(None, &[], None, 2);
+        let issues = crate::activity::issues(None, &[], &[], None, 2);
         assert_eq!(issues.len(), 1);
         assert!(
             issues[0].message.contains("2 frames"),
@@ -373,6 +373,36 @@ mod tests {
         );
         assert!(!issues[0].message.contains("%lld"), "placeholder gone");
         // zero-collision and no-error studies stay silent
-        assert!(crate::activity::issues(None, &[], None, 0).is_empty());
+        assert!(crate::activity::issues(None, &[], &[], None, 0).is_empty());
+    }
+
+    /// The manifest's warnings render one warning each, verbatim
+    /// (Project.swift:120: `issues += (output.manifest?.warnings ?? []).map
+    /// { Issue(kind: .warning, message: $0) }`) — placed after the
+    /// missing-output warning and before the motion branches.
+    #[test]
+    fn manifest_warnings_render_one_warning_each_in_upstream_order() {
+        let _lang = crate::localize::pin_en();
+        let all = issues(
+            Some("SyntaxError: invalid syntax"),
+            &["model.3mf".to_string()],
+            &[
+                "bed smaller than the part".to_string(),
+                "wall exceeds the printer height".to_string(),
+            ],
+            Some("animation.json is not valid: expected a comma"),
+            3,
+        );
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0].kind, IssueKind::Error, "the build error leads");
+        assert_eq!(all[1].message, "Missing output files: model.3mf");
+        assert_eq!(all[2].message, "bed smaller than the part");
+        assert_eq!(all[3].message, "wall exceeds the printer height");
+        assert!(all[4].message.contains("not valid"), "motion error follows");
+        assert!(all[5].message.contains("3 frames"), "collision count last");
+        assert!(
+            all[1..].iter().all(|issue| issue.kind == IssueKind::Warning),
+            "everything but the build error is a warning"
+        );
     }
 }

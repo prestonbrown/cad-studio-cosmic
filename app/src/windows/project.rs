@@ -1312,6 +1312,7 @@ impl ProjectWindow {
         let issues = activity::issues(
             self.bridge.build_error().as_deref(),
             &self.missing_outputs,
+            self.viewer.manifest_warnings(),
             self.viewer.motion_error(),
             self.viewer.collision_frames(),
         );
@@ -1352,6 +1353,7 @@ impl ProjectWindow {
         let issues = activity::issues(
             self.bridge.build_error().as_deref(),
             &self.missing_outputs,
+            self.viewer.manifest_warnings(),
             self.viewer.motion_error(),
             self.viewer.collision_frames(),
         );
