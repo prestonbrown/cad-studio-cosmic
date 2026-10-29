@@ -251,6 +251,15 @@ impl Settings {
         }
     }
 
+    /// Stage the engine's model override — the settings window's Agente tab
+    /// writer (AgentEngine.modelKey's @AppStorage binding).
+    pub fn set_agent_model(&mut self, kind: AgentKind, model: Option<String>) {
+        match kind {
+            AgentKind::Claude => self.claude_model = model,
+            AgentKind::Codex => self.codex_model = model,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, SettingsError> {
         match std::fs::read_to_string(path) {
             Ok(json) => Ok(serde_json::from_str(&json)?),

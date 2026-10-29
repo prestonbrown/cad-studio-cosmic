@@ -1168,10 +1168,8 @@ impl Drive {
     fn close_open_turn(&mut self, transcript: &mut ChatState) {
         transcript.fail_running_tools();
         let _ = store::save_chat(&self.root, &transcript.messages);
-        self.pipeline().activity = Activity::Failed(fl!(
-            "errore-di",
-            agent = transcript.engine.display_name()
-        ));
+        self.pipeline().activity =
+            Activity::Failed(fl!("errore-di", agent = transcript.engine.display_name()));
         let _ = self.out.unbounded_send(Message::Closed);
     }
 
@@ -1708,17 +1706,20 @@ mod tests {
             std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
             std::env::set_var(
                 "CAD_FAKE_SCENARIO",
-                fake_agent().parent().unwrap().join("scenarios/auth-error.jsonl"),
+                fake_agent()
+                    .parent()
+                    .unwrap()
+                    .join("scenarios/auth-error.jsonl"),
             );
             std::env::set_var(
                 "CAD_FAKE_STDERR",
-                fake_agent().parent().unwrap().join("scenarios/auth-error.stderr"),
+                fake_agent()
+                    .parent()
+                    .unwrap()
+                    .join("scenarios/auth-error.stderr"),
             );
             std::env::set_var("CAD_FAKE_ARGV_OUT", root.join("argv-out"));
-            std::env::set_var(
-                "CAD_STUDIO_RUNNING_PROCESSES",
-                root.join("registry"),
-            );
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
         }
 
         let mut settings = Settings::default();
@@ -1734,7 +1735,13 @@ mod tests {
             .enqueue("make a bracket".into(), Vec::new())
             .expect("the send is not refused");
         run_until(&mut messages, |m| {
-            matches!(m, Message::TurnStarted { engine: AgentKind::Codex, .. })
+            matches!(
+                m,
+                Message::TurnStarted {
+                    engine: AgentKind::Codex,
+                    ..
+                }
+            )
         })
         .await;
         assert_eq!(

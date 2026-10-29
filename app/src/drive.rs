@@ -24,6 +24,11 @@
 //! chat <text…>                    # stage the text as the chat draft and
 //!                                 # SEND it through the real shell path
 //!                                 # (a keyboard-free user turn)
+//! settings <tab name>             # open (or focus) the settings window
+//!                                 # at Generale/Agente/Python/Avanzate —
+//!                                 # the ⌘, route without a keyboard
+//!                                 # (the :99 frame pass's per-tab capture)
+//! about                           # open the About window
 //! project <id-less msg> …         # (future) project-window commands
 //! sleep <ms>                      # pause before the next line
 //! ```
@@ -132,6 +137,22 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 _ => return Err(format!("line {}: unknown agent command", number + 1)),
             },
             "noop" => Step::Msg(Message::Noop),
+            "settings" => {
+                let tab = match rest {
+                    "Generale" | "" => crate::windows::settings::Tab::General,
+                    "Agente" => crate::windows::settings::Tab::Agent,
+                    "Python" => crate::windows::settings::Tab::Python,
+                    "Avanzate" => crate::windows::settings::Tab::Advanced,
+                    _ => {
+                        return Err(format!(
+                            "line {}: settings wants a tab (Generale/Agente/Python/Avanzate)",
+                            number + 1
+                        ));
+                    }
+                };
+                Step::Msg(Message::OpenSettings(tab))
+            }
+            "about" => Step::Msg(Message::OpenAbout),
             _ => return Err(format!("line {}: unknown command `{command}`", number + 1)),
         };
         steps.push(step);
@@ -242,5 +263,26 @@ mod tests {
     #[test]
     fn comments_and_blanks_are_skipped() {
         assert!(parse("# nothing\n\n   \n").unwrap().is_empty());
+    }
+
+    /// `settings` opens the settings window at a named tab (the frame
+    /// pass's per-tab capture route — the ⌘, command without a keyboard);
+    /// `about` opens the About window. Unknown tabs are errors, a bare
+    /// `settings` opens Generale.
+    #[test]
+    fn settings_and_about_commands_parse() {
+        let steps = parse("settings Agente\nabout\nsettings\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::OpenSettings(crate::windows::settings::Tab::Agent))
+        ));
+        assert!(matches!(steps[1], Step::Msg(Message::OpenAbout)));
+        assert!(matches!(
+            steps[2],
+            Step::Msg(Message::OpenSettings(
+                crate::windows::settings::Tab::General
+            ))
+        ));
+        assert!(parse("settings Impostazioni").is_err());
     }
 }

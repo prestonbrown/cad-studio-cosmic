@@ -128,6 +128,10 @@ pub enum Message {
     /// A bridge refusal asked for the Python setup sheet — the app layer
     /// owns the sheet's presentation (it overlays whichever window shows).
     PresentSetupSheet,
+    /// A chat row's "Configura l'agente…" action — the app layer presents
+    /// the agent-missing sheet over whichever window shows (upstream
+    /// ChatView.swift:101-102; the sheet, not the settings window).
+    PresentAgentSheet,
     /// The shell's output watcher saw a settled change.
     OutputReload(ReloadKind),
     /// The pane grid's laid-out size (the resize clamp's input).
@@ -174,6 +178,12 @@ pub enum AppRequest {
     OpenProject,
     OpenRecent,
     Welcome,
+    /// Open the settings window (upstream's Settings scene; the port's
+    /// placement is the File root — there is no app menu to hold it).
+    Settings,
+    /// Open the About window (upstream's app-info command group,
+    /// Commands.swift:10-14; same placement note as Settings).
+    About,
 }
 
 /// One open project's window state.
@@ -676,7 +686,10 @@ impl ProjectWindow {
             // the app layer acts (PresentSetupSheet's one producer — the
             // bridge's PythonSheetRequested forward — already lands there;
             // re-emitting it here would loop the variant back into itself)
-            Message::CloseRequested | Message::App(_) | Message::PresentSetupSheet => Task::none(),
+            Message::CloseRequested
+            | Message::App(_)
+            | Message::PresentSetupSheet
+            | Message::PresentAgentSheet => Task::none(),
             Message::Restore(number) => {
                 // restoring dismisses the card it was picked from
                 self.version_card = None;
@@ -773,8 +786,14 @@ impl ProjectWindow {
                 let _ = self.bridge.ask_agent_to_fix(&traceback);
                 self.set_activity(self.bridge.activity().into());
             }
-            // ConfigureClaude is the M8 settings window
-            chat_view::Message::RowAction(_, Action::ConfigureClaude) => {}
+            // the "Configura l'agente…" row action presents the
+            // AGENT-MISSING SHEET — upstream ChatView.swift:101-102 sets
+            // `AgentLocator.current.isMissingSheetPresented = true`; there
+            // is no settings route off the action or off that sheet
+            // (Ruling 6). The app layer owns the sheet.
+            chat_view::Message::RowAction(_, Action::ConfigureClaude) => {
+                return CosmicTask::done(Message::PresentAgentSheet);
+            }
             // a markdown link: the system opener (upstream NSWorkspace.open)
             chat_view::Message::OpenUrl(url) => {
                 let url = url.clone();
@@ -855,7 +874,11 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Closed => {
-                self.set_activity(activity::next(activity::Signal::Closed, false, self.engine_name()));
+                self.set_activity(activity::next(
+                    activity::Signal::Closed,
+                    false,
+                    self.engine_name(),
+                ));
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {
@@ -1362,6 +1385,9 @@ impl ProjectWindow {
             Item::Button(fl!("apri-recenti"), None, AppRequest::OpenRecent),
             Item::Divider,
             Item::Button(fl!("finestra-di-benvenuto"), None, AppRequest::Welcome),
+            Item::Divider,
+            Item::Button(fl!("settings"), None, AppRequest::Settings),
+            Item::Button(fl!("informazioni-su-cad-studio"), None, AppRequest::About),
         ];
         let file_binds = std::collections::HashMap::new();
         let file_tree = cosmic::widget::menu::Tree::with_children(

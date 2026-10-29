@@ -202,4 +202,12 @@ fn agent_engine_readers_route_per_kind() {
     assert_eq!(s.codex_path, None);
     s.set_agent_path(AgentKind::Claude, Some("/x/claude".into()));
     assert_eq!(s.claude_path.as_deref(), Some("/x/claude"));
+
+    // the settings window's model writer: set per kind, clear on None
+    s.set_agent_model(AgentKind::Codex, Some("gpt-5.2-codex".into()));
+    assert_eq!(s.codex_model.as_deref(), Some("gpt-5.2-codex"));
+    s.set_agent_model(AgentKind::Codex, None);
+    assert_eq!(s.codex_model, None);
+    s.set_agent_model(AgentKind::Claude, Some("opus".into()));
+    assert_eq!(s.claude_model.as_deref(), Some("opus"));
 }

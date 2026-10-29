@@ -18,9 +18,10 @@
 //! cards (opaque, rounded, shadowed) in a modal popover, with scrollable
 //! content and pinned action rows so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
-//! mono log. User-visible strings follow the landed modules' convention:
-//! plain English values, each named for its en/main.ftl key, pending the
-//! repo-wide `fl!()` swap.
+//! mono log. The print-preferences section reads through `fl!` (the
+//! settings window shares it); the remaining sheet strings are plain
+//! English values named for their en/main.ftl keys, pending the repo-wide
+//! `fl!()` swap.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,6 +35,8 @@ use cosmic::{Element, Task};
 use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
+
+use crate::fl;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -100,7 +103,10 @@ impl AgentMissing {
     /// Verify, the only moment the value is consumed).
     pub fn stage_custom_path(&self, settings: &mut Settings) {
         let trimmed = self.custom_path.trim();
-        settings.set_agent_path(self.kind, (!trimmed.is_empty()).then(|| trimmed.to_string()));
+        settings.set_agent_path(
+            self.kind,
+            (!trimmed.is_empty()).then(|| trimmed.to_string()),
+        );
     }
 }
 
@@ -235,23 +241,25 @@ impl Setup {
     }
 }
 
-/// Upstream `PrinterType.title` (PrintPreferences.swift:66-72).
-pub fn printer_type_title(kind: PrinterType) -> &'static str {
+/// Upstream `PrinterType.title` (PrintPreferences.swift:66-72), catalog
+/// keys per option.
+pub fn printer_type_title(kind: PrinterType) -> String {
     match kind {
-        PrinterType::Fdm => "FDM (filament)",
-        PrinterType::FdmMultiMaterial => "Multi-material FDM (AMS, MMU)",
-        PrinterType::Resin => "Resin (SLA, DLP, MSLA)",
-        PrinterType::Sls => "SLS (powder)",
+        PrinterType::Fdm => fl!("fdm-filamento"),
+        PrinterType::FdmMultiMaterial => fl!("fdm-multimateriale-ams-mmu"),
+        PrinterType::Resin => fl!("resina-sla-dlp-msla"),
+        PrinterType::Sls => fl!("sls-polvere"),
     }
 }
 
-/// Upstream `MeasurementUnit.title` (PrintPreferences.swift:22-30).
-pub fn measurement_unit_title(unit: MeasurementUnit) -> &'static str {
+/// Upstream `MeasurementUnit.title` (PrintPreferences.swift:22-30),
+/// catalog keys per option.
+pub fn measurement_unit_title(unit: MeasurementUnit) -> String {
     match unit {
-        MeasurementUnit::Millimeters => "Millimeters (mm)",
-        MeasurementUnit::Centimeters => "Centimeters (cm)",
-        MeasurementUnit::Meters => "Meters (m)",
-        MeasurementUnit::Inches => "Inches (in)",
+        MeasurementUnit::Millimeters => fl!("millimetri-mm"),
+        MeasurementUnit::Centimeters => fl!("centimetri-cm"),
+        MeasurementUnit::Meters => fl!("metri-m"),
+        MeasurementUnit::Inches => fl!("pollici-in"),
     }
 }
 
@@ -269,9 +277,75 @@ pub const MEASUREMENT_UNITS: [MeasurementUnit; 4] = [
     MeasurementUnit::Inches,
 ];
 
-/// SetupSheet (SetupSheet.swift:7-41): welcome head, the print preferences
-/// form, Continue. Pickers render as radio-style option lists (no nested
-/// popup inside the modal).
+/// One print-preferences edit (the shared section's message): the same
+/// three writes upstream's `PrintPreferencesSection` binds with
+/// @AppStorage; WHERE they persist is the caller's policy (the first-run
+/// sheet batches to Continue, the settings window writes live).
+#[derive(Debug, Clone)]
+pub enum PrintPrefMessage {
+    PrinterType(PrinterType),
+    PrinterModel(String),
+    Unit(MeasurementUnit),
+}
+
+/// The PrintPreferencesSection port (PrintPreferences.swift:108-135): the
+/// three fields + the footer, one renderer for both surfaces that embed it
+/// — the first-run SetupSheet and the settings window's Generale tab
+/// (SettingsView.swift:57). Compact dropdowns (the sheets idiom; a nested
+/// popup inside the modal sheet clipped in the 460 px welcome window).
+pub fn view_print_preferences<'a>(
+    printer_type: PrinterType,
+    printer_model: &'a str,
+    unit: MeasurementUnit,
+) -> Element<'a, PrintPrefMessage> {
+    let printer_types = PRINTER_TYPES.map(printer_type_title).to_vec();
+    let units = MEASUREMENT_UNITS.map(measurement_unit_title).to_vec();
+    Column::new()
+        .spacing(12)
+        .push(
+            Column::new()
+                .spacing(6)
+                .push(body(fl!("tipo-di-stampante")))
+                .push(cosmic::widget::dropdown(
+                    printer_types,
+                    Some(printer_type as usize),
+                    |index| PrintPrefMessage::PrinterType(PRINTER_TYPES[index]),
+                )),
+        )
+        .push(
+            Column::new()
+                .spacing(6)
+                .push(body(fl!("modello-2")))
+                .push(
+                    text_input::text_input(
+                        fl!("facoltativo-ad-esempio-bambu-lab-p1s"),
+                        printer_model,
+                    )
+                    .on_input(PrintPrefMessage::PrinterModel)
+                    .size(14),
+                ),
+        )
+        .push(
+            Column::new()
+                .spacing(6)
+                .push(body(fl!("unit-di-misura")))
+                .push(cosmic::widget::dropdown(
+                    units,
+                    Some(unit as usize),
+                    |index| PrintPrefMessage::Unit(MEASUREMENT_UNITS[index]),
+                )),
+        )
+        .push(body(fl!(
+            "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
+        ))
+        .class(secondary_text()))
+        .into()
+}
+
+/// SetupSheet (SetupSheet.swift:7-41): welcome head, the shared print
+/// preferences section, Continue. The picks batch into the settings on
+/// Continue (the port's staged write; upstream's section binds
+/// @AppStorage live and Continue writes only hasCompletedSetup).
 pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     let head = Column::new()
         .spacing(4)
@@ -280,51 +354,13 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
             "Tell us how you print: you can change this any time in Settings.".to_string(),
         ));
 
-    // Upstream's Pickers, as compact dropdowns: the radio-list expansion
-    // this view shipped with made the sheet taller than the 460 px
-    // welcome window, clipping the unit list and Continue off-screen.
-    let printer_types = PRINTER_TYPES.map(printer_type_title).to_vec();
-    let units = MEASUREMENT_UNITS.map(measurement_unit_title).to_vec();
-
-    let mut form = Column::new().spacing(12);
-    form = form.push(
-        Column::new()
-            .spacing(6)
-            .push(body("Printer type:".to_string()))
-            .push(cosmic::widget::dropdown(
-                printer_types,
-                Some(sheet.printer_type as usize),
-                |index| SetupMessage::PrinterType(PRINTER_TYPES[index]),
-            )),
+    let form = view_print_preferences(sheet.printer_type, &sheet.printer_model, sheet.unit).map(
+        |message| match message {
+            PrintPrefMessage::PrinterType(kind) => SetupMessage::PrinterType(kind),
+            PrintPrefMessage::PrinterModel(model) => SetupMessage::PrinterModel(model),
+            PrintPrefMessage::Unit(unit) => SetupMessage::Unit(unit),
+        },
     );
-    form = form
-        .push(
-            Column::new()
-                .spacing(6)
-                .push(body("Printer model:".to_string()))
-                .push(
-                    text_input::text_input(
-                        "Optional, e.g. Bambu Lab P1S",
-                        &sheet.printer_model,
-                    )
-                    .on_input(SetupMessage::PrinterModel)
-                    .size(14),
-                ),
-        )
-        .push(
-            Column::new()
-                .spacing(6)
-                .push(body("Measurement unit:".to_string()))
-                .push(cosmic::widget::dropdown(
-                    units,
-                    Some(sheet.unit as usize),
-                    |index| SetupMessage::Unit(MEASUREMENT_UNITS[index]),
-                )),
-        )
-        .push(
-            body("The agent adapts wall thickness, clearances and printing advice to your printer and uses the chosen unit in responses and drawings. STL and 3MF files always stay in millimeters.".to_string())
-                .class(secondary_text()),
-        );
 
     // The form scrolls if it ever outgrows the cap (a small window);
     // Continue stays pinned below it, never scrolled away.
@@ -364,10 +400,14 @@ pub const PYTHON_INSTALL: &str = "Install";
 /// EN catalog `installazione-in-corso` (the disabled busy button, :70).
 pub const PYTHON_INSTALLING: &str = "Installing…";
 
-/// The head's app icon, by app id (upstream shows NSApp.applicationIconImage;
-/// the freedesktop lookup resolves once the app ships its icon — libcosmic's
-/// own About-page convention). Keep in sync with `CadStudio::APP_ID`.
-const PYTHON_SHEET_ICON: &str = "net.brownhouse.CadStudio";
+/// The app icon's freedesktop name (upstream shows
+/// NSApp.applicationIconImage; the freedesktop lookup resolves once the
+/// app ships its icon — libcosmic's own About-page convention). Keep in
+/// sync with `CadStudio::APP_ID`.
+pub const APP_ICON: &str = "net.brownhouse.CadStudio";
+
+/// The python sheet's head icon ([`APP_ICON`]).
+const PYTHON_SHEET_ICON: &str = APP_ICON;
 
 /// PythonSetupSheet messages. The driver kicks are the shell's: it acts on
 /// `Install` (reinstall through the engine seams) and folds `Event`s into
@@ -652,7 +692,7 @@ fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
 }
 
 /// A themed icon widget by freedesktop name; size in px (cosmetic layer).
-fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
+pub(crate) fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
     cosmic::widget::icon::from_name(name).size(size).icon()
 }
 
