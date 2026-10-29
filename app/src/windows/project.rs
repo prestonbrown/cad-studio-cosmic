@@ -1267,7 +1267,10 @@ impl ProjectWindow {
         row = match &self.activity {
             Activity::Idle => row.push(text(fl!("pronto")).size(12).class(dim_text())),
             Activity::Working(_) => row
-                .push(cosmic::widget::progress_bar::indeterminate_circular())
+                // .controlSize(.mini) (ActivityViewer.swift:44-46) — the
+                // 12pt bar's spinner at the ~12px mini size, matching the
+                // succeeded/failed icons beside it (cosmic's default is 48)
+                .push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
                 .push(
                     text(self.activity.text().to_string())
                         .size(12)
@@ -1982,6 +1985,29 @@ mod tests {
     /// back — so a save from the window's open-time copy reverts them. The
     /// restore-then-bookkeeping tail pins the same law after a restore
     /// moves both fields.
+    /// The header's ActivityViewer constructs in every activity state —
+    /// including the Working row's mini spinner (construction is pure; the
+    /// ring only reaches the GPU at draw time).
+    #[tokio::test]
+    async fn view_activity_constructs_in_every_state() {
+        let root = std::env::temp_dir().join(format!("cad-act-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        for activity in [
+            Activity::Idle,
+            Activity::Working("working".into()),
+            Activity::Succeeded("done".into()),
+            Activity::Failed("nope".into()),
+        ] {
+            window.activity = activity;
+            let _ = window.view_activity();
+        }
+    }
+
     /// The overlay-sync triggers the M6 review owed (carry-forwards M6):
     /// the two terminal bridge events drive `sync_parameters` —
     /// `BuildFinished` because the build refreshed the manifest's parameter

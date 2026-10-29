@@ -560,7 +560,9 @@ fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a
         .push(icon("brain", 14))
         .push(secondary_text(message.text.as_str()));
     if active {
-        line = line.push(cosmic::widget::progress_bar::indeterminate_circular());
+        // .controlSize(.mini) (ChatView.swift:170) — cosmic's default is a
+        // 48px ring; mini is the ~12px macOS size
+        line = line.push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0));
     }
     container(line)
         .padding([2.0, 8.0])
@@ -646,7 +648,10 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
     // the tooltip carries upstream's stateDescription (the accessibility
     // label); iced's glyphs have no label of their own
     let mark = match state {
-        ToolState::Running => Element::from(cosmic::widget::progress_bar::indeterminate_circular()),
+        // the running mark is .controlSize(.mini) (ToolActivityRow.swift:90)
+        ToolState::Running => Element::from(
+            cosmic::widget::progress_bar::indeterminate_circular().size(12.0),
+        ),
         ToolState::Succeeded => glyph("✓", STATE_OK),
         ToolState::Failed => glyph("✗", STATE_ERR),
     };
@@ -711,9 +716,10 @@ fn code_block<'a>(code: &str) -> Element<'a, Message> {
 }
 
 /// Upstream ChatView.swift:50-54: a small busy marker while the agent works
-/// before its first row opens.
+/// before its first row opens (.controlSize(.small) — the 16pt size, one
+/// step above the rows' mini spinners).
 fn streaming_indicator() -> Element<'static, Message> {
-    container(cosmic::widget::progress_bar::indeterminate_circular())
+    container(cosmic::widget::progress_bar::indeterminate_circular().size(16.0))
         .padding([0.0, 0.0, 0.0, 2.0])
         .into()
 }
@@ -1316,5 +1322,33 @@ mod tests {
         // missing file as known-failed (the tile, not a retry)
         assert!(decoded_thumbnail(&png).is_some());
         assert!(decoded_thumbnail(Path::new("/tmp/gone-missing.png")).is_none());
+    }
+
+    /// The three spinner-bearing rows construct together — the active
+    /// thinking row, a running tool row's state mark, and the busy
+    /// streaming indicator after a trailing user row — pinning the
+    /// construction path each `.size()` call rides on (the sizes themselves
+    /// are upstream's controlSize equivalents; the element tree carries no
+    /// readable size to assert).
+    #[test]
+    fn spinner_rows_construct() {
+        let root = std::env::temp_dir().join(format!("cad-chatview-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let now = Instant::now();
+        let mut chat = ChatState::new(Vec::new());
+        chat.apply_at(&started(), now);
+        chat.apply_at(&EngineEvent::ThinkingStarted, now);
+        chat.apply_at(
+            &EngineEvent::ToolStarted {
+                id: "tool-1".into(),
+                name: "Bash".into(),
+                title: "Listing the output".into(),
+            },
+            now,
+        );
+        chat.append(user_row("make the wall 4 mm"));
+
+        let pane = ChatPane::new();
+        let _ = view_chat(&pane, &chat, true, &[], false, &root);
     }
 }
