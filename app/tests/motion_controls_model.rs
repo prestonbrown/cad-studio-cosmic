@@ -25,6 +25,17 @@ fn significant_digits_match_the_two_swift_shapes() {
     );
 }
 
+/// Exact decimal ties round HALF-UP like Swift/ICU
+/// (`.precision(.significantDigits(…))`), where Rust's `{:.N}` rounds ties
+/// to even: 0.125 at two digits is "0.13", never "0.12"; the integer cut
+/// (magnitude == max digits) ties the same way (998.5 → "999").
+#[test]
+fn exact_ties_round_half_up_like_icu() {
+    assert_eq!(format_significant(0.125, 1, 2), "0.13");
+    assert_eq!(format_significant(0.625, 1, 2), "0.63");
+    assert_eq!(format_significant(998.5, 1, 3), "999");
+}
+
 #[test]
 fn speed_labels_are_shortest_display() {
     for (speed, label) in [

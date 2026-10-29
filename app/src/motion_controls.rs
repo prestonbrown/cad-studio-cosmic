@@ -9,7 +9,7 @@
 //!   `s` catalog key.
 //! - [`format_significant`] — `.precision(.significantDigits(min...max))`
 //!   for the values row (1...3, :58) and the collision volume (1...2, :86),
-//!   including thousands grouping.
+//!   including thousands grouping and ICU's half-up exact-tie rounding.
 //! - [`speed_label`] — the speed menu's `\(speed)×` labels (:38, :44)
 //!   formatted through the `speed-option` catalog key.
 //! - [`collision_text`] — the collision pairs line (:81-89); the `↔`,
@@ -100,6 +100,15 @@ pub fn format_significant(value: f64, min_digits: usize, max_digits: usize) -> S
     // Re-derive: a carry can grow the magnitude (999.5 -> 1000)
     let magnitude = value.abs().log10().floor() as i32 + 1;
     let decimals = (max_digits as i32 - magnitude).clamp(0, 18) as usize;
+    // Exact decimal ties round HALF-UP, away from zero, like Swift/ICU —
+    // Rust's `{:.n}` rounds ties to even (0.125 -> "0.12" at two digits).
+    // Rounding at the target digit first leaves the format a value whose
+    // last digit is already decided; the scaled magnitudes in this domain
+    // (decimals <= 18, large only for values tiny enough to stay exact)
+    // survive the round-trip through `{:.decimals}` untouched.
+    let scale = 10f64.powi(decimals as i32);
+    let units = (value.abs() * scale + 0.5).floor();
+    let value = (units / scale).copysign(value);
     let mut digits = format!("{value:.decimals$}");
     let significant = |s: &str| {
         s.trim_start_matches(['-', '0'])
