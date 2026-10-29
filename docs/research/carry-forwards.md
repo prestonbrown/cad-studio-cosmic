@@ -433,3 +433,13 @@ M8 T4 attachments divergences (2026-10-28):
   on thelio only (~/.local/share/{applications,icons}) for the dock;
   needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
+
+- Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
+  keyboard listener rides `keyboard::listen()`, which drops the window tag —
+  with TWO project windows open, an editor-unfocused Space/Esc reaches BOTH
+  panes' subscriptions (playback toggles in the background window) where
+  SwiftUI's shortcuts fire in the key window only. Reachable (open_project
+  dedups by root; two roots = two windows); the fix is window-tagged event
+  routing (the pane has no window-focus knowledge today) — a later-milestone
+  design, recorded here until then. The single-window case is unaffected
+  (T9 verified the editor-capture mechanism end-to-end).

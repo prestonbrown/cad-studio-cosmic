@@ -3351,9 +3351,13 @@ mod tests {
     /// captured, so it never reaches the pane's filter.
     /// `Binding::from_key_press` is that editor decision function (the
     /// chat draft's `key_binding` falls through to it for every
-    /// non-shortcut character), so pinning it here guards the pin: an
-    /// editor rev that stopped capturing Space would make the divergence
-    /// real again and this test is the tripwire.
+    /// non-shortcut character), so pinning it here guards the pin's
+    /// BINDING half: an editor rev that stopped *binding* Space (mapping
+    /// it to something else, or nothing) trips this test. The other two
+    /// halves — the binding arm's capture call and listen()'s
+    /// Ignored-only filter — are doc-only coverage (untestable without a
+    /// GUI at this repo's test bar); if either ever changes, re-derive
+    /// the module doc's mechanism paragraph with them.
     #[test]
     fn focused_editor_consumes_bare_space_unfocused_does_not() {
         use cosmic::widget::text_editor::{Binding, KeyPress, Status};
