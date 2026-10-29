@@ -80,7 +80,7 @@ async fn run_fake_with(
         root,
         &TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     );
@@ -549,7 +549,7 @@ async fn cancel_mid_stream() {
         &root,
         &TurnRequest {
             prompt: "slow please".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     );

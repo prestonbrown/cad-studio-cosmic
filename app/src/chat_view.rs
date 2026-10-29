@@ -23,17 +23,21 @@
 //!
 //! Upstream pieces deliberately NOT here: `VersionMarker` rows (M5 — the
 //! versions model doesn't exist yet; summary rows render as plain caption
-//! text), image thumbnails for attachments (needs project-root I/O; chips
-//! show the file name), drag-and-drop/paste attachment (shell owns the
-//! window surface).
+//! text). Attachments render as upstream's `AttachmentThumbnail`s — one
+//! widget, the draft strip at 52px over the staged originals and sent rows
+//! at 64px over the project root (the paste and drag-drop surfaces are the
+//! shell's; their content type lives in [`crate::attachments`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::path::Path;
 
 use cosmic::Element;
 use cosmic::Task;
 use cosmic::iced::font::{Style as FontStyle, Weight as FontWeight};
 use cosmic::iced::keyboard;
 use cosmic::iced::widget::container::Style as ContainerStyle;
+use cosmic::iced::widget::image::Handle;
 use cosmic::iced::widget::text::{Span, Wrapping};
 use cosmic::iced::widget::{operation, rich_text};
 use cosmic::iced::{Color, Font, Length};
@@ -42,6 +46,7 @@ use cosmic::widget::{Column, Row, Space, button, container};
 use engine::project::store::{Action, ChatMessage, Role, ToolState};
 use uuid::Uuid;
 
+use crate::attachments::{self, ClipboardContent};
 use crate::chat::ChatState;
 use crate::fl;
 use crate::markdown::{self, MdStyle};
@@ -148,6 +153,16 @@ pub enum Message {
     Attach,
     /// A staged attachment's remove button.
     Detach(String),
+    /// ⌘V arrived at the editor (ChatInputView.swift:62-73's keyDown
+    /// monitor): the SHELL reads the clipboard's content — files or an
+    /// image attach ([`Message::AttachContent`]), anything else falls
+    /// through to the editor's own text paste.
+    Paste,
+    /// Pasted or dropped content to stage into the draft
+    /// (upstream `chat.attach(urls)`, ChatViewModel.swift:22-28 — the
+    /// shell dedupes via [`ChatState::attach`]). Raw image bytes land as
+    /// a temp-file path first (`Attachments.savedImage`).
+    AttachContent(ClipboardContent),
     RemoveQueued(Uuid),
     SendQueuedNow,
 }
@@ -236,13 +251,16 @@ pub struct QueueItem {
 // ─── view ──────────────────────────────────────────────────────────────────
 
 /// The whole chat pane: transcript (or empty state) over the input bar
-/// (ChatView.swift:9-19).
+/// (ChatView.swift:9-19). `root` is the project root the SENT rows'
+/// `references/…` attachment names resolve against (MessageView.swift:14-16)
+/// and the draft strip's originals resolve against as themselves.
 pub fn view_chat<'a>(
     pane: &'a ChatPane,
     chat: &'a ChatState,
     busy: bool,
     queue: &'a [QueueItem],
     queue_paused: bool,
+    root: &'a Path,
 ) -> Element<'a, Message> {
     // The transcript area is ALWAYS a scrollable — swapping an empty-state
     // column into the slot and back lands a stateful scrollable on a
@@ -259,7 +277,7 @@ pub fn view_chat<'a>(
         let mut rows = Column::new().spacing(12).padding(12).width(Length::Fill);
         for entry in entries(chat, busy) {
             rows = rows.push(match entry {
-                ChatEntry::Row(message) => row_for(pane, chat, message),
+                ChatEntry::Row(message) => row_for(pane, chat, message, root),
                 ChatEntry::StreamingIndicator => streaming_indicator(),
             });
         }
@@ -271,7 +289,7 @@ pub fn view_chat<'a>(
         .width(Length::Fill);
     Column::new()
         .push(transcript)
-        .push(input_bar(pane, chat, busy, queue, queue_paused))
+        .push(input_bar(pane, chat, busy, queue, queue_paused, root))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -282,6 +300,7 @@ fn row_for<'a>(
     pane: &'a ChatPane,
     chat: &'a ChatState,
     message: &'a ChatMessage,
+    root: &Path,
 ) -> Element<'a, Message> {
     match message.role {
         Role::Tool => tool_row(pane, message),
@@ -290,27 +309,36 @@ fn row_for<'a>(
         // number) are M5: without the versions model every summary row is
         // the plain interrupted-marker text (ChatView.swift:78-86).
         Role::Summary => summary_row(message),
-        Role::User | Role::System | Role::Assistant => message_view(pane, message),
+        Role::User | Role::System | Role::Assistant => message_view(pane, message, root),
     }
 }
 
 // ─── rows ──────────────────────────────────────────────────────────────────
 
 /// Upstream `MessageView` (MessageView.swift:3-34).
-fn message_view<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Message> {
+fn message_view<'a>(
+    pane: &'a ChatPane,
+    message: &'a ChatMessage,
+    root: &Path,
+) -> Element<'a, Message> {
     match message.role {
-        Role::User => user_row(message),
+        Role::User => user_row(message, root),
         Role::System => system_row(pane, message),
         _ => markdown_text(&message.text),
     }
 }
 
-/// The user's bubble: attachments over the text, on a subtle rounded fill
-/// (MessageView.swift:10-27).
-fn user_row<'a>(message: &'a ChatMessage) -> Element<'a, Message> {
+/// The user's bubble: attachment thumbnails over the text, on a subtle
+/// rounded fill (MessageView.swift:10-27 — 64px thumbs resolved against
+/// `projectRoot`, the text below).
+fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     let mut stack = Column::new().spacing(8);
     if !message.attachments.is_empty() {
-        stack = stack.push(attachment_chips(&message.attachments, false));
+        let mut thumbs = Row::new().spacing(6);
+        for path in &message.attachments {
+            thumbs = thumbs.push(attachment_thumbnail(path, root, 64.0));
+        }
+        stack = stack.push(thumbs);
     }
     if !message.text.is_empty() {
         stack = stack.push(body_text(message.text.as_str()));
@@ -322,32 +350,114 @@ fn user_row<'a>(message: &'a ChatMessage) -> Element<'a, Message> {
         .into()
 }
 
-/// Name chips for staged/persisted attachments. Upstream renders image
-/// thumbnails loaded from the project root (AttachmentThumbnail); that I/O
-/// belongs to the shell, so chips carry the name here. `removable` adds the
-/// draft strip's remove button (upstream attachmentStrip,
-/// ChatInputView.swift:82-104).
-fn attachment_chips<'a>(paths: &'a [String], removable: bool) -> Element<'a, Message> {
-    let mut chips = Row::new().spacing(6);
+/// One attachment as upstream's `AttachmentThumbnail`
+/// (ChatInputView.swift:156-184): the decoded image when the resolved path
+/// names one, else the file-type icon over an uppercase extension caption;
+/// rounded quaternary fill, hairline border, help = the file name. ONE
+/// widget serves both strips through `root` + `size`: the draft strip shows
+/// its staged originals at 52px (ChatInputView.swift:82-104) and sent rows
+/// the `references/…` copies at 64px (MessageView.swift:10-23) — the
+/// resolution rule ([`attachments::resolve_attachment`]) treats an
+/// absolute path (every pre-M8 row's original) as itself.
+fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, Message> {
+    let resolved = attachments::resolve_attachment(path, root);
+    let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
+    let caption = resolved
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_uppercase())
+        .unwrap_or_default();
+    // upstream: `if isImage(url), let image = NSImage(contentsOf: url)` —
+    // a failed image load falls to the file-icon branch, so the decode
+    // (not the extension alone) decides
+    let body = if engine::agent::attachments::is_image(&resolved) {
+        match decoded_thumbnail(&resolved) {
+            Some(handle) => cosmic::widget::image(handle)
+                .width(Length::Fixed(size))
+                .height(Length::Fixed(size))
+                // upstream aspectRatio(.fill) + clipShape
+                .content_fit(cosmic::iced::ContentFit::Cover)
+                .border_radius(6.0)
+                .into(),
+            None => file_type_tile(&caption, size),
+        }
+    } else {
+        file_type_tile(&caption, size)
+    };
+    let tile = cosmic::widget::tooltip(
+        container(body)
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .class(subtle_style(6.0, 1.0)),
+        body_text(file_name),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    );
+    tile.into()
+}
+
+/// The non-image tile — AttachmentThumbnail's else branch
+/// (ChatInputView.swift:167-175): the file-type icon at half size over the
+/// uppercase extension caption at max(8, size * 0.15).
+fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
+    Column::new()
+        .spacing(3)
+        .push(icon("text-x-generic", (size * 0.5) as u16))
+        .push(
+            secondary_text(caption.to_string())
+                .size((8.0f32).max(size * 0.15))
+                .font(Font {
+                    weight: FontWeight::Semibold,
+                    ..cosmic::font::default()
+                }),
+        )
+        .align_x(cosmic::iced::alignment::Alignment::Center)
+        .into()
+}
+
+// Decoded image handles by resolved path, cached per view thread the way
+// upstream's SwiftUI identity caches its `NSImage`s — a decode happens
+// once per path per session, and a path that failed (unreadable,
+// undecodable) stays on the file-type tile instead of retrying every
+// frame. `None` = known-failed.
+thread_local! {
+    static THUMBNAILS: RefCell<HashMap<String, Option<Handle>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn decoded_thumbnail(path: &Path) -> Option<Handle> {
+    let key = path.to_string_lossy().into_owned();
+    THUMBNAILS.with(|cache| cache.borrow().get(&key).cloned()).flatten()
+        .or_else(|| {
+            let decoded = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                .map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    Handle::from_rgba(width, height, rgba.into_raw())
+                });
+            THUMBNAILS.with(|cache| cache.borrow_mut().insert(key, decoded.clone()));
+            decoded
+        })
+}
+
+/// The draft strip (ChatInputView.swift:82-104): the staged attachments'
+/// 52px thumbnails in a horizontal scroll, each with its remove button
+/// (upstream overlays `xmark.circle.fill` at the top-trailing corner; the
+/// button rides beside the tile, top-aligned — the closest iced shape).
+fn attachment_strip<'a>(paths: &'a [String], root: &Path) -> Element<'a, Message> {
+    let mut tiles = Row::new().spacing(8);
     for path in paths {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let mut chip = Row::new()
-            .spacing(4)
-            .push(secondary_text(name.to_string()).size(12));
-        if removable {
-            chip = chip.push(
+        let tile = Row::new()
+            .align_y(cosmic::iced::alignment::Alignment::Start)
+            .push(attachment_thumbnail(path, root, 52.0))
+            .push(
                 button::icon(icon_handle("window-close", 12))
                     .on_press(Message::Detach(path.clone()))
                     .name(fl!("rimuovi")),
             );
-        }
-        chips = chips.push(
-            container(chip)
-                .padding([2.0, 8.0])
-                .class(subtle_style(6.0, 0.5)),
-        );
+        tiles = tiles.push(tile);
     }
-    chips.into()
+    cosmic::widget::scrollable::horizontal(tiles).into()
 }
 
 /// Assistant text: inline markdown, mapped span by span (upstream
@@ -666,6 +776,7 @@ fn input_bar<'a>(
     busy: bool,
     queue: &'a [QueueItem],
     queue_paused: bool,
+    root: &Path,
 ) -> Element<'a, Message> {
     let mut stack = Column::new();
     stack = stack.push(cosmic::widget::divider::horizontal::default());
@@ -674,7 +785,7 @@ fn input_bar<'a>(
     }
     if !chat.draft_attachments.is_empty() {
         stack = stack.push(
-            container(attachment_chips(&chat.draft_attachments, true))
+            container(attachment_strip(&chat.draft_attachments, root))
                 .padding([10.0, 12.0, 0.0, 12.0]),
         );
     }
@@ -786,13 +897,28 @@ fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element
             })
             .on_action(Message::Draft)
             // Return sends; shift/option+Return breaks the line
-            // (ChatInputView.swift:39-47).
+            // (ChatInputView.swift:39-47). Ctrl+V routes to the shell
+            // while focused — upstream's local keyDown monitor
+            // (ChatInputView.swift:62-73) attaches files when the
+            // clipboard holds them and lets every other paste fall
+            // through to the editor.
             .key_binding(|press| {
                 if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
                     && !press.modifiers.shift()
                     && !press.modifiers.alt()
                 {
                     Some(Binding::Custom(Message::Send))
+                } else if let keyboard::Key::Character(ch) = &press.key {
+                    if ch.eq_ignore_ascii_case("v")
+                        && press.modifiers.control()
+                        && !press.modifiers.shift()
+                        && !press.modifiers.alt()
+                        && matches!(press.status, text_editor::Status::Focused { .. })
+                    {
+                        Some(Binding::Custom(Message::Paste))
+                    } else {
+                        Binding::from_key_press(press)
+                    }
                 } else {
                     Binding::from_key_press(press)
                 }
@@ -1140,25 +1266,55 @@ mod tests {
     }
 
     /// The pane builds in every shape: empty (the suggestion-button empty
-    /// state), populated, busy, with a queue. Element construction is pure
-    /// — but it instantiates every widget class the runtime would, which
-    /// is where tree-shape regressions surface first (the always-scrollable
-    /// hardening's lesson).
+    /// state), populated, busy, with a queue, with a staged draft strip,
+    /// and with sent-row attachment thumbnails over both storage forms —
+    /// relative `references/…` copy names and the absolute originals the
+    /// pre-M8 rows carry. Element construction is pure — but it
+    /// instantiates every widget class the runtime would (scrollables,
+    /// tooltips, image widgets), which is where tree-shape regressions
+    /// surface first (the always-scrollable hardening's lesson).
     #[test]
     fn view_chat_builds_in_every_shape() {
+        let root = std::env::temp_dir().join(format!("cad-chatview-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("references")).unwrap();
+        // a decodable image the thumbnail widget can load, and a
+        // non-image file that takes the file-type tile
+        let png = root.join("references").join("1790000000-1-sketch.png");
+        let tiny =
+            image::RgbaImage::from_pixel(4, 4, image::Rgba([12, 34, 56, 255]));
+        tiny.save(&png).unwrap();
+        std::fs::write(root.join("references").join("1790000000-2-notes.txt"), b"x").unwrap();
+
         let pane = ChatPane::new();
         let empty = ChatState::new(Vec::new());
-        let _ = view_chat(&pane, &empty, false, &[], false);
-        let _ = view_chat(&pane, &empty, true, &[], false);
+        let _ = view_chat(&pane, &empty, false, &[], false, &root);
+        let _ = view_chat(&pane, &empty, true, &[], false, &root);
 
-        let mut busy = ChatState::new(Vec::new());
-        busy.append(user_row("make a bracket"));
+        // a user row with both attachment forms: the relative copy names
+        // M8 rows carry, and an absolute original (the pre-M8 shape)
+        let mut with_attachments = user_row("model this");
+        with_attachments.attachments = vec![
+            "references/1790000000-1-sketch.png".into(),
+            "references/1790000000-2-notes.txt".into(),
+            png.to_string_lossy().into_owned(),
+            "/tmp/gone-missing.png".into(),
+        ];
+        let mut chat = ChatState::new(vec![with_attachments]);
+        chat.draft_attachments = vec![
+            "references/1790000000-1-sketch.png".into(),
+            "/tmp/CAD Studio Attachments/Pasted image x.png".into(),
+        ];
         let queue = vec![QueueItem {
             id: Uuid::new_v4(),
             text: "next up".into(),
             images: 1,
         }];
-        let _ = view_chat(&pane, &busy, true, &queue, true);
-        let _ = view_chat(&pane, &busy, false, &queue, false);
+        let _ = view_chat(&pane, &chat, true, &queue, true, &root);
+        let _ = view_chat(&pane, &chat, false, &queue, false, &root);
+
+        // the decoded thumbnail cached the real PNG and recorded the
+        // missing file as known-failed (the tile, not a retry)
+        assert!(decoded_thumbnail(&png).is_some());
+        assert!(decoded_thumbnail(Path::new("/tmp/gone-missing.png")).is_none());
     }
 }

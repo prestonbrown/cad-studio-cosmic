@@ -178,6 +178,23 @@ impl ChatState {
         Some((text, attachments))
     }
 
+    /// Stage attachments into the draft, skipping ones already staged
+    /// (upstream `attach`, ChatViewModel.swift:22-28:
+    /// `draftAttachments += urls.filter { !draftAttachments.contains($0) }`).
+    /// The paste and drag-drop surfaces both land here.
+    pub fn attach(&mut self, paths: Vec<String>) {
+        let fresh: Vec<String> = paths
+            .into_iter()
+            .filter(|path| !self.draft_attachments.contains(path))
+            .collect();
+        self.draft_attachments.extend(fresh);
+    }
+
+    /// Unstage one attachment (upstream `detach`, ChatViewModel.swift:26-28).
+    pub fn detach(&mut self, path: &str) {
+        self.draft_attachments.retain(|staged| staged != path);
+    }
+
     /// Append a row, returning its id (upstream `ChatViewModel.append`).
     pub fn append(&mut self, message: ChatMessage) -> Uuid {
         let id = message.id;
@@ -478,18 +495,15 @@ fn system_row_text(row: SystemRow) -> String {
 }
 
 /// How many of a send's attachments are images — the queue list's image
-/// count (ChatInputView.swift:230-236 counts `UTType.image`-conforming
-/// URLs). Extension-based, the only signal a path carries.
+/// count (ChatInputView.swift:218-221). The engine's ONE image predicate
+/// decides, the same rule the codex `-i` filter and the thumbnail widget
+/// cite (engine::agent::attachments::is_image) — extension-based, the only
+/// signal a path carries.
 pub fn image_attachments(paths: &[String]) -> usize {
     paths
         .iter()
         .filter(|p| {
-            p.rsplit('.').next().is_some_and(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "heic"
-                )
-            })
+            engine::agent::attachments::is_image(std::path::Path::new(p.as_str()))
         })
         .count()
 }
@@ -1079,6 +1093,34 @@ mod tests {
             Some(("".into(), vec!["references/bracket.png".into()]))
         );
         assert!(state.draft_attachments.is_empty());
+    }
+
+    /// attach stages without duplicating what is already staged, and
+    /// detach removes exactly the addressed path (ChatViewModel.swift:22-28).
+    #[test]
+    fn attach_dedupes_and_detach_removes_one() {
+        let mut state = ChatState::new(Vec::new());
+        state.attach(vec!["/tmp/sketch.png".into(), "/tmp/notes.txt".into()]);
+        assert_eq!(
+            state.draft_attachments,
+            ["/tmp/sketch.png".to_string(), "/tmp/notes.txt".to_string()]
+        );
+        // the already-staged path is not staged twice
+        state.attach(vec![
+            "/tmp/sketch.png".into(),
+            "/tmp/bracket.jpg".into(),
+        ]);
+        assert_eq!(
+            state.draft_attachments,
+            [
+                "/tmp/sketch.png".to_string(),
+                "/tmp/notes.txt".to_string(),
+                "/tmp/bracket.jpg".to_string()
+            ]
+        );
+        state.detach("/tmp/notes.txt");
+        assert_eq!(state.draft_attachments.len(), 2);
+        assert!(state.can_send(), "attachments alone still send");
     }
 
     /// reload_rows swaps the transcript but keeps the input bar's draft

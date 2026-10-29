@@ -116,7 +116,7 @@ async fn run_dance(
         root,
         &TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     );
@@ -415,7 +415,7 @@ async fn cancelled_turn_ends_cleanly() {
         &root,
         &TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     );
@@ -508,7 +508,7 @@ async fn engine_command_drives_the_dance() {
         root: root.clone(),
         request: TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     }
@@ -553,7 +553,7 @@ async fn engine_command_drives_the_dance() {
         root: root.clone(),
         request: TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     }
@@ -612,15 +612,15 @@ async fn engine_command_drives_the_dance() {
     drop(guard);
 }
 
-/// Attachments survive the command surface: `Send` copies them into
-/// references/ (upstream Project.send's role, absorbed by the session) and
-/// the child's argv shows the empty-text fallback prompt naming the copy.
+/// Attachments survive the command surface as pre-made COPY names: `Send`
+/// consumes the request's `references` list into the prompt verbatim
+/// (upstream Project.swift:203 threads `copyReferences`' return straight
+/// into `prompt(text:references:)`) and the engine itself writes nothing —
+/// the bridge made the copies before the turn started, and it stays the
+/// single writer of references/.
 #[tokio::test(flavor = "multi_thread")]
-async fn send_copies_attachments_into_the_prompt() {
+async fn send_consumes_request_references_without_copying() {
     let root = mk_project();
-    let source = std::env::temp_dir().join(format!("cad-att-src-{}.png", uuid::Uuid::new_v4()));
-    std::fs::write(&source, b"png").unwrap();
-    let attachment = source.file_name().unwrap().to_string_lossy().into_owned();
     let dump = root.join("argv-dump.jsonl");
 
     let guard = ENV_LOCK.lock().await;
@@ -632,13 +632,17 @@ async fn send_copies_attachments_into_the_prompt() {
         std::env::set_var("CAD_FAKE_ARGV_OUT", &dump);
         std::env::remove_var("CAD_FAKE_STDERR");
     }
+    // the "bridge" made this copy before the turn started
+    let name = "1790000000-1-sketch.png";
+    std::fs::create_dir_all(root.join("references")).unwrap();
+    std::fs::write(root.join("references").join(name), b"png").unwrap();
     let mut session = Session::new(Settings::default()).with_system_template(system_template());
     let mut running: Option<TurnHandle> = None;
     EngineCommand::Send {
         root: root.clone(),
         request: TurnRequest {
             prompt: String::new(),
-            attachments: vec![source],
+            references: vec![format!("references/{name}")],
             images: Vec::new(),
         },
     }
@@ -650,15 +654,13 @@ async fn send_copies_attachments_into_the_prompt() {
     );
     drop(guard);
 
-    // the copy landed in references/ as <stamp>-1-<name> (numbered from 1,
-    // upstream's index + 1)
+    // the engine wrote nothing into references/ (single writer: the bridge)
     let names: Vec<String> = std::fs::read_dir(root.join("references"))
         .unwrap_or_else(|e| panic!("references/ missing: {e}"))
         .flatten()
         .map(|entry| entry.file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].ends_with(&format!("-1-{attachment}")), "{names:?}");
+    assert_eq!(names, vec![name.to_string()], "{names:?}");
 
     // the prompt the child received: the empty-text fallback + the copy
     let argv = dump_argv(&dump).into_iter().next().expect("one dump line");
@@ -668,8 +670,5 @@ async fn send_copies_attachments_into_the_prompt() {
         prompt.starts_with("Create a model based on the attached files."),
         "{prompt}"
     );
-    assert!(
-        prompt.contains(&format!("references/{}", names[0])),
-        "{prompt}"
-    );
+    assert!(prompt.contains(&format!("references/{name}")), "{prompt}");
 }

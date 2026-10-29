@@ -96,6 +96,10 @@ pub enum Message {
     ProjectCreated(Result<PathBuf, String>),
     /// The file portal answered for the chat attach button.
     AttachChosen(window::Id, Result<Vec<PathBuf>, String>),
+    /// Files were dropped onto `id`'s window (winit's window-level drop
+    /// surface — X11 Xdnd and macOS; winit's Wayland backend has no file
+    /// drops, the chat pane's dnd_destination covers it there).
+    FilesDropped(window::Id, Vec<PathBuf>),
     /// SIGTERM arrived: terminate the engine's children and exit.
     SigTerm,
     /// A no-op ack for futures that must return a message.
@@ -292,6 +296,16 @@ impl Application for CadStudio {
             },
             Message::AttachChosen(id, result) => {
                 let msg = project::Message::AttachChosen(result);
+                self.update_project(id, msg)
+            }
+            Message::FilesDropped(id, paths) => {
+                // the drop lands in the chat's draft attachments wherever
+                // on the window it fell — window-level is this surface's
+                // whole granularity (upstream scopes it to the chat view;
+                // the Wayland dnd_destination is the per-pane port)
+                let msg = project::Message::Chat(crate::chat_view::Message::AttachContent(
+                    crate::attachments::ClipboardContent::Files(paths),
+                ));
                 self.update_project(id, msg)
             }
             Message::SigTerm => {
@@ -877,25 +891,32 @@ pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppShortcut> {
     }
 }
 
-/// Route key presses the focused window's widgets did not consume, tagged
-/// with the window they landed in.
+/// Route the shell-level events the focused window's widgets did not
+/// consume, tagged with the window they landed in: unconsumed key presses
+/// (the shortcut routers) and window-level file drops.
 fn key_events(
     event: cosmic::iced::Event,
     status: cosmic::iced::event::Status,
     id: window::Id,
 ) -> Option<Message> {
-    let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
-        key,
-        modifiers,
-        ..
-    }) = event
-    else {
-        return None;
-    };
-    if matches!(status, cosmic::iced::event::Status::Captured) {
-        return None;
+    match event {
+        cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            ..
+        }) => {
+            if matches!(status, cosmic::iced::event::Status::Captured) {
+                return None;
+            }
+            Some(Message::KeyPressed(id, key, modifiers))
+        }
+        // the drop is not a widget event on this surface — capture status
+        // does not apply
+        cosmic::iced::Event::Window(cosmic::iced::window::Event::FileDropped(paths)) => {
+            Some(Message::FilesDropped(id, paths))
+        }
+        _ => None,
     }
-    Some(Message::KeyPressed(id, key, modifiers))
 }
 
 /// Locate the agent off the UI thread (upstream `AgentLocator.locate()`,

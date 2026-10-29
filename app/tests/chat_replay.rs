@@ -59,7 +59,7 @@ async fn replay(root: &Path, scenario: &Path, stderr: Option<&Path>) -> ChatStat
         root,
         &TurnRequest {
             prompt: "please respond".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     );

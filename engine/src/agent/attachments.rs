@@ -1,11 +1,17 @@
-//! Attachment classification shared engine-side (upstream
-//! Chat/Attachments.swift:4-7: `UTType(filenameExtension:)?.conforms(to:
-//! .image)`). UTType conformance is a macOS registry lookup; the port rules
-//! it to an explicit extension allowlist — the formats the picker and the
-//! paste path produce — so the codex argv's `-i` filter and the app's
-//! thumbnail widget (M8) cite ONE predicate.
+//! Attachment classification and the reference-copy writer shared
+//! engine-side (upstream Chat/Attachments.swift:4-7: `UTType(
+//! filenameExtension:)?.conforms(to: .image)`; Project.swift:210-219:
+//! `copyReferences`). UTType conformance is a macOS registry lookup; the
+//! port rules it to an explicit extension allowlist — the formats the
+//! picker and the paste path produce — so the codex argv's `-i` filter and
+//! the app's thumbnail widget (M8) cite ONE predicate. The copy is
+//! engine-owned but BRIDGE-CALLED: it runs at turn start, before the user
+//! row is appended (upstream `copyReferences` inside `send`,
+//! Project.swift:199-201), and the engine's session consumes the returned
+//! names without writing — one writer of `references/`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whether `path` names an image by extension: png/jpg/jpeg/tiff/webp/gif/
 /// bmp, case-insensitive. Upstream's UTType conformance also admits formats
@@ -19,6 +25,36 @@ pub fn is_image(path: &Path) -> bool {
         ),
         None => false,
     }
+}
+
+/// Copy the turn's attachment sources into `<root>/references/` as
+/// `<unix-seconds>-<index>-<name>` and return the prompt-relative paths
+/// (Project.swift:210-219). The index is 1-based, upstream's `index + 1`.
+/// Copies that fail are dropped from the list, as upstream's `compactMap`
+/// does. Called at TURN START by the bridge (upstream runs it inside
+/// `send()`, before the row appends, Project.swift:199-201); a queued send
+/// holds its pre-copy paths until its own turn starts
+/// (Project.swift:177-190).
+pub fn copy_attachments(sources: &[PathBuf], root: &Path) -> Vec<String> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let references = root.join("references");
+    // the directory is created only when there is something to copy
+    let _ = std::fs::create_dir_all(&references);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    sources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| {
+            let number = index + 1;
+            let name = format!("{stamp}-{number}-{}", source.file_name()?.to_string_lossy());
+            std::fs::copy(source, references.join(&name)).ok()?;
+            Some(format!("references/{name}"))
+        })
+        .collect()
 }
 
 #[cfg(test)]

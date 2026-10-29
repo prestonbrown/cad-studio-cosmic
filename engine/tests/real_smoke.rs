@@ -33,7 +33,7 @@ async fn real_agent_pong() {
         root,
         request: TurnRequest {
             prompt: "pong".into(),
-            attachments: Vec::new(),
+            references: Vec::new(),
             images: Vec::new(),
         },
     }

@@ -29,9 +29,13 @@ thiserror.workspace = true
 # already links tokio (iced/tokio), so this adds no new copy.
 tokio = { workspace = true, features = ["signal"] }
 # resvg matches the iced fork's own pin (0.45) so the tree carries one copy;
-# image (png) decodes the schematic.png fallback raster.
+# image (png) decodes the schematic.png fallback raster; jpeg joins for the
+# chat attachment thumbnails (the picker's two realistic image formats).
 resvg = "0.45"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 # Inline-only markdown for the chat pane; parser only — no html/escape/cli.
 pulldown-cmark = { version = "0.13.4", default-features = false }
 

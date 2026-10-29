@@ -262,12 +262,43 @@ minors, each with its owner:
 
 From the M4 T3 bridge review (2026-10-13):
 
-- Persisted chat.json user rows must list the `references/` COPY names,
+- ~~Persisted chat.json user rows must list the `references/` COPY names,
   not the original request paths (upstream persists the copies,
   Project.swift:199-200). The engine currently drops the copy names after
   `copy_attachments` (session.rs:412) — M8's attachments work adds the
   engine surface (e.g. a Started/TurnEcho field) and switches the bridge's
-  user-row text to the copies.
+  user-row text to the copies.~~ Landed M8 T4 2026-10-28 by MOVING the
+  copy bridge-side: `Drive::start_turn` runs the engine's pure
+  `attachments::copy_attachments` at turn start (before the row appends,
+  upstream's order) and threads the names into the row, the
+  `TurnStarted` message, the prompt, and the codex `-i` images; the
+  engine's `run_attempt` no longer writes (single writer).
+
+M8 T4 attachments divergences (2026-10-28):
+
+- Paste CONTENT reads ride the pin's `clipboard::read_data`
+  (window_clipboard → data-control): real on WAYLAND only. The X11 and
+  macOS backends answer nothing (platform/linux.rs returns None for X11;
+  macos.rs implements text read/write only), so paste-to-attach silently
+  degrades to text paste there. COSMIC/Wayland is the target; no
+  subprocess fallback (dependency ruling stands).
+- Drag-drop: the Wayland-native `DndDestination` wraps the chat pane;
+  winit's window-level `FileDropped` covers X11/macOS — but window-level
+  means a drop anywhere on a project window stages into the chat draft
+  (upstream scopes the drop to the chat view; ChatView.swift:20-31).
+  Drops from portal-sandboxed sources offering only
+  `application/vnd.portal.filetransfer` match nothing: accepting that
+  mime needs libcosmic's `xdg-portal` feature (a dependency ruling, not
+  taken here).
+- Thumbnail decode supports png+jpeg (the `image` crate features the app
+  already pins); webp/gif/bmp/tiff attachments take the file-type tile
+  (upstream's NSImage decodes them). The strip's remove button rides
+  BESIDE the tile (top-aligned) — iced has no overlay for upstream's
+  corner `xmark.circle.fill` (ChatInputView.swift:88-98).
+- `ChatState::image_attachments` (the queue's image count) now cites the
+  engine's ONE image allowlist; `heic` drops out of the count (the
+  engine-side ruling records the allowlist as the formats the attach
+  surfaces produce).
 
 - APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.
 - Fluent: 5 placeholder-only keys sanitized to key/key-2..key-5 need mapping;

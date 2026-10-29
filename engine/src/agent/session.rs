@@ -63,8 +63,7 @@ use time::macros::format_description;
 use tokio::sync::{mpsc, watch};
 
 use crate::agent::claude::{
-    PromptCtx, TurnRequest, build_args, build_prompt, copy_attachments, environment_bullets,
-    render_system_prompt,
+    PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets, render_system_prompt,
 };
 use crate::agent::codex::{self, CodexTranslator};
 use crate::agent::locator::{self, AgentKind, AgentPath, shell_env};
@@ -481,12 +480,6 @@ async fn full_dance(mut ctx: TurnCtx) {
 /// settings file, falling back to the startup snapshot
 /// ([`Session::with_settings_file`]).
 async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
-    // Upstream copies the attachments in Project.send BEFORE the session
-    // runs (Project.swift:198-208); the port's session absorbed that role.
-    // The returned list is deliberately dropped — build_prompt reads the
-    // copies back from references/.
-    let _ = copy_attachments(&ctx.req, &ctx.root);
-
     let settings = attempt_settings(ctx);
     let engine = settings.agent_kind();
     let mut driver = TurnDriver {
@@ -530,7 +523,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
         printer_model: settings.printer_model.as_deref(),
         manifest: manifest.as_ref(),
     };
-    let prompt = build_prompt(&ctx.req, &ctx.root, &missing);
+    let prompt = build_prompt(&ctx.req, &missing);
     let system_prompt =
         render_system_prompt(&ctx.system_template, &prompt_ctx(&ctx.root, &settings));
     let venv_python = app_venv_python();
