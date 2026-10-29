@@ -14,7 +14,9 @@
 //! and dismisses only when a working executable turns up.
 //!
 //! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
-//! copy button; pickers are compact dropdowns. Sheets render as Dialog
+//! copy button; pickers are compact dropdowns, and the print-preferences
+//! section renders as macOS's grouped-Form rows — label leading, control
+//! trailing, the box spanning its surface. Sheets render as Dialog
 //! cards (opaque, rounded, shadowed) in a modal popover, with scrollable
 //! content and pinned action rows so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
@@ -156,9 +158,9 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .size(14),
         )
         .push_maybe(
-            sheet.last_verified_missing.then(|| {
-                body(fl!("nessun-eseguibile-funzionante-trovato")).class(error_text())
-            }),
+            sheet
+                .last_verified_missing
+                .then(|| body(fl!("nessun-eseguibile-funzionante-trovato")).class(error_text())),
         );
     let actions = Row::new()
         .spacing(8)
@@ -287,11 +289,14 @@ pub enum PrintPrefMessage {
     Unit(MeasurementUnit),
 }
 
-/// The PrintPreferencesSection port (PrintPreferences.swift:108-135): the
-/// three fields + the footer, one renderer for both surfaces that embed it
-/// — the first-run SetupSheet and the settings window's Generale tab
-/// (SettingsView.swift:57). Compact dropdowns (the sheets idiom; a nested
-/// popup inside the modal sheet clipped in the 460 px welcome window).
+/// The PrintPreferencesSection port (PrintPreferences.swift:111-134): the
+/// section's grouped box — one row per setting, hairline-separated, the box
+/// spanning its surface — plus the footer below it. One renderer for both
+/// surfaces that embed it: the first-run SetupSheet and the settings
+/// window's Generale tab (SettingsView.swift:57), whose own rows use the
+/// same Form-row idiom (SettingsView.swift:30-52), so the one shape serves
+/// both. Compact dropdowns (the sheets idiom; a nested popup inside the
+/// modal sheet clipped in the 460 px welcome window).
 pub fn view_print_preferences<'a>(
     printer_type: PrinterType,
     printer_model: &'a str,
@@ -299,59 +304,93 @@ pub fn view_print_preferences<'a>(
 ) -> Element<'a, PrintPrefMessage> {
     let printer_types = PRINTER_TYPES.map(printer_type_title).to_vec();
     let units = MEASUREMENT_UNITS.map(measurement_unit_title).to_vec();
-    Column::new()
-        .spacing(12)
-        .push(
-            Column::new()
-                .spacing(6)
-                .push(body(fl!("tipo-di-stampante")))
-                .push(cosmic::widget::dropdown(
-                    printer_types,
-                    Some(printer_type as usize),
-                    |index| PrintPrefMessage::PrinterType(PRINTER_TYPES[index]),
-                )),
-        )
-        .push(
-            Column::new()
-                .spacing(6)
-                .push(body(fl!("modello-2")))
-                .push(
-                    text_input::text_input(
-                        fl!("facoltativo-ad-esempio-bambu-lab-p1s"),
-                        printer_model,
-                    )
-                    .on_input(PrintPrefMessage::PrinterModel)
-                    .size(14),
-                ),
-        )
-        .push(
-            Column::new()
-                .spacing(6)
-                .push(body(fl!("unit-di-misura")))
-                .push(cosmic::widget::dropdown(
-                    units,
-                    Some(unit as usize),
-                    |index| PrintPrefMessage::Unit(MEASUREMENT_UNITS[index]),
-                )),
-        )
-        .push(body(fl!(
-            "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
+    let form = Column::new()
+        .push(form_row(
+            body(fl!("tipo-di-stampante")),
+            trailing(cosmic::widget::dropdown(
+                printer_types,
+                Some(printer_type as usize),
+                |index| PrintPrefMessage::PrinterType(PRINTER_TYPES[index]),
+            )),
         ))
-        .class(secondary_text()))
+        .push(cosmic::widget::divider::horizontal::default())
+        .push(form_row(
+            body(fl!("modello-2")),
+            text_input::text_input(fl!("facoltativo-ad-esempio-bambu-lab-p1s"), printer_model)
+                .on_input(PrintPrefMessage::PrinterModel)
+                .size(14)
+                .width(Length::Fill)
+                .into(),
+        ))
+        .push(cosmic::widget::divider::horizontal::default())
+        .push(form_row(
+            body(fl!("unit-di-misura")),
+            trailing(cosmic::widget::dropdown(
+                units,
+                Some(unit as usize),
+                |index| PrintPrefMessage::Unit(MEASUREMENT_UNITS[index]),
+            )),
+        ));
+    Column::new()
+        .spacing(8)
+        .push(container(form).width(Length::Fill).class(subtle_block()))
+        .push(
+            body(fl!(
+                "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
+            ))
+            .class(secondary_text()),
+        )
         .into()
 }
 
-/// SetupSheet (SetupSheet.swift:7-41): welcome head, the shared print
-/// preferences section, Continue. The picks batch into the settings on
-/// Continue (the port's staged write; upstream's section binds
-/// @AppStorage live and Continue writes only hasCompletedSetup).
+/// One grouped-Form row (the `.formStyle(.grouped)` row shape,
+/// PrintPreferences.swift:118-127): label at the leading edge, control at
+/// the trailing one, the pair spanning the box.
+fn form_row<'a, Message>(
+    label: Text<'a>,
+    control: Element<'a, Message>,
+) -> Row<'a, Message, cosmic::theme::Theme, cosmic::Renderer> {
+    Row::new()
+        .padding([8.0, 12.0])
+        .spacing(12.0)
+        .align_y(cosmic::iced::alignment::Alignment::Center)
+        .push(label)
+        .push(control)
+}
+
+/// A shrink-wrapped control pinned to its row's trailing edge — where a
+/// Form row's picker value + chevron sit.
+fn trailing<'a, Message: 'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(control)
+        .width(Length::Fill)
+        .align_x(cosmic::iced::alignment::Horizontal::Right)
+        .into()
+}
+
+/// SetupSheet (SetupSheet.swift:6-41): the 64 px app icon beside the
+/// headline/callout stack (upstream's `HStack(spacing: 14)`, :8-22 — the
+/// same head shape as the python sheet's), the print-preferences section
+/// as the sheet-spanning grouped Form (:23-28), and Continue pinned
+/// bottom-right (:29-36), on upstream's 520-wide frame (:39). The picks
+/// batch into the settings on Continue (the port's staged write;
+/// upstream's section binds @AppStorage live and Continue writes only
+/// hasCompletedSetup).
 pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
-    let head = Column::new()
-        .spacing(4)
-        .push(bold(fl!("benvenuto-in-cad-studio"), 18.0))
-        .push(body(fl!(
-            "indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"
-        )));
+    let head = Row::new()
+        .spacing(14)
+        .align_y(cosmic::iced::alignment::Alignment::Center)
+        .push(icon(APP_ICON, 64))
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(bold(fl!("benvenuto-in-cad-studio"), 18.0))
+                .push(
+                    body(fl!(
+                        "indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"
+                    ))
+                    .class(secondary_text()),
+                ),
+        );
 
     let form = view_print_preferences(sheet.printer_type, &sheet.printer_model, sheet.unit).map(
         |message| match message {
@@ -375,7 +414,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
         .push(actions);
     container(card)
         .padding(20)
-        .width(600.0)
+        .width(520.0)
         .class(cosmic::theme::Container::Dialog(true))
         .into()
 }
@@ -885,6 +924,31 @@ mod tests {
         assert_eq!(
             settings.printer_model, None,
             "a blank model clears the field"
+        );
+    }
+
+    /// Element construction is pure (the python sheet's construction-test
+    /// pattern): the setup sheet builds a frame for every option its
+    /// pickers offer, in both the shared section's own context and the
+    /// sheet's.
+    #[test]
+    fn setup_sheet_view_builds_in_every_picker_shape() {
+        let mut sheet = Setup::from_settings(&Settings::default());
+        let _ = view_setup(&sheet);
+        for kind in PRINTER_TYPES {
+            sheet.printer_type = kind;
+            let _ = view_setup(&sheet);
+        }
+        for unit in MEASUREMENT_UNITS {
+            sheet.unit = unit;
+            let _ = view_setup(&sheet);
+        }
+        sheet.printer_model = "Bambu Lab P1S".into();
+        let _ = view_setup(&sheet);
+        let _ = view_print_preferences(
+            PrinterType::FdmMultiMaterial,
+            &String::new(),
+            MeasurementUnit::Inches,
         );
     }
 }
