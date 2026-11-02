@@ -1,0 +1,6 @@
+[
+  {"id": "6f0c1a52-0001-4000-8000-000000000001", "role": "user", "text": "Crea una scatola con coperchio, 60×60 mm, con pareti da 2 mm.", "date": "2026-10-27T08:41:00Z", "tool": null, "detail": null, "action": null},
+  {"id": "6f0c1a52-0002-4000-8000-000000000002", "role": "tool", "text": "Compila il modello", "date": "2026-10-27T08:41:30Z", "tool": {"toolUseID": "toolu_fixture_1", "name": "Bash", "input": "python model.py", "output": "ok", "preview": null, "state": "succeeded"}, "detail": null, "action": null},
+  {"id": "6f0c1a52-0003-4000-8000-000000000003", "role": "assistant", "text": "Fatto! Ho creato la scatola: base 60×60×8 mm con coperchio da 10 mm, pareti 2 mm. Nel pannello a destra trovi la tavola tecnica con le quote. Vuoi aggiungere fori per le viti?", "date": "2026-10-27T08:42:00Z", "tool": null, "detail": null, "action": null},
+  {"id": "6f0c1a52-0004-4000-8000-000000000004", "role": "user", "text": "Aggiungi lo smusso sugli spigoli del coperchio.", "date": "2026-10-28T20:33:00Z", "tool": null, "detail": null, "action": null}
+]

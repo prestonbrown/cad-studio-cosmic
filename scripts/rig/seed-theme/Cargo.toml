@@ -1,0 +1,7 @@
+[package]
+name = "seed-theme"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+cosmic-theme = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4" }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic.git", rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4" }

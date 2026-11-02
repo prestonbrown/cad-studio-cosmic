@@ -1,0 +1,37 @@
+{
+  "app_version" : "1.0",
+  "created_at" : "2026-10-27T08:40:00Z",
+  "current_version" : 3,
+  "layout" : {
+    "split" : {
+      "_0" : {
+        "axis" : "row",
+        "first" : {
+          "pane" : {
+            "_0" : "chat"
+          }
+        },
+        "fraction" : 0.34015151515151515,
+        "second" : {
+          "split" : {
+            "_0" : {
+              "axis" : "column",
+              "first" : {
+                "pane" : {
+                  "_0" : "model3D"
+                }
+              },
+              "fraction" : 0.5996192893401016,
+              "second" : {
+                "pane" : {
+                  "_0" : "schematic"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "updated_at" : "2026-10-28T20:33:22Z"
+}

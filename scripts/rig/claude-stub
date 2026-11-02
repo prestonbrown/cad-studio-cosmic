@@ -1,0 +1,3 @@
+#!/bin/sh
+# Rig stub: answers the app executable probe; never runs a turn.
+case "$1" in --version) echo "2.1.0 (Claude Code)";; *) echo stub;; esac

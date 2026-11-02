@@ -1,0 +1,41 @@
+#!/bin/bash
+# Runs on mercury. Drives the cad-dev build/test/capture rig (incus container
+# on zeus, ssh alias `cad-dev`). Each worktree gets its own source dir
+# (~/wt/<name>) and target dir (~/targets/<name>) on the rig, so several
+# worktrees build in parallel without sharing a cargo lock. Nothing is ever
+# committed on the rig: source of record stays on mercury.
+#
+#   rig.sh sync <name> [worktree-dir]    rsync the worktree (default: cwd) up
+#   rig.sh run  <name> <command...>      run in ~/wt/<name> with its target dir
+#                                        (e.g. rig.sh run foo cargo test -p app --lib)
+#   rig.sh cap  <name> <cap> [WxH] [drive] [wait] [light|dark] [xdo-file]
+#                                        capture with ~/targets/<name>/release/cad-studio,
+#                                        png lands in <worktree>/../rig-caps/<name>/<cap>.png
+#
+# A drive or xdo file given as a local path is copied up first.
+set -eu
+cmd=$1; name=$2; shift 2
+host=${RIG_HOST:-cad-dev}
+case "$cmd" in
+  sync)
+    src=${1:-$PWD}
+    ssh "$host" "mkdir -p ~/wt/$name ~/targets"
+    ssh "$host" "[ -d ~/targets/$name ] || cp -r ~/cad-studio-cosmic/target ~/targets/$name"
+    rsync -az --delete --exclude target --exclude .superpowers --exclude .git -e ssh "$src"/ "$host:wt/$name/"
+    ;;
+  run)
+    ssh "$host" "cd ~/wt/$name && . ~/.cargo/env && export CARGO_TARGET_DIR=~/targets/$name && $*"
+    ;;
+  cap)
+    cap=$1; geom=${2:-1320x840}; drive=${3:-open-box.drive}; wait=${4:-12}; mode=${5:-light}; xdo=${6:-}
+    here=$(cd "$(dirname "$0")" && pwd)
+    up() { if [ -f "$1" ]; then scp -q "$1" "$host:caps/$name-$(basename "$1")"; echo "caps/$name-$(basename "$1")";
+           elif [ -f "$here/$1" ]; then scp -q "$here/$1" "$host:caps/$name-$1"; echo "caps/$name-$1"; else echo "$1"; fi; }
+    ssh "$host" "mkdir -p ~/caps"
+    d=$(up "$drive"); x=""; [ -n "$xdo" ] && x=$(up "$xdo")
+    ssh "$host" "cd ~ && BIN=~/targets/$name/release/cad-studio ~/wt/$name/scripts/rig/cap.sh $name-$cap $geom ~/$d $wait $mode ${x:+~/$x}"
+    out=${RIG_CAPS:-$PWD/../rig-caps/$name}; mkdir -p "$out"
+    scp -q "$host:caps/$name-$cap.png" "$out/$cap.png" && echo "$out/$cap.png"
+    ;;
+  *) echo "unknown command $cmd" >&2; exit 2 ;;
+esac

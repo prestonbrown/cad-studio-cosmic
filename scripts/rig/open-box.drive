@@ -1,0 +1,5 @@
+setup Continue
+sleep 1500
+recent /home/pbrown/fixtures/box-fixture
+sleep 1000
+noop
