@@ -42,6 +42,6 @@ fi
 sleep $wait
 DISPLAY=$disp xwd -root -silent | convert xwd:- png:$HOME/caps/$name.png
 echo "$(ts) captured $name.png alive=$(kill -0 $ap 2>/dev/null && echo y || echo n)" >> ~/caps/$name.log
-kill $ap $xp 2>/dev/null; wait 2>/dev/null
-grep -m3 -i panic ~/caps/$name.log
+kill $ap 2>/dev/null; sleep 1; kill $xp 2>/dev/null; wait 2>/dev/null
+sed "/captured/q" ~/caps/$name.log | grep -m3 -i panic
 tail -1 ~/caps/$name.log

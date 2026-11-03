@@ -1,12 +1,12 @@
 use engine::project::layout::{self, Axis, LayoutNode, PaneKind};
 
 /// The exact bytes Swift's synthesized `Codable` emits for the four presets
-/// (externally tagged enum, LayoutSplit fields in declaration order,
-/// shortest-round-trip doubles).
-const CHAT_LEADING_JSON: &str = r#"{"split":{"axis":"row","first":{"pane":"chat"},"second":{"split":{"axis":"column","first":{"pane":"model3D"},"second":{"pane":"schematic"},"fraction":0.6}},"fraction":0.34}}"#;
-const CHAT_TRAILING_JSON: &str = r#"{"split":{"axis":"row","first":{"split":{"axis":"column","first":{"pane":"model3D"},"second":{"pane":"schematic"},"fraction":0.6}},"second":{"pane":"chat"},"fraction":0.66}}"#;
-const CHAT_BOTTOM_JSON: &str = r#"{"split":{"axis":"column","first":{"split":{"axis":"row","first":{"pane":"model3D"},"second":{"pane":"schematic"},"fraction":0.6}},"second":{"pane":"chat"},"fraction":0.62}}"#;
-const THREE_COLUMNS_JSON: &str = r#"{"split":{"axis":"row","first":{"pane":"chat"},"second":{"split":{"axis":"row","first":{"pane":"model3D"},"second":{"pane":"schematic"},"fraction":0.55}},"fraction":0.28}}"#;
+/// (externally tagged enum, each unlabeled associated value under `_0`,
+/// LayoutSplit fields in declaration order, shortest-round-trip doubles).
+const CHAT_LEADING_JSON: &str = r#"{"split":{"_0":{"axis":"row","first":{"pane":{"_0":"chat"}},"second":{"split":{"_0":{"axis":"column","first":{"pane":{"_0":"model3D"}},"second":{"pane":{"_0":"schematic"}},"fraction":0.6}}},"fraction":0.34}}}"#;
+const CHAT_TRAILING_JSON: &str = r#"{"split":{"_0":{"axis":"row","first":{"split":{"_0":{"axis":"column","first":{"pane":{"_0":"model3D"}},"second":{"pane":{"_0":"schematic"}},"fraction":0.6}}},"second":{"pane":{"_0":"chat"}},"fraction":0.66}}}"#;
+const CHAT_BOTTOM_JSON: &str = r#"{"split":{"_0":{"axis":"column","first":{"split":{"_0":{"axis":"row","first":{"pane":{"_0":"model3D"}},"second":{"pane":{"_0":"schematic"}},"fraction":0.6}}},"second":{"pane":{"_0":"chat"}},"fraction":0.62}}}"#;
+const THREE_COLUMNS_JSON: &str = r#"{"split":{"_0":{"axis":"row","first":{"pane":{"_0":"chat"}},"second":{"split":{"_0":{"axis":"row","first":{"pane":{"_0":"model3D"}},"second":{"pane":{"_0":"schematic"}},"fraction":0.55}}},"fraction":0.28}}}"#;
 
 #[test]
 fn preset_matches_upstream_json() {
@@ -21,6 +21,38 @@ fn preset_matches_upstream_json() {
         let back: LayoutNode = serde_json::from_str(upstream_json).unwrap();
         assert_eq!(back, preset, "upstream bytes decode to the preset");
     }
+}
+
+/// The bare shape earlier port builds wrote (no `_0` wrappers).
+const LEGACY_PORT_JSON: &str = r#"{"split":{"axis":"row","first":{"pane":"chat"},"second":{"split":{"axis":"column","first":{"pane":"model3D"},"second":{"pane":"schematic"},"fraction":0.6}},"fraction":0.34}}"#;
+
+#[test]
+fn legacy_port_json_still_decodes() {
+    let back: LayoutNode = serde_json::from_str(LEGACY_PORT_JSON).unwrap();
+    assert_eq!(back, LayoutNode::chat_leading());
+}
+
+#[test]
+fn decodes_a_project_json_written_by_the_mac_app() {
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/matched-state/project.json"
+    ))
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let layout: LayoutNode = serde_json::from_value(value["layout"].clone()).unwrap();
+    let LayoutNode::Split {
+        axis,
+        first,
+        fraction,
+        ..
+    } = layout
+    else {
+        panic!("root is a split");
+    };
+    assert_eq!(axis, Axis::Row);
+    assert_eq!(*first, LayoutNode::Pane(PaneKind::Chat));
+    assert!((fraction - 0.340_151_515).abs() < 1e-6);
 }
 
 #[test]
