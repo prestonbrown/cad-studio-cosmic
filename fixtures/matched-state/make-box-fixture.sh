@@ -13,7 +13,7 @@ cp "$golden"/* "$dest/output/"
 cp "$here/project.json" "$here/chat.json" "$dest/.cadstudio/"
 cp "$here/model.py" "$dest/model.py"
 prompts=("Crea una scatola con coperchio, 60×60 mm, con pareti da 2 mm." \
-         "Porta l'altezza della base a 8 mm." \
+         "Aumenta l'altezza del coperchio a 10 mm." \
          "Aggiungi lo smusso sugli spigoli del coperchio.")
 for n in 1 2 3; do
   v="$dest/.cadstudio/versions/$n"
