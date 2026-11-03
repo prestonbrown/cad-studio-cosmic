@@ -1619,10 +1619,30 @@ impl ViewerPane {
 
     fn canvas_element(&self, size: Size) -> Element<'_, Message> {
         self.report_size(size);
-        shader(&self.scene)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        // upstream follows the system appearance: the viewport background
+        // (ModelViewer.swift:88), the grid line color (:429-430) and the
+        // bed's controlAccentColor (:198) all come from the live theme
+        let theme = cosmic::theme::active();
+        let dark = theme.cosmic().is_dark;
+        let accent = theme.cosmic().accent_color();
+        let palette = viewer::render::Palette::new(
+            dark,
+            [accent.red, accent.green, accent.blue].map(viewer::render::srgb_to_linear_f),
+        );
+        let [r, g, b] = viewer::render::grid::background_srgb(dark);
+        let background = cosmic::iced::Color::from_rgb8(r, g, b);
+        container(
+            shader(self.scene.themed(palette))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .class(cosmic::theme::Container::custom(move |_| {
+            cosmic::iced::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(background)),
+                ..Default::default()
+            }
+        }))
+        .into()
     }
 
     /// The canvas area's size, reported from layout — deduped through

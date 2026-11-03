@@ -21,21 +21,24 @@ struct Model {
 };
 @group(1) @binding(0) var<uniform> model: Model;
 
-// Two-light parity shading (facts §1, ModelViewer.swift:344-353): upstream
-// lights are directional — key 2600 from (60,120,90), fill 900 from
-// (-90,40,-60), both SCENE space — approximated in-shader as
-// intensity/10⁴ diffuse coefficients over the vertex normal plus ambient,
-// clamped. The @NAME@ markers are substituted from the Rust-side `lights`
-// module at pipeline creation: one definition shared by the shader and the
-// headless shading tests (a surviving marker is invalid WGSL and fails
-// compilation loudly). The COLLISION_@ markers follow the same contract
-// from COLLISION_LINEAR.
+// Parity shading (ModelViewer.swift:344-353, 415-423): the `lights`
+// module's fitted model of upstream's PhysicallyBasedMaterial under its key
+// and fill lights plus RealityView's environment —
+// shoulder(D(n)·base + S(n, v)). The @NAME@ markers are substituted from
+// the Rust-side `lights` module at pipeline creation: one definition
+// shared by the shader and its Rust twin `lights::shade` (a surviving
+// marker is invalid WGSL and fails compilation loudly). The COLLISION_@
+// markers follow the same contract from COLLISION_LINEAR.
 const KEY_POS: vec3<f32> = @KEY_POS@;
 const KEY_COEFF: f32 = @KEY_COEFF@;
 const FILL_POS: vec3<f32> = @FILL_POS@;
 const FILL_COEFF: f32 = @FILL_COEFF@;
+const ENV_DIR: vec3<f32> = @ENV_DIR@;
+const ENV_COEFF: f32 = @ENV_COEFF@;
 const AMBIENT: f32 = @AMBIENT@;
-const LIT_MAX: f32 = @LIT_MAX@;
+const SPECULAR: f32 = @SPECULAR@;
+const SHININESS: f32 = @SHININESS@;
+const SHOULDER_START: f32 = @SHOULDER_START@;
 const COLLISION_R: f32 = @COLLISION_R@;
 const COLLISION_G: f32 = @COLLISION_G@;
 const COLLISION_B: f32 = @COLLISION_B@;
@@ -66,6 +69,21 @@ fn vs_main(in: Vin) -> Vout {
     return out;
 }
 
+// The direction toward the camera: a perspective view-projection's w row
+// is the camera's forward axis (clip w = view depth), so the column-major
+// matrix's w components hold it without a separate uniform.
+fn to_eye() -> vec3<f32> {
+    let vp = camera.view_proj;
+    return -normalize(vec3<f32>(vp[0].w, vp[1].w, vp[2].w));
+}
+
+// lights::shoulder: identity below SHOULDER_START, then a roll-off
+// toward 1.
+fn shoulder(c: f32) -> f32 {
+    let d = 1.0 - SHOULDER_START;
+    return select(max(c, 0.0), 1.0 - d * d / (c + d - SHOULDER_START), c >= SHOULDER_START);
+}
+
 @fragment
 fn fs_main(in: Vout) -> @location(0) vec4<f32> {
     if (camera.section_enable > 0.5) {
@@ -77,13 +95,19 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
     // staged normals are unit and `model` is identity today; normalize is
     // insurance for scaled future transforms
     let n = normalize(in.normal);
-    let lit = KEY_COEFF * max(dot(n, normalize(KEY_POS)), 0.0)
+    let key = normalize(KEY_POS);
+    let n_key = max(dot(n, key), 0.0);
+    let diffuse = AMBIENT
+            + KEY_COEFF * n_key
             + FILL_COEFF * max(dot(n, normalize(FILL_POS)), 0.0)
-            + AMBIENT;
+            + ENV_COEFF * max(dot(n, normalize(ENV_DIR)), 0.0);
+    let h = normalize(key + to_eye());
+    let spec = SPECULAR * pow(max(dot(n, h), 1e-6), SHININESS) * n_key;
     if (model.collision > 0.5) {
         // upstream's collision material: emissive systemRed — flat from
         // every normal, opaque even on a would-be-translucent part
         return vec4<f32>(to_target(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B)), 1.0);
     }
-    return vec4<f32>(to_target(in.color * clamp(lit, 0.0, LIT_MAX)), model.alpha);
+    let lit = in.color * diffuse + vec3<f32>(spec);
+    return vec4<f32>(to_target(vec3<f32>(shoulder(lit.r), shoulder(lit.g), shoulder(lit.b))), model.alpha);
 }

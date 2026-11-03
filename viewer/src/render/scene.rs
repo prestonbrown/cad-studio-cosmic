@@ -5,7 +5,7 @@
 //! scene sits behind an `Arc`, so the per-frame primitive carries a
 //! refcount bump, not a mesh copy.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
@@ -101,6 +101,19 @@ pub struct ModelScene {
     /// the staged scene's own; the pane's frozen stamp (T10) writes
     /// layout-switch-time values here instead.
     grid_aabb: ([f32; 3], [f32; 3]),
+    /// The overlay rebuilt for the last non-default palette a [`Themed`]
+    /// draw asked for, keyed by the [`ModelScene::grid`] it was derived
+    /// from — a theme or overlay change rebuilds once, every other frame
+    /// is a refcount bump.
+    themed_grid: Mutex<Option<(grid::Palette, Arc<GridMesh>, Arc<GridMesh>)>>,
+}
+
+/// A [`ModelScene`] drawn under an app theme: the overlay takes
+/// `palette`'s line and bed colors. The app resolves the palette at view
+/// time, so a theme switch repaints on the next frame without a message.
+pub struct Themed<'a> {
+    scene: &'a ModelScene,
+    palette: grid::Palette,
 }
 
 impl ModelScene {
@@ -128,6 +141,57 @@ impl ModelScene {
             bed: None,
             section: None,
             grid_aabb,
+            themed_grid: Mutex::new(None),
+        }
+    }
+
+    /// This scene drawn under `palette` (see [`Themed`]).
+    pub fn themed(&self, palette: grid::Palette) -> Themed<'_> {
+        Themed {
+            scene: self,
+            palette,
+        }
+    }
+
+    /// The overlay in `palette`'s colors: [`ModelScene::grid`] itself for
+    /// the default palette, else a rebuild over the same inputs, cached
+    /// against the grid it mirrors.
+    pub fn grid_for(&self, palette: grid::Palette) -> Arc<GridMesh> {
+        if palette == grid::Palette::DARK {
+            return self.grid.clone();
+        }
+        let mut cache = self.themed_grid.lock().unwrap();
+        if let Some((p, base, themed)) = cache.as_ref() {
+            if *p == palette && Arc::ptr_eq(base, &self.grid) {
+                return themed.clone();
+            }
+        }
+        let themed = Arc::new(grid::geometry_with(self.grid_aabb, self.bed, palette));
+        *cache = Some((palette, self.grid.clone(), themed.clone()));
+        themed
+    }
+
+    /// The frame's primitive with `grid` as the overlay (when shown).
+    fn primitive(&self, bounds: Rectangle, grid: impl FnOnce() -> Arc<GridMesh>) -> ModelPrimitive {
+        // the projection aspect comes from the viewport being drawn — the
+        // widget's own bounds — never a fixed ratio
+        let aspect = if bounds.width > 0.0 && bounds.height > 0.0 {
+            bounds.width / bounds.height
+        } else {
+            16.0 / 9.0 // zero-size layout pass: nothing draws; any finite ratio
+        };
+        ModelPrimitive {
+            scene: self.scene.clone(),
+            poses: self.poses.clone(),
+            appearances: self.appearances.clone(),
+            grid: self.show_grid.then(grid),
+            markers: self.markers.clone(),
+            ghost: self.ghost.clone(),
+            camera: self.camera(aspect),
+            options: Options {
+                wireframe: self.wireframe,
+                msaa: self.msaa,
+            },
         }
     }
 
@@ -270,26 +334,22 @@ impl<Message> shader::Program<Message> for ModelScene {
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> Self::Primitive {
-        // the projection aspect comes from the viewport being drawn — the
-        // widget's own bounds — never a fixed ratio
-        let aspect = if bounds.width > 0.0 && bounds.height > 0.0 {
-            bounds.width / bounds.height
-        } else {
-            16.0 / 9.0 // zero-size layout pass: nothing draws; any finite ratio
-        };
-        ModelPrimitive {
-            scene: self.scene.clone(),
-            poses: self.poses.clone(),
-            appearances: self.appearances.clone(),
-            grid: self.show_grid.then(|| self.grid.clone()),
-            markers: self.markers.clone(),
-            ghost: self.ghost.clone(),
-            camera: self.camera(aspect),
-            options: Options {
-                wireframe: self.wireframe,
-                msaa: self.msaa,
-            },
-        }
+        self.primitive(bounds, || self.grid.clone())
+    }
+}
+
+impl<Message> shader::Program<Message> for Themed<'_> {
+    type State = ();
+    type Primitive = ModelPrimitive;
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        _cursor: mouse::Cursor,
+        bounds: Rectangle,
+    ) -> Self::Primitive {
+        self.scene
+            .primitive(bounds, || self.scene.grid_for(self.palette))
     }
 }
 

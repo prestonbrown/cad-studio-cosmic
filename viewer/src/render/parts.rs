@@ -29,14 +29,23 @@ use engine::parsing::{Part, TriangleColor};
 
 use super::Vertex;
 
-/// The app's fixed neutral face color (upstream-contract §5): dark mode's
-/// (0.62, 0.70, 0.80) (ModelViewer.swift:401-403). The facts give values,
-/// not a color space; LINEAR is the recorded assumption — it is staged as
-/// the vertex color straight into the shader's lit multiply, like every
-/// EOTF-converted triangle color beside it. `from_parts` paints it onto
-/// uncolored triangles; it is a parameter so a theme-supplied neutral can
-/// take its place.
-pub const NEUTRAL: [f32; 3] = [0.62, 0.70, 0.80];
+/// Upstream's neutral face color for uncolored triangles, dark appearance
+/// (ModelViewer.swift:401-403: `NSColor(red: 0.62, green: 0.70, blue:
+/// 0.80)`), LINEAR: NSColor's components are sRGB-encoded and RealityKit
+/// decodes material tints before lighting, so this is the sRGB decode of
+/// upstream's literals — the same crossing every 3MF triangle color takes.
+/// `from_parts` paints it onto uncolored triangles; it is a parameter so
+/// the theme's neutral ([`neutral`]) can take its place.
+pub const NEUTRAL: [f32; 3] = [0.3424, 0.448, 0.6038];
+
+/// The light-appearance neutral (ModelViewer.swift:403: `NSColor(red:
+/// 0.55, green: 0.64, blue: 0.75)`), linear like [`NEUTRAL`].
+pub const NEUTRAL_LIGHT: [f32; 3] = [0.2633, 0.3672, 0.5225];
+
+/// The neutral for an appearance (ModelViewer.swift:401-403).
+pub fn neutral(dark: bool) -> [f32; 3] {
+    if dark { NEUTRAL } else { NEUTRAL_LIGHT }
+}
 
 /// Exact piecewise sRGB EOTF (IEC 61966-2-2) on the f32 unit scale, where
 /// 0.0 is black and 1.0 is white. The linear segment below 0.04045 is not
@@ -346,6 +355,25 @@ fn floor_pin(parts: &[Part]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The neutrals are upstream's NSColor literals decoded to linear —
+    /// staging the raw literals as linear renders them visibly washed out.
+    #[test]
+    fn neutrals_are_decoded_upstream_literals() {
+        for (linear, literal) in [
+            (NEUTRAL, [0.62, 0.70, 0.80]),
+            (NEUTRAL_LIGHT, [0.55, 0.64, 0.75]),
+        ] {
+            for i in 0..3 {
+                assert!(
+                    (linear[i] - srgb_to_linear_f(literal[i])).abs() < 1e-3,
+                    "{linear:?} vs decode of {literal:?}"
+                );
+            }
+        }
+        assert_eq!(neutral(true), NEUTRAL);
+        assert_eq!(neutral(false), NEUTRAL_LIGHT);
+    }
 
     /// The staged colors cross srgb_to_linear once at build; the shader
     /// curves them back through linear_to_srgb on a plain target — the

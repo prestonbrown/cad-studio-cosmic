@@ -481,13 +481,41 @@ fn chroma_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
-/// The golden model's two part chromas — fixture bytes (base #1F78B5,
-/// lid #D62629; model.3mf basematerials) through the same EOTF the staging
-/// applies, normalized so per-face lighting divides out.
-fn fixture_chromas() -> ([f32; 3], [f32; 3]) {
+/// The chromaticities a part of linear color `base` takes on the golden
+/// boxes' axis-aligned faces under the default iso camera — `lights::shade`
+/// of each face normal, normalized. The key's white specular and the
+/// highlight shoulder desaturate lit faces, so a part has one chroma per
+/// face rather than one overall; a flat face still renders a single value.
+fn face_chromas(base: [f32; 3]) -> Vec<[f32; 3]> {
+    let to_eye = lights::to_eye(std::f32::consts::FRAC_PI_4, 0.6);
+    let mut normals = Vec::new();
+    for a in 0..3 {
+        for s in [-1.0, 1.0] {
+            let mut n = [0.0; 3];
+            n[a] = s;
+            normals.push(n);
+        }
+    }
+    normals
+        .into_iter()
+        .map(|n| chroma(lights::shade(base, n, to_eye)))
+        .collect()
+}
+
+/// Distance from chroma `x` to the nearest of `set`.
+fn chroma_gap(x: [f32; 3], set: &[[f32; 3]]) -> f32 {
+    set.iter()
+        .map(|&c| chroma_dist(x, c))
+        .fold(f32::MAX, f32::min)
+}
+
+/// The golden model's two parts' face chromas — fixture bytes (base
+/// #1F78B5, lid #D62629; model.3mf basematerials) through the same EOTF
+/// the staging applies, then [`face_chromas`].
+fn fixture_chromas() -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     (
-        chroma([31, 120, 181].map(srgb_to_linear)),
-        chroma([214, 38, 41].map(srgb_to_linear)),
+        face_chromas([31, 120, 181].map(srgb_to_linear)),
+        face_chromas([214, 38, 41].map(srgb_to_linear)),
     )
 }
 
@@ -925,26 +953,19 @@ fn aspect_from_viewport() {
 
 /// Coverage-blend pixels of the 4x resolve (the msaa test): pixels whose
 /// chromaticity sits more than 0.05 from EVERY pure chroma of the frame —
-/// the two part colors and the background. Chroma, not luminance: with
-/// two-light shading (T4 re-measure) the six pure faces span readback
-/// values (11,61,95)..(16,75,115) for the blue base and
-/// (113,15,16)..(137,21,23) for the red lid beside the (89,89,97)
-/// background — pure faces bracket the background on every channel, so no
-/// luminance band separates blends from pures. Chroma is
-/// lighting-invariant (the per-face `lit` scalar divides out), so every
-/// pure pixel lands within 0.0074 of its part's chroma and a
+/// the two parts' face chromas ([`face_chromas`]) and the background.
+/// Chroma, not luminance: the pure faces bracket the background on every
+/// channel, so no luminance band separates blends from pures, while each
+/// flat face renders one value that sits on its own face chroma and a
 /// silhouette-edge blend — resolve box-filters the covered samples — lands
-/// strictly between endpoint chromas. Measured on Metal: exactly 0
-/// in-band pixels at 1x (unblended, single-sample), 1153 at 4x — the same
-/// count T3 measured, the blended edge set being geometric while shading
-/// moved only the luminances; the 0.05 cut is ~7x the measured pure-pixel
-/// noise.
-fn blend_pixels(px: &[u8], bg: [u8; 4], blue: [f32; 3], red: [f32; 3]) -> usize {
+/// strictly between endpoint chromas. At 1x (unblended, single-sample)
+/// there are none; the 0.05 cut is several times u8 quantization noise.
+fn blend_pixels(px: &[u8], bg: [u8; 4], blue: &[[f32; 3]], red: &[[f32; 3]]) -> usize {
     let bgc = chroma(decode_linear(&bg));
     px.chunks(4)
         .filter(|c| {
             let x = chroma(decode_linear(c));
-            chroma_dist(x, bgc) > 0.05 && chroma_dist(x, blue) > 0.05 && chroma_dist(x, red) > 0.05
+            chroma_dist(x, bgc) > 0.05 && chroma_gap(x, blue) > 0.05 && chroma_gap(x, red) > 0.05
         })
         .count()
 }
@@ -970,8 +991,8 @@ fn msaa_smooths_a_diagonal_edge() {
     let px1 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 1);
     let px4 = render_frame_msaa(device, queue, &scene, &camera, 800, 600, 4);
     let (e1, e4) = (
-        blend_pixels(&px1, bg, blue, red),
-        blend_pixels(&px4, bg, blue, red),
+        blend_pixels(&px1, bg, &blue, &red),
+        blend_pixels(&px4, bg, &blue, &red),
     );
     // at 1x the pipeline writes unblended single-sample fragments, so every
     // pixel IS a pure chroma — anything else is a blend/state leak
@@ -1089,7 +1110,7 @@ fn two_parts_two_colors() {
         min_row = min_row.min(row);
         max_row = max_row.max(row);
         let x = chroma(decode_linear(c));
-        if chroma_dist(x, blue) < TOL || chroma_dist(x, red) < TOL {
+        if chroma_gap(x, &blue) < TOL || chroma_gap(x, &red) < TOL {
             classified += 1;
         }
     }
@@ -1107,7 +1128,7 @@ fn two_parts_two_colors() {
         }
         let row = i / 800;
         let x = chroma(decode_linear(c));
-        let (d_blue, d_red) = (chroma_dist(x, blue), chroma_dist(x, red));
+        let (d_blue, d_red) = (chroma_gap(x, &blue), chroma_gap(x, &red));
         let near = |d: f32| d < TOL;
         if row - min_row < span / 3 {
             if near(d_blue) || near(d_red) {
@@ -1138,8 +1159,8 @@ fn two_parts_two_colors() {
 }
 
 /// Uncolored geometry paints the neutral: the golden STL carries no colors,
-/// so every ink pixel's chromaticity must sit on the neutral's (the
-/// per-face lighting scalar divides out). Guards the None branch of the
+/// so every ink pixel's chromaticity must sit on one of the neutral's face
+/// chromas ([`face_chromas`]). Guards the None branch of the
 /// staging against a future default-color or passthrough regression.
 #[test]
 fn neutral_when_uncolored() {
@@ -1158,7 +1179,7 @@ fn neutral_when_uncolored() {
     let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
-    let neutral = chroma(NEUTRAL);
+    let neutral = face_chromas(NEUTRAL);
     // Measured on Metal (T4, two-light shading): max chroma distance over
     // all 98560 ink pixels is 0.0115 (u8 quantization on the lit-neutral
     // faces — ambient-only faces are dark and quantize coarser); TOL 0.05
@@ -1168,7 +1189,7 @@ fn neutral_when_uncolored() {
     let near = px
         .chunks(4)
         .filter(|c| is_ink(c, bg))
-        .filter(|c| chroma_dist(chroma(decode_linear(c)), neutral) < TOL)
+        .filter(|c| chroma_gap(chroma(decode_linear(c)), &neutral) < TOL)
         .count();
     assert!(
         near as f64 >= 0.99 * n_ink as f64,
@@ -1184,17 +1205,13 @@ fn quad(positions: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d:
 
 /// A white cube rotated 45° about MODEL Z (corners on the axes), so the
 /// remap lands its side-face normals at scene azimuths 315°/45°/135°/225°.
-/// The rotation is the point: with an axis-aligned cube no single camera
-/// sees two faces the shading constants separate by 2x — the top face is
-/// the brightest at 0.26·0.7428+0.09·0.3468+0.15 ≈ 0.374, and the dimmest
-/// side face any above-horizon camera can see alongside it lights to
-/// 0.1968, a 1.90x ratio. Viewed from scene yaw 3π/4, the 315°-normal
-/// side faces the camera dead-on and sits >90° from BOTH light directions
-/// — ambient only, lit = 0.15 — while the top face takes
-/// key+fill+ambient; every other side is exactly edge-on. White
-/// (`Some([255,255,255])` is exact linear (1,1,1)) makes readback
-/// luminance equal the light `lights::lit` computes, with no albedo to
-/// divide out.
+/// The rotation is the point: viewed from scene yaw 3π/4, the 315°-normal
+/// side faces the camera dead-on and sits >90° from the key, fill AND
+/// environment directions — ambient only — while the top face takes every
+/// term plus the key's specular; every other side is exactly edge-on, so
+/// the shading constants separate the two visible faces by well over 2x.
+/// White (`Some([255,255,255])` is exact linear (1,1,1)) makes readback
+/// luminance equal [`white_shade`], with no albedo to divide out.
 fn white_diamond_cube() -> engine::parsing::Part {
     let h = 20.0;
     let ring = |z: f32| [[h, 0.0, z], [0.0, h, z], [-h, 0.0, z], [0.0, -h, z]];
@@ -1213,12 +1230,23 @@ fn white_diamond_cube() -> engine::parsing::Part {
     }
 }
 
-/// Real normals + the two-light model reach pixels (Task 4): key-facing vs
+/// The linear value mesh.wgsl writes for a white face with scene normal
+/// `n` under the white-cube tests' camera (yaw 3π/4, pitch 0.6) — the
+/// shader's Rust twin, so every expectation derives from the constants.
+fn white_shade(n: [f32; 3]) -> f32 {
+    lights::shade(
+        [1.0; 3],
+        n,
+        lights::to_eye(3.0 * std::f32::consts::FRAC_PI_4, 0.6),
+    )[0]
+}
+
+/// Real normals + the shading model reach pixels: key-facing vs
 /// away-facing regions of a white cube differ in readback luminance by
 /// >=2x, and each region sits in the band derived from the shading
-/// constants — `lights::lit` of the face's scene normal, quantized through
-/// the target's u8 sRGB storage by nearest decoded byte. No measured
-/// constants anywhere: the bands come from the 0.26/0.09/0.15 coefficients
+/// constants — [`white_shade`] of the face's scene normal, quantized
+/// through the target's u8 sRGB storage by nearest decoded byte. No
+/// measured constants anywhere: the bands come from the `lights` module
 /// and the cube's geometry.
 #[test]
 fn shaded_faces_differ() {
@@ -1238,7 +1266,7 @@ fn shaded_faces_differ() {
     // (nearest byte by the same EOTF the readback decodes with) — computed,
     // not measured
     let expected = |n: [f32; 3]| {
-        let lit = lights::lit(n);
+        let lit = white_shade(n);
         let mut best = 0u8;
         let mut best_d = f32::MAX;
         for b in 0u8..=255 {
@@ -1307,8 +1335,8 @@ fn shaded_faces_differ() {
 /// iced's compositor picks for the app under libcosmic's `web-colors`
 /// build, where the hardware stores no sRGB encode and the shader must
 /// carry it (`target_space_wgsl`). Rendered at that format, the white
-/// cube's faces read back as the ENCODED `lights::lit` byte (≈0.65/0.54),
-/// never the raw linear one (≈0.37/0.25) — the reading that rendered the
+/// cube's faces read back as the ENCODED [`white_shade`] byte, never the
+/// raw linear one — the reading that rendered the
 /// app's model darker than its background. Readback is BGR byte order; a
 /// gray face repeats the same byte on every channel.
 #[test]
@@ -1344,8 +1372,8 @@ fn plain_target_shader_carries_the_srgb_encode() {
     // the two visible faces' expected STORED bytes: the linear lit through
     // the encode the shader now carries (encode_srgb is its test twin)
     let lits = [
-        lights::lit([0.0, 1.0, 0.0]),
-        lights::lit([
+        white_shade([0.0, 1.0, 0.0]),
+        white_shade([
             std::f32::consts::FRAC_1_SQRT_2,
             0.0,
             -std::f32::consts::FRAC_1_SQRT_2,
@@ -1353,11 +1381,15 @@ fn plain_target_shader_carries_the_srgb_encode() {
     ];
     let encoded: Vec<u8> = lits.iter().map(|&l| encode_srgb(l)).collect();
     let raw: Vec<u8> = lits.iter().map(|&l| (l * 255.0).round() as u8).collect();
+    // every face's encoded byte must sit outside the ±2 match band of its
+    // raw byte, and at least one face far outside it, for this test to bite
+    let gaps: Vec<i32> = encoded
+        .iter()
+        .zip(&raw)
+        .map(|(&e, &r)| (e as i32 - r as i32).abs())
+        .collect();
     assert!(
-        encoded
-            .iter()
-            .zip(&raw)
-            .all(|(&e, &r)| (e as i32 - r as i32).abs() > 20),
+        gaps.iter().all(|&g| g > 4) && gaps.iter().any(|&g| g > 20),
         "encoded {encoded:?} vs raw {raw:?} must be far apart for this test to bite"
     );
     // the harness clear (0.1, 0.1, 0.12, 1.0) stored raw by the plain target
@@ -1449,7 +1481,7 @@ fn wireframe_renders_lines_not_faces() {
         .filter(|c| is_ink(c, bg))
         .filter(|c| {
             let x = chroma(decode_linear(c));
-            chroma_dist(x, blue) < TOL || chroma_dist(x, red) < TOL
+            chroma_gap(x, &blue) < TOL || chroma_gap(x, &red) < TOL
         })
         .count();
     // measured 3423/3423 (100%); the 90% bar absorbs driver raster drift
@@ -1940,11 +1972,11 @@ fn msaa_toggle_rebuilds_in_place() {
         None,
         &Options::default(),
     );
-    assert_eq!(blend_pixels(&one, bg, blue, red), 0, "1x has no blends");
+    assert_eq!(blend_pixels(&one, bg, &blue, &red), 0, "1x has no blends");
     assert!(
-        blend_pixels(&four, bg, blue, red) > 600,
+        blend_pixels(&four, bg, &blue, &red) > 600,
         "the rebuilt 4x path must resolve+blit: {}",
-        blend_pixels(&four, bg, blue, red)
+        blend_pixels(&four, bg, &blue, &red)
     );
     assert!(
         ink_pixels(&four, bg) > 5_000,
@@ -2332,14 +2364,20 @@ fn translucent_alpha_survives_the_msaa_resolve() {
         600.0,
     )
     .unwrap();
-    let idx = (p.1 as usize * 800 + p.0 as usize) * 4;
+    // measure on the channel where the opaque face and the background
+    // differ most, so the blend has room to sit between them
+    let base = p.1 as usize * 800 + p.0 as usize;
+    let ch = (0..3)
+        .max_by_key(|&k| (px_opaque[base * 4 + k] as i32 - bg[k] as i32).abs())
+        .unwrap();
+    let idx = base * 4 + ch;
     let distance_from_opaque = (px_blend[idx] as i32 - px_opaque[idx] as i32).abs();
-    let distance_from_bg = (px_blend[idx] as i32 - bg[0] as i32).abs();
+    let distance_from_bg = (px_blend[idx] as i32 - bg[ch] as i32).abs();
     assert!(
         distance_from_opaque > 10 && distance_from_bg > 5,
         "blended pixel sits between opaque ({}) and background ({}), not on either ({} vs {})",
         px_opaque[idx],
-        bg[0],
+        bg[ch],
         distance_from_opaque,
         distance_from_bg
     );
