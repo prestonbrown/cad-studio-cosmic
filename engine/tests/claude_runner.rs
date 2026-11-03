@@ -6,11 +6,13 @@
 
 use engine::agent::attachments::copy_attachments;
 use engine::agent::claude::{
-    PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets,
-    render_system_prompt,
+    PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets, render_system_prompt,
 };
 use engine::agent::locator::AgentPath;
 use std::path::{Path, PathBuf};
+
+mod common;
+use common::*;
 
 fn fake_path() -> AgentPath {
     AgentPath {
@@ -21,12 +23,6 @@ fn fake_path() -> AgentPath {
 
 fn golden() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden")
-}
-
-fn fixture_upstream(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/upstream")
-        .join(p)
 }
 
 /// A temp project with the real on-disk layout: model.py at the root when

@@ -17,6 +17,9 @@ use engine::agent::tool_summary::{ToolAction, ToolTitle};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
+mod common;
+use common::*;
+
 /// The fake reads its env at spawn time and `Session::run_turn` snapshots the
 /// login environment per turn, so every [set env → run_turn → turn finished]
 /// window must be exclusive across the parallel test threads.
@@ -28,27 +31,11 @@ const FORK_SID: &str = "283df95a-9a62-4620-9a04-73d1e3209968";
 const WRITE_ID: &str = "toolu_013uZKwucpApefxH7dUCMw1L";
 const READ_ID: &str = "toolu_01PiSki6C6xfd2exZn7nabus";
 
-fn fixture_fake(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/fake-agent")
-        .join(p)
-}
-
-fn fixture_upstream(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/upstream")
-        .join(p)
-}
-
 /// A temp project with the real on-disk layout: empty output/, no model.py.
 fn mk_project() -> PathBuf {
     let root = std::env::temp_dir().join(format!("cad-session-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("output")).unwrap();
     root
-}
-
-fn system_template() -> String {
-    std::fs::read_to_string(fixture_upstream("CADSystemPrompt.md")).unwrap()
 }
 
 /// Point the CAD_* env at one fake invocation and run a whole turn to its
@@ -88,28 +75,6 @@ async fn run_fake_with(
     let events = collect_until_finished(&mut handle).await;
     drop(guard);
     events
-}
-
-/// Drain the handle's events up to and including TurnFinished, bounded by the
-/// suite-wide 5 s margin (never a fixed sleep).
-async fn collect_until_finished(
-    handle: &mut engine::agent::session::TurnHandle,
-) -> Vec<EngineEvent> {
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match tokio::time::timeout_at(deadline, handle.events.recv()).await {
-            Ok(Some(event)) => {
-                let finished = matches!(event, EngineEvent::TurnFinished(_));
-                events.push(event);
-                if finished {
-                    return events;
-                }
-            }
-            Ok(None) => panic!("events channel closed before TurnFinished: {events:?}"),
-            Err(_) => panic!("timed out before TurnFinished: {events:?}"),
-        }
-    }
 }
 
 /// Positions (indexes into `events`) of the events matching `pred`.

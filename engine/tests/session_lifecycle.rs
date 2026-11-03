@@ -20,6 +20,9 @@ use engine::agent::session::{EngineEvent, Session, SystemRow, TurnOutcome};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
+mod common;
+use common::*;
+
 /// The fake reads its env at spawn time and the session snapshots the login
 /// environment per attempt, so every [set env → send → TurnFinished] window
 /// must be exclusive across the parallel test threads.
@@ -33,19 +36,6 @@ const BUSY_SID: &str = "11111111-2222-3333-4444-555555555555";
 /// stable ids; the app localizes at its boundary.
 const BUSY_FRESH_ROW: SystemRow = SystemRow::BusyFreshContext;
 const MISSING_ROW: SystemRow = SystemRow::MissingSession;
-
-fn fixture_fake(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/fake-agent")
-        .join(p)
-}
-
-fn system_template() -> String {
-    std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/upstream/CADSystemPrompt.md"),
-    )
-    .unwrap()
-}
 
 fn mk_project() -> PathBuf {
     let root = std::env::temp_dir().join(format!("cad-lifecycle-{}", uuid::Uuid::new_v4()));
@@ -122,28 +112,6 @@ async fn run_dance(
     let events = collect_until_finished(&mut handle).await;
     drop(guard);
     (events, dump)
-}
-
-/// Drain the handle's events up to and including TurnFinished, bounded by
-/// the suite-wide 5 s margin (never a fixed sleep).
-async fn collect_until_finished(
-    handle: &mut engine::agent::session::TurnHandle,
-) -> Vec<EngineEvent> {
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match tokio::time::timeout_at(deadline, handle.events.recv()).await {
-            Ok(Some(event)) => {
-                let finished = matches!(event, EngineEvent::TurnFinished(_));
-                events.push(event);
-                if finished {
-                    return events;
-                }
-            }
-            Ok(None) => panic!("events channel closed before TurnFinished: {events:?}"),
-            Err(_) => panic!("timed out before TurnFinished: {events:?}"),
-        }
-    }
 }
 
 fn positions<F: Fn(&EngineEvent) -> bool>(events: &[EngineEvent], pred: F) -> Vec<usize> {
