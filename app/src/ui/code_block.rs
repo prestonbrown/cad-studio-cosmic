@@ -62,9 +62,12 @@ pub fn code_block<'a, M: Clone + 'a>(
         tooltip::Position::FollowCursor,
     );
     cosmic::iced::widget::stack![
-        container(scroller)
-            .width(Length::Fill)
-            .class(surface::fill(Tone::Quaternary, 0.5, Corner::S, false)),
+        container(scroller).width(Length::Fill).class(surface::fill(
+            Tone::Quaternary,
+            0.5,
+            Corner::S,
+            false
+        )),
         container(copy)
             .width(Length::Fill)
             .padding(3)

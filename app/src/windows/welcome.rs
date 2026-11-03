@@ -334,9 +334,12 @@ impl Welcome {
 
         let thumbnail: Element<'_, Message> = match self.thumbnail(path) {
             Some(handle) => cosmic::widget::image(handle).width(40).height(30).into(),
-            None => container(
-                ui::icon::icon(Symbol::Cube, 18.0, Tone::Secondary, Backdrop::Plain),
-            )
+            None => container(ui::icon::icon(
+                Symbol::Cube,
+                18.0,
+                Tone::Secondary,
+                Backdrop::Plain,
+            ))
             .width(40)
             .height(30)
             .align_x(cosmic::iced::alignment::Alignment::Center)

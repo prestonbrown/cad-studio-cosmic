@@ -1753,7 +1753,10 @@ mod tests {
             agent = AgentKind::Claude.display_name()
         ));
         let (ev_tx, mut ev_rx) = mpsc::channel::<EngineEvent>(1);
-        ev_tx.send(EngineEvent::TurnFinished(outcome)).await.unwrap();
+        ev_tx
+            .send(EngineEvent::TurnFinished(outcome))
+            .await
+            .unwrap();
         drop(ev_tx);
         let end = drive
             .drain_turn(&mut ev_rx, || {}, ChatState::new(Vec::new()))
@@ -1785,7 +1788,11 @@ mod tests {
             Activity::Succeeded(fl!("risposta-completata")),
             "the terminal's activity is the finished one"
         );
-        assert_eq!(at_send, drive.pipeline().activity, "the tail changes nothing more");
+        assert_eq!(
+            at_send,
+            drive.pipeline().activity,
+            "the tail changes nothing more"
+        );
     }
 
     /// A failed turn's activity is set at the instant TurnFinished is sent.
@@ -1814,17 +1821,14 @@ mod tests {
     }
 
     /// A codex turn announces its engine on TurnStarted and names itself in
-    /// the working and failure activities — the Claude-only constants the
-    /// T3 follow-up retired. The scripted-agent seam suspends the settings
-    /// re-read, so the launch snapshot's engine is the turn's engine here.
+    /// the working and failure activities, never a fixed "Claude". The
+    /// scripted-agent seam suspends the settings re-read, so the launch
+    /// snapshot's engine is the turn's engine here.
     #[tokio::test(flavor = "multi_thread")]
     async fn codex_turn_announces_its_engine_and_names_its_activities() {
         // LOCK ORDER: pin_en BEFORE ENV_LOCK, uniformly with every other
-        // dual-lock test — the previous ENV→pin order here inverted against
-        // the pin→ENV tests and deadlocked the suite intermittently (ABBA:
-        // this test parked on pin_en while a pin→ENV test parked on
-        // ENV_LOCK; every pin_en waiter — including pure sync tests — hung
-        // behind the never-released guard)
+        // dual-lock test: one test taking them in the other order deadlocks
+        // the suite (ABBA), and every pin_en waiter hangs behind it
         let _lang = crate::localize::pin_en();
         let _guard = ENV_LOCK.lock().await;
         let root = std::env::temp_dir().join(format!("cad-codex-name-{}", Uuid::new_v4()));

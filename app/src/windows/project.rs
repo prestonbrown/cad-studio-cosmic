@@ -1392,7 +1392,12 @@ impl ProjectWindow {
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(surface::fill(Tone::Separator, DIVIDER_SCALE, Corner::None, false))
+            .class(surface::fill(
+                Tone::Separator,
+                DIVIDER_SCALE,
+                Corner::None,
+                false,
+            ))
             .into()
     }
 
@@ -1411,9 +1416,7 @@ impl ProjectWindow {
                 Tone::Secondary,
                 Backdrop::Material,
             )
-            .opacity(
-                opacity * Tone::Secondary.alpha(&cosmic::theme::active(), Backdrop::Material),
-            ),
+            .opacity(opacity * Tone::Secondary.alpha(&cosmic::theme::active(), Backdrop::Material)),
         )
         .width(Length::Fixed(28.0))
         .height(Length::Fixed(16.0))
@@ -1626,8 +1629,9 @@ impl ProjectWindow {
         Column::with_capacity(2)
             .push(band)
             .push(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false)),
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
+                    surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false),
+                ),
             )
             .into()
     }
@@ -1746,7 +1750,12 @@ impl ProjectWindow {
             .width(Length::Fixed(480.0))
             .height(Length::Fixed(24.0))
             .align_y(cosmic::iced::alignment::Vertical::Center)
-            .class(surface::fill(Tone::Quaternary, CAPSULE_SCALE, Corner::S, false))
+            .class(surface::fill(
+                Tone::Quaternary,
+                CAPSULE_SCALE,
+                Corner::S,
+                false,
+            ))
             .into()
     }
 
@@ -2053,9 +2062,8 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
     if !paths.is_empty() {
         list = list.push(
             container(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
-                    surface::fill(Tone::Separator, 1.0, Corner::None, false),
-                ),
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                    .class(surface::fill(Tone::Separator, 1.0, Corner::None, false)),
             )
             .padding([5, 14]),
         );
@@ -2149,7 +2157,7 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
     .boxed()
 }
 
-/// The M4 shortcut table (upstream keyboardShortcut values, ⌘→Ctrl,
+/// The project window's shortcut table (upstream keyboardShortcut values, ⌘→Ctrl,
 /// ⌥→Alt). Pure: the app routes a key press through this before the
 /// focused window sees it.
 pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
@@ -2172,8 +2180,7 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
         (true, true, false, "3") => Some(ViewerPreset(Preset::Top)),
         (true, true, false, "4") => Some(ViewerPreset(Preset::Right)),
         (true, true, false, "0") => Some(ViewerFit),
-        // ⌥⌘I parameters (Commands.swift:69-73) — the app-wide arm (the
-        // viewer pane's subscription no longer carries it)
+        // ⌥⌘I parameters (Commands.swift:69-73): the app-wide arm
         (true, true, false, "i") => Some(ToggleParameters),
         (true, false, false, "+") | (true, false, false, "=") => Some(SchematicZoomIn),
         (true, false, false, "-") => Some(SchematicZoomOut),

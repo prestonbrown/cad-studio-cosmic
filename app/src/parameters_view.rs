@@ -38,8 +38,8 @@ use engine::project::versions::ProjectVersion;
 
 use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
-use crate::ui::slider::{KNOB, small_slider, with_rail_ends};
 use crate::typography;
+use crate::ui::slider::{KNOB, small_slider, with_rail_ends};
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
 

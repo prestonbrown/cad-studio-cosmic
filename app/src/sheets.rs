@@ -609,7 +609,10 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         stack = stack.push(
             Row::new()
                 .spacing(8)
-                .push(ui::icon::multicolor(Symbol::XmarkOctagonFillMulticolor, 18.0))
+                .push(ui::icon::multicolor(
+                    Symbol::XmarkOctagonFillMulticolor,
+                    18.0,
+                ))
                 .push(body(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
         );
     }

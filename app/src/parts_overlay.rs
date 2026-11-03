@@ -24,9 +24,9 @@ use viewer::tools::section;
 use crate::fl;
 use crate::typography;
 use crate::ui::segmented::{Look, segmented};
+use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::tone::wash;
-use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
 use crate::viewer_pane::{Message, format_length};
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools};
@@ -383,8 +383,8 @@ pub fn view_measure_badge(points: &[[f32; 3]], unit: MeasurementUnit) -> Element
 // ─── section controls (ModelPane.swift:181-200) ────────────────────────────
 
 /// The bottom-center section capsule: the X/Y/Z segmented picker
-/// (`.fixedSize()`) and the position slider over T3's
-/// `SLIDER_MIN..=SLIDER_MAX`, width 220, 10 apart, in a material capsule
+/// (`.fixedSize()`) and the position slider over
+/// `section::SLIDER_MIN..=SLIDER_MAX`, width 220, 10 apart, in a material capsule
 /// padded 12 × 6.
 pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
     let selected = section::ALL

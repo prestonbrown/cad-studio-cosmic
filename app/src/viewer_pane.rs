@@ -10,7 +10,7 @@
 //! Shared/PaneStatusBar.swift). The bar's toggle state and the overlay
 //! family that floats over the canvas (parts panel top-leading, measure
 //! badge top-center, section controls bottom-center — [`crate::parts_overlay`])
-//! read from [`tools`](ViewerTools), the T8 state hub. The mesh pass
+//! read from [`tools`](ViewerTools), the viewer's tool state. The mesh pass
 //! renders at 4× MSAA (`MeshPipeline::with_msaa`, the spec §5 decision),
 //! as SceneKit's macOS SCNView multisamples 4× by default; upstream has no
 //! control for it, so neither does the bar.
