@@ -720,30 +720,42 @@ fn ghost_identity(scene: &PartScene) -> u64 {
     h.finish()
 }
 
-/// The depth/stencil contract shared by every pass that must not occlude —
-/// the grid/markers overlay pipeline, the compare ghost, and the
-/// translucent part pipelines: depth-TESTED so the opaque mesh orders
-/// these draws correctly, depth-write OFF so they occlude nothing after
-/// them, stencil inert (Always/Keep — the mesh pass's winding parity stays
-/// untouched for whoever reads it next).
-fn overlay_depth_stencil() -> wgpu::DepthStencilState {
+/// One stencil face: `compare`, with `fail` kept and `op` applied on both
+/// depth-pass and depth-fail.
+fn stencil_face(
+    compare: wgpu::CompareFunction,
+    op: wgpu::StencilOperation,
+) -> wgpu::StencilFaceState {
+    wgpu::StencilFaceState {
+        compare,
+        fail_op: wgpu::StencilOperation::Keep,
+        depth_fail_op: op,
+        pass_op: op,
+    }
+}
+
+/// The face every pass that leaves the stencil alone uses.
+const STENCIL_INERT: wgpu::StencilFaceState = wgpu::StencilFaceState {
+    compare: wgpu::CompareFunction::Always,
+    fail_op: wgpu::StencilOperation::Keep,
+    depth_fail_op: wgpu::StencilOperation::Keep,
+    pass_op: wgpu::StencilOperation::Keep,
+};
+
+/// The viewer's Depth24PlusStencil8 state with full read/write masks.
+fn depth_stencil(
+    depth_write: bool,
+    depth_compare: wgpu::CompareFunction,
+    front: wgpu::StencilFaceState,
+    back: wgpu::StencilFaceState,
+) -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: wgpu::TextureFormat::Depth24PlusStencil8,
-        depth_write_enabled: false,
-        depth_compare: wgpu::CompareFunction::LessEqual,
+        depth_write_enabled: depth_write,
+        depth_compare,
         stencil: wgpu::StencilState {
-            front: wgpu::StencilFaceState {
-                compare: wgpu::CompareFunction::Always,
-                fail_op: wgpu::StencilOperation::Keep,
-                depth_fail_op: wgpu::StencilOperation::Keep,
-                pass_op: wgpu::StencilOperation::Keep,
-            },
-            back: wgpu::StencilFaceState {
-                compare: wgpu::CompareFunction::Always,
-                fail_op: wgpu::StencilOperation::Keep,
-                depth_fail_op: wgpu::StencilOperation::Keep,
-                pass_op: wgpu::StencilOperation::Keep,
-            },
+            front,
+            back,
             read_mask: 0xFF,
             write_mask: 0xFF,
         },
@@ -751,22 +763,98 @@ fn overlay_depth_stencil() -> wgpu::DepthStencilState {
     }
 }
 
+/// The depth/stencil contract shared by every pass that must not occlude —
+/// the grid/markers overlay pipeline, the compare ghost, and the
+/// translucent part pipelines: depth-TESTED so the opaque mesh orders
+/// these draws correctly, depth-write OFF so they occlude nothing after
+/// them, stencil inert (the mesh pass's winding parity stays untouched for
+/// whoever reads it next).
+fn overlay_depth_stencil() -> wgpu::DepthStencilState {
+    depth_stencil(
+        false,
+        wgpu::CompareFunction::LessEqual,
+        STENCIL_INERT,
+        STENCIL_INERT,
+    )
+}
+
+/// The staged part vertex as the part pipelines read it: position,
+/// normal, color.
+const PART_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+
+/// A position-only read of a vertex buffer (the cap quad, the ghost's
+/// part vertices).
+const POSITION_ATTR: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+
+/// The overlay vertex: position, straight-alpha color.
+const OVERLAY_ATTRS: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+
+/// What differs between the viewer's render pipelines; everything else —
+/// one vertex buffer, one color target at the frame's format, no culling,
+/// the frame's sample count — is shared by [`build_pipeline`].
+struct PipelineSpec<'a> {
+    label: &'a str,
+    layout: &'a wgpu::PipelineLayout,
+    module: &'a wgpu::ShaderModule,
+    vs: &'a str,
+    fs: &'a str,
+    stride: usize,
+    attributes: &'a [wgpu::VertexAttribute],
+    topology: wgpu::PrimitiveTopology,
+    blend: Option<wgpu::BlendState>,
+    depth_stencil: wgpu::DepthStencilState,
+}
+
+fn build_pipeline(
+    device: &wgpu::Device,
+    spec: PipelineSpec<'_>,
+    format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(spec.label),
+        layout: Some(spec.layout),
+        vertex: wgpu::VertexState {
+            module: spec.module,
+            entry_point: Some(spec.vs),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: spec.stride as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: spec.attributes,
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: spec.module,
+            entry_point: Some(spec.fs),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: spec.blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: spec.topology,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(spec.depth_stencil),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 pub struct MeshPipeline {
-    pipeline: wgpu::RenderPipeline,
-    cap_pipeline: wgpu::RenderPipeline,
-    /// Wireframe hairlines (facts #44): the mesh shader at LineList
-    /// topology, drawn instead of `pipeline` when `wireframe` is set.
-    line_pipeline: wgpu::RenderPipeline,
-    /// The translucent part set's pipelines (motion playback): the mesh
-    /// and line materials with alpha blending and no depth write — drawn
-    /// after the opaque set, before the cap.
-    mesh_blend_pipeline: wgpu::RenderPipeline,
-    line_blend_pipeline: wgpu::RenderPipeline,
-    /// Unlit grid/bed/tripod overlay (facts #34/#37).
-    grid_pipeline: wgpu::RenderPipeline,
-    /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
-    /// 371-378): LINE topology over the ghost scene's edge lists.
-    ghost_pipeline: wgpu::RenderPipeline,
+    /// The render pipelines at the current sample count.
+    pipelines: Pipelines,
     /// Part-draw pipeline layout (camera + per-part model groups): the mesh
     /// and line pipelines; rebuilt pipelines keep using this object so the
     /// resident bind groups stay compatible.
@@ -924,14 +1012,22 @@ fn ghost_wgsl_source(target_format: wgpu::TextureFormat) -> String {
 /// [`MeshPipeline::make_pipelines`] at creation and on every
 /// [`Options::msaa`] flip in `prepare_parts`.
 struct Pipelines {
+    /// Filled parts, writing the section cap's winding parity.
     mesh: wgpu::RenderPipeline,
+    /// The section cap quad, drawn where the parity is nonzero.
     cap: wgpu::RenderPipeline,
+    /// Wireframe hairlines (facts #44): the mesh shader at LineList,
+    /// drawn instead of `mesh` in wireframe mode.
     line: wgpu::RenderPipeline,
     /// The mesh/line pipelines' alpha-blended twins for the translucent
-    /// part set (blend on, the overlay depth stance).
+    /// part set (blend on, the overlay depth stance), drawn after the
+    /// opaque set, before the cap.
     mesh_blend: wgpu::RenderPipeline,
     line_blend: wgpu::RenderPipeline,
+    /// Unlit grid/bed/tripod and measure-marker overlay (facts #34/#37).
     grid: wgpu::RenderPipeline,
+    /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
+    /// 371-378) over the ghost scene's edge lists.
     ghost: wgpu::RenderPipeline,
 }
 
@@ -1038,13 +1134,7 @@ impl MeshPipeline {
         let blit = (sample_count > 1).then(|| Self::make_blit(device, target_format));
         let (depth_tex, depth) = Self::make_depth(device, (1, 1), sample_count);
         Self {
-            pipeline: pipelines.mesh,
-            cap_pipeline: pipelines.cap,
-            line_pipeline: pipelines.line,
-            mesh_blend_pipeline: pipelines.mesh_blend,
-            line_blend_pipeline: pipelines.line_blend,
-            grid_pipeline: pipelines.grid,
-            ghost_pipeline: pipelines.ghost,
+            pipelines,
             part_pass_layout,
             camera_pass_layout,
             bind_group,
@@ -1073,7 +1163,7 @@ impl MeshPipeline {
         }
     }
 
-    /// The six render pipelines at `sample_count`, built against the SAME
+    /// The seven render pipelines at `sample_count`, built against the SAME
     /// pipeline layout objects the resident bind groups reference — a
     /// rebuilt pipeline stays bind-compatible without re-staging anything.
     fn make_pipelines(
@@ -1083,379 +1173,119 @@ impl MeshPipeline {
         part_layout: &wgpu::PipelineLayout,
         camera_layout: &wgpu::PipelineLayout,
     ) -> Pipelines {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mesh.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source(target_format).into()),
-        });
-        let vlayout = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 12,
-                shader_location: 1,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 24,
-                shader_location: 2,
-            },
-        ];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                // No culling: back faces must rasterize or their decrement
-                // never happens and the winding parity below breaks.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                // Winding parity for the section cap: every rasterized
-                // fragment flips the stencil (front +1, back -1), including
-                // depth-occluded ones, so after the pass stencil != 0 exactly
-                // where a ray from the camera ends inside the sectioned
-                // solid — the cut face the cap quad fills. Wrap (not Clamp)
-                // keeps 0-1 = 255 in the parity; fragments discarded by the
-                // section plane never reach the stencil op, which is what
-                // clips the count at the cut.
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::IncrementWrap,
-                        pass_op: wgpu::StencilOperation::IncrementWrap,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::DecrementWrap,
-                        pass_op: wgpu::StencilOperation::DecrementWrap,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        use wgpu::CompareFunction::{Always, Less, LessEqual, NotEqual};
+        use wgpu::PrimitiveTopology::{LineList, TriangleList, TriangleStrip};
+        use wgpu::StencilOperation::{DecrementWrap, IncrementWrap};
+        let module = |label: &str, source: String| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let build = |spec| build_pipeline(device, spec, target_format, sample_count);
+        let mesh_shader = module("mesh.wgsl", mesh_wgsl_source(target_format));
+        // The four part pipelines share the mesh shader and the part vertex,
+        // and differ in topology, blend, and depth/stencil.
+        let part = |label, topology, blend, depth_stencil| {
+            build(PipelineSpec {
+                label,
+                layout: part_layout,
+                module: &mesh_shader,
+                vs: "vs_main",
+                fs: "fs_main",
+                stride: std::mem::size_of::<Vertex>(),
+                attributes: &PART_ATTRS,
+                topology,
+                blend,
+                depth_stencil,
+            })
+        };
+        // Filled parts. No culling: back faces must rasterize or their
+        // decrement never happens and the winding parity breaks. Winding
+        // parity for the section cap: every rasterized fragment flips the
+        // stencil (front +1, back -1), including depth-occluded ones, so
+        // after the pass stencil != 0 exactly where a ray from the camera
+        // ends inside the sectioned solid — the cut face the cap quad
+        // fills. Wrap (not Clamp) keeps 0-1 = 255 in the parity; fragments
+        // discarded by the section plane never reach the stencil op, which
+        // is what clips the count at the cut.
+        let mesh = part(
+            "mesh",
+            TriangleList,
+            None,
+            depth_stencil(
+                true,
+                Less,
+                stencil_face(Always, IncrementWrap),
+                stencil_face(Always, DecrementWrap),
+            ),
+        );
+        // Wireframe hairlines (facts #44): the SAME mesh shader, material,
+        // and opacity as fill — only the topology changes (LineList;
+        // wgpu/WebGPU fix line width at 1, so no wide lines and no tint).
+        // Depth-tested like the fill so hidden edges stay hidden. Stencil
+        // inert: winding parity is a filled-rasterization trick, and the
+        // cap it feeds is disabled in wireframe anyway.
+        let line = part(
+            "wireframe lines",
+            LineList,
+            None,
+            depth_stencil(true, Less, STENCIL_INERT, STENCIL_INERT),
+        );
+        // The translucent part set (motion playback, ModelViewer.swift:410):
+        // the mesh and line materials with ALPHA_BLENDING and the overlay
+        // depth stance — depth-TESTED so the opaque set orders correctly,
+        // never WRITING depth so a translucent part occludes nothing after
+        // it. The blend pipelines never participate in section winding
+        // parity: section ∩ animation is empty by mutual exclusion (the
+        // pane's isAnimating excludes sectioning). fs_main applies
+        // model.alpha identically to fill and lines.
+        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let mesh_blend = part("mesh blend", TriangleList, blend, overlay_depth_stencil());
+        let line_blend = part(
+            "wireframe lines blend",
+            LineList,
+            blend,
+            overlay_depth_stencil(),
+        );
         // The cap quad fills the cut face where the mesh pass left winding
         // parity. Its stencil test is read-only (all ops Keep) so the mesh's
         // inc/dec stays in the attachment; depth is read-only too (the quad
         // must not occlude anything drawn after it), and it wins LessEqual
         // only where the surviving mesh lies beyond the section plane.
         // Camera-only (camera_layout): the cap has no per-part transform.
-        let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cap.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(cap_wgsl_source(target_format).into()),
+        // The quad is 4 Z-ordered vertices drawn 0..4 (see `cap_quad`), so
+        // the topology is a STRIP: a TriangleList would draw only the first
+        // 3 of the 4 vertices, half the quad.
+        let cap_shader = module("cap.wgsl", cap_wgsl_source(target_format));
+        let not_zero = stencil_face(NotEqual, wgpu::StencilOperation::Keep);
+        let cap = build(PipelineSpec {
+            label: "section cap",
+            layout: camera_layout,
+            module: &cap_shader,
+            vs: "vs_cap",
+            fs: "fs_cap",
+            stride: std::mem::size_of::<CapVertex>(),
+            attributes: &POSITION_ATTR,
+            topology: TriangleStrip,
+            blend: None,
+            depth_stencil: depth_stencil(false, LessEqual, not_zero, not_zero),
         });
-        let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("section cap"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &cap_shader,
-                entry_point: Some("vs_cap"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<CapVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &cap_shader,
-                entry_point: Some("fs_cap"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            // The quad is 4 Z-ordered vertices drawn 0..4 (see `cap_quad`) —
-            // a STRIP, so both halves rasterize. The topology must say so:
-            // PrimitiveState's TriangleList default renders only the first
-            // 3 of the 4 vertices, HALF the quad, with the cut-face center
-            // landing on the unrendered diagonal (the cap-color test's
-            // sample point; through M3 this half-quad was invisible — the
-            // red-pixel tests counted area, not shape).
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::NotEqual,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::NotEqual,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // Wireframe hairlines (facts #44): the SAME mesh shader, material,
-        // and opacity as fill — only the topology (LineList; wgpu/WebGPU
-        // fix line width at 1, so no wide lines and no tint) and culling
-        // change. Depth-tested like the fill so hidden edges stay hidden.
-        // Stencil ops all Keep: winding parity is a filled-rasterization
-        // trick, and the cap it feeds is disabled in wireframe anyway.
-        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe lines"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The translucent part set (motion playback, ModelViewer.swift:410):
-        // the mesh material with ALPHA_BLENDING and the overlay depth stance
-        // ([`overlay_depth_stencil`]) — depth-TESTED so the opaque set orders
-        // correctly, never WRITING depth so a translucent part occludes
-        // nothing after it. Stencil all Keep through that shared state: the
-        // blend pipelines never participate in section winding parity —
-        // section ∩ animation is empty by mutual exclusion (the pane's
-        // isAnimating excludes sectioning) — stated here rather than silently
-        // inheriting the mesh's inc/dec ops that rely on it. No culling,
-        // like the mesh (upstream's translucent material sets faceCulling
-        // .none too).
-        let mesh_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh blend"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The same swap on the wireframe hairlines: a translucent part in
-        // wireframe mode draws its edge list through this pipeline — fs_main
-        // applies model.alpha identically to fill.
-        let line_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe lines blend"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // Grid / bed / tripod overlay (facts #34/#37): unlit vertex colors,
-        // alpha-blended, no culling. Depth-tested so the model occludes
-        // the overlay, but NO depth write — an overlay must not occlude
-        // ([`overlay_depth_stencil`]).
-        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("grid.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(grid_wgsl_source(target_format).into()),
-        });
-        let grid_vlayout = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 12,
-                shader_location: 1,
-            },
-        ];
-        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("grid overlay"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs_grid"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GridVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &grid_vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs_grid"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        // Grid / bed / tripod / markers overlay (facts #34/#37): unlit
+        // vertex colors, alpha-blended. Depth-tested so the model occludes
+        // the overlay, but no depth write — an overlay must not occlude.
+        let grid_shader = module("grid.wgsl", grid_wgsl_source(target_format));
+        let grid = build(PipelineSpec {
+            label: "grid overlay",
+            layout: camera_layout,
+            module: &grid_shader,
+            vs: "vs_grid",
+            fs: "fs_grid",
+            stride: std::mem::size_of::<GridVertex>(),
+            attributes: &OVERLAY_ATTRS,
+            topology: TriangleList,
+            blend,
+            depth_stencil: overlay_depth_stencil(),
         });
         // The compare ghost (ModelViewer.swift:371-378): unlit systemOrange
         // wireframe at 0.6 — LINE topology like the wireframe pass but its
@@ -1463,63 +1293,29 @@ impl MeshPipeline {
         // material than the shaded wireframe: UnlitMaterial + transparent
         // blending). Camera-only (camera_layout): upstream parents
         // ghostEntity straight under `content`, so the ghost carries no
-        // per-part pose. Depth ON / write OFF — the grid overlay contract:
-        // the mesh occludes the ghost, the ghost occludes nothing after it.
-        let ghost_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ghost.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(ghost_wgsl_source(target_format).into()),
-        });
-        let ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("compare ghost"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &ghost_shader,
-                entry_point: Some("vs_ghost"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    // the staged part vertex (pos/normal/color, 36 B) with
-                    // only the position attribute read
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &ghost_shader,
-                entry_point: Some("fs_ghost"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        // per-part pose. It reads only the position of the staged part
+        // vertex. Depth ON / write OFF, the overlay contract.
+        let ghost_shader = module("ghost.wgsl", ghost_wgsl_source(target_format));
+        let ghost = build(PipelineSpec {
+            label: "compare ghost",
+            layout: camera_layout,
+            module: &ghost_shader,
+            vs: "vs_ghost",
+            fs: "fs_ghost",
+            stride: std::mem::size_of::<Vertex>(),
+            attributes: &POSITION_ATTR,
+            topology: LineList,
+            blend,
+            depth_stencil: overlay_depth_stencil(),
         });
         Pipelines {
-            mesh: pipeline,
-            cap: cap_pipeline,
-            line: line_pipeline,
-            mesh_blend: mesh_blend_pipeline,
-            line_blend: line_blend_pipeline,
-            grid: grid_pipeline,
-            ghost: ghost_pipeline,
+            mesh,
+            cap,
+            line,
+            mesh_blend,
+            line_blend,
+            grid,
+            ghost,
         }
     }
 
@@ -1530,20 +1326,13 @@ impl MeshPipeline {
     /// pipelines are built against the kept layout objects, so the
     /// resident bind groups stay valid.
     fn set_msaa(&mut self, device: &wgpu::Device, count: u32) {
-        let pipelines = Self::make_pipelines(
+        self.pipelines = Self::make_pipelines(
             device,
             self.format,
             count,
             &self.part_pass_layout,
             &self.camera_pass_layout,
         );
-        self.pipeline = pipelines.mesh;
-        self.cap_pipeline = pipelines.cap;
-        self.line_pipeline = pipelines.line;
-        self.mesh_blend_pipeline = pipelines.mesh_blend;
-        self.line_blend_pipeline = pipelines.line_blend;
-        self.grid_pipeline = pipelines.grid;
-        self.ghost_pipeline = pipelines.ghost;
         self.blit = (count > 1).then(|| Self::make_blit(device, self.format));
         let (depth_tex, depth) = Self::make_depth(device, self.size, count);
         self.depth_tex = depth_tex;
@@ -2138,7 +1927,7 @@ impl MeshPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
             // facts #44: same material and opacity as fill, hairline list
-            pass.set_pipeline(&self.line_pipeline);
+            pass.set_pipeline(&self.pipelines.line);
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2147,7 +1936,7 @@ impl MeshPipeline {
                 pass.draw_indexed(0..resident.edge_count, 0, 0..1);
             }
         } else {
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.pipelines.mesh);
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2161,7 +1950,7 @@ impl MeshPipeline {
         // (opaque by partition), so the flat-red branch never blends.
         if !self.drawn_translucent.is_empty() {
             if self.wireframe {
-                pass.set_pipeline(&self.line_blend_pipeline);
+                pass.set_pipeline(&self.pipelines.line_blend);
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2170,7 +1959,7 @@ impl MeshPipeline {
                     pass.draw_indexed(0..resident.edge_count, 0, 0..1);
                 }
             } else {
-                pass.set_pipeline(&self.mesh_blend_pipeline);
+                pass.set_pipeline(&self.pipelines.mesh_blend);
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2183,7 +1972,7 @@ impl MeshPipeline {
             // Same pass, after the mesh: the stencil attachment already holds
             // the parity the mesh's inc/dec left, so the quad only survives
             // where the cut opened the solid.
-            pass.set_pipeline(&self.cap_pipeline);
+            pass.set_pipeline(&self.pipelines.cap);
             pass.set_stencil_reference(0);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.cap_buf.slice(..));
@@ -2196,7 +1985,7 @@ impl MeshPipeline {
         // the wireframe toggle (facts #44/#45 disable the interior shell,
         // not the ghost).
         if !self.ghost_residents.is_empty() {
-            pass.set_pipeline(&self.ghost_pipeline);
+            pass.set_pipeline(&self.pipelines.ghost);
             pass.set_bind_group(0, &self.bind_group, &[]);
             for resident in &self.ghost_residents {
                 pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
@@ -2212,7 +2001,7 @@ impl MeshPipeline {
             .into_iter()
             .flatten()
         {
-            pass.set_pipeline(&self.grid_pipeline);
+            pass.set_pipeline(&self.pipelines.grid);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, overlay.vertex_buf.slice(..));
             pass.draw(0..overlay.vertex_count, 0..1);
