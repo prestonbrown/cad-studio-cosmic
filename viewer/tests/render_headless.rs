@@ -481,13 +481,15 @@ fn chroma_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
-/// The chromaticities a part of linear color `base` takes on the golden
-/// boxes' axis-aligned faces under the default iso camera — `lights::shade`
-/// of each face normal, normalized. The key's white specular and the
-/// highlight shoulder desaturate lit faces, so a part has one chroma per
-/// face rather than one overall; a flat face still renders a single value.
-fn face_chromas(base: [f32; 3]) -> Vec<[f32; 3]> {
-    let to_eye = lights::to_eye(std::f32::consts::FRAC_PI_4, 0.6);
+/// The default iso camera's view axis: the direction toward the eye that
+/// mesh.wgsl derives from the view-projection, as its Rust twin reads it.
+fn iso_to_eye() -> [f32; 3] {
+    let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
+    lights::to_eye(yaw, pitch)
+}
+
+/// The six axis-aligned face normals of the golden boxes.
+fn axis_normals() -> Vec<[f32; 3]> {
     let mut normals = Vec::new();
     for a in 0..3 {
         for s in [-1.0, 1.0] {
@@ -497,8 +499,30 @@ fn face_chromas(base: [f32; 3]) -> Vec<[f32; 3]> {
         }
     }
     normals
+}
+
+/// The axis normals the iso camera sees (`n · to_eye > 0`): +X, +Y, +Z.
+/// A solid render shows no other face, so a classifier built on these
+/// fails when specular or the shoulder stop reaching the lit faces —
+/// the hidden faces' ambient-only chroma is the undesaturated base.
+fn iso_visible_normals() -> Vec<[f32; 3]> {
+    let to_eye = glam::Vec3::from_array(iso_to_eye());
+    axis_normals()
         .into_iter()
-        .map(|n| chroma(lights::shade(base, n, to_eye)))
+        .filter(|&n| glam::Vec3::from_array(n).dot(to_eye) > 0.0)
+        .collect()
+}
+
+/// The chromaticities a part of linear color `base` takes on faces with
+/// `normals` under the default iso camera — `lights::shade` of each
+/// normal, normalized. The key's white specular and the highlight
+/// shoulder desaturate lit faces, so a part has one chroma per face
+/// rather than one overall; a flat face still renders a single value.
+fn face_chromas(base: [f32; 3], normals: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let to_eye = iso_to_eye();
+    normals
+        .iter()
+        .map(|&n| chroma(lights::shade(base, n, to_eye)))
         .collect()
 }
 
@@ -509,14 +533,22 @@ fn chroma_gap(x: [f32; 3], set: &[[f32; 3]]) -> f32 {
         .fold(f32::MAX, f32::min)
 }
 
-/// The golden model's two parts' face chromas — fixture bytes (base
+/// The golden model's part colors, linear — fixture bytes (base
 /// #1F78B5, lid #D62629; model.3mf basematerials) through the same EOTF
-/// the staging applies, then [`face_chromas`].
-fn fixture_chromas() -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+/// the staging applies.
+fn fixture_colors() -> ([f32; 3], [f32; 3]) {
     (
-        face_chromas([31, 120, 181].map(srgb_to_linear)),
-        face_chromas([214, 38, 41].map(srgb_to_linear)),
+        [31, 120, 181].map(srgb_to_linear),
+        [214, 38, 41].map(srgb_to_linear),
     )
+}
+
+/// The golden model's two parts' chromas on the faces a solid iso render
+/// shows ([`iso_visible_normals`]), as (base, lid).
+fn fixture_chromas() -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let (base, lid) = fixture_colors();
+    let normals = iso_visible_normals();
+    (face_chromas(base, &normals), face_chromas(lid, &normals))
 }
 
 #[test]
@@ -1179,7 +1211,7 @@ fn neutral_when_uncolored() {
     let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
-    let neutral = face_chromas(NEUTRAL);
+    let neutral = face_chromas(NEUTRAL, &iso_visible_normals());
     // Measured on Metal (T4, two-light shading): max chroma distance over
     // all 98560 ink pixels is 0.0115 (u8 quantization on the lit-neutral
     // faces — ambient-only faces are dark and quantize coarser); TOL 0.05
@@ -1331,6 +1363,64 @@ fn shaded_faces_differ() {
     );
 }
 
+/// The shader IS its Rust twin, face by face: the golden 3MF at the iso
+/// preset shows six flat faces (lid and base: top +Y, front +Z, right
+/// +X), and each must read back as `lights::shade` of its part color and
+/// normal, seen along `lights::to_eye(π/4, 0.6)`, sRGB-encoded to a byte —
+/// within ±2 per channel. Most of these faces sit below the highlight
+/// shoulder, so every term (ambient, key, fill, environment, specular)
+/// and mesh.wgsl's view-axis derivation moves at least one face out of
+/// its band if the shader drifts from the twin. Expectations are
+/// computed from the constants; nothing here is measured.
+#[test]
+fn iso_faces_match_the_shading_twin() {
+    let (device, queue) = gpu::device_queue();
+    let scene = golden_scene();
+    let camera = preset_camera(&scene, camera::Preset::Iso, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let px = render_frame(device, queue, &mut pipeline, &scene, &camera, 800, 600);
+    let (base, lid) = fixture_colors();
+    let to_eye = iso_to_eye();
+    let faces: Vec<(String, [u8; 3])> = [("lid", lid), ("base", base)]
+        .into_iter()
+        .flat_map(|(part, color)| {
+            iso_visible_normals().into_iter().map(move |n| {
+                (
+                    format!("{part} {n:?}"),
+                    lights::shade(color, n, to_eye).map(encode_srgb),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(faces.len(), 6, "lid and base, three visible faces each");
+    let within = |c: &[u8], e: [u8; 3]| (0..3).all(|i| (c[i] as i32 - e[i] as i32).abs() <= 2);
+    let mut counts = vec![0usize; faces.len()];
+    let mut n_ink = 0usize;
+    for c in px.chunks(4).filter(|c| is_ink(c, bg)) {
+        n_ink += 1;
+        if let Some(i) = faces.iter().position(|(_, e)| within(c, *e)) {
+            counts[i] += 1;
+        }
+    }
+    assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
+    // every face is thousands of pixels at 800x600; 500 is a floor that
+    // only a face rendering the wrong value misses
+    for ((name, e), &count) in faces.iter().zip(&counts) {
+        assert!(
+            count > 500,
+            "{name}: {count} px within ±2 of the twin's {e:?} (counts {counts:?})"
+        );
+    }
+    // 1x renders unblended single-sample fragments: a pixel off every
+    // face's value is a shading or state leak; 1% absorbs edge-on slivers
+    let matched: usize = counts.iter().sum();
+    assert!(
+        matched * 100 >= n_ink * 99,
+        "only {matched}/{n_ink} ink pixels equal a twin face value"
+    );
+}
+
 /// The output-space contract for a PLAIN (non-sRGB) target — the format
 /// iced's compositor picks for the app under libcosmic's `web-colors`
 /// build, where the hardware stores no sRGB encode and the shader must
@@ -1473,8 +1563,14 @@ fn wireframe_renders_lines_not_faces() {
         (0.01..0.12).contains(&ratio),
         "wireframe/solid ink ratio {ratio:.3} must sit well below 1 — hairlines, not faces"
     );
-    // same material: wire ink classifies as base-blue or lid-red chroma
-    let (blue, red) = fixture_chromas();
+    // same material: wire ink classifies as base-blue or lid-red chroma.
+    // Lines have no faces to hide them, so back edges draw too and carry
+    // every axis normal's shading.
+    let (base, lid) = fixture_colors();
+    let (blue, red) = (
+        face_chromas(base, &axis_normals()),
+        face_chromas(lid, &axis_normals()),
+    );
     const TOL: f32 = 0.05;
     let classified = wire
         .chunks(4)
