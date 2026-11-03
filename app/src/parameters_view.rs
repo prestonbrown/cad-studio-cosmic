@@ -22,28 +22,25 @@
 //! mounts the overlay in [`crate::viewer_pane::ViewerPane::view_model_3d`].
 //!
 //! User-visible strings read through `fl!` at render time (the key names
-//! the en/main.ftl entry). Icon names are freedesktop-theme approximations
-//! of upstream SF Symbols; the theme in play decides what actually shows
-//! (cosmetic — flagged for the shell task). Also cosmetic and flagged: the
-//! panel has no drop shadow (no widget shadows in iced), and a busy row's
-//! slider keeps its colors while inert — the interactions themselves are
-//! gated (upstream `.disabled(isBusy)`).
+//! the en/main.ftl entry). The card, glyphs, slider and ink levels are the
+//! shared overlay look in [`crate::parts_overlay`]. A busy row's slider
+//! keeps its colors while inert — the interactions themselves are gated
+//! (upstream `.disabled(isBusy)`).
 
 use std::collections::{BTreeMap, HashMap};
 
 use cosmic::Element;
+use cosmic::iced::widget::pick_list;
 use cosmic::iced::widget::text::{Span, Wrapping};
-use cosmic::iced::widget::{pick_list, slider};
-use cosmic::iced::{Color, Length};
-use cosmic::widget::{Column, Row, Space, button, container, text, text_input, tooltip};
+use cosmic::iced::{Alignment, Color, Length};
+use cosmic::widget::{Column, Row, Space, button, container, text, tooltip};
 use engine::project::versions::ProjectVersion;
 
 use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
-
-/// This module's text widget, pinned to cosmic's theme/renderer (same
-/// invariance note as the chat pane's).
-type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
+use crate::parts_overlay::{
+    Ink, KNOB, Symbol, card_style, icon_button, small_slider, symbol, with_rail_ends,
+};
 
 /// The panel's fixed width (ParametersOverlay.swift:109).
 const PANEL_WIDTH: f32 = 280.0;
@@ -52,16 +49,22 @@ const PANEL_WIDTH: f32 = 280.0;
 /// a bounded height up front, so the view estimates the content height
 /// (one row ≈ head line + slider + spacing) and clamps it to the cap.
 const SCROLL_MAX_HEIGHT: f32 = 340.0;
-const ROW_HEIGHT_ESTIMATE: f32 = 46.0;
+/// The name line's height (an 11 px monospaced line).
+const NAME_LINE: f32 = 14.0;
+/// One row: the name line, 2 px, the slider (ParametersOverlay.swift:140).
+const ROW_HEIGHT: f32 = NAME_LINE + 2.0 + KNOB;
+/// Rows sit 10 apart (ParametersOverlay.swift:65).
+const ROW_SPACING: f32 = 10.0;
+/// The pop-up picker's accent badge (13 px square, measured), the gap
+/// between the longest option and the badge, and the option text size.
+const POPUP_BADGE: f32 = 13.0;
+const POPUP_GAP: f32 = 7.0;
+const POPUP_TEXT: f32 = 11.0;
 
 /// Upstream's orange previous-value tint (`foregroundStyle(.orange)`,
 /// ParametersOverlay.swift:151) — same explicit color family as the chat
 /// pane's warn tint, theme-independent like upstream's.
 const ORANGE: Color = Color::from_rgb(1.0, 0.58, 0.02);
-
-/// Upstream's `slider.horizontal.3` — freedesktop approximation
-/// (cosmetic; the icon theme decides).
-const SLIDER_ICON: &str = "preferences-desktop";
 
 // ─── messages ──────────────────────────────────────────────────────────────
 
@@ -120,7 +123,7 @@ pub fn view_parameters<'a>(
     if panel.collapsed {
         return collapsed_capsule();
     }
-    let mut rows = Column::new().spacing(10);
+    let mut rows = Column::new().spacing(ROW_SPACING);
     for (name, state) in &panel.sliders {
         rows = rows.push(parameter_row(
             name,
@@ -131,68 +134,108 @@ pub fn view_parameters<'a>(
             ctx.busy,
         ));
     }
-    let scroll_height =
-        (panel.sliders.len() as f32 * ROW_HEIGHT_ESTIMATE + 10.0).min(SCROLL_MAX_HEIGHT);
     let mut panel_view = Column::new()
         .push(header())
         .push(
             cosmic::widget::scrollable::scrollable(
                 rows.padding([0.0, 12.0, 10.0, 12.0]).width(Length::Fill),
             )
-            .height(Length::Fixed(scroll_height))
+            .height(Length::Fixed(scroll_height(panel.sliders.len())))
             .width(Length::Fill),
         )
-        .push(cosmic::widget::divider::horizontal::default())
+        // upstream's Divider: a 1 pt rule that reads as nothing on the
+        // material (measured ≤ 2 RGB units) — its height is kept
+        .push(Space::new().height(1.0))
         .push(compare_footer(ctx));
     if ctx.compare.is_some() {
         panel_view = panel_view.push(compare_caption());
     }
     container(panel_view)
         .width(Length::Fixed(PANEL_WIDTH))
-        .class(panel_style())
+        .class(card_style(12.0, 8.0))
         .into()
 }
 
-/// The collapsed state: the capsule button that expands the panel
-/// (ParametersOverlay.swift:13-25).
+/// The scroll area's height: every row, the gaps between them and the
+/// 10 px bottom padding, capped at [`SCROLL_MAX_HEIGHT`].
+fn scroll_height(rows: usize) -> f32 {
+    let rows = rows as f32;
+    (rows * ROW_HEIGHT + (rows - 1.0).max(0.0) * ROW_SPACING + 10.0).min(SCROLL_MAX_HEIGHT)
+}
+
+/// The collapsed state: the material capsule button that expands the
+/// panel (ParametersOverlay.swift:13-25) — the slider glyph and
+/// "Parameters" at `.callout` medium, padded 10 × 6.
 fn collapsed_capsule() -> Element<'static, Message> {
     let label = Row::new()
         .spacing(6)
-        .push(icon(SLIDER_ICON, 14))
-        .push(text(fl!("parametri")).size(14));
-    let capsule = button::custom(container(label).padding([6.0, 10.0]))
-        .class(cosmic::theme::Button::Standard)
-        .on_press(Message::Collapse(false));
+        .align_y(Alignment::Center)
+        .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
+        .push(
+            text(fl!("parametri"))
+                .size(12)
+                .font(cosmic::font::semibold())
+                .class(Ink::Primary.text_class()),
+        );
+    let capsule = button::custom(
+        container(label)
+            .padding([6.0, 10.0])
+            .class(card_style(999.0, 6.0)),
+    )
+    .padding(0)
+    .class(cosmic::theme::Button::Transparent)
+    .on_press(Message::Collapse(false))
+    .name(fl!("espandi-i-parametri"));
     tooltip(
         capsule,
         text(fl!("espandi-i-parametri")),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
 }
 
-/// The expanded panel's header: the collapse button (label + chevron) and
-/// the close button (ParametersOverlay.swift:33-59).
+/// The expanded panel's header: the collapse button (glyph, bold
+/// "Parameters" at `.headline`, the chevron) and the close ✕
+/// (ParametersOverlay.swift:33-59), padded 12 / 12 / 8.
 fn header() -> Element<'static, Message> {
     let collapse = button::custom(
         Row::new()
             .spacing(6)
-            .push(icon(SLIDER_ICON, 14))
-            .push(text(fl!("parametri")).size(14))
-            .push(secondary_text("⌃").size(10)), // chevron.up stand-in
+            .align_y(Alignment::Center)
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
+                    .push(
+                        text(fl!("parametri"))
+                            .size(13)
+                            .line_height(line_height(16.0))
+                            .font(cosmic::font::bold())
+                            .class(Ink::Primary.text_class()),
+                    ),
+            )
+            .push(symbol(Symbol::ChevronUp, 14, Ink::Secondary)),
     )
-    .class(cosmic::theme::Button::Text)
-    .on_press(Message::Collapse(true));
+    .height(Length::Fixed(16.0))
+    .padding(0)
+    .class(cosmic::theme::Button::Transparent)
+    .on_press(Message::Collapse(true))
+    .name(fl!("comprimi-i-parametri"));
     let collapse = tooltip(
         collapse,
         text(fl!("comprimi-i-parametri")),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        cosmic::widget::tooltip::Position::Bottom,
     );
-    let close = button::icon(icon_handle("window-close", 12))
-        .on_press(Message::Close)
-        .name(fl!("nascondi-parametri"))
-        .description(fl!("nascondi-parametri-i"));
+    let close = icon_button(
+        Symbol::Xmark,
+        11,
+        Ink::Secondary,
+        fl!("nascondi-parametri-i"),
+        Some(Message::Close),
+    );
     Row::new()
+        .align_y(Alignment::Center)
         .push(collapse)
         .push(Space::new().width(Length::Fill))
         .push(close)
@@ -201,8 +244,8 @@ fn header() -> Element<'static, Message> {
 }
 
 /// One parameter's row: the name line (monospace name, struck-through
-/// previous value when comparing, the numeric field) over the slider
-/// (ParameterSlider's body, ParametersOverlay.swift:139-169).
+/// previous value when comparing, the plain numeric field) over the
+/// small slider (ParameterSlider's body, ParametersOverlay.swift:139-169).
 fn parameter_row<'a>(
     name: &'a str,
     state: &'a SliderState,
@@ -213,19 +256,21 @@ fn parameter_row<'a>(
 ) -> Element<'a, Message> {
     let mut head = Row::new()
         .spacing(0)
+        .align_y(Alignment::Center)
         .push(
             text(name.to_string())
                 .font(cosmic::font::mono())
                 .size(11)
+                .line_height(line_height(NAME_LINE))
                 .width(Length::Fill)
                 .wrapping(Wrapping::None)
                 .ellipsize(cosmic::iced::core::text::Ellipsize::Middle(
                     cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
                 ))
                 .class(if busy {
-                    secondary_text_class()
+                    Ink::Tertiary.text_class()
                 } else {
-                    cosmic::theme::Text::Default
+                    Ink::Primary.text_class()
                 }),
         )
         .push(Space::new().width(6));
@@ -249,15 +294,17 @@ fn parameter_row<'a>(
             Message::Drag(drag_name.clone(), value)
         }
     };
-    let track = slider::Slider::new(range, state.value, on_change)
-        .on_release(if busy {
-            Message::Inert
-        } else {
-            Message::Release(name.to_string())
-        })
-        .width(Length::Fill);
+    let track = small_slider(range, state.value, on_change, Length::Fill).on_release(if busy {
+        Message::Inert
+    } else {
+        Message::Release(name.to_string())
+    });
 
-    Column::new().spacing(2).push(head).push(track).into()
+    Column::new()
+        .spacing(2)
+        .push(head.height(Length::Fixed(NAME_LINE)))
+        .push(with_rail_ends(track, Length::Fill))
+        .into()
 }
 
 /// The struck-through orange previous value
@@ -271,15 +318,16 @@ fn previous_value(value: f64) -> Element<'static, Message> {
     tooltip(
         struck,
         text(fl!("valore-nella-versione-a-confronto")),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
 }
 
-/// The live numeric field: the raw draft while one is staged, otherwise the
-/// live value at 0…3 fraction digits (ParametersOverlay.swift:154-159).
-/// While the busy gate is on the field mounts without handlers, which is
-/// iced's disabled input.
+/// The live numeric field (ParametersOverlay.swift:154-159): upstream's
+/// `.plain` text field — monospaced 11, trailing-aligned, 56 wide, no
+/// border — showing the raw draft while one is staged, otherwise the live
+/// value at 0…3 fraction digits. While the busy gate is on the field
+/// mounts without handlers, which is iced's disabled input.
 fn numeric_field<'a>(
     name: &'a str,
     state: &'a SliderState,
@@ -289,7 +337,14 @@ fn numeric_field<'a>(
     let shown = draft
         .map(str::to_string)
         .unwrap_or_else(|| format_display(state.value, 3));
-    let input = text_input::text_input("", shown).width(56).size(11);
+    let input = cosmic::iced::widget::text_input("", &shown)
+        .width(56)
+        .size(11)
+        .line_height(line_height(NAME_LINE))
+        .padding(0)
+        .font(cosmic::font::mono())
+        .align_x(cosmic::iced::alignment::Horizontal::Right)
+        .class(cosmic::theme::iced::TextInput::Search);
     let input = if busy {
         input
     } else {
@@ -297,23 +352,19 @@ fn numeric_field<'a>(
         let for_submit = name.to_string();
         input
             .on_input(move |text| Message::Draft(for_input.clone(), text))
-            .on_submit_maybe(Some(move |_text| Message::Submit(for_submit.clone())))
+            .on_submit(Message::Submit(for_submit))
     };
     input.into()
 }
 
-/// The "Compare with" footer (ParametersOverlay.swift:80-98): the label and
-/// the picker, newest version first, disabled (a plain label — pick lists
-/// cannot be built inert) when no versions exist.
+/// The "Compare with" footer (ParametersOverlay.swift:80-98): the
+/// secondary label and the pop-up picker — the selection, then the
+/// accent badge with the up/down chevrons; newest version first; dimmed
+/// and inert when no versions exist.
 fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
     let bottom = if ctx.compare.is_some() { 4.0 } else { 8.0 };
-    let mut footer = Row::new()
-        .spacing(0)
-        .push(secondary_text(fl!("confronta-con")))
-        .push(Space::new().width(Length::Fill));
-    if ctx.versions.is_empty() {
-        footer = footer.push(secondary_text(selected_label(ctx.compare)));
-    } else {
+    let enabled = !ctx.versions.is_empty();
+    let picker: Element<'static, Message> = if enabled {
         let mut options = vec![CompareOption::NoVersion];
         options.extend(
             ctx.versions
@@ -325,22 +376,73 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
             Some(number) => Some(CompareOption::Version(number)),
             None => Some(CompareOption::NoVersion),
         };
-        footer = footer.push(
-            pick_list::PickList::new(options, selected, |option| {
-                Message::Compare(option.number())
-            })
-            .placeholder(fl!("nessuna")),
-        );
-    }
-    footer.padding([8.0, 12.0, bottom, 12.0]).into()
+        pick_list::PickList::new(options, selected, |option| {
+            Message::Compare(option.number())
+        })
+        .text_size(POPUP_TEXT)
+        // the list reserves one text size for its own (hidden) handle
+        .padding([0.0, POPUP_BADGE + POPUP_GAP - POPUP_TEXT, 0.0, 0.0])
+        .handle(pick_list::Handle::None)
+        .into()
+    } else {
+        container(
+            text(selected_label(ctx.compare))
+                .size(11)
+                .class(Ink::Tertiary.text_class()),
+        )
+        .padding([0.0, POPUP_BADGE + POPUP_GAP, 0.0, 0.0])
+        .into()
+    };
+    let badge = container(symbol(Symbol::ChevronUpChevronDown, 12, Ink::OnAccent))
+        .width(POPUP_BADGE)
+        .height(POPUP_BADGE)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .class(cosmic::theme::Container::custom(move |theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(if enabled {
+                    Ink::Accent.color(theme)
+                } else {
+                    Ink::Tertiary.color(theme)
+                })),
+                border: cosmic::iced::Border {
+                    radius: 3.5.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }));
+    // the badge sits over the picker's right padding; it takes no input,
+    // so presses reach the picker underneath
+    let popup = cosmic::iced::widget::stack![
+        picker,
+        container(badge)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Center),
+    ];
+    Row::new()
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .push(
+            text(fl!("confronta-con"))
+                .size(11)
+                .class(Ink::Secondary.text_class()),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(popup)
+        .padding([8.0, 12.0, bottom, 12.0])
+        .into()
 }
 
 /// The caption under the footer while comparing
 /// (ParametersOverlay.swift:100-106).
 fn compare_caption() -> Element<'static, Message> {
     container(
-        secondary_text(fl!("in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni"))
-            .size(12)
+        text(fl!("in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni"))
+            .size(10)
+            .class(Ink::Secondary.text_class())
             .wrapping(Wrapping::Word)
             .width(Length::Fill),
     )
@@ -387,42 +489,10 @@ fn selected_label(compare: Option<i64>) -> String {
     }
 }
 
-// ─── shared bits (the chat pane keeps private twins; modules stay
-// self-contained rather than cross-importing widgets) ───────────────────────
+// ─── shared bits ───────────────────────────────────────────────────────────
 
-fn secondary_text<'a>(body: impl Into<String>) -> Text<'a> {
-    text(body.into()).class(secondary_text_class())
-}
-
-fn secondary_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-/// The panel surface: solid theme base with a hairline border, radius 12
-/// (upstream's `.regularMaterial` + separator stroke,
-/// ParametersOverlay.swift:110-111; the drop shadow has no iced port).
-fn panel_style() -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(|theme| {
-        let base = Color::from(theme.cosmic().background(false).base);
-        let mut border = Color::from(theme.cosmic().background(false).on);
-        border.a = 0.15;
-        cosmic::iced::widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(base)),
-            border: cosmic::iced::Border {
-                color: border,
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            ..Default::default()
-        }
-    })
+fn line_height(pixels: f32) -> cosmic::iced::widget::text::LineHeight {
+    cosmic::iced::widget::text::LineHeight::Absolute(pixels.into())
 }
 
 fn rich_text_element(span: Span<'_, String>) -> Element<'_, Message> {
@@ -431,12 +501,4 @@ fn rich_text_element(span: Span<'_, String>) -> Element<'_, Message> {
         .font(cosmic::font::default())
         .wrapping(Wrapping::Word)
         .into()
-}
-
-fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
-    cosmic::widget::icon::from_name(name).size(size).icon()
-}
-
-fn icon_handle(name: &str, size: u16) -> cosmic::widget::icon::Handle {
-    cosmic::widget::icon::from_name(name).size(size).handle()
 }

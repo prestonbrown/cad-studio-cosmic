@@ -6,27 +6,28 @@
 //! arrangement math; these views render state verbatim and route every
 //! interaction to a [`crate::viewer_pane::Message`].
 //!
-//! Port divergences, all cosmetic and deliberate (function parity over
-//! glyph parity — no SF-Symbol icon-name roulette):
-//! - upstream's row/picker icons are TEXT buttons and glyph stand-ins here
-//!   (the chevron is "⌃"/"⌄", the explode arrows "↘↗"/"↗↘");
-//! - `.help(...)` and accessibility labels ride a tooltip (the chat pane's
-//!   established stand-in — iced glyphs carry no label of their own);
-//! - a disabled layout picker renders buttons without `on_press` (iced's
-//!   disabled look); an inert slider cannot exist, and the explode row
-//!   never mounts while comparing (comparing forces the effective layout
-//!   to Assembled, hiding it upstream too);
-//! - no drop shadow (no widget shadows in iced), matching the parameters
-//!   panel.
+//! The module also holds the overlay look the parameters panel and the
+//! schematic footer share: the SF-Symbol-shaped icons
+//! ([`Symbol`], drawn in `app/resources/icons/`), the floating card
+//! surface ([`card_style`]: upstream's `.regularMaterial` + separator
+//! stroke + drop shadow), the compact segmented picker ([`segmented`]:
+//! `.pickerStyle(.segmented)` at `.controlSize(.small)`), and the small
+//! slider ([`small_slider_class`]).
+//!
+//! Every color derives from the cosmic theme (the window's `base` / `on`
+//! pair and the accent), mixed at the ratios measured off the upstream
+//! light-mode gallery, so dark mode inverts with the theme.
 //!
 //! The views copy every input into owned widget state and return
 //! `Element<'static>` — callers may pass short-lived data (the pane
 //! computes `groups` fresh per frame).
 
+use std::rc::Rc;
+
 use cosmic::Element;
-use cosmic::iced::widget::{slider, text::Wrapping};
-use cosmic::iced::{Color, Length};
-use cosmic::widget::{Column, Row, button, container, mouse_area, text, tooltip};
+use cosmic::iced::widget::{slider, svg, text::Wrapping};
+use cosmic::iced::{Alignment, Background, Border, Color, Length, Shadow, Vector};
+use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text, tooltip};
 use engine::settings::{MeasurementUnit, PartsLayout};
 use viewer::tools::arrangement::PartGroup;
 use viewer::tools::section;
@@ -41,12 +42,486 @@ type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Ren
 
 /// The panel's fixed width when expanded (PartsOverlay.swift:47).
 const PANEL_WIDTH: f32 = 250.0;
-/// The part list's height cap (PartsOverlay.swift:87). Upstream's scroll
-/// view grows with content up to this; an iced scrollable needs a bounded
-/// height up front, so the view estimates one row and clamps to the cap
-/// (the parameters panel's approach).
+/// The part list's height cap (PartsOverlay.swift:87).
 const LIST_MAX_HEIGHT: f32 = 220.0;
-const ROW_HEIGHT_ESTIMATE: f32 = 26.0;
+/// One group row: a 16 px callout line plus 2 px vertical padding each
+/// side (PartsOverlay.swift:131), rows 2 px apart (:81). Fixed, so the
+/// list's scroll height is exact.
+const ROW_HEIGHT: f32 = 20.0;
+const ROW_SPACING: f32 = 2.0;
+
+// ─── SF-Symbol stand-ins ───────────────────────────────────────────────────
+
+/// The SF Symbols upstream's overlays and pane bars draw, each shipped as
+/// a same-shape SVG in `app/resources/icons/<sf-name>.svg` (no Cosmic
+/// theme icon has these shapes). The SVGs are single-color masks: every
+/// use tints them through [`symbol`]'s color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Symbol {
+    SquareStack3dUp,
+    ChevronUp,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    ChevronUpChevronDown,
+    Xmark,
+    Eye,
+    EyeSlash,
+    Link,
+    LinkBadgePlus,
+    ArrowsInward,
+    ArrowsOutward,
+    SliderHorizontal3,
+    MinusMagnifyingGlass,
+    PlusMagnifyingGlass,
+}
+
+impl Symbol {
+    /// The glyph's width over its height: the side chevrons ship a
+    /// 10 × 16 view box (no dead side margins, matching SF's tight
+    /// horizontal metrics); every other symbol is square.
+    fn aspect(self) -> f32 {
+        match self {
+            Self::ChevronLeft | Self::ChevronRight => 10.0 / 16.0,
+            _ => 1.0,
+        }
+    }
+
+    fn svg(self) -> &'static [u8] {
+        match self {
+            Self::SquareStack3dUp => include_bytes!("../resources/icons/square.stack.3d.up.svg"),
+            Self::ChevronUp => include_bytes!("../resources/icons/chevron.up.svg"),
+            Self::ChevronDown => include_bytes!("../resources/icons/chevron.down.svg"),
+            Self::ChevronLeft => include_bytes!("../resources/icons/chevron.left.svg"),
+            Self::ChevronRight => include_bytes!("../resources/icons/chevron.right.svg"),
+            Self::ChevronUpChevronDown => {
+                include_bytes!("../resources/icons/chevron.up.chevron.down.svg")
+            }
+            Self::Xmark => include_bytes!("../resources/icons/xmark.svg"),
+            Self::Eye => include_bytes!("../resources/icons/eye.svg"),
+            Self::EyeSlash => include_bytes!("../resources/icons/eye.slash.svg"),
+            Self::Link => include_bytes!("../resources/icons/link.svg"),
+            Self::LinkBadgePlus => include_bytes!("../resources/icons/link.badge.plus.svg"),
+            Self::ArrowsInward => {
+                include_bytes!("../resources/icons/arrow.down.right.and.arrow.up.left.svg")
+            }
+            Self::ArrowsOutward => {
+                include_bytes!("../resources/icons/arrow.up.left.and.arrow.down.right.svg")
+            }
+            Self::SliderHorizontal3 => include_bytes!("../resources/icons/slider.horizontal.3.svg"),
+            Self::MinusMagnifyingGlass => {
+                include_bytes!("../resources/icons/minus.magnifyingglass.svg")
+            }
+            Self::PlusMagnifyingGlass => {
+                include_bytes!("../resources/icons/plus.magnifyingglass.svg")
+            }
+        }
+    }
+}
+
+/// How strongly an overlay glyph or label reads against its surface —
+/// upstream's `.primary` / `.secondary` / `.tertiary` vibrancy levels
+/// inside a material, as fractions of the theme's `on` color (measured:
+/// primary text 68/255 on a 228 card ≈ 0.72; secondary glyphs ≈ 0.5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Ink {
+    Primary,
+    Secondary,
+    Tertiary,
+    Accent,
+    /// Text on a filled neutral control (the selected segment).
+    OnFill,
+    /// A glyph on an accent fill (the pop-up picker's badge).
+    OnAccent,
+}
+
+impl Ink {
+    /// The ink's opacity over its surface (`OnFill` and `Accent` are
+    /// solid).
+    const fn alpha(self) -> f32 {
+        match self {
+            Self::Primary => 0.72,
+            Self::Secondary => 0.45,
+            Self::Tertiary => 0.25,
+            Self::Accent | Self::OnFill | Self::OnAccent => 1.0,
+        }
+    }
+
+    /// The ink's solid color; [`Ink::color`] applies the alpha.
+    fn solid(self, theme: &cosmic::Theme) -> Color {
+        match self {
+            Self::Primary | Self::Secondary | Self::Tertiary => {
+                Color::from(theme.cosmic().background(false).on)
+            }
+            Self::Accent => {
+                let accent = theme.cosmic().accent_color();
+                Color::from_rgb(accent.red, accent.green, accent.blue)
+            }
+            Self::OnFill => Color::WHITE,
+            Self::OnAccent => Color::from(theme.cosmic().accent.on),
+        }
+    }
+
+    pub(crate) fn color(self, theme: &cosmic::Theme) -> Color {
+        let solid = self.solid(theme);
+        Color {
+            a: solid.a * self.alpha(),
+            ..solid
+        }
+    }
+
+    pub(crate) fn text_class(self) -> cosmic::theme::Text {
+        cosmic::theme::Text::Custom(match self {
+            Self::Primary => |theme| text_style(Ink::Primary.color(theme)),
+            Self::Secondary => |theme| text_style(Ink::Secondary.color(theme)),
+            Self::Tertiary => |theme| text_style(Ink::Tertiary.color(theme)),
+            Self::Accent => |theme| text_style(Ink::Accent.color(theme)),
+            Self::OnFill => |theme| text_style(Ink::OnFill.color(theme)),
+            Self::OnAccent => |theme| text_style(Ink::OnAccent.color(theme)),
+        })
+    }
+}
+
+fn text_style(color: Color) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(color),
+        ..Default::default()
+    }
+}
+
+/// A symbol icon `size` px tall (and [`Symbol::aspect`] as wide), tinted
+/// with `ink`. The svg tint replaces color but keeps the glyph's own
+/// coverage, so the ink's alpha rides the icon's opacity.
+pub(crate) fn symbol(symbol: Symbol, size: u16, ink: Ink) -> cosmic::widget::Icon {
+    cosmic::widget::icon::icon(cosmic::widget::icon::from_svg_bytes(symbol.svg()))
+        .size(size)
+        .width(Length::Fixed(f32::from(size) * symbol.aspect()))
+        .height(Length::Fixed(f32::from(size)))
+        .opacity(ink.alpha())
+        .class(cosmic::theme::Svg::custom(move |theme| svg::Style {
+            color: Some(ink.solid(theme)),
+        }))
+}
+
+/// A borderless icon button (upstream `.buttonStyle(.borderless)` /
+/// `.plain` around an `Image(systemName:)`): the bare glyph, no padding,
+/// no fill, the help string as tooltip and accessible name. `None`
+/// renders it disabled with the glyph at tertiary ink.
+pub(crate) fn icon_button<M: Clone + 'static>(
+    glyph: Symbol,
+    size: u16,
+    ink: Ink,
+    help: String,
+    on_press: Option<M>,
+) -> Element<'static, M> {
+    let ink = if on_press.is_some() {
+        ink
+    } else {
+        Ink::Tertiary
+    };
+    let body = button::custom(symbol(glyph, size, ink))
+        .padding(0)
+        .class(cosmic::theme::Button::Transparent)
+        .on_press_maybe(on_press)
+        .name(help.clone());
+    tooltip(body, text(help), cosmic::widget::tooltip::Position::Bottom).into()
+}
+
+/// A borderless text button (upstream `Button("…")` under
+/// `.buttonStyle(.borderless)`): the label at `ink`, no padding or fill;
+/// disabled shows tertiary ink.
+pub(crate) fn text_button<M: Clone + 'static>(
+    label: String,
+    size: u16,
+    ink: Ink,
+    on_press: Option<M>,
+) -> Element<'static, M> {
+    let ink = if on_press.is_some() {
+        ink
+    } else {
+        Ink::Tertiary
+    };
+    button::custom(text(label).size(size).class(ink.text_class()))
+        .padding(0)
+        .class(cosmic::theme::Button::Transparent)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+// ─── surfaces ──────────────────────────────────────────────────────────────
+
+/// `a` moved toward `b` by `t` (alpha kept from `a`).
+pub(crate) fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a,
+    }
+}
+
+/// The material fill: the window base nudged 5 % toward its `on` color —
+/// darker in light mode (upstream's card reads 228 over a 239 viewer),
+/// lighter in dark mode, as macOS's `.regularMaterial` does. Opaque: the
+/// 3D scene behind must not show through without the blur.
+pub(crate) fn material(theme: &cosmic::Theme) -> Color {
+    let bg = theme.cosmic().background(false);
+    mix(Color::from(bg.base), Color::from(bg.on), 0.05)
+}
+
+/// Upstream's `.separator` stroke on a material: the `on` color at 10 %
+/// (207 on the 228 card).
+pub(crate) fn separator(theme: &cosmic::Theme) -> Color {
+    let on = Color::from(theme.cosmic().background(false).on);
+    Color { a: 0.1, ..on }
+}
+
+/// The floating card: material fill, hairline separator border, and the
+/// drop shadow (`.shadow(color: .black.opacity(0.15), radius:, y: 2)` —
+/// SwiftUI's radius is a Gaussian sigma, iced's blur a diameter).
+pub(crate) fn card_style(radius: f32, shadow_radius: f32) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
+        background: Some(Background::Color(material(theme))),
+        border: Border {
+            color: separator(theme),
+            width: 1.0,
+            radius: radius.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.15),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: shadow_radius * 2.0,
+        },
+        ..Default::default()
+    })
+}
+
+/// The measurement badge / section capsule: material at a pill radius,
+/// no stroke, no shadow (ModelPane.swift:176, :197).
+fn capsule_style() -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
+        background: Some(Background::Color(material(theme))),
+        border: Border {
+            radius: 999.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+// ─── segmented picker ──────────────────────────────────────────────────────
+
+/// The segmented control's height at `.controlSize(.small)` (measured
+/// 18 px; the selected pill insets 1 px).
+const SEGMENT_HEIGHT: f32 = 18.0;
+
+/// The track: a lighter inset on the material (242 on the 228 card in
+/// light mode; a faint lift in dark mode).
+fn segment_track(theme: &cosmic::Theme) -> Color {
+    let lift = if theme.cosmic().is_dark { 0.08 } else { 0.3 };
+    mix(material(theme), Color::WHITE, lift)
+}
+
+/// The selected pill: the track pressed toward `on` (178 on 242 in light
+/// mode), white label.
+fn segment_selected(theme: &cosmic::Theme) -> Color {
+    let on = Color::from(theme.cosmic().background(false).on);
+    mix(segment_track(theme), on, 0.26)
+}
+
+/// A compact segmented picker: equal-width segments on a rounded track,
+/// the selected one a filled pill with a semibold white label. With
+/// `enabled` false the segments carry no press and the labels dim
+/// (upstream `.disabled`). `width` is the whole control's width
+/// (`Length::Fill` inside a fixed panel, `Shrink` for `.fixedSize()`).
+pub(crate) fn segmented<M: Clone + 'static>(
+    items: Vec<(String, M)>,
+    selected: Option<usize>,
+    enabled: bool,
+    width: Length,
+) -> Element<'static, M> {
+    let count = items.len();
+    let mut bar = Row::new()
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(SEGMENT_HEIGHT));
+    for (index, (label, message)) in items.into_iter().enumerate() {
+        let is_selected = selected == Some(index);
+        let ink = match (is_selected, enabled) {
+            (true, _) => Ink::OnFill,
+            (false, true) => Ink::Primary,
+            (false, false) => Ink::Tertiary,
+        };
+        let mut label = text(label).size(11).class(ink.text_class());
+        if is_selected {
+            label = label.font(cosmic::font::semibold());
+        }
+        let pill = container(label)
+            .padding([0.0, 6.0])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .class(if is_selected {
+                cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
+                    background: Some(Background::Color(segment_selected(theme))),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            } else {
+                cosmic::theme::Container::Transparent
+            });
+        let mut segment = mouse_area(container(pill).padding(1));
+        if enabled {
+            segment = segment.on_press(message);
+        }
+        bar = bar.push(container(segment).width(if width == Length::Shrink {
+            Length::Shrink
+        } else {
+            Length::FillPortion(1)
+        }));
+        // a hairline divides two neighbouring unselected segments; next to
+        // the selected pill the pill itself is the boundary
+        let next_selected = selected == Some(index + 1);
+        if index + 1 < count && !is_selected && !next_selected {
+            bar = bar.push(segment_divider());
+        }
+    }
+    container(bar)
+        .width(width)
+        .class(cosmic::theme::Container::custom(|theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(segment_track(theme))),
+                border: Border {
+                    radius: 5.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// The 1 px divider between two unselected segments (207 on the 242
+/// track: the separator ink).
+fn segment_divider<M: 'static>() -> Element<'static, M> {
+    container(Space::new().width(1.0).height(10.0))
+        .class(cosmic::theme::Container::custom(|theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(separator(theme))),
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+// ─── small slider ──────────────────────────────────────────────────────────
+
+/// The small macOS slider: a 4 px rounded rail (accent fill, faint `on`
+/// remainder) and a 16 px round knob — white with a hairline ring in
+/// light mode, a light neutral in dark mode.
+pub(crate) fn small_slider_class() -> cosmic::theme::iced::Slider {
+    let style = Rc::new(|theme: &cosmic::Theme| {
+        let on = Color::from(theme.cosmic().background(false).on);
+        let knob = if theme.cosmic().is_dark {
+            mix(on, Color::BLACK, 0.15)
+        } else {
+            Color::WHITE
+        };
+        slider::Style {
+            rail: slider::Rail {
+                backgrounds: (
+                    Background::Color(Ink::Accent.color(theme)),
+                    Background::Color(Color { a: 0.1, ..on }),
+                ),
+                width: 4.0,
+                // square ends: the rounded caps come from `with_rail_ends`
+                border: Border::default(),
+            },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Circle { radius: 8.0 },
+                background: Background::Color(knob),
+                border_width: 1.0,
+                border_color: Color { a: 0.18, ..on },
+            },
+            breakpoint: slider::Breakpoint { color: on },
+        }
+    });
+    cosmic::theme::iced::Slider::Custom {
+        active: style.clone(),
+        hovered: style.clone(),
+        dragging: style,
+    }
+}
+
+/// The small slider's knob diameter (and row height).
+pub(crate) const KNOB: f32 = 16.0;
+
+/// A small slider over `range`: the [`small_slider_class`] look, a
+/// [`KNOB`]-sized knob, and the rail reaching the full width. iced insets
+/// its rail by half the knob at both ends (the knob's travel), where
+/// macOS runs the rail edge to edge; the two half-knob end caps are
+/// drawn underneath — the leading cap in the fill color (the value never
+/// sits left of the range start), the trailing one in the track color.
+pub(crate) fn small_slider<'a, T, M>(
+    range: std::ops::RangeInclusive<T>,
+    value: T,
+    on_change: impl Fn(T) -> M + 'a,
+    width: Length,
+) -> cosmic::iced::widget::Slider<'a, T, M, cosmic::Theme>
+where
+    T: Copy + From<u8> + PartialOrd,
+    M: Clone + 'a,
+{
+    cosmic::iced::widget::Slider::new(range, value, on_change)
+        .width(width)
+        .height(KNOB)
+        .handle_width(KNOB)
+        .handle_height(KNOB)
+        .class(small_slider_class())
+}
+
+/// Wrap a [`small_slider`] (or its tooltip) with the rail end caps.
+pub(crate) fn with_rail_ends<'a, M: 'a>(
+    track: impl Into<Element<'a, M>>,
+    width: Length,
+) -> Element<'a, M> {
+    let cap = |leading: bool| {
+        container(Space::new().width(KNOB / 2.0).height(4.0)).class(
+            cosmic::theme::Container::custom(move |theme| {
+                let on = Color::from(theme.cosmic().background(false).on);
+                cosmic::iced::widget::container::Style {
+                    background: Some(Background::Color(if leading {
+                        Ink::Accent.color(theme)
+                    } else {
+                        Color { a: 0.1, ..on }
+                    })),
+                    border: Border {
+                        radius: if leading {
+                            [2.0, 0.0, 0.0, 2.0].into()
+                        } else {
+                            [0.0, 2.0, 2.0, 0.0].into()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }),
+        )
+    };
+    let ends = Row::new()
+        .height(KNOB)
+        .align_y(Alignment::Center)
+        .push(cap(true))
+        .push(Space::new().width(Length::Fill))
+        .push(cap(false));
+    cosmic::iced::widget::stack![ends, track.into()]
+        .width(width)
+        .into()
+}
 
 // ─── parts panel (PartsOverlay.swift:12-51) ────────────────────────────────
 
@@ -87,63 +562,71 @@ pub fn view_parts_panel(
         } else {
             Length::Fixed(PANEL_WIDTH)
         })
-        .class(panel_style(10.0))
+        .class(card_style(10.0, 6.0))
         .into()
 }
 
-/// The header button: "Parts", the group-count badge when more than one
-/// group, and the chevron — the whole row toggles `collapsed`
-/// (PartsOverlay.swift:57-77).
+/// The header button: the layers glyph + semibold "Parts", the group
+/// count when more than one group, and the chevron — the whole row
+/// toggles `collapsed` (PartsOverlay.swift:57-77).
 fn header(tools: &ViewerTools, groups: &[PartGroup]) -> Element<'static, Message> {
-    let mut label = Row::new().spacing(6).push(text(fl!("parti")).size(14));
+    let mut label = Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(symbol(Symbol::SquareStack3dUp, 16, Ink::Primary))
+        .push(
+            text(fl!("parti"))
+                .size(12)
+                .font(cosmic::font::semibold())
+                .class(Ink::Primary.text_class()),
+        );
     if groups.len() > 1 {
         label = label.push(count_badge(groups.len()));
     }
-    label = label.push(
-        secondary_text(if tools.collapsed { "⌃" } else { "⌄" }).size(10), // chevron stand-in
-    );
+    label = label.push(symbol(
+        if tools.collapsed {
+            Symbol::ChevronDown
+        } else {
+            Symbol::ChevronUp
+        },
+        14,
+        Ink::Secondary,
+    ));
     let help = if tools.collapsed {
         fl!("mostra-le-parti")
     } else {
         fl!("nascondi-le-parti")
     };
     let header = button::custom(label)
-        .class(cosmic::theme::Button::Text)
-        .on_press(Message::TogglePartsCollapsed);
+        .padding(0)
+        .class(cosmic::theme::Button::Transparent)
+        .on_press(Message::TogglePartsCollapsed)
+        .name(help.clone());
     tooltip(
         header,
         text(help),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
 }
 
-/// The layout picker as one button per layout, the selected one in the
-/// suggested style (the preset picker's pattern — a segmented control's
-/// model borrows its owner, which a per-view rebuild cannot satisfy).
-/// Disabled while comparing: buttons without `on_press`
-/// (PartsOverlay.swift:16-23).
+/// The layout picker (PartsOverlay.swift:16-23): one segmented control
+/// over the available layouts, disabled while animating or comparing.
 fn layout_picker(
     tools: &ViewerTools,
     parts_count: usize,
     comparing: bool,
 ) -> Element<'static, Message> {
-    let mut bar = Row::new().spacing(4);
-    for layout in ViewerTools::available_layouts(parts_count) {
-        let mut choice = button::text(layout_label(layout)).class(if tools.layout == layout {
-            cosmic::theme::Button::Suggested
-        } else {
-            cosmic::theme::Button::Standard
-        });
-        if !comparing {
-            choice = choice.on_press(Message::SetLayout(layout));
-        }
-        bar = bar.push(choice);
-    }
+    let layouts = ViewerTools::available_layouts(parts_count);
+    let selected = layouts.iter().position(|layout| *layout == tools.layout);
+    let items = layouts
+        .into_iter()
+        .map(|layout| (layout_label(layout), Message::SetLayout(layout)))
+        .collect();
     tooltip(
-        bar,
+        segmented(items, selected, !comparing, Length::Fill),
         text(fl!("vista-delle-parti")),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
 }
@@ -157,20 +640,29 @@ fn layout_label(layout: PartsLayout) -> String {
 }
 
 /// The explode-distance slider row, only in the effective Exploded
-/// layout (PartsOverlay.swift:24-33): the range is T8's `EXPLODE_RANGE`
-/// (0 assembled … 2 fully spread); the arrows are glyph stand-ins.
+/// layout (PartsOverlay.swift:24-33): the inward-arrows glyph, the slider
+/// over `EXPLODE_RANGE` (0 assembled … 2 fully spread), the outward
+/// arrows.
 fn explode_row(tools: &ViewerTools) -> Element<'static, Message> {
-    let distance =
-        slider(EXPLODE_RANGE, tools.explode_amount, Message::SetExplode).width(Length::Fill);
+    let distance = small_slider(
+        EXPLODE_RANGE,
+        tools.explode_amount,
+        Message::SetExplode,
+        Length::Fill,
+    );
     Row::new()
         .spacing(6)
-        .push(secondary_text("↘↗").size(12))
-        .push(tooltip(
-            distance,
-            text(fl!("distanza-tra-le-parti")),
-            cosmic::widget::tooltip::Position::FollowCursor,
+        .align_y(Alignment::Center)
+        .push(symbol(Symbol::ArrowsInward, 13, Ink::Secondary))
+        .push(with_rail_ends(
+            tooltip(
+                distance,
+                text(fl!("distanza-tra-le-parti")),
+                cosmic::widget::tooltip::Position::Bottom,
+            ),
+            Length::Fill,
         ))
-        .push(secondary_text("↗↘").size(12))
+        .push(symbol(Symbol::ArrowsOutward, 13, Ink::Secondary))
         .into()
 }
 
@@ -182,15 +674,20 @@ fn part_list(
     effective: PartsLayout,
 ) -> Element<'static, Message> {
     let exploded = effective == PartsLayout::Exploded;
-    let mut rows = Column::new().spacing(2);
+    let mut rows = Column::new().spacing(ROW_SPACING);
     for group in groups {
         rows = rows.push(group_row(tools, group, exploded));
     }
-    let height = (groups.len() as f32 * ROW_HEIGHT_ESTIMATE + 4.0).min(LIST_MAX_HEIGHT);
     cosmic::widget::scrollable::scrollable(rows.width(Length::Fill))
-        .height(Length::Fixed(height))
+        .height(Length::Fixed(list_height(groups.len())))
         .width(Length::Fill)
         .into()
+}
+
+/// The list's height: every row plus the gaps between them, capped.
+fn list_height(rows: usize) -> f32 {
+    let rows = rows as f32;
+    (rows * ROW_HEIGHT + (rows - 1.0).max(0.0) * ROW_SPACING).min(LIST_MAX_HEIGHT)
 }
 
 /// One group row (PartsOverlay.swift:91-135): color dot, name (dimmed
@@ -203,80 +700,100 @@ fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<
     let is_attached = tools.attached.contains(&group.name);
     let mut cluster = Row::new()
         .spacing(6)
+        .align_y(Alignment::Center)
         .push(color_dot(group.color, 9.0))
         .push(
             text(group.name.clone())
                 .size(12)
-                .width(Length::Fill)
                 .wrapping(Wrapping::None)
                 .ellipsize(cosmic::iced::core::text::Ellipsize::Middle(
                     cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
                 ))
                 .class(if is_hidden {
-                    tertiary_text_class()
+                    Ink::Tertiary.text_class()
                 } else {
-                    cosmic::theme::Text::Default
+                    Ink::Primary.text_class()
                 }),
         );
     if group.members.len() > 1 {
-        cluster = cluster.push(count_badge(group.members.len()));
+        cluster = cluster.push(
+            text(fl!("lld-3", count = group.members.len()))
+                .size(10)
+                .class(Ink::Secondary.text_class()),
+        );
     }
     let name = group.name.clone();
     let mut row = Row::new()
         .spacing(6)
-        .push(mouse_area(cluster.width(Length::Fill)).on_press(Message::RowClicked(name)));
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .push(
+            mouse_area(
+                container(cluster)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center),
+            )
+            .on_press(Message::RowClicked(name.clone())),
+        );
     if exploded {
-        row = row.push(action_button(
+        row = row.push(icon_button(
+            if is_attached {
+                Symbol::Link
+            } else {
+                Symbol::LinkBadgePlus
+            },
+            16,
+            if is_attached {
+                Ink::Accent
+            } else {
+                Ink::Secondary
+            },
             if is_attached {
                 fl!("separa-dal-resto")
             } else {
                 fl!("tieni-unita-al-resto")
             },
-            is_attached,
-            Message::ToggleAttachedGroup(group.name.clone()),
+            Some(Message::ToggleAttachedGroup(name.clone())),
         ));
     }
-    row = row.push(action_button(
+    // upstream's eye reads about half as dark as the link glyph beside it
+    // (176 vs 129 on the card): SF's eye strokes are hairlines, so the
+    // port's eye takes the tertiary ink to land at the same weight
+    row = row.push(icon_button(
+        if is_hidden {
+            Symbol::EyeSlash
+        } else {
+            Symbol::Eye
+        },
+        18,
+        Ink::Tertiary,
         if is_hidden {
             fl!("mostra")
         } else {
             fl!("nascondi")
         },
-        false,
-        Message::ToggleHiddenGroup(group.name.clone()),
+        Some(Message::ToggleHiddenGroup(name)),
     ));
     row.into()
 }
 
-/// A small text action button; `active` tints the label with the theme
-/// accent (upstream colors the attached link icon with `accentColor`).
-fn action_button(label: String, active: bool, message: Message) -> Element<'static, Message> {
-    let body = text(label).size(10).class(if active {
-        accent_text_class()
-    } else {
-        secondary_text_class()
-    });
-    button::custom(body)
-        .class(cosmic::theme::Button::Text)
-        .on_press(message)
-        .into()
-}
-
-/// The caption digit badge (upstream `.caption.monospacedDigit()`).
+/// The caption count beside the header title (upstream
+/// `.caption.monospacedDigit()`, secondary).
 fn count_badge(count: usize) -> Text<'static> {
     text(count.to_string())
-        .font(cosmic::font::mono())
         .size(10)
-        .class(secondary_text_class())
+        .class(Ink::Secondary.text_class())
 }
 
 /// The plate note (PartsOverlay.swift:37-42): shown in the effective
 /// Plate layout while the agent has produced no plate parts.
 fn plate_note() -> Element<'static, Message> {
-    secondary_text(fl!(
+    text(fl!(
         "l-agente-non-ha-ancora-preparato-il-piatto-di-stampa-le-parti-sono-affiancate-senza-ruotarle-chiedi-di-prepararlo-nella-chat"
     ))
-    .size(12)
+    .size(10)
+    .class(Ink::Secondary.text_class())
     .wrapping(Wrapping::Word)
     .width(Length::Fill)
     .into()
@@ -312,11 +829,13 @@ pub fn badge_text(points: &[[f32; 3]], unit: MeasurementUnit) -> String {
     }
 }
 
-/// The floating measurement badge: a capsule with the two-point
+/// The floating measurement badge: a material capsule with the two-point
 /// measurement in monospace (upstream `.fontDesign(.monospaced)`, on the
-/// measurement arm only) or the next-step prompt.
+/// measurement arm only) or the next-step prompt, at `.callout` (12).
 pub fn view_measure_badge(points: &[[f32; 3]], unit: MeasurementUnit) -> Element<'static, Message> {
-    let body = text(badge_text(points, unit)).size(14);
+    let body = text(badge_text(points, unit))
+        .size(12)
+        .class(Ink::Primary.text_class());
     let body = if points.len() == 2 {
         body.font(cosmic::font::mono())
     } else {
@@ -330,122 +849,65 @@ pub fn view_measure_badge(points: &[[f32; 3]], unit: MeasurementUnit) -> Element
 
 // ─── section controls (ModelPane.swift:181-200) ────────────────────────────
 
-/// The bottom-center section capsule: the X/Y/Z axis picker (one button
-/// per axis, selected = suggested — the preset picker's pattern) and the
-/// position slider over T3's `SLIDER_MIN..=SLIDER_MAX`, width 220.
+/// The bottom-center section capsule: the X/Y/Z segmented picker
+/// (`.fixedSize()`) and the position slider over T3's
+/// `SLIDER_MIN..=SLIDER_MAX`, width 220, 10 apart, in a material capsule
+/// padded 12 × 6.
 pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
-    let mut axes = Row::new().spacing(4);
-    for axis in section::ALL {
-        axes = axes.push(
-            button::text(axis.title().to_string())
-                .class(if tools.section_axis == axis {
-                    cosmic::theme::Button::Suggested
-                } else {
-                    cosmic::theme::Button::Standard
-                })
-                .on_press(Message::SetSectionAxis(axis)),
-        );
-    }
-    let position = slider(
+    let selected = section::ALL
+        .iter()
+        .position(|axis| *axis == tools.section_axis);
+    let axes = segmented(
+        section::ALL
+            .iter()
+            .map(|axis| (axis.title().to_string(), Message::SetSectionAxis(*axis)))
+            .collect(),
+        selected,
+        true,
+        Length::Shrink,
+    );
+    let width = Length::Fixed(220.0);
+    let position = small_slider(
         section::SLIDER_MIN..=section::SLIDER_MAX,
         tools.section_position,
         Message::SetSectionPosition,
-    )
-    .width(Length::Fixed(220.0));
-    let row = Row::new().spacing(10).push(axes).push(tooltip(
-        position,
-        text(fl!("posizione-della-sezione")),
-        cosmic::widget::tooltip::Position::FollowCursor,
-    ));
+        width,
+    );
+    let row = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(axes)
+        .push(with_rail_ends(
+            tooltip(
+                position,
+                text(fl!("posizione-della-sezione")),
+                cosmic::widget::tooltip::Position::Top,
+            ),
+            width,
+        ));
     container(row.padding([6.0, 12.0]))
         .class(capsule_style())
         .into()
 }
 
-// ─── shared bits (private twins; modules stay self-contained — the chat
-// pane's convention) ─────────────────────────────────────────────────────────
+// ─── color dot ─────────────────────────────────────────────────────────────
 
-fn secondary_text(body: impl Into<String>) -> Text<'static> {
-    text(body.into()).class(secondary_text_class())
-}
-
-fn secondary_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-/// Dimmer than secondary (upstream's `.tertiary` on a hidden row's name).
-fn tertiary_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.45;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-fn accent_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let accent = theme.cosmic().accent_color();
-        cosmic::iced::widget::text::Style {
-            color: Some(Color::from_rgb(accent.red, accent.green, accent.blue)),
-            ..Default::default()
-        }
-    })
-}
-
-/// A solid theme-base surface with a hairline border (upstream's
-/// `.regularMaterial` + separator stroke; the drop shadow has no iced
-/// port) — the parameters panel's style at the parts panel's radius 10.
-fn panel_style(radius: f32) -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(move |theme| {
-        let base = Color::from(theme.cosmic().background(false).base);
-        let mut border = Color::from(theme.cosmic().background(false).on);
-        border.a = 0.15;
-        cosmic::iced::widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(base)),
-            border: cosmic::iced::Border {
-                color: border,
-                width: 1.0,
-                radius: radius.into(),
-            },
-            ..Default::default()
-        }
-    })
-}
-
-/// The badge/section capsule: the panel surface at a pill radius.
-fn capsule_style() -> cosmic::theme::Container<'static> {
-    panel_style(999.0)
-}
-
-/// A `size`-pixel color swatch with a hairline ring (upstream's stroked
-/// circles); `None` falls back to the dimmed secondary fill
+/// A `size`-pixel color swatch with a hairline separator ring (upstream's
+/// stroked circles); `None` falls back to the dimmed secondary fill
 /// (PartsOverlay.swift:95-98).
 pub(crate) fn color_dot(color: Option<[u8; 3]>, size: f32) -> Element<'static, Message> {
-    container(dot_filler(size))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .class(dot_style(
-            color.map(|c| Color::from_rgb8(c[0], c[1], c[2])),
-            size,
-        ))
-        .into()
-}
-
-/// A zero-content filler that gives the dot its square bounds.
-fn dot_filler(size: f32) -> cosmic::widget::Space {
-    cosmic::widget::Space::new()
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
+    container(
+        Space::new()
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size)),
+    )
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .class(dot_style(
+        color.map(|c| Color::from_rgb8(c[0], c[1], c[2])),
+        size,
+    ))
+    .into()
 }
 
 fn dot_style(fill: Option<Color>, size: f32) -> cosmic::theme::Container<'static> {
@@ -455,16 +917,58 @@ fn dot_style(fill: Option<Color>, size: f32) -> cosmic::theme::Container<'static
             fallback.a *= 0.4;
             fallback
         });
-        let mut border = Color::from(theme.cosmic().background(false).on);
-        border.a = 0.15;
         cosmic::iced::widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(fill)),
-            border: cosmic::iced::Border {
-                color: border,
+            background: Some(Background::Color(fill)),
+            border: Border {
+                color: separator(theme),
                 width: 1.0,
                 radius: (size / 2.0).into(),
             },
             ..Default::default()
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The list is sized to exactly its rows and gaps, capped at the
+    /// upstream maximum (PartsOverlay.swift:87).
+    #[test]
+    fn list_height_fits_rows_and_caps() {
+        assert_eq!(list_height(1), ROW_HEIGHT);
+        assert_eq!(list_height(2), 2.0 * ROW_HEIGHT + ROW_SPACING);
+        assert_eq!(list_height(100), LIST_MAX_HEIGHT);
+    }
+
+    /// Every symbol's SVG is shipped and parses as an SVG document.
+    #[test]
+    fn every_symbol_svg_is_shipped() {
+        use Symbol::*;
+        for symbol in [
+            SquareStack3dUp,
+            ChevronUp,
+            ChevronDown,
+            ChevronLeft,
+            ChevronRight,
+            ChevronUpChevronDown,
+            Xmark,
+            Eye,
+            EyeSlash,
+            Link,
+            LinkBadgePlus,
+            ArrowsInward,
+            ArrowsOutward,
+            SliderHorizontal3,
+            MinusMagnifyingGlass,
+            PlusMagnifyingGlass,
+        ] {
+            let svg = std::str::from_utf8(symbol.svg()).unwrap();
+            assert!(
+                svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"),
+                "{symbol:?}"
+            );
+        }
+    }
 }
