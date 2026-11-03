@@ -32,7 +32,7 @@ use cosmic::iced::stream;
 use cosmic::iced::time::every;
 use cosmic::iced::{Color, Length, Size, Subscription, Task};
 use cosmic::widget::menu::action::MenuAction;
-use cosmic::widget::pane_grid::{self, DragEvent, ResizeEvent};
+use cosmic::widget::pane_grid::{self, ResizeEvent};
 use cosmic::widget::text_editor;
 use cosmic::widget::{Column, Row, Space, button, container, popover, text};
 use cosmic::{Element, Task as CosmicTask};
@@ -63,9 +63,34 @@ use crate::viewer_pane::ViewerPane;
 pub const DEFAULT_SIZE: (f32, f32) = (1320.0, 840.0);
 pub const MIN_SIZE: (f32, f32) = (960.0, 600.0);
 
-/// The pane grid's divider thickness — the spacing half of
-/// [`panes::clamp_resize`]'s contract.
-const GRID_SPACING: f32 = 8.0;
+/// The pane grid's divider thickness (upstream's 1 pt NSSplitView
+/// hairline) — the spacing half of [`panes::clamp_resize`]'s contract.
+const GRID_SPACING: f32 = 1.0;
+
+/// The pane divider's on-background wash: #D4D4D5 between #EBEBEC panes
+/// (project-model.png).
+const DIVIDER_ALPHA: f32 = 0.1;
+
+/// The pane grid's minimum pane extent (iced's default, named so the drag
+/// hit-test computes the same regions the grid lays out).
+const GRID_MIN_PANE: f32 = 50.0;
+
+/// The toolbar band's height above its bottom hairline
+/// (project-model.png: the divider at y=104 of the 2x capture).
+const HEADER_HEIGHT: f32 = 52.0;
+
+/// The ActivityViewer capsule's `.quaternary.opacity(0.6)` fill as an
+/// on-background wash: #DFDFE1 over the toolbar's #EEEEF0.
+const CAPSULE_ALPHA: f32 = 0.063;
+
+/// The toolbar's bottom hairline: #C5C5C6 over #EEEEF0.
+const HAIRLINE_ALPHA: f32 = 0.17;
+
+/// The version card's width: the visible span of upstream's menu inside
+/// the window (version-menu.png: x 968 to the 1320 edge, less an 8 px
+/// margin — an in-window popover is clamped to the window, libcosmic
+/// popover.rs:375).
+const VERSION_CARD_WIDTH: f32 = 344.0;
 
 /// The output watcher's debounce (upstream FileWatcher's 0.3 s — shared
 /// with the viewer pane's own watch).
@@ -143,8 +168,15 @@ pub enum Message {
     Command(Command),
     /// A pane-grid divider drag (clamped through [`panes::clamp_resize`]).
     Resized(ResizeEvent),
-    /// A pane drag-and-drop rearrangement.
-    Dragged(DragEvent),
+    /// A pane's grab handle was pressed (PaneContainer.swift:30-33): the
+    /// drag runs on window-level cursor events until release.
+    GripPressed(PaneKind),
+    /// The pointer entered (`Some`) or left (`None`) a pane's grab handle.
+    GripHovered(Option<PaneKind>),
+    /// The cursor moved while a handle is held (window coordinates).
+    PaneDragMoved(cosmic::iced::Point),
+    /// The mouse button came up while a handle is held: drop.
+    PaneDragEnded,
     /// The attach portal answered.
     AttachChosen(Result<Vec<PathBuf>, String>),
     /// The export save portal answered (`Err` = cancelled — upstream's
@@ -156,8 +188,18 @@ pub enum Message {
     ExportDone(Option<PathBuf>),
     /// An issue button opened/closed its list (`None` closes).
     ToggleIssues(Option<IssueKind>),
+    /// An outside click dismissed whichever header card was open.
+    CloseCards,
+    /// A row of the Open Recent card: open that project (the app layer).
+    OpenRecentPath(PathBuf),
+    /// The Open Recent card's "Cancella menu" (the app layer clears the
+    /// store and empties the card).
+    ClearRecents,
     /// The header's close button (the app layer closes the window).
     CloseRequested,
+    /// A window-chrome gesture on the header (the app layer owns the
+    /// window id the platform call needs).
+    Window(WindowOp),
     /// An app-level request bubbled from the File menu (the window cannot
     /// act on windows or portals itself).
     App(AppRequest),
@@ -169,6 +211,16 @@ pub enum Message {
     /// state when the item set changes; version_menu's module doc has the
     /// panic chain).
     ToggleVersionCard,
+}
+
+/// The header's window gestures: drag-to-move, maximize toggle (button or
+/// double-click), minimize, and the right-click window menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowOp {
+    Drag,
+    ToggleMaximize,
+    Minimize,
+    Menu,
 }
 
 /// App-level commands the project window's File menu bubbles up
@@ -223,8 +275,17 @@ pub struct ProjectWindow {
     /// would rebuild every row's text every second; version_menu's
     /// view_versions doc).
     version_card: Option<time::OffsetDateTime>,
+    /// The Open Recent card's snapshot of the recents list (the app
+    /// layer owns the store and fills this when the File item fires).
+    pub recent_card: Option<Vec<PathBuf>>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
+    /// The pane whose grab handle is held (the drag's input gate).
+    grip_held: Option<PaneKind>,
+    /// The handle under the pointer (full opacity while hovered).
+    grip_hover: Option<PaneKind>,
+    /// The live drag once the cursor has moved (upstream `paneDrag`).
+    pane_drag: Option<panes::PaneDrag>,
     /// The last reported grid size (the report dedup).
     last_size: Arc<Mutex<Size>>,
     /// Keeps the shell's output watch alive; dropped with the window.
@@ -335,6 +396,15 @@ impl ProjectWindow {
     /// app maps them; the window then reads the same bridge's pipeline the
     /// live app reads.
     pub fn with_bridge(root: PathBuf, settings: &Settings, bridge: Bridge) -> Self {
+        let mut window = Self::assemble(root, settings, bridge);
+        // the overlay opens populated (upstream's reload at open reads the
+        // manifest's parameters, ProjectOutput.swift:48-51)
+        let parameters = window.bridge.parameters();
+        window.viewer.sync_parameters(&parameters);
+        window
+    }
+
+    fn assemble(root: PathBuf, settings: &Settings, bridge: Bridge) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let _ = store::prepare(&root);
         let name = root
@@ -410,7 +480,11 @@ impl ProjectWindow {
             missing_outputs: activity::missing_output_files(&output_dir),
             shown_issues: None,
             version_card: None,
+            recent_card: None,
             focus_flash: None,
+            grip_held: None,
+            grip_hover: None,
+            pane_drag: None,
             last_size: Arc::new(Mutex::new(Size::default())),
             watch,
             events,
@@ -587,8 +661,15 @@ impl ProjectWindow {
                     }
                     // the 3D pane's own watch rebuilds the scene; the shell
                     // refreshes the activity model's warnings
-                    ReloadKind::Mesh | ReloadKind::Plate | ReloadKind::Manifest => {
+                    ReloadKind::Mesh | ReloadKind::Plate => {
                         self.refresh_missing_outputs();
+                    }
+                    // a manifest change re-reads the parameters, whoever
+                    // wrote it (ProjectOutput.swift:48-51)
+                    ReloadKind::Manifest => {
+                        self.refresh_missing_outputs();
+                        let parameters = bridge::refresh_parameters(&self.root);
+                        self.viewer.sync_parameters(&parameters);
                     }
                     ReloadKind::Motion => {}
                 }
@@ -619,16 +700,41 @@ impl ProjectWindow {
                 }
                 Task::none()
             }
-            Message::Dragged(DragEvent::Picked { .. } | DragEvent::Canceled { .. }) => Task::none(),
-            Message::Dragged(DragEvent::Dropped { pane, target }) => {
-                let Some((target_kind, edge)) = drop_target(&self.grid, target) else {
-                    return Task::none();
-                };
-                let Some(moving_kind) = self.grid.panes.get(&pane).copied() else {
-                    return Task::none();
-                };
-                let node = panes::moving(&self.layout, moving_kind, edge, target_kind);
-                self.apply_layout_persist(node);
+            Message::GripPressed(kind) => {
+                self.grip_held = Some(kind);
+                Task::none()
+            }
+            Message::GripHovered(kind) => {
+                self.grip_hover = kind;
+                Task::none()
+            }
+            Message::PaneDragMoved(position) => {
+                if let Some(pane) = self.grip_held {
+                    // the grid sits under the header band and its hairline
+                    let point =
+                        cosmic::iced::Point::new(position.x, position.y - HEADER_HEIGHT - 1.0);
+                    let regions = self.grid.layout().pane_regions(
+                        GRID_SPACING,
+                        GRID_MIN_PANE,
+                        Size::new(self.size.0, self.size.1),
+                    );
+                    let hit = panes::locate(
+                        regions
+                            .into_iter()
+                            .filter_map(|(id, bounds)| Some((*self.grid.panes.get(&id)?, bounds))),
+                        point,
+                    );
+                    self.pane_drag = Some(panes::drag_to(pane, hit));
+                }
+                Task::none()
+            }
+            Message::PaneDragEnded => {
+                self.grip_held = None;
+                if let Some(drag) = self.pane_drag.take() {
+                    if let Some(node) = panes::drop(&self.layout, &drag) {
+                        self.apply_layout_persist(node);
+                    }
+                }
                 Task::none()
             }
             Message::AttachChosen(Ok(paths)) => {
@@ -688,7 +794,16 @@ impl ProjectWindow {
             // the app layer acts (PresentSetupSheet's one producer — the
             // bridge's PythonSheetRequested forward — already lands there;
             // re-emitting it here would loop the variant back into itself)
+            Message::CloseCards => {
+                self.version_card = None;
+                self.shown_issues = None;
+                self.recent_card = None;
+                Task::none()
+            }
             Message::CloseRequested
+            | Message::Window(_)
+            | Message::OpenRecentPath(_)
+            | Message::ClearRecents
             | Message::App(_)
             | Message::PresentSetupSheet
             | Message::PresentAgentSheet => Task::none(),
@@ -712,7 +827,14 @@ impl ProjectWindow {
     /// (busy) or an engine failure changed nothing observable, so there is
     /// nothing to reload (upstream's catch skips the reloads too).
     fn restore(&mut self, number: i64) -> Task<Message> {
-        if self.bridge.restore(number).is_err() || self.bridge.build_error().is_some() {
+        if self.bridge.restore(number).is_err() {
+            // the busy refusal changed nothing
+            return Task::none();
+        }
+        // "Versione N ripristinata" / "Impossibile ripristinare la versione
+        // N" either way (Project.swift:319-321)
+        self.set_activity(self.bridge.activity().into());
+        if self.bridge.build_error().is_some() {
             return Task::none();
         }
         // the layout stays the window's: only the fields the bridge's save
@@ -976,6 +1098,11 @@ impl ProjectWindow {
                 self.refresh_missing_outputs();
                 self.save_metadata();
                 self.reload_chat_rows();
+                // the turn's tail re-read the manifest (bridge
+                // turn_success_tail): an agent-made parameter set shows
+                // now, not at the next Compila
+                let parameters = self.bridge.parameters();
+                self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity().into());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
@@ -1111,12 +1238,33 @@ impl ProjectWindow {
         if self.is_busy() || self.focus_flash.is_some() {
             subs.push(every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
+        if self.grip_held.is_some() {
+            subs.push(cosmic::iced::event::listen_with(
+                |event, _status, _window| {
+                    use cosmic::iced::{Event, mouse};
+                    match event {
+                        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                            Some(Message::PaneDragMoved(position))
+                        }
+                        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                            Some(Message::PaneDragEnded)
+                        }
+                        _ => None,
+                    }
+                },
+            ));
+        }
         Subscription::batch(subs)
     }
 
     /// The whole window: header over the pane grid (upstream
     /// ProjectSplitView), with the open issue list as a popover.
     pub fn view(&self) -> Element<'_, Message> {
+        self.view_with_focus(true)
+    }
+
+    /// The window frame; `focused` styles the header's window controls.
+    pub fn view_with_focus(&self, focused: bool) -> Element<'_, Message> {
         // the grid reports its laid-out size through the shell relay: the
         // resize clamp needs the GRID extent, and the window size would
         // ignore the header (the panes' responsive report pattern)
@@ -1134,26 +1282,15 @@ impl ProjectWindow {
             this.view_grid()
         });
         let base: Element<'_, Message> = Column::with_capacity(2)
-            .push(self.view_header())
+            .push(self.view_header(focused))
             .push(sized)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
 
-        // the issue list and the version history card ride as non-modal
-        // popovers over the content — one slot, mutually exclusive
-        let mut pop = popover(base);
-        if let Some(now) = self.version_card {
-            pop = pop.popup(crate::version_menu::view_versions(
-                &version_menu::menu_entries(&self.bridge.versions(), self.metadata.current_version),
-                self.is_busy(),
-                now,
-                Message::Restore,
-            ));
-        } else if let Some(kind) = self.shown_issues {
-            pop = pop.popup(self.view_issue_list(kind));
-        }
-        pop.into()
+        // the version card, the issue list, and the Open Recent card are
+        // popovers anchored to their own header controls (view_header)
+        base
     }
 
     /// The resizable pane grid (rebuilt per layout — iced elements are
@@ -1206,7 +1343,14 @@ impl ProjectWindow {
             // the focus command's one-second highlight (upstream
             // PaneFocusRequest's flash)
             let flashing = self.focus_flash == Some(*kind);
-            let framed: Element<'_, Message> = container(body)
+            let mut layers = cosmic::iced::widget::Stack::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .push(body);
+            if let Some(highlight) = self.view_drop_highlight(*kind) {
+                layers = layers.push(highlight);
+            }
+            let framed: Element<'_, Message> = container(layers.push(self.view_grip(*kind)))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .class(flash_border(flashing))
@@ -1214,137 +1358,298 @@ impl ProjectWindow {
             pane_grid::Content::new(framed)
         })
         .spacing(GRID_SPACING)
-        .on_resize(6, Message::Resized)
-        .on_drag(Message::Dragged);
+        .min_size(GRID_MIN_PANE)
+        .on_resize(6, Message::Resized);
+        // the 1 px gaps between opaque panes show this fill: the
+        // NSSplitView hairline, #D4D4D5 between #EBEBEC panes
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
+            .class(chrome::fill_class(DIVIDER_ALPHA, 0.0))
             .into()
     }
 
-    /// The toolbar (ProjectToolbar.swift, M4 subset): chat toggle + stop |
-    /// ActivityViewer | commands menu + reveal + export + slicer.
-    fn view_header(&self) -> Element<'_, Message> {
-        let chat_toggle = button::icon(
-            cosmic::widget::icon::from_name("view-column")
-                .size(16)
-                .handle(),
+    /// A pane's grab handle (PaneContainer.swift:19-37): `line.3.horizontal`
+    /// at 10 pt semibold, secondary, in a 28×16 material capsule with a
+    /// separator stroke, 6 px from the pane's top-left; 45 % opacity until
+    /// hovered or dragging.
+    fn view_grip(&self, kind: PaneKind) -> Element<'static, Message> {
+        let lit =
+            self.grip_hover == Some(kind) || self.pane_drag.is_some_and(|drag| drag.pane == kind);
+        let opacity = if lit { 1.0 } else { 0.45 };
+        let pill = container(
+            chrome::glyph_icon(chrome::GRIP_LINES, (10.0, 7.0), chrome::Tone::Secondary)
+                .opacity(opacity),
         )
-        .on_press(Message::Command(Command::ShowChat))
-        .name("show-chat");
-
-        let stop = button::icon(
-            cosmic::widget::icon::from_name("media-playback-stop")
-                .size(16)
-                .handle(),
+        .width(Length::Fixed(28.0))
+        .height(Length::Fixed(16.0))
+        .align_x(cosmic::iced::alignment::Horizontal::Center)
+        .align_y(cosmic::iced::alignment::Vertical::Center)
+        .class(grip_class(opacity));
+        let grip = cosmic::widget::mouse_area(pill)
+            .on_press(Message::GripPressed(kind))
+            .on_enter(Message::GripHovered(Some(kind)))
+            .on_exit(Message::GripHovered(None))
+            .interaction(cosmic::iced::mouse::Interaction::Grab);
+        cosmic::widget::tooltip(
+            container(grip).padding(6),
+            text(fl!("trascina-per-spostare-il-pannello")).size(12),
+            cosmic::widget::tooltip::Position::Bottom,
         )
-        .on_press_maybe(self.is_busy().then_some(Message::Command(Command::Stop)))
-        .name("stop");
+        .into()
+    }
 
-        let reveal = button::icon(cosmic::widget::icon::from_name("folder").size(16).handle())
-            .on_press(Message::Command(Command::Reveal))
-            .name("reveal");
+    /// The drop highlight over a pane while a drag is live
+    /// (PaneContainer.swift:40-62): the target's edge half, inset 4, an
+    /// 8-radius accent fill at 18 % with a 2 px accent stroke; the dragged
+    /// pane itself takes a 6 % accent wash.
+    fn view_drop_highlight(&self, kind: PaneKind) -> Option<Element<'static, Message>> {
+        let drag = self.pane_drag?;
+        let tint = |alpha: f32, stroke: bool| {
+            cosmic::theme::Container::custom(move |theme| {
+                let accent = Color::from(theme.cosmic().accent_color());
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(Color {
+                        a: alpha,
+                        ..accent
+                    })),
+                    border: cosmic::iced::Border {
+                        color: accent,
+                        width: if stroke { 2.0 } else { 0.0 },
+                        radius: if stroke { 8.0.into() } else { 0.0.into() },
+                    },
+                    ..Default::default()
+                }
+            })
+        };
+        let fill = || Space::new().width(Length::Fill).height(Length::Fill);
+        match (drag.target, drag.edge) {
+            (Some(target), Some(edge)) if target == kind => {
+                let mark: Element<'static, Message> =
+                    container(fill()).class(tint(0.18, true)).into();
+                // the edge half inset 4 on every side: padding 4, an 8 px
+                // gutter between the halves
+                let halves: Element<'static, Message> = match edge {
+                    panes::DropEdge::Leading => {
+                        Row::new().spacing(8).push(mark).push(fill()).into()
+                    }
+                    panes::DropEdge::Trailing => {
+                        Row::new().spacing(8).push(fill()).push(mark).into()
+                    }
+                    panes::DropEdge::Top => Column::new().spacing(8).push(mark).push(fill()).into(),
+                    panes::DropEdge::Bottom => {
+                        Column::new().spacing(8).push(fill()).push(mark).into()
+                    }
+                };
+                Some(container(halves).padding(4).into())
+            }
+            _ if drag.pane == kind => Some(container(fill()).class(tint(0.06, false)).into()),
+            _ => None,
+        }
+    }
 
-        // upstream gates the slicer button on output.hasThreeMF
+    /// The toolbar (ProjectWindow.swift:94-161 `ProjectToolbar`) as ONE
+    /// header row: the command menu bar first (upstream's AppCommands live
+    /// in the macOS global menu bar; COSMIC has none, so the menus ride the
+    /// header start like cosmic-edit's), the navigation group (chat toggle,
+    /// Compila, Stop), the principal ActivityViewer capsule centered on the
+    /// window, the primary-action group (versions, reveal, export, slicer,
+    /// parameters), then the window controls. 52 px tall to the hairline:
+    /// the upstream capture's toolbar divider sits at y=104 of 1680
+    /// (project-model.png, 2x).
+    fn view_header(&self, focused: bool) -> Element<'_, Message> {
+        let busy = self.is_busy();
+        // upstream gates export and slicer on output.hasThreeMF
         let has_3mf = self.output_dir().join("model.3mf").exists();
 
-        // "Esporta pacchetto" (ProjectWindow.swift:135-140) — upstream's
-        // share glyph; disabled !hasThreeMF || isBusy (the toolbar's
-        // STRICTER gate — the menu entry above stays clickable while busy,
-        // upstream's split, copied as-is). The tooltip is upstream's
-        // `.help` naming the archive's contents.
-        let export = button::icon(
-            cosmic::widget::icon::from_name("emblem-shared")
-                .size(16)
-                .handle(),
-        )
-        .on_press_maybe((has_3mf && !self.is_busy()).then_some(Message::Command(Command::Export)))
-        .name(fl!("esporta-pacchetto"));
-        let export = cosmic::widget::tooltip(
-            export,
-            cosmic::widget::text(fl!(
-                "esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"
-            )),
-            cosmic::widget::tooltip::Position::FollowCursor,
-        );
-
-        let slicer = button::icon(
-            cosmic::widget::icon::from_name("document-export")
-                .size(16)
-                .handle(),
-        )
-        .on_press_maybe(has_3mf.then_some(Message::Command(Command::OpenInSlicer)))
-        .name("open-in-slicer");
-
-        cosmic::widget::header_bar()
-            .title(self.name.clone())
-            .on_close(Message::CloseRequested)
-            .start(chat_toggle)
-            .start(stop)
-            .center(self.view_activity())
-            .end(crate::version_menu::version_button(
-                self.metadata.current_version,
-                self.version_card.is_some(),
-                Message::ToggleVersionCard,
+        // icon sizes and button widths: the upstream capture's glyph bboxes
+        // and center-to-center pitch (sidebar→play 38, play→stop 34, the
+        // primary group 38), halved to the 1x basis
+        let start = Row::new()
+            .align_y(cosmic::iced::Alignment::Center)
+            .push({
+                // "Apri recenti" (Commands.swift:30-40) drops its card from
+                // the menu bar
+                let mut menu = popover(self.view_menu())
+                    .position(cosmic::widget::popover::Position::Bottom)
+                    .on_close(Message::CloseCards);
+                if let Some(recents) = &self.recent_card {
+                    menu = menu.popup(view_recents(recents));
+                }
+                menu
+            })
+            .push(Space::new().width(Length::Fixed(8.0)))
+            .push(toolbar_button(
+                chrome::SIDEBAR_LEFT,
+                (19.5, 15.0),
+                40.0,
+                Some(Message::Command(Command::ShowChat)),
+                fl!("mostra-o-nascondi-la-chat-0"),
             ))
-            .end(self.view_menu())
-            .end(reveal)
-            .end(export)
-            .end(slicer)
+            // "Compila modello" (ProjectWindow.swift:107-113), disabled
+            // while busy
+            .push(toolbar_button(
+                chrome::PLAY_FILL,
+                (12.5, 14.0),
+                36.0,
+                (!busy).then_some(Message::Command(Command::Build)),
+                fl!("compila-modello-b"),
+            ))
+            // Stop (:115-121), disabled when idle
+            .push(toolbar_button(
+                chrome::STOP_FILL,
+                (13.5, 13.5),
+                32.0,
+                busy.then_some(Message::Command(Command::Stop)),
+                fl!("interrompi"),
+            ));
+
+        let end = Row::new()
+            .align_y(cosmic::iced::Alignment::Center)
+            .push({
+                let mut versions = popover(crate::version_menu::version_button(
+                    self.metadata.current_version,
+                    self.version_card.is_some(),
+                    Message::ToggleVersionCard,
+                ))
+                .position(cosmic::widget::popover::Position::Point(
+                    cosmic::iced::Point::new(
+                        version_menu::CARD_OFFSET.0,
+                        version_menu::CARD_OFFSET.1,
+                    ),
+                ))
+                .on_close(Message::CloseCards);
+                if let Some(now) = self.version_card {
+                    versions = versions.popup(version_menu::view_versions(
+                        &version_menu::menu_entries(
+                            &self.bridge.versions(),
+                            self.metadata.current_version,
+                        ),
+                        busy,
+                        now,
+                        VERSION_CARD_WIDTH,
+                        Message::Restore,
+                    ));
+                }
+                versions
+            })
+            .push(Space::new().width(Length::Fixed(5.0)))
+            .push(toolbar_button(
+                chrome::FOLDER,
+                (18.5, 15.0),
+                38.0,
+                Some(Message::Command(Command::Reveal)),
+                fl!("mostra-nel-finder"),
+            ))
+            // the toolbar's STRICTER export gate (!hasThreeMF || isBusy;
+            // the menu entry stays clickable while busy — upstream's split)
+            .push(toolbar_button(
+                chrome::SHARE,
+                (14.5, 18.5),
+                38.0,
+                (has_3mf && !busy).then_some(Message::Command(Command::Export)),
+                fl!("esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"),
+            ))
+            .push(toolbar_button(
+                chrome::OPEN_EXTERNAL,
+                (15.0, 15.0),
+                38.0,
+                has_3mf.then_some(Message::Command(Command::OpenInSlicer)),
+                fl!("apri-il-file-3mf-nello-slicer-predefinito"),
+            ))
+            // "Parametri" (:154-159)
+            .push(toolbar_button(
+                chrome::SLIDERS,
+                (17.0, 14.5),
+                38.0,
+                Some(Message::Command(Command::ToggleParameters)),
+                fl!("mostra-o-nascondi-i-parametri-i"),
+            ));
+
+        let bar: Element<'_, Message> = cosmic::widget::header_bar()
+            .focused(focused)
+            .on_close(Message::CloseRequested)
+            .on_minimize(Message::Window(WindowOp::Minimize))
+            .on_maximize(Message::Window(WindowOp::ToggleMaximize))
+            .on_drag(Message::Window(WindowOp::Drag))
+            .on_double_click(Message::Window(WindowOp::ToggleMaximize))
+            .on_right_click(Message::Window(WindowOp::Menu))
+            .start(start)
+            .center(self.view_activity())
+            .end(end)
+            .into();
+        // the bar's own height is libcosmic's fixed 47; the strip it is
+        // centered in carries the same drag/maximize/menu wiring so the
+        // whole 52 px band moves the window
+        let band = cosmic::widget::mouse_area(
+            container(bar)
+                .width(Length::Fill)
+                .height(Length::Fixed(HEADER_HEIGHT))
+                .align_y(cosmic::iced::alignment::Vertical::Center),
+        )
+        .on_drag(Message::Window(WindowOp::Drag))
+        .on_double_press(Message::Window(WindowOp::ToggleMaximize))
+        .on_right_press(Message::Window(WindowOp::Menu));
+        Column::with_capacity(2)
+            .push(band)
+            .push(
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                    .class(chrome::fill_class(HAIRLINE_ALPHA, 0.0)),
+            )
             .into()
     }
 
-    /// The minimal ActivityViewer port (Shared/ActivityViewer.swift):
-    /// project name, status icon + text, elapsed, and the error/warning
-    /// issue buttons — the upstream home of output warnings, plus M7's
-    /// motion error and collision warnings from the viewer pane. The full
-    /// port's manifest warnings are M8's.
+    /// The ActivityViewer capsule (Shared/ActivityViewer.swift): cube,
+    /// project name (medium), compact chevron, status icon + text, elapsed
+    /// timer, then the right-aligned error/warning counts — 12 pt, 10 pt
+    /// side padding, 24 tall, 480 wide shrinking toward the 320 minimum as
+    /// the header narrows, a `.quaternary` 6-radius fill (:7-37).
     fn view_activity(&self) -> Element<'_, Message> {
+        use chrome::Tone;
+        // `.fontWeight(.medium)` in SF; the interface font's Medium face is
+        // not installed (it falls back to Regular), Semibold is the nearest
+        // stroke weight it carries
+        let medium = cosmic::font::semibold();
         let mut row = Row::new()
-            .spacing(6)
-            .push(text(self.name.clone()).size(12))
-            .push(text("›".to_string()).size(12).class(dim_text()));
+            .spacing(8)
+            .align_y(cosmic::iced::Alignment::Center)
+            .push(chrome::glyph(chrome::CUBE, (13.0, 13.0), Tone::Secondary))
+            .push(
+                text(self.name.clone())
+                    .size(12)
+                    .font(medium)
+                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                    .class(chrome::text_class(Tone::Primary)),
+            )
+            .push(chrome::glyph(
+                chrome::CHEVRON_COMPACT_RIGHT,
+                (4.0, 8.5),
+                Tone::Tertiary,
+            ));
+        // statusIcon (:41-55): mini spinner / green check / red octagon
         row = match &self.activity {
-            Activity::Idle => row.push(text(fl!("pronto")).size(12).class(dim_text())),
-            Activity::Working(_) => row
-                // .controlSize(.mini) (ActivityViewer.swift:44-46) — the
-                // 12pt bar's spinner at the ~12px mini size, matching the
-                // succeeded/failed icons beside it (cosmic's default is 48)
-                .push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
-                .push(
-                    text(self.activity.text().to_string())
-                        .size(12)
-                        .class(dim_text()),
-                ),
-            Activity::Succeeded(_) => row
-                .push(
-                    cosmic::widget::icon::from_name("object-select")
-                        .size(12)
-                        .icon(),
-                )
-                .push(
-                    text(self.activity.text().to_string())
-                        .size(12)
-                        .class(cosmic::theme::Text::Color(ok_color())),
-                ),
-            Activity::Failed(_) => row
-                .push(
-                    cosmic::widget::icon::from_name("dialog-error")
-                        .size(12)
-                        .icon(),
-                )
-                .push(
-                    text(self.activity.text().to_string())
-                        .size(12)
-                        .class(cosmic::theme::Text::Color(error_color())),
-                ),
+            Activity::Idle => row,
+            // .controlSize(.mini) — the ~12 px spinner
+            Activity::Working(_) => {
+                row.push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
+            }
+            Activity::Succeeded(_) => {
+                row.push(chrome::colored(chrome::CHECK_CIRCLE_FILL, (13.0, 13.0)))
+            }
+            Activity::Failed(_) => row.push(chrome::colored(chrome::ERROR_FILL, (13.0, 13.0))),
         };
+        row = row.push(
+            text(self.activity.text())
+                .size(12)
+                .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                .class(chrome::text_class(Tone::Secondary)),
+        );
         if let Some(start) = self.work_started_at {
             row = row.push(
                 text(activity::elapsed_text(start.elapsed().as_secs()))
                     .size(12)
                     .font(cosmic::font::mono())
-                    .class(dim_text()),
+                    .class(chrome::text_class(Tone::Tertiary)),
             );
         }
         row = row.push(Space::new().width(Length::Fill));
@@ -1357,35 +1662,45 @@ impl ProjectWindow {
             self.viewer.collision_frames(),
         );
         for kind in [IssueKind::Error, IssueKind::Warning] {
-            let matching: Vec<_> = issues.iter().filter(|i| i.kind == kind).collect();
-            if matching.is_empty() {
+            let count = issues.iter().filter(|i| i.kind == kind).count();
+            if count == 0 {
                 continue;
             }
             let open = self.shown_issues == Some(kind);
-            row = row.push(
-                button::custom(
-                    Row::new()
-                        .spacing(3)
-                        .push(
-                            cosmic::widget::icon::from_name(match kind {
-                                IssueKind::Error => "dialog-error",
-                                IssueKind::Warning => "dialog-warning",
-                            })
+            // `.buttonStyle(.plain)` (:79): glyph + count, spacing 2
+            let face = button::custom(
+                Row::new()
+                    .spacing(2)
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .push(match kind {
+                        IssueKind::Error => chrome::colored(chrome::ERROR_FILL, (12.5, 12.5)),
+                        IssueKind::Warning => chrome::colored(chrome::WARNING_FILL, (13.0, 11.5)),
+                    })
+                    .push(
+                        text(format!("{count}"))
                             .size(12)
-                            .icon(),
-                        )
-                        .push(text(format!("{}", matching.len())).size(12)),
-                )
-                .class(if open {
-                    cosmic::theme::Button::Suggested
-                } else {
-                    cosmic::theme::Button::Standard
-                })
-                .on_press(Message::ToggleIssues((!open).then_some(kind)))
-                .padding([2, 8]),
-            );
+                            .class(chrome::text_class(Tone::Primary)),
+                    ),
+            )
+            .padding(0)
+            .class(chrome::button_class(false, 4.0))
+            .on_press(Message::ToggleIssues((!open).then_some(kind)));
+            // the `.popover` on the issue button (:80-85)
+            let mut anchored = popover(face)
+                .position(cosmic::widget::popover::Position::Bottom)
+                .on_close(Message::CloseCards);
+            if open {
+                anchored = anchored.popup(self.view_issue_list(kind));
+            }
+            row = row.push(anchored);
         }
-        container(row.padding([2, 10])).width(Length::Fill).into()
+        container(row)
+            .padding([0, 10])
+            .width(Length::Fixed(480.0))
+            .height(Length::Fixed(24.0))
+            .align_y(cosmic::iced::alignment::Vertical::Center)
+            .class(chrome::fill_class(CAPSULE_ALPHA, 6.0))
+            .into()
     }
 
     /// The issue list popover (upstream `IssueList`).
@@ -1397,49 +1712,25 @@ impl ProjectWindow {
             self.viewer.motion_error(),
             self.viewer.collision_frames(),
         );
+        // VStack(spacing: 8) of Labels, .callout, padding 12, width 360
+        // (ActivityViewer.swift:104-124); the popover closes on an outside
+        // click like upstream's
         let mut list = Column::new()
             .spacing(8)
             .padding(12)
-            .max_width(380)
-            .width(Length::Fill);
+            .width(Length::Fixed(360.0));
         for issue in issues.iter().filter(|i| i.kind == kind) {
             list = list.push(
                 Row::new()
-                    .spacing(8)
-                    .push(
-                        cosmic::widget::icon::from_name(match kind {
-                            IssueKind::Error => "dialog-error",
-                            IssueKind::Warning => "dialog-warning",
-                        })
-                        .size(14)
-                        .icon(),
-                    )
+                    .spacing(6)
+                    .push(match kind {
+                        IssueKind::Error => chrome::colored(chrome::ERROR_FILL, (13.0, 13.0)),
+                        IssueKind::Warning => chrome::colored(chrome::WARNING_FILL, (14.0, 12.5)),
+                    })
                     .push(text(issue.message.clone()).size(12)),
             );
         }
-        list = list.push(
-            Row::new().push(Space::new().width(Length::Fill)).push(
-                button::text(fl!("chiudi"))
-                    .class(cosmic::theme::Button::Standard)
-                    .on_press(Message::ToggleIssues(None)),
-            ),
-        );
-        container(list)
-            .width(Length::Fill)
-            .class(cosmic::theme::Container::custom(|theme| {
-                cosmic::iced::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        theme.cosmic().background(false).base.into(),
-                    )),
-                    border: cosmic::iced::Border {
-                        color: theme.cosmic().background(false).on.into(),
-                        width: 1.0,
-                        radius: theme.cosmic().corner_radii.radius_s.into(),
-                    },
-                    ..Default::default()
-                }
-            }))
-            .into()
+        container(list).class(chrome::card_class()).into()
     }
 
     /// The commands menu bar (the M4 subset of upstream AppCommands plus M5's
@@ -1471,38 +1762,13 @@ impl ProjectWindow {
             items(&file_binds, file_entries),
         );
 
-        // `compila-modello` (Commands.swift:115-119): disabled while busy,
-        // like upstream's `.disabled(project?.isBusy == true)`
-        let build_entry = if self.is_busy() {
-            Item::ButtonDisabled(fl!("compila-modello"), None, Command::Build)
-        } else {
-            Item::Button(fl!("compila-modello"), None, Command::Build)
-        };
-        // `esporta-pacchetto-2` ("Esporta pacchetto…", Commands.swift:130-132):
-        // gated on hasThreeMF only — the menu does NOT gate on busy
-        // (upstream's menu/toolbar split). Button↔ButtonDisabled keeps the
-        // item SET fixed — the static-roots law's build_entry precedent.
-        let export_entry = if self.output_dir().join("model.3mf").exists() {
-            Item::Button(fl!("esporta-pacchetto-2"), None, Command::Export)
-        } else {
-            Item::ButtonDisabled(fl!("esporta-pacchetto-2"), None, Command::Export)
-        };
         let model_binds = std::collections::HashMap::new();
         let model_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("modello")).into();
                 root_button
             },
-            items(
-                &model_binds,
-                vec![
-                    build_entry,
-                    Item::Divider,
-                    Item::Button(fl!("stop"), None, Command::Stop),
-                    Item::Divider,
-                    export_entry,
-                ],
-            ),
+            items(&model_binds, self.model_entries()),
         );
 
         let entries = self.view_entries();
@@ -1521,22 +1787,61 @@ impl ProjectWindow {
             .into()
     }
 
+    /// The Modello root's item list (Commands.swift:113-138): Compila,
+    /// Stop, Esporta, Mostra nel Finder, Apri in slicer — each gate a
+    /// Button↔ButtonDisabled swap, so the item SET never changes (the
+    /// dynamic-items corruption family stays out of reach).
+    fn model_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
+        use cosmic::widget::menu::Item;
+        let gate = |enabled: bool, label: String, command: Command| {
+            if enabled {
+                Item::Button(label, None, command)
+            } else {
+                Item::ButtonDisabled(label, None, command)
+            }
+        };
+        let busy = self.is_busy();
+        // the menu gates export and slicer on hasThreeMF only — NOT on busy
+        // (upstream's menu/toolbar split)
+        let has_3mf = self.output_dir().join("model.3mf").exists();
+        vec![
+            gate(!busy, fl!("compila-modello"), Command::Build),
+            gate(busy, fl!("stop"), Command::Stop),
+            Item::Divider,
+            gate(has_3mf, fl!("esporta-pacchetto-2"), Command::Export),
+            Item::Button(fl!("mostra-nel-finder"), None, Command::Reveal),
+            gate(has_3mf, fl!("apri-in-slicer"), Command::OpenInSlicer),
+        ]
+    }
+
     /// The View root's item list (Commands.swift:55-105 order). Built from
     /// window state alone so the construction test can pin the entry set
     /// without mounting the menu bar.
     fn view_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
         use cosmic::widget::menu::Item;
 
+        // Button↔ButtonDisabled keeps every root's item SET and labels
+        // fixed (the Compila entry's busy gate is the running precedent),
+        // outside the dynamic-items corruption family
+        let gate = |enabled: bool, label: String, command: Command| {
+            if enabled {
+                Item::Button(label, None, command)
+            } else {
+                Item::ButtonDisabled(label, None, command)
+            }
+        };
+        let output = self.output_dir();
+        // upstream's mesh loads from model.3mf, else model.stl
+        // (ProjectOutput.swift:138-141); hasSVG reads schematic.svg
+        let has_mesh = output.join("model.3mf").exists() || output.join("model.stl").exists();
+        let has_svg = output.join("schematic.svg").exists();
+
         vec![
-            Item::Button(
-                if self.chat_visible {
-                    fl!("nascondi-chat")
-                } else {
-                    fl!("mostra-chat")
-                },
-                None,
-                Command::ShowChat,
-            ),
+            // STATIC label: upstream flips "Mostra/Nascondi chat"
+            // (Commands.swift:52), a text-only change inside the menu-overlay
+            // corruption family; the label is upstream's own toolbar phrasing
+            // (ProjectWindow.swift:103), like the parameters entry below
+            Item::Button(fl!("mostra-o-nascondi-la-chat"), None, Command::ShowChat),
             Item::Divider,
             Item::Button(fl!("vai-alla-chat"), None, Command::FocusChat),
             Item::Button(fl!("vai-al-viewer-3d"), None, Command::FocusModel),
@@ -1554,6 +1859,8 @@ impl ProjectWindow {
                 None,
                 Command::ToggleParameters,
             ),
+            // "Scrivi un messaggio" ⌘L (Commands.swift:74-76): focus(.chat)
+            Item::Button(fl!("scrivi-un-messaggio"), None, Command::FocusChat),
             Item::Divider,
             Item::Folder(
                 fl!("layout"),
@@ -1564,69 +1871,59 @@ impl ProjectWindow {
                     Item::Button(fl!("tre-colonne"), None, Command::LayoutThreeColumns),
                 ],
             ),
+            // `.disabled(project?.output.mesh == nil)` (Commands.swift:101):
+            // a folder cannot be disabled, so its leaves are
             Item::Folder(
                 fl!("viewer-3d"),
                 vec![
-                    Item::Button(
+                    gate(
+                        has_mesh,
                         fl!("vista-isometrica"),
-                        None,
                         Command::ViewerPreset(Preset::Iso),
                     ),
-                    Item::Button(
+                    gate(
+                        has_mesh,
                         fl!("vista-frontale"),
-                        None,
                         Command::ViewerPreset(Preset::Front),
                     ),
-                    Item::Button(
+                    gate(
+                        has_mesh,
                         fl!("vista-dall-alto"),
-                        None,
                         Command::ViewerPreset(Preset::Top),
                     ),
-                    Item::Button(
+                    gate(
+                        has_mesh,
                         fl!("vista-da-destra"),
-                        None,
                         Command::ViewerPreset(Preset::Right),
                     ),
                     Item::Divider,
-                    Item::Button(fl!("adatta-alla-vista"), None, Command::ViewerFit),
+                    gate(has_mesh, fl!("adatta-alla-vista"), Command::ViewerFit),
                 ],
             ),
+            // `.disabled(project?.output.hasSVG != true)` (:110)
             Item::Folder(
                 fl!("schematica-2d"),
                 vec![
-                    Item::Button(fl!("ingrandisci"), None, Command::SchematicZoomIn),
-                    Item::Button(fl!("riduci"), None, Command::SchematicZoomOut),
+                    gate(has_svg, fl!("ingrandisci"), Command::SchematicZoomIn),
+                    gate(has_svg, fl!("riduci"), Command::SchematicZoomOut),
                     Item::Divider,
-                    Item::Button(fl!("adatta-alla-finestra"), None, Command::SchematicFit),
+                    gate(has_svg, fl!("adatta-alla-finestra"), Command::SchematicFit),
                 ],
             ),
         ]
     }
 }
 
-fn dim_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-fn ok_color() -> Color {
-    Color::from_rgb(0.18, 0.66, 0.34)
-}
-
-fn error_color() -> Color {
-    Color::from_rgb(0.90, 0.32, 0.32)
-}
-
 /// The focus flash's pane border.
 fn flash_border(flashing: bool) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| {
-        let mut style = cosmic::iced::widget::container::Style::default();
+        // opaque, so only the 1 px grid gaps show the divider fill
+        let mut style = cosmic::iced::widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(
+                theme.cosmic().background(false).base.into(),
+            )),
+            ..Default::default()
+        };
         if flashing {
             style.border = cosmic::iced::Border {
                 color: Color::from(theme.cosmic().accent_color()),
@@ -1638,26 +1935,323 @@ fn flash_border(flashing: bool) -> cosmic::theme::Container<'static> {
     })
 }
 
-/// Map an iced pane-grid drop target onto the upstream
-/// (target pane, edge) pair. Only a pane's edge regions map — upstream has
-/// no center-drop and no whole-grid-edge drop.
-fn drop_target(
-    grid: &pane_grid::State<PaneKind>,
-    target: pane_grid::Target,
-) -> Option<(PaneKind, panes::DropEdge)> {
-    let (pane, region) = match target {
-        pane_grid::Target::Pane(pane, region) => (pane, region),
-        pane_grid::Target::Edge(_) => return None,
+/// The grab handle's capsule: `.regularMaterial` over a `.separator`
+/// stroke, the whole handle at `opacity`.
+fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let base = Color::from(theme.cosmic().background(false).base);
+        let mut stroke = chrome::wash(theme, 0.15);
+        stroke.a *= opacity;
+        cosmic::iced::widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(Color {
+                a: 0.85 * opacity,
+                ..base
+            })),
+            border: cosmic::iced::Border {
+                color: stroke,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+}
+
+/// The toolbar's drawing kit: SF-Symbol-shaped glyphs (the Cosmic theme has
+/// no matching shapes for `sidebar.left`, `clock.arrow.circlepath`,
+/// `square.and.arrow.up`, `arrow.up.forward.app`, `slider.horizontal.3`,
+/// `cube`, `chevron.compact.right`, `line.3.horizontal`), the label tones
+/// macOS draws them in, and the borderless toolbar-button look. Tones are
+/// the theme's on-background color at the alphas the upstream light
+/// capture measures over its own background, so dark mode follows.
+pub mod chrome {
+    use cosmic::Element;
+    use cosmic::iced::{Background, Border, Color, Length};
+    use cosmic::widget::icon;
+
+    macro_rules! glyph_file {
+        ($file:literal) => {
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/resources/icons/",
+                $file
+            ))
+        };
+    }
+
+    pub const SIDEBAR_LEFT: &[u8] = glyph_file!("sidebar-left.svg");
+    pub const PLAY_FILL: &[u8] = glyph_file!("play-fill.svg");
+    pub const STOP_FILL: &[u8] = glyph_file!("stop-fill.svg");
+    pub const FOLDER: &[u8] = glyph_file!("folder.svg");
+    pub const SHARE: &[u8] = glyph_file!("share.svg");
+    pub const OPEN_EXTERNAL: &[u8] = glyph_file!("open-external.svg");
+    pub const SLIDERS: &[u8] = glyph_file!("sliders.svg");
+    pub const CLOCK_ARROW: &[u8] = glyph_file!("clock-arrow.svg");
+    pub const CHEVRON_DOWN: &[u8] = glyph_file!("chevron-down.svg");
+    pub const CUBE: &[u8] = glyph_file!("cube.svg");
+    pub const CHEVRON_COMPACT_RIGHT: &[u8] = glyph_file!("chevron-compact-right.svg");
+    pub const GRIP_LINES: &[u8] = glyph_file!("grip-lines.svg");
+    pub const CHECKMARK: &[u8] = glyph_file!("checkmark.svg");
+    /// Full-color glyphs (drawn in their own fills, never tinted).
+    pub const WARNING_FILL: &[u8] = glyph_file!("warning-fill.svg");
+    pub const ERROR_FILL: &[u8] = glyph_file!("error-fill.svg");
+    pub const CHECK_CIRCLE_FILL: &[u8] = glyph_file!("check-circle-fill.svg");
+
+    /// The label hierarchy a glyph or text is drawn in.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Tone {
+        /// `.primary` text inside the capsule (project name, issue count).
+        Primary,
+        /// `.secondary` (status text, the capsule's cube).
+        Secondary,
+        /// `.tertiary` (the capsule's chevron, the elapsed timer).
+        Tertiary,
+        /// An enabled toolbar glyph.
+        Toolbar,
+        /// A disabled toolbar glyph.
+        Disabled,
+    }
+
+    impl Tone {
+        /// The on-background alpha: upstream light capture, label pixel vs
+        /// its own background (#434344 / #606062 / #9F9FA1 over the capsule
+        /// #DFDFE1; #6B6B6C / #B2B2B4 over the toolbar #EEEEF0).
+        fn alpha(self) -> f32 {
+            match self {
+                Tone::Primary => 0.70,
+                Tone::Secondary => 0.57,
+                Tone::Tertiary => 0.29,
+                Tone::Toolbar => 0.55,
+                Tone::Disabled => 0.25,
+            }
+        }
+
+        pub fn color(self, theme: &cosmic::Theme) -> Color {
+            let mut color = Color::from(theme.cosmic().background(false).on);
+            color.a *= self.alpha();
+            color
+        }
+
+        /// The tone pre-composited over the window background: the svg
+        /// tint keeps the glyph's own alpha and drops the color's.
+        pub fn opaque(self, theme: &cosmic::Theme) -> Color {
+            let base = Color::from(theme.cosmic().background(false).base);
+            let on = Color::from(theme.cosmic().background(false).on);
+            let a = self.alpha();
+            let mix = |b: f32, o: f32| b * (1.0 - a) + o * a;
+            Color::from_rgb(mix(base.r, on.r), mix(base.g, on.g), mix(base.b, on.b))
+        }
+    }
+
+    /// The text class for a tone.
+    pub fn text_class(tone: Tone) -> cosmic::theme::Text {
+        fn style(tone: Tone, theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+            cosmic::iced::widget::text::Style {
+                color: Some(tone.color(theme)),
+                ..Default::default()
+            }
+        }
+        match tone {
+            Tone::Primary => cosmic::theme::Text::Custom(|t| style(Tone::Primary, t)),
+            Tone::Secondary => cosmic::theme::Text::Custom(|t| style(Tone::Secondary, t)),
+            Tone::Tertiary => cosmic::theme::Text::Custom(|t| style(Tone::Tertiary, t)),
+            Tone::Toolbar => cosmic::theme::Text::Custom(|t| style(Tone::Toolbar, t)),
+            Tone::Disabled => cosmic::theme::Text::Custom(|t| style(Tone::Disabled, t)),
+        }
+    }
+
+    /// A tinted glyph at its measured 1x size.
+    pub fn glyph<'a, M: 'a>(svg: &'static [u8], size: (f32, f32), tone: Tone) -> Element<'a, M> {
+        glyph_icon(svg, size, tone).into()
+    }
+
+    /// [`glyph`] as an [`icon::Icon`], for callers that set its opacity.
+    pub fn glyph_icon(svg: &'static [u8], (width, height): (f32, f32), tone: Tone) -> icon::Icon {
+        icon::from_svg_bytes(svg)
+            .symbolic(true)
+            .icon()
+            .class(cosmic::theme::Svg::custom(move |theme| {
+                cosmic::iced::widget::svg::Style {
+                    color: Some(tone.opaque(theme)),
+                    ..Default::default()
+                }
+            }))
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(height))
+    }
+
+    /// A full-color glyph at its measured 1x size.
+    pub fn colored<'a, M: 'a>(svg: &'static [u8], (width, height): (f32, f32)) -> Element<'a, M> {
+        icon::from_svg_bytes(svg)
+            .icon()
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(height))
+            .into()
+    }
+
+    /// A translucent on-background fill (the capsule's `.quaternary`, the
+    /// hover wash, hairline borders).
+    pub fn wash(theme: &cosmic::Theme, alpha: f32) -> Color {
+        let mut color = Color::from(theme.cosmic().background(false).on);
+        color.a *= alpha;
+        color
+    }
+
+    /// The borderless toolbar button: no fill at rest, a rounded wash on
+    /// hover/press (macOS toolbar items), or — `bordered` — the hairline
+    /// pill the version menu's `Menu` label sits in.
+    pub fn button_class(bordered: bool, radius: f32) -> cosmic::theme::Button {
+        let style = move |theme: &cosmic::Theme, fill: f32| {
+            let mut style = cosmic::widget::button::Style::new();
+            style.background = (fill > 0.0).then(|| Background::Color(wash(theme, fill)));
+            style.border_radius = radius.into();
+            if bordered {
+                style.border_width = 1.0;
+                style.border_color = wash(theme, 0.05);
+            }
+            style
+        };
+        cosmic::theme::Button::Custom {
+            active: Box::new(move |_, theme| style(theme, 0.0)),
+            disabled: Box::new(move |theme| style(theme, 0.0)),
+            hovered: Box::new(move |_, theme| style(theme, 0.06)),
+            pressed: Box::new(move |_, theme| style(theme, 0.12)),
+        }
+    }
+
+    /// A popover card's face (the menu/popover material): an opaque fill a
+    /// shade under the window background (#E2E2E3 measured over the
+    /// #EEEEF0 toolbar in version-menu.png), a hairline edge, 10 px
+    /// corners, a soft drop shadow.
+    pub fn card_class() -> cosmic::theme::Container<'static> {
+        cosmic::theme::Container::custom(|theme| {
+            let base = Color::from(theme.cosmic().background(false).base);
+            let on = Color::from(theme.cosmic().background(false).on);
+            let mix = |a: f32, b: f32| a * 0.95 + b * 0.05;
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(Color::from_rgb(
+                    mix(base.r, on.r),
+                    mix(base.g, on.g),
+                    mix(base.b, on.b),
+                ))),
+                border: Border {
+                    color: wash(theme, 0.12),
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                shadow: cosmic::iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+                    offset: cosmic::iced::Vector::new(0.0, 6.0),
+                    blur_radius: 18.0,
+                },
+                ..Default::default()
+            }
+        })
+    }
+
+    /// A container class: a rounded fill of `alpha` on-background wash.
+    pub fn fill_class(alpha: f32, radius: f32) -> cosmic::theme::Container<'static> {
+        cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
+            background: Some(Background::Color(wash(theme, alpha))),
+            border: Border {
+                radius: radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+/// The "Apri recenti" card (Commands.swift:30-40 — a submenu upstream; a
+/// card here because the list changes between rebuilds, which a cosmic menu
+/// cannot survive: docs/research/libcosmic-menu-dynamic-items-bug.md): one
+/// row per recent project by folder name, a divider, then "Cancella menu",
+/// disabled when the list is empty.
+fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
+    use chrome::Tone;
+    let row = |label: String, tone: Tone, on_press: Option<Message>| -> Element<'static, Message> {
+        container(
+            button::custom(
+                container(
+                    text(label)
+                        .size(13)
+                        .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                        .class(chrome::text_class(tone)),
+                )
+                .padding([0.0, 9.5])
+                .height(Length::Fixed(22.0))
+                .align_y(cosmic::iced::alignment::Vertical::Center),
+            )
+            .padding(0)
+            .width(Length::Fill)
+            .class(chrome::button_class(false, 5.0))
+            .on_press_maybe(on_press),
+        )
+        .padding([0, 5])
+        .into()
     };
-    let kind = grid.panes.get(&pane).copied()?;
-    let edge = match region {
-        pane_grid::Region::Edge(pane_grid::Edge::Top) => panes::DropEdge::Top,
-        pane_grid::Region::Edge(pane_grid::Edge::Left) => panes::DropEdge::Leading,
-        pane_grid::Region::Edge(pane_grid::Edge::Right) => panes::DropEdge::Trailing,
-        pane_grid::Region::Edge(pane_grid::Edge::Bottom) => panes::DropEdge::Bottom,
-        pane_grid::Region::Center => return None,
+    let mut list = Column::new().padding([5, 0]).width(Length::Fixed(240.0));
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        list = list.push(row(
+            name,
+            Tone::Primary,
+            Some(Message::OpenRecentPath(path.clone())),
+        ));
+    }
+    if !paths.is_empty() {
+        list = list.push(
+            container(
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                    .class(chrome::fill_class(0.1, 0.0)),
+            )
+            .padding([5, 14]),
+        );
+    }
+    let clear_tone = if paths.is_empty() {
+        Tone::Tertiary
+    } else {
+        Tone::Primary
     };
-    Some((kind, edge))
+    list = list.push(row(
+        fl!("cancella-menu"),
+        clear_tone,
+        (!paths.is_empty()).then_some(Message::ClearRecents),
+    ));
+    container(list).class(chrome::card_class()).into()
+}
+
+/// One toolbar icon button: a tinted glyph centered in a `width`×28 hit
+/// area (disabled glyphs dim), with its upstream `.help` tooltip.
+fn toolbar_button(
+    svg: &'static [u8],
+    glyph_size: (f32, f32),
+    width: f32,
+    on_press: Option<Message>,
+    help: String,
+) -> Element<'static, Message> {
+    let tone = if on_press.is_some() {
+        chrome::Tone::Toolbar
+    } else {
+        chrome::Tone::Disabled
+    };
+    let face = container(chrome::glyph(svg, glyph_size, tone))
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(28.0))
+        .align_x(cosmic::iced::alignment::Horizontal::Center)
+        .align_y(cosmic::iced::alignment::Vertical::Center);
+    cosmic::widget::tooltip(
+        button::custom(face)
+            .padding(0)
+            .class(chrome::button_class(false, 6.0))
+            .on_press_maybe(on_press),
+        text(help).size(12),
+        cosmic::widget::tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 /// The output-watch relay stream (the panes' take-once pattern).
@@ -2177,11 +2771,14 @@ mod tests {
             r#"{"parameters": {"wall": 3}}"#,
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
-        assert!(
-            window.viewer.parameters.sliders.is_empty(),
-            "open syncs nothing; the two events own the overlay's population"
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        // 7.21: the overlay opens populated from the manifest
+        assert_eq!(
+            window.viewer.parameters.sliders.len(),
+            1,
+            "open syncs the manifest's set"
         );
+        window.viewer.sync_parameters(&[]);
 
         // the build's drain: the manifest's set is what the panel shows
         let _ = window.update(Message::Bridge(bridge::Message::BuildFinished {
@@ -2203,6 +2800,227 @@ mod tests {
             window.viewer.parameters.sliders[0].1.value, 4.0,
             "the overlay's row follows the committed value"
         );
+
+        // 7.21: an agent turn's bookkeeping re-syncs from the pipeline the
+        // turn's tail refreshed
+        window.viewer.sync_parameters(&[]);
+        let _ = window.update(Message::Bridge(bridge::Message::TurnSuccessBookkeeping));
+        assert_eq!(
+            window.viewer.parameters.sliders.len(),
+            1,
+            "bookkeeping syncs the overlay"
+        );
+
+        // 7.21: a manifest rewrite (whoever wrote it) re-reads the set
+        std::fs::write(root.join("model.py"), "wall = 4\nlid_h = 9\n").unwrap();
+        std::fs::write(
+            root.join("output/manifest.json"),
+            r#"{"parameters": {"wall": 4, "lid_h": 9}}"#,
+        )
+        .unwrap();
+        let _ = window.update(Message::OutputReload(ReloadKind::Manifest));
+        let names: Vec<_> = window
+            .viewer
+            .parameters
+            .sliders
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(names.len(), 2, "the reload shows the new set: {names:?}");
+        assert!(names.contains(&"lid_h".to_string()));
+    }
+
+    /// 6.4: a restore writes its status line either way
+    /// (Project.swift:319-321) — "Version N restored" on success, "Could
+    /// not restore version N" on failure.
+    #[tokio::test]
+    async fn restore_sets_the_status_line() {
+        use engine::project::versions;
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-restore-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        let mut history = Vec::new();
+        versions::record(
+            &root,
+            &mut history,
+            "a cube",
+            None,
+            ::time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        window.bridge.mark_python_ready_for_test();
+
+        let _ = window.update(Message::Restore(1));
+        assert_eq!(
+            window.activity,
+            Activity::Succeeded(fl!("versione-lld-ripristinata", version = 1))
+        );
+        let _ = window.update(Message::Restore(7));
+        assert_eq!(
+            window.activity,
+            Activity::Failed(fl!("impossibile-ripristinare-la-versione-lld", version = 7))
+        );
+    }
+
+    /// The menu gates (Commands.swift:101, 110, 122-137) flip Button ↔
+    /// ButtonDisabled only — every root keeps its item set and labels —
+    /// and the entries upstream has are present: Stop disabled when idle,
+    /// Mostra nel Finder, Apri in slicer gated on the 3MF, "Scrivi un
+    /// messaggio" in View, the Viewer 3D / Schematica leaves gated on a
+    /// mesh / the SVG, the chat entry's label static.
+    #[tokio::test]
+    async fn menu_gates_swap_enablement_without_changing_the_item_set() {
+        use cosmic::widget::menu::Item;
+        fn describe(entries: &[Item<Command, String>]) -> Vec<(String, Option<Command>, bool)> {
+            entries
+                .iter()
+                .flat_map(|entry| match entry {
+                    Item::Button(label, _, action) => vec![(label.clone(), Some(*action), true)],
+                    Item::ButtonDisabled(label, _, action) => {
+                        vec![(label.clone(), Some(*action), false)]
+                    }
+                    Item::Folder(label, children) => {
+                        let mut rows = vec![(label.clone(), None, true)];
+                        rows.extend(describe(children));
+                        rows
+                    }
+                    _ => vec![(String::from("-"), None, true)],
+                })
+                .collect()
+        }
+        let enabled = |rows: &[(String, Option<Command>, bool)], command: Command| {
+            rows.iter()
+                .find(|(_, action, _)| *action == Some(command))
+                .map(|(_, _, on)| *on)
+                .expect("entry present")
+        };
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-gates-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        window.bridge.mark_python_ready_for_test();
+
+        let model_bare = describe(&window.model_entries());
+        let view_bare = describe(&window.view_entries());
+        assert!(
+            !enabled(&model_bare, Command::Stop),
+            "Stop is disabled when idle"
+        );
+        assert!(enabled(&model_bare, Command::Reveal));
+        assert!(!enabled(&model_bare, Command::OpenInSlicer));
+        assert!(
+            !enabled(&view_bare, Command::ViewerFit),
+            "no mesh: Viewer 3D gated"
+        );
+        assert!(
+            !enabled(&view_bare, Command::SchematicFit),
+            "no SVG: Schematica gated"
+        );
+        assert!(view_bare.iter().any(|(label, action, _)| {
+            *action == Some(Command::FocusChat) && label == "Write a Message"
+        }));
+
+        std::fs::write(root.join("output/model.3mf"), b"x").unwrap();
+        std::fs::write(root.join("output/schematic.svg"), b"<svg/>").unwrap();
+        let _ = window.update(Message::Command(Command::ShowChat));
+        let model_full = describe(&window.model_entries());
+        let view_full = describe(&window.view_entries());
+        assert!(enabled(&model_full, Command::OpenInSlicer));
+        assert!(enabled(&view_full, Command::ViewerFit));
+        assert!(enabled(&view_full, Command::SchematicZoomIn));
+
+        let shape = |rows: &[(String, Option<Command>, bool)]| {
+            rows.iter()
+                .map(|(label, action, _)| (label.clone(), *action))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shape(&model_bare),
+            shape(&model_full),
+            "Modello's item set is fixed"
+        );
+        assert_eq!(
+            shape(&view_bare),
+            shape(&view_full),
+            "View's item set and labels are fixed — the chat toggle included"
+        );
+    }
+
+    /// 4.11: a pane drags by its grab handle to another pane's edge
+    /// (PaneContainer.swift:30-33 → Project.dropPane): press, move over the
+    /// target's edge (window coordinates, under the header), release.
+    #[tokio::test]
+    async fn grip_drag_moves_a_pane_to_the_target_edge() {
+        let root = std::env::temp_dir().join(format!("cad-grip-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        window.set_settings_path_for_test(
+            std::env::temp_dir().join(format!("cad-grip-settings-{}.json", uuid::Uuid::new_v4())),
+        );
+        window.layout = LayoutNode::chat_leading();
+        window.rebuild_grid();
+        let _ = window.update(Message::GridResized(Size::new(1320.0, 787.0)));
+        let before = window.layout.clone();
+
+        // a press and release with no motion drops nothing
+        let _ = window.update(Message::GripPressed(PaneKind::Chat));
+        let _ = window.update(Message::PaneDragEnded);
+        assert_eq!(window.layout, before);
+
+        // chat → the right edge of the schematic pane (bottom-right of
+        // chat_leading's grid)
+        let _ = window.update(Message::GripPressed(PaneKind::Chat));
+        let over = cosmic::iced::Point::new(1300.0, HEADER_HEIGHT + 1.0 + 700.0);
+        let _ = window.update(Message::PaneDragMoved(over));
+        assert_eq!(
+            window.pane_drag.and_then(|drag| drag.target),
+            Some(PaneKind::Schematic),
+            "the drag targets the pane under the cursor"
+        );
+        let _ = window.update(Message::PaneDragEnded);
+        assert_eq!(window.pane_drag, None);
+        assert_eq!(
+            window.layout,
+            panes::moving(
+                &before,
+                PaneKind::Chat,
+                panes::DropEdge::Trailing,
+                PaneKind::Schematic
+            )
+        );
+    }
+
+    /// The header cards close together on an outside click.
+    #[tokio::test]
+    async fn close_cards_dismisses_every_header_card() {
+        let root = std::env::temp_dir().join(format!("cad-cards-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        window.recent_card = Some(vec![PathBuf::from("/tmp/a")]);
+        let _ = window.update(Message::ToggleVersionCard);
+        assert!(window.version_card.is_some());
+        let _ = view_recents(&[PathBuf::from("/tmp/a")]);
+        let _ = view_recents(&[]);
+        let _ = window.update(Message::CloseCards);
+        assert!(window.version_card.is_none() && window.recent_card.is_none());
     }
 
     /// The metadata-clobber pin (T7 review F1): the window's save points
