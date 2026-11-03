@@ -1,7 +1,6 @@
 //! Pane layout tree (upstream LayoutNode). The JSON shape is load-bearing for
-//! macOS interop: `{"pane":"chat"}` and
-//! `{"split":{"axis":"row","first":…,"second":…,"fraction":…}}`, with
-//! `PaneKind::Model3D` spelled exactly `"model3D"`.
+//! macOS interop — see [`LayoutNode`] — with `PaneKind::Model3D` spelled
+//! exactly `"model3D"`.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,11 +22,14 @@ pub enum Axis {
     Column,
 }
 
-/// Externally tagged with lowercased variant names: the newtype variant gives
-/// `{"pane":<kind>}` and the struct variant's fields land inside the tag,
-/// matching the upstream encoder without hand-written serde.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The pane layout tree. Serialized the way Swift's synthesized `Codable`
+/// encodes upstream's `indirect enum LayoutNode { case pane(Pane); case
+/// split(LayoutSplit) }`: an unlabeled associated value sits under the key
+/// `_0`, so a leaf is `{"pane":{"_0":"chat"}}` and a split is
+/// `{"split":{"_0":{"axis":…,"first":…,"second":…,"fraction":…}}}`.
+/// Decoding also accepts the bare forms `{"pane":"chat"}` and
+/// `{"split":{"axis":…}}` that earlier port builds wrote.
+#[derive(Debug, Clone, PartialEq)]
 pub enum LayoutNode {
     Pane(PaneKind),
     Split {
@@ -36,6 +38,94 @@ pub enum LayoutNode {
         second: Box<LayoutNode>,
         fraction: f64,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+struct SplitFields {
+    axis: Axis,
+    first: Box<LayoutNode>,
+    second: Box<LayoutNode>,
+    fraction: f64,
+}
+
+/// Swift's wrapper around an unlabeled associated value.
+#[derive(Serialize, Deserialize)]
+struct Swift<T> {
+    #[serde(rename = "_0")]
+    value: T,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Payload<T> {
+    Swift(Swift<T>),
+    Bare(T),
+}
+
+impl<T> Payload<T> {
+    fn into_inner(self) -> T {
+        match self {
+            Payload::Swift(Swift { value }) | Payload::Bare(value) => value,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum WireOut {
+    Pane(Swift<PaneKind>),
+    Split(Swift<SplitFields>),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WireIn {
+    Pane(Payload<PaneKind>),
+    Split(Payload<SplitFields>),
+}
+
+impl Serialize for LayoutNode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self.clone() {
+            LayoutNode::Pane(kind) => WireOut::Pane(Swift { value: kind }),
+            LayoutNode::Split {
+                axis,
+                first,
+                second,
+                fraction,
+            } => WireOut::Split(Swift {
+                value: SplitFields {
+                    axis,
+                    first,
+                    second,
+                    fraction,
+                },
+            }),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LayoutNode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match WireIn::deserialize(deserializer)? {
+            WireIn::Pane(payload) => LayoutNode::Pane(payload.into_inner()),
+            WireIn::Split(payload) => {
+                let SplitFields {
+                    axis,
+                    first,
+                    second,
+                    fraction,
+                } = payload.into_inner();
+                LayoutNode::Split {
+                    axis,
+                    first,
+                    second,
+                    fraction,
+                }
+            }
+        })
+    }
 }
 
 impl LayoutNode {
