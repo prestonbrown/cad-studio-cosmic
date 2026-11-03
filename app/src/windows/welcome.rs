@@ -405,7 +405,9 @@ impl Welcome {
         if let Some(hit) = cache.get(root) {
             return hit.clone();
         }
-        let loaded = load_thumbnail(&root.join("output").join("schematic.png"));
+        let loaded = load_thumbnail(
+            &engine::project::folder::output_dir(root).join(engine::project::folder::SCHEMATIC_PNG),
+        );
         cache.insert(root.to_path_buf(), loaded.clone());
         loaded
     }

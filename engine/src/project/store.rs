@@ -1,6 +1,6 @@
 //! Project store (upstream ProjectStore.swift + ChatMessage.swift): metadata
-//! and chat persisted under `<project>/.cadstudio/`, saved atomically via
-//! temp-file + rename (same approach as [`crate::settings::Settings::save`]),
+//! and chat persisted under `<project>/.cadstudio/` (paths from
+//! [`crate::project::folder`]), saved through [`crate::storage::atomic_write`],
 //! the recent-projects list, the project-name rules used by the new-project
 //! dialog, and [`create_project`]'s new-project scaffolding.
 
@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
+use crate::project::folder;
 use crate::project::layout::LayoutNode;
+use crate::storage::atomic_write;
 
 /// Whole-second UTC RFC 3339. Upstream's `.iso8601` date strategy rejects
 /// fractional seconds, so writes truncate to whole seconds and force a `Z`
@@ -102,6 +104,13 @@ pub struct ProjectMetadata {
     pub layout: Option<LayoutNode>,
 }
 
+/// The version a project.json written by this build records in
+/// `app_version` (upstream CFBundleShortVersionString). Every workspace
+/// crate inherits `version.workspace`, so the engine's compile-time
+/// version is the app's; the engine owns the constant because the engine
+/// writes project.json too (scaffolding, the mid-turn session id).
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 impl ProjectMetadata {
     pub fn new(app_version: &str) -> Self {
         let now = OffsetDateTime::now_utc();
@@ -130,60 +139,37 @@ pub enum ProjectStoreError {
     NotAFolder(PathBuf),
 }
 
-/// Per-project support directory (upstream ProjectFolder.support) holding
-/// project.json and chat.json.
-fn support_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".cadstudio")
-}
-
-/// Write via temp-file + rename so a reader never sees a torn file; the temp
-/// name must keep the file extension so tooling still recognizes it.
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| std::io::Error::other("atomic_write: path has no file name"))?;
-    let tmp = path.with_file_name(format!("{name}.tmp"));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 pub fn save_metadata(
     project_root: &Path,
     metadata: &ProjectMetadata,
 ) -> Result<(), ProjectStoreError> {
     let json = serde_json::to_string_pretty(metadata)?;
-    atomic_write(
-        &support_dir(project_root).join("project.json"),
-        json.as_bytes(),
-    )?;
+    atomic_write(&folder::metadata_path(project_root), json.as_bytes())?;
     Ok(())
 }
 
 pub fn load_metadata(project_root: &Path) -> Result<ProjectMetadata, ProjectStoreError> {
-    let json = std::fs::read_to_string(support_dir(project_root).join("project.json"))?;
+    let json = std::fs::read_to_string(folder::metadata_path(project_root))?;
     Ok(serde_json::from_str(&json)?)
+}
+
+/// The project's metadata as it is on disk now, or a fresh document when
+/// none loads. Every writer of project.json starts from this rather than
+/// a copy held since open: the agent session writes `session_id` mid-turn
+/// and version recording writes `current_version`, so a held copy would
+/// clobber them.
+pub fn load_metadata_or_new(project_root: &Path) -> ProjectMetadata {
+    load_metadata(project_root).unwrap_or_else(|_| ProjectMetadata::new(APP_VERSION))
 }
 
 pub fn save_chat(project_root: &Path, messages: &[ChatMessage]) -> Result<(), ProjectStoreError> {
     let json = serde_json::to_string_pretty(messages)?;
-    atomic_write(
-        &support_dir(project_root).join("chat.json"),
-        json.as_bytes(),
-    )?;
+    atomic_write(&folder::chat_path(project_root), json.as_bytes())?;
     Ok(())
 }
 
 pub fn load_chat(project_root: &Path) -> Result<Vec<ChatMessage>, ProjectStoreError> {
-    let json = std::fs::read_to_string(support_dir(project_root).join("chat.json"))?;
+    let json = std::fs::read_to_string(folder::chat_path(project_root))?;
     Ok(serde_json::from_str(&json)?)
 }
 
@@ -222,13 +208,10 @@ pub fn prepare(project_root: &Path) -> Result<(), ProjectStoreError> {
     if !project_root.is_dir() {
         return Err(ProjectStoreError::NotAFolder(project_root.to_path_buf()));
     }
-    std::fs::create_dir_all(project_root.join("output"))?;
-    std::fs::create_dir_all(project_root.join(".cadstudio").join("logs"))?;
-    if !support_dir(project_root).join("project.json").exists() {
-        save_metadata(
-            project_root,
-            &ProjectMetadata::new(env!("CARGO_PKG_VERSION")),
-        )?;
+    std::fs::create_dir_all(folder::output_dir(project_root))?;
+    std::fs::create_dir_all(folder::logs_dir(project_root))?;
+    if !folder::metadata_path(project_root).exists() {
+        save_metadata(project_root, &ProjectMetadata::new(APP_VERSION))?;
     }
     Ok(())
 }

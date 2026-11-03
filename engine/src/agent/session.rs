@@ -66,17 +66,18 @@ use crate::agent::claude::{
     PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets, render_system_prompt,
 };
 use crate::agent::codex::{self, CodexTranslator};
-use crate::agent::locator::{self, AgentKind, AgentPath, shell_env};
+use crate::agent::locator::{self, AgentKind, AgentPath};
 use crate::agent::stream_event::{
     ContentBlock, Delta, InnerEvent, ResultEvent, StreamEvent, SystemKind, ToolResultContent,
     parse_line,
 };
 use crate::agent::tool_summary::{ToolTitle, live_title, summarize};
 use crate::parsing::threemf::parse_3mf;
-use crate::processes::{Line, RunningProcess, spawn_streaming};
+use crate::processes::{Line, RunningProcess, spawn_streaming, tool_environment};
+use crate::project::folder;
 use crate::project::manifest::Manifest;
 use crate::project::outputs::MissingCtx;
-use crate::project::store::{ProjectMetadata, load_metadata, save_metadata};
+use crate::project::store::{ProjectMetadata, load_metadata, load_metadata_or_new, save_metadata};
 use crate::settings::Settings;
 
 /// Names an executable to spawn instead of discovering one — the test and
@@ -397,7 +398,7 @@ impl Attempt {
 
 /// [`Session::run_turn`]'s driver: one attempt, then its terminal event.
 async fn single_turn(mut ctx: TurnCtx) {
-    let metadata = stored_metadata(&ctx.root);
+    let metadata = load_metadata_or_new(&ctx.root);
     let resume_sid = metadata.session_id.clone();
     let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
     let _ = ctx
@@ -415,7 +416,7 @@ async fn full_dance(mut ctx: TurnCtx) {
     let mut attempt_no = 0;
     let mut allows_resume = true;
     loop {
-        let metadata = stored_metadata(&ctx.root);
+        let metadata = load_metadata_or_new(&ctx.root);
         let resume_sid = if allows_resume {
             metadata.session_id
         } else {
@@ -505,7 +506,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let engine = settings.agent_kind();
     let mut driver = TurnDriver {
         root: ctx.root.clone(),
-        metadata: stored_metadata(&ctx.root),
+        metadata: load_metadata_or_new(&ctx.root),
         state: TurnState {
             engine,
             translator: CodexTranslator::default(),
@@ -528,12 +529,12 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
 
     // the missing-output note needs the parts count from the parsed 3MF and
     // a manifest that only counts when it loads
-    let output_dir = ctx.root.join("output");
-    let parts_count = std::fs::read(output_dir.join("model.3mf"))
+    let output_dir = folder::output_dir(&ctx.root);
+    let parts_count = std::fs::read(output_dir.join(folder::MODEL_3MF))
         .ok()
         .and_then(|bytes| parse_3mf(&bytes).ok())
         .map_or(0, |parts| parts.len());
-    let manifest = Manifest::load(&output_dir.join("manifest.json")).ok();
+    let manifest = Manifest::load(&output_dir.join(folder::MANIFEST)).ok();
     let missing = MissingCtx {
         project_root: &ctx.root,
         output_dir: &output_dir,
@@ -566,14 +567,9 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
             &venv_python,
         )),
     }
-    // The login environment is snapshotted per turn: upstream caches it in
-    // its long-lived actor, which M4's app can layer on top the same way.
-    let mut env = shell_env();
-    // ModelBuilder.toolEnvironment's additions ride the login env
-    // (ClaudeRunner.swift:23; upstream-contract.md §1)
-    env.insert("MPLBACKEND".to_string(), "Agg".to_string());
-    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    let env: Vec<(String, String)> = env.into_iter().collect();
+    // the agent runs under the same tool environment as a model.py build
+    // (ClaudeRunner.swift:23), snapshotted per turn
+    let env = tool_environment();
 
     let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
@@ -651,11 +647,6 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
         stdout: driver.state.stdout_text,
         stderr,
     }
-}
-
-/// The project's stored metadata, or a fresh document when none loads.
-fn stored_metadata(root: &Path) -> ProjectMetadata {
-    load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION")))
 }
 
 /// The settings this attempt runs with (Ruling 1, M8 plan): upstream's
@@ -749,10 +740,10 @@ fn resolve_executable(engine: AgentKind, settings: &Settings) -> Option<AgentPat
     locator::find_agent(engine, settings.agent_path(engine))
 }
 
-/// Create this turn's tee log under `.cadstudio/logs/`. A failure to open is
-/// not a turn failure — upstream's `try?` simply drops the log too.
+/// Create this turn's tee log under [`folder::logs_dir`]. A failure to open
+/// is not a turn failure — upstream's `try?` simply drops the log too.
 fn open_log(root: &Path) -> Option<std::fs::File> {
-    let dir = root.join(".cadstudio").join("logs");
+    let dir = folder::logs_dir(root);
     std::fs::create_dir_all(&dir).ok()?;
     let name = OffsetDateTime::now_utc().format(&LOG_TIMESTAMP).ok()?;
     std::fs::OpenOptions::new()

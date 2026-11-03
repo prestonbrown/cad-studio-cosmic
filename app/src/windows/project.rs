@@ -37,6 +37,7 @@ use cosmic::widget::text_editor;
 use cosmic::widget::{Column, Row, Space, button, container, popover, text};
 use cosmic::{Element, Task as CosmicTask};
 use engine::agent::session::EngineEvent;
+use engine::project::folder;
 use engine::project::layout::{LayoutNode, PaneKind};
 use engine::project::manifest::Manifest;
 use engine::project::store::Action;
@@ -373,8 +374,8 @@ fn drawing_pages(output_dir: &Path) -> Vec<PathBuf> {
 /// deterministic; upstream's directory order is unspecified and the SET
 /// is what matters.
 fn export_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = vec![root.join("model.py")];
-    if let Ok(entries) = std::fs::read_dir(root.join("output")) {
+    let mut files = vec![folder::model_script(root)];
+    if let Ok(entries) = std::fs::read_dir(folder::output_dir(root)) {
         let mut outputs: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
@@ -423,8 +424,7 @@ impl ProjectWindow {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Project".to_string());
-        let metadata = store::load_metadata(&root)
-            .unwrap_or_else(|_why| ProjectMetadata::new(env!("CARGO_PKG_VERSION")));
+        let metadata = store::load_metadata_or_new(&root);
         let layout = metadata
             .layout
             .clone()
@@ -432,8 +432,8 @@ impl ProjectWindow {
         let chat_visible = true;
         let grid = panes::from_layout(&panes::displayed(&layout, chat_visible));
 
-        let output_dir = root.join("output");
-        let manifest = Manifest::load(&output_dir.join("manifest.json")).ok();
+        let output_dir = folder::output_dir(&root);
+        let manifest = Manifest::load(&output_dir.join(folder::MANIFEST)).ok();
         let files = drawing_pages(&output_dir);
 
         // The shell's own output watch: schematic reloads + missing-output
@@ -531,21 +531,21 @@ impl ProjectWindow {
     }
 
     fn output_dir(&self) -> PathBuf {
-        self.root.join("output")
+        folder::output_dir(&self.root)
     }
 
     /// An established save point (upstream `save()`, Project.swift:429-433):
     /// metadata with the current layout, timestamps bumped — written
-    /// THROUGH the disk copy (the bridge's load-fresh law,
-    /// [`bridge::fresh_metadata`]): the engine writes the session id into
+    /// THROUGH the disk copy
+    /// ([`store::load_metadata_or_new`]): the engine writes the session id into
     /// project.json mid-turn and `record_version` the version pointer, both
     /// behind the window's back, so those fields are re-read here, never
     /// held from open.
     fn save_metadata(&mut self) {
-        let mut metadata = bridge::fresh_metadata(&self.root);
+        let mut metadata = store::load_metadata_or_new(&self.root);
         metadata.layout = Some(self.layout.clone());
         metadata.updated_at = OffsetDateTime::now_utc();
-        metadata.app_version = env!("CARGO_PKG_VERSION").to_string();
+        metadata.app_version = store::APP_VERSION.to_string();
         self.metadata = metadata.clone();
         let _ = store::save_metadata(&self.root, &metadata);
     }
@@ -624,12 +624,7 @@ impl ProjectWindow {
                 parameters_view::Message::Compare(number),
             )) => {
                 self.bridge.compare_with(number);
-                let version = number.map(|n| {
-                    (
-                        n,
-                        engine::project::versions::versions_root(&self.root).join(n.to_string()),
-                    )
-                });
+                let version = number.map(|n| (n, folder::version_dir(&self.root, n)));
                 self.viewer.set_compare(version);
                 Task::none()
             }
@@ -679,7 +674,7 @@ impl ProjectWindow {
                     ReloadKind::Schematic => {
                         let files = drawing_pages(&self.output_dir());
                         let manifest =
-                            Manifest::load(&self.output_dir().join("manifest.json")).ok();
+                            Manifest::load(&self.output_dir().join(folder::MANIFEST)).ok();
                         self.schematic.reload(&files, manifest.as_ref());
                     }
                     // the 3D pane's own watch rebuilds the scene; the shell
@@ -862,7 +857,7 @@ impl ProjectWindow {
         }
         // the layout stays the window's: only the fields the bridge's save
         // owns cross over
-        let fresh = bridge::fresh_metadata(&self.root);
+        let fresh = store::load_metadata_or_new(&self.root);
         self.metadata.session_id = fresh.session_id;
         self.metadata.current_version = fresh.current_version;
         let engine = self.chat.engine;
@@ -1112,7 +1107,7 @@ impl ProjectWindow {
                 // read the window's copy — refresh from the fresh metadata
                 // exactly as restore does (display currency only; the
                 // load-fresh law already protects the file)
-                let fresh = bridge::fresh_metadata(&self.root);
+                let fresh = store::load_metadata_or_new(&self.root);
                 self.metadata.session_id = fresh.session_id;
                 self.metadata.current_version = fresh.current_version;
                 self.sync_version_markers();
@@ -1223,7 +1218,7 @@ impl ProjectWindow {
                 // while busy — upstream's menu/toolbar split, copied as-is.
                 // The keybind is the menu item's, so the arm repeats only
                 // its gate.
-                if !self.output_dir().join("model.3mf").exists() {
+                if !self.output_dir().join(folder::MODEL_3MF).exists() {
                     return Task::none();
                 }
                 let name = self.name.clone();
@@ -1242,11 +1237,11 @@ impl ProjectWindow {
                 // upstream openInSlicer: the plate when present, else the
                 // model (Project.swift:457-459)
                 let output = self.output_dir();
-                let plate = output.join("plate.3mf");
+                let plate = output.join(folder::PLATE_3MF);
                 let target = if plate.exists() {
                     plate
                 } else {
-                    output.join("model.3mf")
+                    output.join(folder::MODEL_3MF)
                 };
                 crate::app::open_path(&target);
                 Task::none()
@@ -1496,7 +1491,7 @@ impl ProjectWindow {
     fn view_header(&self, focused: bool) -> Element<'_, Message> {
         let busy = self.is_busy();
         // upstream gates export and slicer on output.hasThreeMF
-        let has_3mf = self.output_dir().join("model.3mf").exists();
+        let has_3mf = self.output_dir().join(folder::MODEL_3MF).exists();
 
         // icon sizes and button widths: the upstream capture's glyph bboxes
         // and center-to-center pitch (sidebar→play 38, play→stop 34, the
@@ -1866,7 +1861,7 @@ impl ProjectWindow {
         let busy = self.is_busy();
         // the menu gates export and slicer on hasThreeMF only — NOT on busy
         // (upstream's menu/toolbar split)
-        let has_3mf = self.output_dir().join("model.3mf").exists();
+        let has_3mf = self.output_dir().join(folder::MODEL_3MF).exists();
         vec![
             gate(!busy, fl!("compila-modello"), Command::Build),
             gate(busy, fl!("stop"), Command::Stop),
@@ -1896,8 +1891,9 @@ impl ProjectWindow {
         let output = self.output_dir();
         // upstream's mesh loads from model.3mf, else model.stl
         // (ProjectOutput.swift:138-141); hasSVG reads schematic.svg
-        let has_mesh = output.join("model.3mf").exists() || output.join("model.stl").exists();
-        let has_svg = output.join("schematic.svg").exists();
+        let has_mesh =
+            output.join(folder::MODEL_3MF).exists() || output.join(folder::MODEL_STL).exists();
+        let has_svg = output.join(folder::SCHEMATIC_SVG).exists();
 
         vec![
             // STATIC label: upstream flips "Mostra/Nascondi chat"

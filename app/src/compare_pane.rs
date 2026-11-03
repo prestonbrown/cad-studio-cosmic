@@ -50,7 +50,7 @@ impl ViewerPane {
             return;
         };
         let pin = self.scene.scene.pin;
-        self.scene.ghost = load_model_parts(&dir.join("output"))
+        self.scene.ghost = load_model_parts(&engine::project::folder::output_dir(&dir))
             .map(|parts| Arc::new(PartScene::from_parts_with_pin(&parts, NEUTRAL, pin)));
     }
 }

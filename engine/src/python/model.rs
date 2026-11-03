@@ -16,19 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, watch};
 
-use crate::agent::locator::shell_env;
-use crate::processes::{Line, RunningProcess, spawn_streaming};
-
-/// ModelBuilder.toolEnvironment (ModelBuilder.swift:13-19): the login-shell
-/// environment every tool subprocess runs under, plus the headless
-/// matplotlib backend (a model.py that plots must never open a window) and
-/// unbuffered Python output so lines stream as they print.
-pub fn tool_environment() -> Vec<(String, String)> {
-    let mut env = shell_env();
-    env.insert("MPLBACKEND".to_string(), "Agg".to_string());
-    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    env.into_iter().collect()
-}
+use crate::processes::{Line, RunningProcess, spawn_streaming, tool_environment};
 
 /// How a build ended. `Failed` carries the failure detail — `output` is the
 /// failure text and `last_line` its last line, the `buildError` the app
@@ -106,7 +94,7 @@ impl BuildHandle {
 pub fn run_model(interpreter: &Path, project_root: &Path) -> io::Result<BuildHandle> {
     let argv = [
         interpreter.to_string_lossy().into_owned(),
-        "model.py".to_string(),
+        crate::project::folder::MODEL_SCRIPT.to_string(),
     ];
     let proc = spawn_streaming(&argv, project_root, &tool_environment())?;
     let pid = Arc::new(Mutex::new(Some(proc.pid)));

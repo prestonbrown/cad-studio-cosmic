@@ -39,7 +39,7 @@ pub fn copy_attachments(sources: &[PathBuf], root: &Path) -> Vec<String> {
     if sources.is_empty() {
         return Vec::new();
     }
-    let references = root.join("references");
+    let references = crate::project::folder::references_dir(root);
     // the directory is created only when there is something to copy
     let _ = std::fs::create_dir_all(&references);
     let stamp = SystemTime::now()
@@ -52,7 +52,7 @@ pub fn copy_attachments(sources: &[PathBuf], root: &Path) -> Vec<String> {
             let number = index + 1;
             let name = format!("{stamp}-{number}-{}", source.file_name()?.to_string_lossy());
             std::fs::copy(source, references.join(&name)).ok()?;
-            Some(format!("references/{name}"))
+            Some(format!("{}/{name}", crate::project::folder::REFERENCES_DIR))
         })
         .collect()
 }

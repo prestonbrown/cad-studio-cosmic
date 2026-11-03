@@ -9,10 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::OffsetDateTime;
 
-use crate::project::store::atomic_write;
+use crate::project::folder::{self, CHAT_FILE, MODEL_SCRIPT, OUTPUT_DIR, version_dir};
+use crate::storage::atomic_write;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectVersion {
@@ -31,20 +32,11 @@ pub enum VersionError {
     Json(#[from] serde_json::Error),
 }
 
-/// Snapshots live under `<root>/.cadstudio/versions`.
-pub fn versions_root(project_root: &Path) -> PathBuf {
-    project_root.join(".cadstudio").join("versions")
-}
-
-fn version_dir(project_root: &Path, number: i64) -> PathBuf {
-    versions_root(project_root).join(number.to_string())
-}
-
 /// Every `versions/<n>/version.json` that parses, ascending by number
 /// (upstream compactMap + sort). Unparseable or absent entries are skipped,
 /// an absent versions root is simply no versions.
 pub fn load_versions(project_root: &Path) -> Vec<ProjectVersion> {
-    let Ok(entries) = std::fs::read_dir(versions_root(project_root)) else {
+    let Ok(entries) = std::fs::read_dir(folder::versions_dir(project_root)) else {
         return Vec::new();
     };
     let mut versions: Vec<ProjectVersion> = entries
@@ -70,8 +62,12 @@ pub fn has_changes(project_root: &Path, versions: &[ProjectVersion], current: Op
     let Some(version) = versions.iter().find(|v| Some(v.number) == current) else {
         return true;
     };
-    let saved = std::fs::read(version_dir(project_root, version.number).join("model.py")).ok();
-    let live = std::fs::read(project_root.join("model.py")).ok();
+    let saved = std::fs::read(folder::model_script(&version_dir(
+        project_root,
+        version.number,
+    )))
+    .ok();
+    let live = std::fs::read(folder::model_script(project_root)).ok();
     saved != live
 }
 
@@ -94,12 +90,9 @@ pub fn record(
     };
     let dir = version_dir(project_root, version.number);
     std::fs::create_dir_all(&dir)?;
-    copy_if_present(&project_root.join("model.py"), &dir.join("model.py"))?;
-    copy_tree_if_present(&project_root.join("output"), &dir.join("output"))?;
-    copy_if_present(
-        &project_root.join(".cadstudio/chat.json"),
-        &dir.join("chat.json"),
-    )?;
+    copy_if_present(&project_root.join(MODEL_SCRIPT), &dir.join(MODEL_SCRIPT))?;
+    copy_tree_if_present(&project_root.join(OUTPUT_DIR), &dir.join(OUTPUT_DIR))?;
+    copy_if_present(&folder::chat_path(project_root), &dir.join(CHAT_FILE))?;
     let json = serde_json::to_string_pretty(&version)?;
     atomic_write(&dir.join("version.json"), json.as_bytes())?;
     versions.push(version.clone());
@@ -113,17 +106,14 @@ pub fn record(
 /// leaves `output/` empty. Metadata is the caller's business.
 pub fn restore(project_root: &Path, version: &ProjectVersion) -> Result<(), VersionError> {
     let dir = version_dir(project_root, version.number);
-    replace_with(&project_root.join("model.py"), &dir.join("model.py"))?;
-    replace_with(
-        &project_root.join(".cadstudio/chat.json"),
-        &dir.join("chat.json"),
-    )?;
-    let output = project_root.join("output");
+    replace_with(&project_root.join(MODEL_SCRIPT), &dir.join(MODEL_SCRIPT))?;
+    replace_with(&folder::chat_path(project_root), &dir.join(CHAT_FILE))?;
+    let output = project_root.join(OUTPUT_DIR);
     for entry in std::fs::read_dir(&output)? {
         remove_path(&entry?.path())?;
     }
     // the version's output dir is read best-effort (upstream `try? ?? []`)
-    if let Ok(entries) = std::fs::read_dir(dir.join("output")) {
+    if let Ok(entries) = std::fs::read_dir(dir.join(OUTPUT_DIR)) {
         for entry in entries.flatten() {
             let target = output.join(entry.file_name());
             if entry.file_type()?.is_dir() {
@@ -144,7 +134,7 @@ pub fn comparison_parameters(project_root: &Path, number: Option<i64>) -> BTreeM
     let Some(number) = number else {
         return BTreeMap::new();
     };
-    let model = std::fs::read_to_string(version_dir(project_root, number).join("model.py"))
+    let model = std::fs::read_to_string(folder::model_script(&version_dir(project_root, number)))
         .unwrap_or_default();
     crate::project::parameters::scan(&model)
 }

@@ -2,7 +2,7 @@
 //! ProjectOutput.swift `orderedParameters`): the manifest's `parameters`
 //! map ordered by first appearance in model.py, the surgical rewrite
 //! of one parameter's numeric literal in the script (written back with
-//! [`super::store::atomic_write`]), and [`scan`] — the value extraction
+//! [`crate::storage::atomic_write`]), and [`scan`] — the value extraction
 //! from the script itself.
 //!
 //! One deliberate divergence from Swift's `String(Double)`: beyond ~1e16
@@ -136,8 +136,9 @@ pub fn set_parameter(
     name: &str,
     value: f64,
 ) -> Result<Rewrite, ParameterError> {
-    let script = std::fs::read_to_string(project_root.join("model.py"))?;
+    let path = super::folder::model_script(project_root);
+    let script = std::fs::read_to_string(&path)?;
     let rewrite = rewrite_value(&script, name, value)?;
-    super::store::atomic_write(&project_root.join("model.py"), rewrite.script.as_bytes())?;
+    crate::storage::atomic_write(&path, rewrite.script.as_bytes())?;
     Ok(rewrite)
 }

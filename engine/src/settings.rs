@@ -270,24 +270,12 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
-        {
-            let mut file = std::fs::File::create(&tmp)?;
-            std::io::Write::write_all(&mut file, json.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
+        crate::storage::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 }
 
 pub fn settings_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", "cad-studio")
-        .expect("no home directory: cannot locate settings")
-        .config_dir()
-        .join("settings.json")
+    crate::storage::config_dir().join("settings.json")
 }

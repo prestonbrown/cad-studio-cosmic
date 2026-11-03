@@ -29,7 +29,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
@@ -144,17 +144,25 @@ pub fn spawn_streaming(
     })
 }
 
-/// The registry file: the `cad-studio` data dir (`~/.local/share` on Linux)
-/// plus `running-processes`, resolved through the same directories crate
-/// settings uses — unless `CAD_STUDIO_RUNNING_PROCESSES` points elsewhere.
+/// ModelBuilder.toolEnvironment (ModelBuilder.swift:13-19): the login-shell
+/// environment every tool subprocess runs under (model.py builds and agent
+/// turns alike), plus the headless matplotlib backend (a model.py that
+/// plots must never open a window) and unbuffered Python output so lines
+/// stream as they print.
+pub fn tool_environment() -> Vec<(String, String)> {
+    let mut env = crate::agent::locator::shell_env();
+    env.insert("MPLBACKEND".to_string(), "Agg".to_string());
+    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+    env.into_iter().collect()
+}
+
+/// The registry file: [`crate::storage::data_dir`] plus `running-processes`,
+/// unless `CAD_STUDIO_RUNNING_PROCESSES` points elsewhere.
 pub fn registry_path() -> PathBuf {
     if let Some(path) = std::env::var_os(ENV_OVERRIDE) {
         return PathBuf::from(path);
     }
-    directories::ProjectDirs::from("", "", "cad-studio")
-        .expect("no home directory: cannot locate registry")
-        .data_dir()
-        .join("running-processes")
+    crate::storage::data_dir().join("running-processes")
 }
 
 /// Register a live child in the default registry.
@@ -274,16 +282,9 @@ fn persist(path: &Path, pids: &BTreeSet<u32>) {
         .iter()
         .filter_map(|pid| ps(*pid).map(|(_, started)| format!("{pid}:{started}")))
         .collect();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("tmp");
-    let _ = fs::File::create(&tmp)
-        .and_then(|mut file| {
-            file.write_all(lines.join("\n").as_bytes())?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&tmp, path));
+    // best effort: a registry that cannot be written only weakens the next
+    // launch's reap
+    let _ = crate::storage::atomic_write(path, lines.join("\n").as_bytes());
 }
 
 /// `(ppid, start time)` of a pid, via `ps`. `None` when the pid is gone or
