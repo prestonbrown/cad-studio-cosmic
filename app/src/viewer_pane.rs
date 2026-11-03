@@ -1,6 +1,6 @@
 //! 3D pane — the embedded viewer: [`ViewerPane`] owns the viewer crate's
 //! `ModelScene` behind a `mouse_area`, drives it through the pure
-//! [`crate::camera_input`] state machine, and reloads the model from the
+//! [`viewer::camera_input`] state machine, and reloads the model from the
 //! project's `output/` directory through the engine's watcher.
 //!
 //! Upstream shape (fixtures/upstream-source/Viewer3D/ModelPane.swift): the
@@ -42,7 +42,7 @@
 //!
 //! M6 measure (ModelPane's `onPick` flow): while the tool measures, a
 //! primary-button CLICK (release under 4 px of travel) casts
-//! [`camera::pick_ray`] at the release cursor and runs
+//! [`camera::Orbit::pick_ray`] at the release cursor and runs
 //! [`picking::first_hit`] on a named std thread — click-driven and
 //! off-thread per spec §5, never the cosmic executor — with the answer
 //! returning as [`Message::Picked`] through the pane's relay, the same
@@ -128,6 +128,7 @@ use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
+use viewer::camera_input::CameraInput;
 use viewer::render::markers;
 use viewer::render::{
     ModelScene, PartAppearance, PartPose, PartScene, SectionPlane, camera, camera::Preset,
@@ -136,7 +137,6 @@ use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::picking;
 use viewer::tools::section::{self, SectionAxis};
 
-use crate::camera_input::CameraInput;
 use crate::fl;
 use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
@@ -497,7 +497,7 @@ impl ViewerPane {
         let settings = Settings::load(&settings_path).unwrap_or_default();
         let mut pane = ViewerPane {
             scene: ModelScene::new(empty.clone()),
-            input: CameraInput::new([0.0; 3], [0.0; 3]),
+            input: CameraInput::new(Box3::ZERO),
             preset: Preset::Iso,
             unit,
             mesh_error: None,
@@ -624,7 +624,7 @@ impl ViewerPane {
                 // frame_aabb without touching the framing reference, so
                 // re-point it here rather than frame whatever a layout
                 // change or scene swap last pushed
-                self.input.set_framing_reference(self.frame_aabb.pair());
+                self.input.set_framing_reference(self.frame_aabb);
                 self.input.fit();
                 self.sync_pose();
             }
@@ -1119,7 +1119,7 @@ impl ViewerPane {
             let next = Arc::new(PartScene::from_parts(&parts, neutral()));
             if scenes_differ(&self.model_scene, &next) {
                 self.model_parts = parts;
-                self.input.mesh_changed(next.aabb_min, next.aabb_max);
+                self.input.mesh_changed(next.aabb());
                 self.tools.mesh_changed();
                 // points collected against the old geometry are gone
                 // (ModelViewerState.swift:128) — their markers go with them
@@ -1372,7 +1372,7 @@ impl ViewerPane {
             // scene; `input` owns the pose, so re-assert it — and adopt the
             // drawn box as the framing reference outright (the plate swap
             // is not a mesh reload; no >50 % gate applies).
-            self.input.set_framing_reference(self.frame_aabb.pair());
+            self.input.set_framing_reference(self.frame_aabb);
             self.sync_pose();
             self.restage_ghost();
         }
@@ -1446,7 +1446,7 @@ impl ViewerPane {
         self.tools.set_layout(layout);
         self.persist_setting(|s| s.parts_layout = layout);
         self.apply_arrangement();
-        self.input.set_framing_reference(self.frame_aabb.pair());
+        self.input.set_framing_reference(self.frame_aabb);
         self.input.preset(self.preset);
         self.sync_pose();
     }
@@ -1500,12 +1500,7 @@ impl ViewerPane {
 
     /// Push the state machine's settled pose into the scene.
     fn sync_pose(&mut self) {
-        self.scene.set_pose(
-            self.input.yaw,
-            self.input.pitch,
-            self.input.distance,
-            self.input.target,
-        );
+        self.scene.orbit = self.input.orbit;
     }
 
     // ── measure (M6) ────────────────────────────────────────────────────
@@ -1521,12 +1516,7 @@ impl ViewerPane {
         if size.width <= 0.0 || size.height <= 0.0 {
             return; // no layout pass yet: nothing to aim at
         }
-        let (origin, dir) = camera::pick_ray(
-            self.input.distance,
-            self.input.yaw,
-            self.input.pitch,
-            self.input.target,
-            size.width / size.height,
+        let (origin, dir) = self.input.orbit.pick_ray(
             (self.last_cursor.x, self.last_cursor.y),
             (size.width, size.height),
         );
@@ -2498,10 +2488,10 @@ mod tests {
     fn preset_message_drives_the_scene_pose() {
         let (_, mut pane) = pane("preset", &[], &["golden/model.3mf"]);
         let _ = pane.update(Message::Preset(Preset::Top));
-        assert!((pane.scene.pitch - 1.5607).abs() < 1e-4);
-        assert!((pane.scene.yaw - 0.0).abs() < 1e-4);
-        assert!((pane.scene.pitch - pane.input.pitch).abs() < 1e-6);
-        assert!((pane.scene.yaw - pane.input.yaw).abs() < 1e-6);
+        assert!((pane.scene.orbit.pitch - 1.5607).abs() < 1e-4);
+        assert!((pane.scene.orbit.yaw - 0.0).abs() < 1e-4);
+        assert!((pane.scene.orbit.pitch - pane.input.orbit.pitch).abs() < 1e-6);
+        assert!((pane.scene.orbit.yaw - pane.input.orbit.yaw).abs() < 1e-6);
 
         // Fit frames the CURRENT arranged box (upstream fitToView,
         // ModelViewer.swift:322-337): an explode change moves the arranged
@@ -2513,7 +2503,7 @@ mod tests {
         let _ = pane.update(Message::Fit);
         let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.min, pane.frame_aabb.max);
         assert!(
-            (pane.scene.distance - spread).abs() < 1e-4,
+            (pane.scene.orbit.distance - spread).abs() < 1e-4,
             "Fit frames the exploded arrangement, not the pre-explode reference"
         );
         let (_, staged) =
@@ -2531,21 +2521,21 @@ mod tests {
         // the pan formula scales by the viewport height, normally reported
         // from the first layout pass
         pane.input.set_view_height(600.0);
-        let d0 = pane.scene.distance;
-        let t0 = pane.input.target;
+        let d0 = pane.scene.orbit.distance;
+        let t0 = pane.input.orbit.target;
 
         // plain scroll zooms (facts #20)
         let _ = pane.update(Message::Scrolled(ScrollDelta::Pixels { x: 0.0, y: 24.0 }));
-        assert!((pane.scene.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3);
+        assert!((pane.scene.orbit.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3);
 
         // shift+scroll pans without zooming (CameraInputView.swift:63-66)
         let _ = pane.update(Message::ModifiersChanged(Modifiers::SHIFT));
         let _ = pane.update(Message::Scrolled(ScrollDelta::Pixels { x: 0.0, y: -24.0 }));
         assert!(
-            (pane.scene.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3,
+            (pane.scene.orbit.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3,
             "modifier scroll never zooms"
         );
-        assert!(pane.input.target != t0, "the target moved");
+        assert!(pane.input.orbit.target != t0, "the target moved");
     }
 
     #[test]
@@ -2761,17 +2751,17 @@ mod tests {
         let _ = pane.update(Message::Pressed);
         let _ = pane.update(Message::Moved(Point::new(300.0, 300.0)));
         let _ = pane.update(Message::Moved(Point::new(340.0, 300.0)));
-        let yaw_before = pane.input.yaw;
+        let yaw_before = pane.input.orbit.yaw;
         assert!(yaw_before.abs() > 1e-3);
-        let dist_before = pane.input.distance;
+        let dist_before = pane.input.orbit.distance;
         let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
         assert!(
-            (pane.input.yaw - 0.0).abs() < 1e-4,
+            (pane.input.orbit.yaw - 0.0).abs() < 1e-4,
             "front preset yaw restored"
         );
-        assert!((pane.input.pitch - 0.0).abs() < 1e-4);
+        assert!((pane.input.orbit.pitch - 0.0).abs() < 1e-4);
         assert!(
-            pane.input.distance > dist_before,
+            pane.input.orbit.distance > dist_before,
             "re-frame used the CURRENT arranged aabb: the plate fallback lays parts side by side (wider than assembled), so the camera pulls BACK"
         );
         assert_eq!(pane.tools.layout, PartsLayout::Plate);

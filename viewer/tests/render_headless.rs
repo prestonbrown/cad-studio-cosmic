@@ -1070,15 +1070,13 @@ fn exploded_section_cap_covers_every_pushed_part() {
     let cut = section::pinned_plane(SectionAxis::X, 0.5, eff, &scene);
     model.set_section(Some(cut));
     // look down -x at the cap, framed on the exploded scene box
-    let (target, distance) = camera::frame(cut.cap.min, cut.cap.max);
-    let (yaw, pitch) = camera::Preset::Right.yaw_pitch();
-    model.set_pose(yaw, pitch, distance, target);
+    model.orbit = camera::Orbit::framed(cut.cap, camera::Preset::Right);
 
     let (w, h) = (800, 600);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let drawn = cap_red_pixels(&render_adapter(device, queue, &mut pipeline, &model, w, h));
 
-    let cam = Camera::orbiting(distance, yaw, pitch, target, w as f32 / h as f32);
+    let cam = model.orbit.camera(w as f32 / h as f32);
     let appearances = default_appearances(&scene);
     let oracle = Frame {
         camera: &cam,
@@ -1491,15 +1489,13 @@ fn white_shade(n: [f32; 3]) -> f32 {
 fn shaded_faces_differ() {
     let (device, queue) = gpu::device_queue();
     let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
-    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
     // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
-    let camera = Camera::orbiting(
-        distance,
-        3.0 * std::f32::consts::FRAC_PI_4,
-        0.6,
-        target,
-        800.0 / 600.0,
-    );
+    let camera = camera::Orbit {
+        yaw: 3.0 * std::f32::consts::FRAC_PI_4,
+        pitch: 0.6,
+        ..camera::Orbit::framed(scene.aabb(), camera::Preset::Iso)
+    }
+    .camera(800.0 / 600.0);
     // expected decoded luminance of a white face with scene normal n: the
     // linear lit, carried through the target's u8 sRGB quantization
     // (nearest byte by the same EOTF the readback decodes with) — computed,
@@ -1641,15 +1637,13 @@ fn plain_target_shader_carries_the_srgb_encode() {
     let (device, queue) = gpu::device_queue();
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
     let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
-    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
     // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
-    let camera = Camera::orbiting(
-        distance,
-        3.0 * std::f32::consts::FRAC_PI_4,
-        0.6,
-        target,
-        800.0 / 600.0,
-    );
+    let camera = camera::Orbit {
+        yaw: 3.0 * std::f32::consts::FRAC_PI_4,
+        pitch: 0.6,
+        ..camera::Orbit::framed(scene.aabb(), camera::Preset::Iso)
+    }
+    .camera(800.0 / 600.0);
     let px = render_frame_with_poses_format(
         device,
         queue,

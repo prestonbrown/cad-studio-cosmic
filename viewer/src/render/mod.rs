@@ -1088,8 +1088,14 @@ mod tests {
         );
         assert_eq!((u1, a1), (2, 2), "one upload+alloc per part on residency");
         // second frame, same scene, MOVED camera: mesh bytes must not move
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
+        let framed = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
+        let moved = camera::Orbit {
+            yaw: 0.9,
+            pitch: 0.4,
+            distance: framed.distance * 2.0,
+            ..framed
+        }
+        .camera(4.0 / 3.0);
         pipeline.prepare_parts(
             device,
             queue,
@@ -1524,8 +1530,14 @@ mod tests {
         let u1 = pipeline.ghost_upload_count_for_tests();
         assert_eq!(u1, 2, "one upload per ghost part on residency");
         // moved camera, same ghost: zero ghost bytes
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
+        let framed = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
+        let moved = camera::Orbit {
+            yaw: 0.9,
+            pitch: 0.4,
+            distance: framed.distance * 2.0,
+            ..framed
+        }
+        .camera(4.0 / 3.0);
         pipeline.prepare_parts(
             device,
             queue,

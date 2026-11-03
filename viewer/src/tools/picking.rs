@@ -62,7 +62,7 @@ fn moller_trumbore(
 
 /// The nearest ray/triangle hit across every part `poses` places visibly,
 /// as a MODEL-space point — the measure tool's pick. `origin`/`dir` are
-/// scene-space (the output of [`crate::render::camera::pick_ray`]);
+/// scene-space (the output of [`crate::render::camera::Orbit::pick_ray`]);
 /// `section` is the shader's discard plane as the camera uniform carries
 /// it (a scene axis and keep-below position in the PINNED scene frame),
 /// and a hit beyond it is skipped so the nearest SURVIVING hit wins.

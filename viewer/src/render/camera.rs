@@ -1,8 +1,9 @@
 //! Parity camera math, transcribed from ModelViewer.swift (facts §1).
-//! Pure — no GPU types — so the formulas are testable headless; the
-//! adapter owns the state (yaw/pitch/distance/target) and calls in.
+//! Pure — no GPU types — so the formulas are testable headless. The pose
+//! is one [`Orbit`] value; [`crate::camera_input::CameraInput`] owns the
+//! live one and the adapter draws whatever it is handed.
 
-use super::PartScene;
+use super::{Box3, PartScene};
 
 /// Vertical FOV (ModelViewer.swift:144) with near and far planes
 /// (:142-143) — absolute, never radius-relative.
@@ -40,29 +41,13 @@ impl Preset {
 /// direction from the look-at target toward an orbit camera at
 /// `(yaw, pitch)` — yaw about scene +Y from +Z toward +X, pitch up
 /// from the floor plane. The one definition every pose derivation
-/// ([`orbit`], [`panned`], [`pick_ray`], `lights::to_eye`) builds on.
+/// ([`Orbit`]'s view, pan, and pick ray; `lights::to_eye`) builds on.
 pub fn eye_dir(yaw: f32, pitch: f32) -> glam::Vec3 {
     glam::Vec3::new(
         pitch.cos() * yaw.sin(),
         pitch.sin(),
         pitch.cos() * yaw.cos(),
     )
-}
-
-/// placeCamera (ModelViewer.swift:339-342): look at `target` from
-/// `target + dir(yaw, pitch)·distance` with Y up, projected at
-/// `aspect` — the viewport's width/height, required, so the projection
-/// always matches the window it renders into.
-pub fn orbit(distance: f32, yaw: f32, pitch: f32, target: [f32; 3], aspect: f32) -> [[f32; 4]; 4] {
-    let at = glam::Vec3::from_array(target);
-    let view = glam::camera::rh::view::look_at_mat4(
-        at + eye_dir(yaw, pitch) * distance,
-        at,
-        glam::Vec3::Y,
-    );
-    // directx = WebGPU NDC (Z in [0,1], Y-up)
-    let proj = glam::camera::rh::proj::directx::perspective(FOV, aspect, NEAR, FAR);
-    (proj * view).to_cols_array_2d()
 }
 
 /// Framing radius: half the aabb DIAGONAL, floored at 1
@@ -85,95 +70,132 @@ pub fn frame(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> ([f32; 3], f32) {
     (target, distance)
 }
 
-/// zoom (ModelViewer.swift:307-310): distance × factor clamped to
-/// [0.1·radius, 200·radius].
-pub fn zoomed(distance: f32, factor: f32, radius: f32) -> f32 {
-    (distance * factor).clamp(radius * 0.1, radius * 200.0)
-}
-
 /// pan's units-per-point (ModelViewer.swift:312-320): the view-plane
-/// height covered by one point at `distance`. The target translation
-/// wiring is M4's; this is the parity formula.
+/// height covered by one point at `distance`.
 pub fn pan_units_per_point(distance: f32, view_height: f32) -> f32 {
     2.0 * distance * (FOV / 2.0).tan() / view_height
 }
 
-/// pan(by:viewHeight:) (ModelViewer.swift:312-320): the look-at target
-/// shifted by the drag in camera-plane world units — `target +=
-/// (-right·dx + up·dy)·units_per_point` over the camera's own scene
-/// axes, derived here from the yaw/pitch pose the same way
-/// [`orbit`]'s look-at builds them. `dx`/`dy` are AppKit-convention
-/// deltas (dy bottom-up; iced's top-down cursor y must be negated by
-/// the caller). The drag WIRING is M4's; this is the parity formula.
-pub fn panned(
-    target: [f32; 3],
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-    view_height: f32,
-    dx: f32,
-    dy: f32,
-) -> [f32; 3] {
-    if view_height <= 0.0 {
-        return target;
+/// An orbit camera pose: `yaw` about scene +Y from +Z toward +X, `pitch`
+/// up from the floor plane (kept within ±[`MAX_PITCH`]), `distance` from
+/// the look-at `target`. The one pose value the adapter, the input state
+/// machine, and the pick ray share — the formulas below read it by name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Orbit {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub target: [f32; 3],
+}
+
+impl Orbit {
+    /// `preset`'s angles at [`frame`]'s target and distance for `aabb`
+    /// (upstream's preset re-frame, ModelViewer.swift:322-337).
+    pub fn framed(aabb: Box3, preset: Preset) -> Orbit {
+        let (target, distance) = frame(aabb.min, aabb.max);
+        let (yaw, pitch) = preset.yaw_pitch();
+        Orbit {
+            yaw,
+            pitch,
+            distance,
+            target,
+        }
     }
-    let back = eye_dir(yaw, pitch);
-    // the look-at basis: camera +X/+Y in scene space, Y-up world
-    let right = glam::Vec3::Y.cross(back).normalize_or_zero();
-    let up = back.cross(right);
-    let t = glam::Vec3::from_array(target)
-        + (right * -dx + up * dy) * pan_units_per_point(distance, view_height);
-    t.to_array()
-}
 
-/// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
-/// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
-/// scaled 0.008, pitch clamped to ±MAX_PITCH.
-pub fn orbit_drag(yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f32) {
-    (
-        yaw - dx * ORBIT_SENSITIVITY,
-        (pitch + dy * ORBIT_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
-    )
-}
+    /// The eye position: `target + eye_dir(yaw, pitch)·distance`.
+    pub fn eye(&self) -> glam::Vec3 {
+        glam::Vec3::from_array(self.target) + eye_dir(self.yaw, self.pitch) * self.distance
+    }
 
-/// pick(at:in:on:)'s ray half (ModelViewer.swift:291-299, facts #29):
-/// the scene-space (origin, direction) a click at `cursor` casts through
-/// the orbit camera at `(distance, yaw, pitch)` around `target`, for a
-/// `view`-sized viewport at `aspect`. Upstream unprojects through
-/// RealityKit — `camera.convert((x, y, −1), to: root)` — which in pure
-/// math is `normalize(x·r + y·u + f)` over the look-at basis
-/// [`orbit`]/[`panned`] build: eye from placeCamera's formula, `f`
-/// forward, `r`/`u` the camera's own right/up. `cursor` is iced's
-/// top-down point and must cross to AppKit's bottom-up `h − cy` BEFORE
-/// the NDC mapping (facts #29) or every vertical click aims mirrored;
-/// `x` scales by `aspect` and both by the half-FOV tangent, exactly
-/// upstream's unprojection terms. Pure — the click flow owns the
-/// off-thread seam this is cast from.
-pub fn pick_ray(
-    distance: f32,
-    yaw: f32,
-    pitch: f32,
-    target: [f32; 3],
-    aspect: f32,
-    cursor: (f32, f32),
-    view: (f32, f32),
-) -> ([f32; 3], [f32; 3]) {
-    let at = glam::Vec3::from_array(target);
-    let back = eye_dir(yaw, pitch);
-    let eye = at + back * distance;
-    // the look-at basis: f = normalize(target − eye) = −back; r and u as
-    // `panned` derives them (r degenerate only at ±90° pitch, which
-    // MAX_PITCH's clamp keeps unreachable)
-    let f = -back;
-    let r = glam::Vec3::Y.cross(back).normalize_or_zero();
-    let u = back.cross(r);
-    let tangent = (FOV / 2.0).tan();
-    let (w, h) = view;
-    let x = (2.0 * cursor.0 / w - 1.0) * tangent * aspect;
-    // iced's cursor is top-down; AppKit's point is bottom-up (facts #29)
-    let y = (2.0 * (h - cursor.1) / h - 1.0) * tangent;
-    let dir = (r * x + u * y + f).normalize_or_zero();
-    (eye.to_array(), dir.to_array())
+    /// placeCamera (ModelViewer.swift:339-342): look at `target` from
+    /// [`Orbit::eye`] with Y up, projected at `aspect` — the viewport's
+    /// width/height, required, so the projection always matches the window
+    /// it renders into.
+    pub fn view_proj(&self, aspect: f32) -> [[f32; 4]; 4] {
+        let view = glam::camera::rh::view::look_at_mat4(
+            self.eye(),
+            glam::Vec3::from_array(self.target),
+            glam::Vec3::Y,
+        );
+        // directx = WebGPU NDC (Z in [0,1], Y-up)
+        let proj = glam::camera::rh::proj::directx::perspective(FOV, aspect, NEAR, FAR);
+        (proj * view).to_cols_array_2d()
+    }
+
+    /// [`Orbit::view_proj`] as the frame's camera.
+    pub fn camera(&self, aspect: f32) -> Camera {
+        Camera {
+            view_proj: self.view_proj(aspect),
+        }
+    }
+
+    /// The camera's right and up axes in scene space — the look-at basis
+    /// [`Orbit::view_proj`] builds (right degenerates only at ±90° pitch,
+    /// which [`MAX_PITCH`] keeps unreachable).
+    fn basis(&self) -> (glam::Vec3, glam::Vec3) {
+        let back = eye_dir(self.yaw, self.pitch);
+        let right = glam::Vec3::Y.cross(back).normalize_or_zero();
+        (right, back.cross(right))
+    }
+
+    /// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
+    /// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
+    /// scaled [`ORBIT_SENSITIVITY`], pitch clamped to ±[`MAX_PITCH`].
+    /// `dx`/`dy` are AppKit-convention deltas (dy bottom-up).
+    pub fn dragged(self, dx: f32, dy: f32) -> Orbit {
+        Orbit {
+            yaw: self.yaw - dx * ORBIT_SENSITIVITY,
+            pitch: (self.pitch + dy * ORBIT_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
+            ..self
+        }
+    }
+
+    /// zoom (ModelViewer.swift:307-310): distance × `factor` clamped to
+    /// [0.1·radius, 200·radius].
+    pub fn zoomed(self, factor: f32, radius: f32) -> Orbit {
+        Orbit {
+            distance: (self.distance * factor).clamp(radius * 0.1, radius * 200.0),
+            ..self
+        }
+    }
+
+    /// pan(by:viewHeight:) (ModelViewer.swift:312-320): the target shifted
+    /// by `(-right·dx + up·dy)·units_per_point` over the camera's own
+    /// axes. `dx`/`dy` are AppKit-convention deltas (dy bottom-up); a
+    /// non-positive view height leaves the pose alone, as upstream's
+    /// guard does.
+    pub fn panned(self, view_height: f32, dx: f32, dy: f32) -> Orbit {
+        if view_height <= 0.0 {
+            return self;
+        }
+        let (right, up) = self.basis();
+        let t = glam::Vec3::from_array(self.target)
+            + (right * -dx + up * dy) * pan_units_per_point(self.distance, view_height);
+        Orbit {
+            target: t.to_array(),
+            ..self
+        }
+    }
+
+    /// pick(at:in:on:)'s ray half (ModelViewer.swift:291-299, facts #29):
+    /// the scene-space (origin, direction) a click at `cursor` casts for a
+    /// `view`-sized viewport. Upstream unprojects through RealityKit, which
+    /// in pure math is `normalize(x·r + y·u + f)` over the look-at basis.
+    /// `cursor` is iced's top-down point and crosses to AppKit's bottom-up
+    /// `h − cy` BEFORE the NDC mapping (facts #29) or every vertical click
+    /// aims mirrored; `x` scales by the view's aspect and both by the
+    /// half-FOV tangent, exactly upstream's unprojection terms.
+    pub fn pick_ray(&self, cursor: (f32, f32), view: (f32, f32)) -> ([f32; 3], [f32; 3]) {
+        let (right, up) = self.basis();
+        let forward = -eye_dir(self.yaw, self.pitch);
+        let tangent = (FOV / 2.0).tan();
+        let (w, h) = view;
+        let x = (2.0 * cursor.0 / w - 1.0) * tangent * (w / h);
+        // iced's cursor is top-down; AppKit's point is bottom-up (facts #29)
+        let y = (2.0 * (h - cursor.1) / h - 1.0) * tangent;
+        let dir = (right * x + up * y + forward).normalize_or_zero();
+        (self.eye().to_array(), dir.to_array())
+    }
 }
 
 /// The frame's view-projection (column-major, glam `to_cols_array_2d`).
@@ -182,22 +204,10 @@ pub struct Camera {
     pub view_proj: [[f32; 4]; 4],
 }
 
-impl Camera {
-    /// The orbit camera at `(distance, yaw, pitch)` around `target` for a
-    /// `aspect`-wide viewport — the uniform form of [`orbit`].
-    pub fn orbiting(distance: f32, yaw: f32, pitch: f32, target: [f32; 3], aspect: f32) -> Camera {
-        Camera {
-            view_proj: orbit(distance, yaw, pitch, target, aspect),
-        }
-    }
-}
-
 /// The camera for `preset` framing `scene` (upstream's preset-change
 /// reframe, ModelViewer.swift:322-337).
 pub fn preset_camera(scene: &PartScene, preset: Preset, aspect: f32) -> Camera {
-    let (target, distance) = frame(scene.aabb_min, scene.aabb_max);
-    let (yaw, pitch) = preset.yaw_pitch();
-    Camera::orbiting(distance, yaw, pitch, target, aspect)
+    Orbit::framed(scene.aabb(), preset).camera(aspect)
 }
 
 /// Default iso camera framing `scene` (upstream presets: yaw π/4, pitch 0.6).
@@ -210,6 +220,16 @@ mod tests {
     use crate::render::test_support::golden_3mf_parts;
     use crate::render::{NEUTRAL, PartScene};
     use crate::render::{camera, lights};
+    use camera::Orbit;
+
+    fn pose(yaw: f32, pitch: f32, distance: f32, target: [f32; 3]) -> Orbit {
+        Orbit {
+            yaw,
+            pitch,
+            distance,
+            target,
+        }
+    }
 
     #[test]
     fn frame_radius_is_diagonal_half() {
@@ -233,18 +253,30 @@ mod tests {
     #[test]
     fn zoom_clamps_and_presets() {
         // zoom: distance × factor clamped to [0.1r, 200r] (facts #19)
-        assert_eq!(camera::zoomed(50.0, 0.5, 10.0), 25.0);
-        assert_eq!(camera::zoomed(50.0, 0.001, 10.0), 1.0, "floor 0.1r");
-        assert_eq!(camera::zoomed(50.0, 100.0, 10.0), 2000.0, "ceiling 200r");
+        let at50 = pose(0.0, 0.0, 50.0, [0.0; 3]);
+        assert_eq!(at50.zoomed(0.5, 10.0).distance, 25.0);
+        assert_eq!(at50.zoomed(0.001, 10.0).distance, 1.0, "floor 0.1r");
+        assert_eq!(at50.zoomed(100.0, 10.0).distance, 2000.0, "ceiling 200r");
         // pitch clamp is upstream's exact constant, not π/2 − ε (facts #18)
         assert_eq!(camera::MAX_PITCH, 1.5607);
         assert!(camera::MAX_PITCH < std::f32::consts::FRAC_PI_2);
         // drag: yaw -= dx·0.008, pitch += dy·0.008, clamped at ±MAX_PITCH
-        let (yaw, pitch) = camera::orbit_drag(0.3, 0.2, 100.0, 25.0);
-        assert!((yaw + 0.5).abs() < 1e-6, "yaw {yaw}");
-        assert!((pitch - 0.4).abs() < 1e-6, "pitch {pitch}");
-        assert_eq!(camera::orbit_drag(0.0, 1.5, 0.0, 1000.0).1, 1.5607);
-        assert_eq!(camera::orbit_drag(0.0, -1.5, 0.0, -1000.0).1, -1.5607);
+        let dragged = pose(0.3, 0.2, 50.0, [1.0, 2.0, 3.0]).dragged(100.0, 25.0);
+        assert!((dragged.yaw + 0.5).abs() < 1e-6, "yaw {}", dragged.yaw);
+        assert!(
+            (dragged.pitch - 0.4).abs() < 1e-6,
+            "pitch {}",
+            dragged.pitch
+        );
+        assert_eq!((dragged.distance, dragged.target), (50.0, [1.0, 2.0, 3.0]));
+        assert_eq!(
+            pose(0.0, 1.5, 1.0, [0.0; 3]).dragged(0.0, 1000.0).pitch,
+            1.5607
+        );
+        assert_eq!(
+            pose(0.0, -1.5, 1.0, [0.0; 3]).dragged(0.0, -1000.0).pitch,
+            -1.5607
+        );
         // presets (facts #25): top reuses the maximumPitch constant
         assert_eq!(
             camera::Preset::Iso.yaw_pitch(),
@@ -274,7 +306,9 @@ mod tests {
         let target = [3.0, -4.0, 5.0];
         let (yaw, pitch, distance) = (0.7f32, 0.3f32, 120.0f32);
         let (dx, dy, view_height) = (25.0f32, -10.0f32, 500.0f32);
-        let panned = camera::panned(target, yaw, pitch, distance, view_height, dx, dy);
+        let panned = pose(yaw, pitch, distance, target)
+            .panned(view_height, dx, dy)
+            .target;
         let at = glam::Vec3::from_array(target);
         let back = camera::eye_dir(yaw, pitch);
         let view = glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
@@ -293,7 +327,9 @@ mod tests {
         // the camera's right axis
         assert!(glam::Vec3::from_array(panned).dot(right) < at.dot(right));
         assert_eq!(
-            camera::panned(target, yaw, pitch, distance, 0.0, dx, dy),
+            pose(yaw, pitch, distance, target)
+                .panned(0.0, dx, dy)
+                .target,
             target,
             "zero view height must not pan"
         );
@@ -337,7 +373,7 @@ mod tests {
             (-2.5, camera::MAX_PITCH, 90_000.0),
             (std::f32::consts::PI, -camera::MAX_PITCH, 250.0),
         ] {
-            let vp = camera::orbit(distance, yaw, pitch, target, aspect);
+            let vp = pose(yaw, pitch, distance, target).view_proj(aspect);
             let dir = camera::eye_dir(yaw, pitch);
             let at = glam::Vec3::from_array(target);
             let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
@@ -364,7 +400,7 @@ mod tests {
             }
             // aspect is load-bearing: a 16:9 projection differs from 4:3 —
             // the hardcode this task kills would render both identically
-            assert_ne!(vp, camera::orbit(distance, yaw, pitch, target, 16.0 / 9.0));
+            assert_ne!(vp, pose(yaw, pitch, distance, target).view_proj(16.0 / 9.0));
         }
     }
 
@@ -377,15 +413,8 @@ mod tests {
     #[test]
     fn pick_ray_center_points_at_the_target() {
         // yaw 0, pitch 0: eye = target + dist*(0,0,1); center pixel aims at f
-        let (o, d) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (400.0, 300.0),
-            (800.0, 600.0),
-        );
+        let front = pose(0.0, 0.0, 100.0, [0.0, 5.0, 0.0]);
+        let (o, d) = front.pick_ray((400.0, 300.0), (800.0, 600.0));
         assert!(
             (o[0] - 0.0).abs() < 1e-4 && (o[1] - 5.0).abs() < 1e-4 && (o[2] - 100.0).abs() < 1e-4
         );
@@ -394,25 +423,9 @@ mod tests {
         // right edge (x=799) tilts toward +x; BOTTOM-left corner tilts -x -y
         // (iced y is top-down: cursor y 599 flips to AppKit y 1 = bottom,
         // which aims DOWN in any bottom-up convention)
-        let (_, d2) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (799.0, 300.0),
-            (800.0, 600.0),
-        );
+        let (_, d2) = front.pick_ray((799.0, 300.0), (800.0, 600.0));
         assert!(d2[0] > 0.1, "right edge aims right: {d2:?}");
-        let (_, d3) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (0.0, 599.0),
-            (800.0, 600.0),
-        );
+        let (_, d3) = front.pick_ray((0.0, 599.0), (800.0, 600.0));
         assert!(
             d3[0] < 0.0 && d3[1] < 0.0,
             "bottom-left aims left and DOWN (iced bottom = AppKit bottom after the flip): {d3:?}"
@@ -430,7 +443,8 @@ mod tests {
         // headroom, the half-diagonal radius, or the target rule changes,
         // these ratios move and the fill visibly changes with them.
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let iso = Orbit::framed(scene.aabb(), camera::Preset::Iso);
+        let distance = iso.distance;
         let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
         let half_fov = camera::FOV / 2.0;
         let angular_fill = (radius / distance).asin() / half_fov;
@@ -438,10 +452,8 @@ mod tests {
             (angular_fill - 0.866).abs() < 0.005,
             "sphere fills {angular_fill:.3} of the half-view, not 86.6 %"
         );
-        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
         let corners = |a: f32| {
-            let view_proj =
-                glam::Mat4::from_cols_array_2d(&camera::orbit(distance, yaw, pitch, target, a));
+            let view_proj = glam::Mat4::from_cols_array_2d(&iso.view_proj(a));
             let mut span = (f32::MAX, f32::MIN);
             for i in 0..8 {
                 let p = [

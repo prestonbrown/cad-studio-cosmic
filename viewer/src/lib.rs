@@ -45,6 +45,7 @@
 //! render tests exercise the identical renderer, and [`render::gpu`] is
 //! the suite-global device context those tests share.
 
+pub mod camera_input;
 pub mod playback;
 pub mod render;
 pub mod tools;

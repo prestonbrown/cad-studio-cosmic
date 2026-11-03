@@ -13,7 +13,7 @@
 //! there per the settings-persistence law; this module never touches the
 //! settings file. Scene-side consequences (re-frame on layout change, mesh
 //! rebuild on section change) stay with the pane, which owns the camera
-//! ([`crate::camera_input`]) and the scene.
+//! ([`viewer::camera_input`]) and the scene.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};

@@ -28,20 +28,12 @@ fn opaque_appearances(n: usize) -> Arc<[PartAppearance]> {
     Arc::from(vec![PartAppearance::default(); n])
 }
 
-/// The interactive model scene: part scene, orbit camera state.
-/// Framing (target + distance) comes from [`camera::frame`] at
-/// construction — aspect-free, against the pinned scene aabb — and the
-/// input methods ([`ModelScene::orbit`], [`ModelScene::zoom`],
-/// [`ModelScene::pan`]) are the parity formulas over that state. The
-/// overlay ([`grid::geometry`]) is built once alongside: it depends only
-/// on the scene aabb, never on the camera.
-///
-/// Two owners drive the pose: the example mutates it through those input
-/// methods directly, while the app's pane keeps its own pure state machine
-/// (`app::camera_input::CameraInput`, which calls the same [`camera`]
-/// formulas) and pushes the settled pose in through [`ModelScene::set_pose`]
-/// after every event. The framing-derived fields stay private so both paths
-/// read one consistent camera.
+/// The interactive model scene: part scene plus the [`camera::Orbit`] it
+/// is drawn from. The pose starts at the iso framing of the pinned scene
+/// aabb; the gesture owner ([`crate::camera_input::CameraInput`]) writes
+/// [`ModelScene::orbit`] after every event, so this struct never decodes
+/// input itself. The overlay ([`grid::geometry`]) is built alongside: it
+/// depends only on the scene aabb, never on the camera.
 pub struct ModelScene {
     pub scene: Arc<PartScene>,
     /// Per-part poses for the next frame — `Some(matrix)` draws the part
@@ -75,16 +67,8 @@ pub struct ModelScene {
     /// Samples per pixel, 1 or 4 (the example's `m` toggle): flows into
     /// `Options::msaa`, whose flip rebuilds the pipeline in place.
     pub msaa: u32,
-    pub yaw: f32,
-    /// keep within ±[`camera::MAX_PITCH`]: the orbit formula uses Y as up
-    pub pitch: f32,
-    /// Camera distance from `target` — scroll zooms this itself, not a
-    /// multiplier, so the clamp is the radius-relative parity one.
-    pub distance: f32,
-    /// The aspect-free framing of `scene`: look-at target and the framing
-    /// radius the zoom clamp scales.
-    target: [f32; 3],
-    radius: f32,
+    /// The camera pose the next frame draws from.
+    pub orbit: camera::Orbit,
     /// The manifest bed the overlay was last built with — kept across
     /// [`ModelScene::replace_scene`] so a reload's grid derives from it
     /// (upstream's pane re-sends the bed every update; a mesh swap alone
@@ -117,9 +101,7 @@ pub struct Themed<'a> {
 
 impl ModelScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
-        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
+        let orbit = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
         let grid_aabb = (scene.aabb_min, scene.aabb_max);
         let grid = Arc::new(grid::geometry(grid_aabb, None));
         Self {
@@ -132,11 +114,7 @@ impl ModelScene {
             show_grid: true,
             wireframe: false,
             msaa: 1,
-            yaw,
-            pitch,
-            distance,
-            target,
-            radius,
+            orbit,
             bed: None,
             section: None,
             grid_aabb,
@@ -186,56 +164,13 @@ impl ModelScene {
             grid: self.show_grid.then(grid),
             markers: self.markers.clone(),
             ghost: self.ghost.clone(),
-            camera: Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect),
+            camera: self.orbit.camera(aspect),
             section: self.section,
             options: Options {
                 wireframe: self.wireframe,
                 msaa: self.msaa,
             },
         }
-    }
-
-    /// orbit(by:) (facts #18): yaw −= dx·0.008, pitch += dy·0.008 clamped
-    /// to ±[`camera::MAX_PITCH`]. `dx`/`dy` are AppKit-convention deltas
-    /// (dy bottom-up) — iced's top-down cursor y must be negated by the
-    /// caller.
-    pub fn orbit(&mut self, dx: f32, dy: f32) {
-        (self.yaw, self.pitch) = camera::orbit_drag(self.yaw, self.pitch, dx, dy);
-    }
-
-    /// zoom(by:) (facts #19): distance × factor clamped to
-    /// [0.1·radius, 200·radius].
-    pub fn zoom(&mut self, factor: f32) {
-        self.distance = camera::zoomed(self.distance, factor, self.radius);
-    }
-
-    /// pan(by:viewHeight:) (facts #22) — the parity formula. The app's
-    /// input wiring lives in its own state machine
-    /// (`app::camera_input::CameraInput`), which calls [`camera::panned`]
-    /// directly; this method stays the adapter-local convenience for the
-    /// example.
-    pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
-        self.target = camera::panned(
-            self.target,
-            self.yaw,
-            self.pitch,
-            self.distance,
-            view_height,
-            dx,
-            dy,
-        );
-    }
-
-    /// Adopt a pose computed by an external owner (the app pane's
-    /// `CameraInput`): every field the draw reads, set atomically. The
-    /// framing-derived private fields are NOT touched — a re-frame arrives
-    /// through [`ModelScene::replace_scene`] or construction, and the
-    /// external state machine tracks its own framing radius.
-    pub fn set_pose(&mut self, yaw: f32, pitch: f32, distance: f32, target: [f32; 3]) {
-        self.yaw = yaw;
-        self.pitch = pitch;
-        self.distance = distance;
-        self.target = target;
     }
 
     /// Store the overlay frame — the aabb the grid/bed/tripod derive from
@@ -261,10 +196,9 @@ impl ModelScene {
     /// against the new pinned aabb (deriving from the STORED bed — the pane
     /// re-sends it on its next stamp), resets the poses to the new scene's
     /// assembled identities (a new model has no carried explode offsets),
-    /// and re-derives the framing fields so the struct stays
-    /// self-consistent; the caller decides whether the camera actually
-    /// re-frames (the > 50 % diagonal rule) and pushes the settled pose
-    /// through [`ModelScene::set_pose`].
+    /// and re-frames the orbit's target and distance on the new scene; a
+    /// gesture owner that keeps its own pose (the > 50 % diagonal rule)
+    /// writes [`ModelScene::orbit`] back afterwards.
     pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
         self.grid_aabb = (scene.aabb_min, scene.aabb_max);
         self.grid = Arc::new(grid::geometry(self.grid_aabb, self.bed));
@@ -276,12 +210,11 @@ impl ModelScene {
         // the app re-stages it if the comparison is still active
         self.ghost = None;
         let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        self.orbit.target = target;
+        self.orbit.distance = distance;
         self.poses = identity_poses(scene.parts.len());
         self.appearances = opaque_appearances(scene.parts.len());
         self.scene = scene;
-        self.target = target;
-        self.distance = distance;
     }
 
     /// Store the section plane the frame carries, in THIS scene's pinned
