@@ -824,6 +824,11 @@ struct Drive {
     out: UnboundedSender<Message>,
     pipeline: Arc<Mutex<Pipeline>>,
     engine_source: EngineSource,
+    /// Every message the driver sent, with the activity the pipeline held
+    /// at that instant (`None` when the pipeline was locked mid-send):
+    /// ordering tests read state at send time, not when a consumer wakes.
+    #[cfg(test)]
+    sent: Mutex<Vec<(Message, Option<Activity>)>>,
 }
 
 impl Drive {
@@ -842,11 +847,24 @@ impl Drive {
             out,
             pipeline,
             engine_source,
+            #[cfg(test)]
+            sent: Mutex::new(Vec::new()),
         }
     }
 
     fn pipeline(&self) -> MutexGuard<'_, Pipeline> {
         self.pipeline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Forward one message to the app layer. A dropped receiver is the app
+    /// going away: the send never blocks and its failure is ignored.
+    fn emit(&self, message: Message) {
+        #[cfg(test)]
+        self.sent.lock().unwrap_or_else(|e| e.into_inner()).push((
+            message.clone(),
+            self.pipeline.try_lock().ok().map(|p| p.activity.clone()),
+        ));
+        let _ = self.out.unbounded_send(message);
     }
 
     async fn run(mut self, mut session: Session) {
@@ -1050,7 +1068,7 @@ impl Drive {
             attachments: references.clone(),
         });
         let _ = store::save_chat(&self.root, &transcript.messages);
-        let _ = self.out.unbounded_send(Message::TurnStarted {
+        self.emit(Message::TurnStarted {
             prompt: send.prompt.clone(),
             attachments: references.clone(),
             engine,
@@ -1100,7 +1118,7 @@ impl Drive {
     /// `queue`/`isQueuePaused` directly; the driver's copy is unreachable
     /// from the app, so changes travel as messages).
     fn notify_queue(&self) {
-        let _ = self.out.unbounded_send(Message::QueueChanged {
+        self.emit(Message::QueueChanged {
             queue: self.queue.iter().map(QueuedItem::from).collect(),
             paused: self.paused,
         });
@@ -1169,13 +1187,13 @@ impl Drive {
                     }
                     None => self.settle_turn_outputs(&transcript),
                 };
-                let _ = self.out.unbounded_send(Message::Event(event));
+                self.emit(Message::Event(event));
                 if succeeded {
                     self.turn_success_tail(record_prompt);
                 }
                 return TurnEnd::Finished { succeeded };
             }
-            let _ = self.out.unbounded_send(Message::Event(event));
+            self.emit(Message::Event(event));
         }
     }
 
@@ -1187,7 +1205,7 @@ impl Drive {
         let _ = store::save_chat(&self.root, &transcript.messages);
         self.pipeline().activity =
             Activity::Failed(fl!("errore-di", agent = transcript.engine.display_name()));
-        let _ = self.out.unbounded_send(Message::Closed);
+        self.emit(Message::Closed);
     }
 
     /// Drain one build's events, forwarding each as
@@ -1223,9 +1241,7 @@ impl Drive {
                 },
                 Err(TryRecvError::Disconnected) => return BuildEnd::Closed,
             };
-            let _ = self
-                .out
-                .unbounded_send(Message::BuildEventBridge(event.clone()));
+            self.emit(Message::BuildEventBridge(event.clone()));
             if let BuildEvent::Finished(outcome) = event {
                 return BuildEnd::Finished(outcome);
             }
@@ -1292,7 +1308,7 @@ impl Drive {
                 .unwrap_or_else(|| fl!("compilazione-manuale-di-model-py"));
             self.record_version(&prompt);
         }
-        let _ = self.out.unbounded_send(Message::BuildFinished {
+        self.emit(Message::BuildFinished {
             outcome,
             version_prompt,
         });
@@ -1337,7 +1353,7 @@ impl Drive {
         if let Some(prompt) = record_prompt {
             self.record_version(&prompt);
         }
-        let _ = self.out.unbounded_send(Message::TurnSuccessBookkeeping);
+        self.emit(Message::TurnSuccessBookkeeping);
     }
 
     /// Snapshot the project as the next version (upstream `recordVersion`,
@@ -1714,64 +1730,86 @@ mod tests {
         );
     }
 
-    /// A successful turn's activity is settled before TurnFinished is
-    /// forwarded: a consumer reading the bridge the moment it hears the
+    /// The activity the pipeline held when the driver sent its
+    /// TurnFinished message.
+    fn activity_at_turn_finished(drive: &Drive) -> Activity {
+        drive
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(m, _)| matches!(m, Message::Event(EngineEvent::TurnFinished(_))))
+            .expect("TurnFinished was sent")
+            .1
+            .clone()
+            .expect("the pipeline was free at the send")
+    }
+
+    /// Drain one turn whose only event is `outcome`'s TurnFinished.
+    async fn drain_terminal(root: &Path, outcome: TurnOutcome) -> (Drive, TurnEnd) {
+        let (mut drive, _cmd_tx, _messages) = harness(root);
+        drive.pipeline().activity = Activity::Working(fl!(
+            "sta-lavorando",
+            agent = AgentKind::Claude.display_name()
+        ));
+        let (ev_tx, mut ev_rx) = mpsc::channel::<EngineEvent>(1);
+        ev_tx.send(EngineEvent::TurnFinished(outcome)).await.unwrap();
+        drop(ev_tx);
+        let end = drive
+            .drain_turn(&mut ev_rx, || {}, ChatState::new(Vec::new()))
+            .await;
+        (drive, end)
+    }
+
+    /// A successful turn's activity is settled at the instant TurnFinished
+    /// is sent: a consumer reading the bridge the moment it hears the
     /// terminal sees the finished state, never the turn's Working line,
     /// and the later TurnSuccessBookkeeping does not change it.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_successful_turn_settles_its_activity_before_turn_finished() {
         let _lang = crate::localize::pin_en();
-        let _guard = ENV_LOCK.lock().await;
         let root = std::env::temp_dir().join(format!("cad-settle-{}", Uuid::new_v4()));
-        store::create_project(
-            root.parent().unwrap(),
-            root.file_name().unwrap().to_str().unwrap(),
+        std::fs::create_dir_all(&root).unwrap();
+        let (drive, end) = drain_terminal(
+            &root,
+            TurnOutcome::Success {
+                session_id: None,
+                text: String::new(),
+            },
         )
-        .unwrap();
-        // SAFETY: agent-fake env holds this suite's ENV_LOCK.
-        unsafe {
-            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
-            std::env::set_var(
-                "CAD_FAKE_SCENARIO",
-                fake_agent().parent().unwrap().join("scenarios/pong.jsonl"),
-            );
-            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
-        }
-        let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
-        bridge.mark_python_ready_for_test();
-        bridge
-            .enqueue("ping".into(), Vec::new())
-            .expect("the send starts");
-        let mut at_finish = None;
-        run_until(&mut messages, |m| {
-            let finished = matches!(
-                m,
-                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Success { .. }))
-            );
-            if finished {
-                at_finish = Some(bridge.activity());
-            }
-            finished
-        })
         .await;
-        run_until(&mut messages, |m| {
-            matches!(m, Message::TurnSuccessBookkeeping)
-        })
-        .await;
-        unsafe {
-            std::env::remove_var("CAD_TEST_CLAUDE");
-            std::env::remove_var("CAD_FAKE_SCENARIO");
-            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
-        }
-        let at_finish = at_finish.expect("the turn finished");
-        assert!(
-            matches!(at_finish, Activity::Succeeded(_)),
-            "the terminal's activity is the finished one: {at_finish:?}"
-        );
+        assert_eq!(end, TurnEnd::Finished { succeeded: true });
+        let at_send = activity_at_turn_finished(&drive);
         assert_eq!(
-            at_finish,
-            bridge.activity(),
-            "the tail changes nothing more"
+            at_send,
+            Activity::Succeeded(fl!("risposta-completata")),
+            "the terminal's activity is the finished one"
+        );
+        assert_eq!(at_send, drive.pipeline().activity, "the tail changes nothing more");
+    }
+
+    /// A failed turn's activity is set at the instant TurnFinished is sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_turn_sets_its_activity_before_turn_finished() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-settle-fail-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (drive, end) = drain_terminal(
+            &root,
+            TurnOutcome::Failed {
+                error: String::new(),
+                auth: true,
+                exit_code: Some(1),
+            },
+        )
+        .await;
+        assert_eq!(end, TurnEnd::Finished { succeeded: false });
+        assert_eq!(
+            activity_at_turn_finished(&drive),
+            Activity::Failed(fl!(
+                "accesso-a-richiesto",
+                agent = AgentKind::Claude.display_name()
+            )),
         );
     }
 

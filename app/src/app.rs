@@ -364,10 +364,13 @@ impl Application for CadStudio {
                 Task::none()
             }
             Message::ParentFolderChosen(Ok(parents)) => {
-                let Some(sheet) = self.welcome.creating.as_ref() else {
+                let Some(sheet) = self.welcome.creating.as_mut() else {
                     return Task::none();
                 };
                 let Some(parent) = parents.first().cloned() else {
+                    // no usable folder came back: the sheet stops waiting,
+                    // so Avanti and Return ask again
+                    sheet.awaiting_parent = false;
                     return Task::none();
                 };
                 let name = sheet.trimmed_name().to_string();
@@ -1938,6 +1941,21 @@ mod shell_behavior {
             awaiting_parent(&f.app),
             "Return runs Avanti on a valid name"
         );
+    }
+
+    /// 2.15: a folder pick that yields no usable folder (no URIs, or
+    /// none that maps to a local path) leaves the sheet live: Return asks
+    /// for a folder again.
+    #[test]
+    fn an_empty_folder_pick_leaves_the_new_project_sheet_live() {
+        let mut f = fixture();
+        new_project_sheet(&mut f.app, "Staffa");
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(awaiting_parent(&f.app));
+        let _ = f.app.update(Message::ParentFolderChosen(Ok(Vec::new())));
+        assert!(!awaiting_parent(&f.app), "the sheet stopped waiting");
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(awaiting_parent(&f.app), "Return asks for a folder again");
     }
 
     /// 2.16 / 3.10: Esc is the new-project sheet's Annulla.
