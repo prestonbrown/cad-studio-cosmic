@@ -39,8 +39,10 @@ use engine::project::versions::ProjectVersion;
 use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
 use crate::parts_overlay::{
-    Ink, KNOB, Symbol, card_style, icon_button, small_slider, symbol, with_rail_ends,
+    CardShape, Ink, KNOB, SMALL_CONTROL_TEXT, Symbol, card_style, icon_button, small_slider,
+    symbol, with_rail_ends,
 };
+use crate::typography;
 
 /// The panel's fixed width (ParametersOverlay.swift:109).
 const PANEL_WIDTH: f32 = 280.0;
@@ -50,7 +52,9 @@ const PANEL_WIDTH: f32 = 280.0;
 /// (one row ≈ head line + slider + spacing) and clamps it to the cap.
 const SCROLL_MAX_HEIGHT: f32 = 340.0;
 /// The name line's height (an 11 px monospaced line).
-const NAME_LINE: f32 = 14.0;
+const NAME_LINE: f32 = NAME_TEXT + 3.0;
+/// Names and values: upstream `.system(size: 11, design: .monospaced)`.
+const NAME_TEXT: f32 = typography::scaled(11.0);
 /// One row: the name line, 2 px, the slider (ParametersOverlay.swift:140).
 const ROW_HEIGHT: f32 = NAME_LINE + 2.0 + KNOB;
 /// Rows sit 10 apart (ParametersOverlay.swift:65).
@@ -59,7 +63,7 @@ const ROW_SPACING: f32 = 10.0;
 /// between the longest option and the badge, and the option text size.
 const POPUP_BADGE: f32 = 13.0;
 const POPUP_GAP: f32 = 7.0;
-const POPUP_TEXT: f32 = 11.0;
+const POPUP_TEXT: f32 = SMALL_CONTROL_TEXT;
 
 /// Upstream's orange previous-value tint (`foregroundStyle(.orange)`,
 /// ParametersOverlay.swift:151) — same explicit color family as the chat
@@ -152,7 +156,7 @@ pub fn view_parameters<'a>(
     }
     container(panel_view)
         .width(Length::Fixed(PANEL_WIDTH))
-        .class(card_style(12.0, 8.0))
+        .class(card_style(CardShape::Panel, 8.0))
         .into()
 }
 
@@ -173,14 +177,14 @@ fn collapsed_capsule() -> Element<'static, Message> {
         .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
         .push(
             text(fl!("parametri"))
-                .size(12)
+                .size(typography::CALLOUT)
                 .font(cosmic::font::semibold())
                 .class(Ink::Primary.text_class()),
         );
     let capsule = button::custom(
         container(label)
             .padding([6.0, 10.0])
-            .class(card_style(999.0, 6.0)),
+            .class(card_style(CardShape::Capsule, 6.0)),
     )
     .padding(0)
     .class(cosmic::theme::Button::Transparent)
@@ -209,15 +213,13 @@ fn header() -> Element<'static, Message> {
                     .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
                     .push(
                         text(fl!("parametri"))
-                            .size(13)
-                            .line_height(line_height(16.0))
-                            .font(cosmic::font::bold())
+                            .size(typography::HEADLINE)
+                            .font(cosmic::font::semibold())
                             .class(Ink::Primary.text_class()),
                     ),
             )
             .push(symbol(Symbol::ChevronUp, 14, Ink::Secondary)),
     )
-    .height(Length::Fixed(16.0))
     .padding(0)
     .class(cosmic::theme::Button::Transparent)
     .on_press(Message::Collapse(true))
@@ -260,7 +262,7 @@ fn parameter_row<'a>(
         .push(
             text(name.to_string())
                 .font(cosmic::font::mono())
-                .size(11)
+                .size(NAME_TEXT)
                 .line_height(line_height(NAME_LINE))
                 .width(Length::Fill)
                 .wrapping(Wrapping::None)
@@ -339,7 +341,7 @@ fn numeric_field<'a>(
         .unwrap_or_else(|| format_display(state.value, 3));
     let input = cosmic::iced::widget::text_input("", &shown)
         .width(56)
-        .size(11)
+        .size(NAME_TEXT)
         .line_height(line_height(NAME_LINE))
         .padding(0)
         .font(cosmic::font::mono())
@@ -387,7 +389,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
     } else {
         container(
             text(selected_label(ctx.compare))
-                .size(11)
+                .size(POPUP_TEXT)
                 .class(Ink::Tertiary.text_class()),
         )
         .padding([0.0, POPUP_BADGE + POPUP_GAP, 0.0, 0.0])
@@ -406,7 +408,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
                     Ink::Tertiary.color(theme)
                 })),
                 border: cosmic::iced::Border {
-                    radius: 3.5.into(),
+                    radius: theme.cosmic().corner_radii.radius_xs.into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -427,7 +429,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         .align_y(Alignment::Center)
         .push(
             text(fl!("confronta-con"))
-                .size(11)
+                .size(SMALL_CONTROL_TEXT)
                 .class(Ink::Secondary.text_class()),
         )
         .push(Space::new().width(Length::Fill))
@@ -441,7 +443,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
 fn compare_caption() -> Element<'static, Message> {
     container(
         text(fl!("in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni"))
-            .size(10)
+            .size(typography::CAPTION)
             .class(Ink::Secondary.text_class())
             .wrapping(Wrapping::Word)
             .width(Length::Fill),
@@ -497,7 +499,7 @@ fn line_height(pixels: f32) -> cosmic::iced::widget::text::LineHeight {
 
 fn rich_text_element(span: Span<'_, String>) -> Element<'_, Message> {
     cosmic::iced::widget::rich_text([span])
-        .size(10) // upstream's caption2
+        .size(typography::CAPTION2)
         .font(cosmic::font::default())
         .wrapping(Wrapping::Word)
         .into()

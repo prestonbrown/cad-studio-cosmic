@@ -41,7 +41,10 @@ use cosmic::iced::{Length, Padding, Point, Rectangle, Size, Subscription, Task};
 use cosmic::widget::{Column, Image, Row, Space, container, mouse_area, text, tooltip};
 use engine::project::manifest::Manifest;
 
-use crate::parts_overlay::{Ink, Symbol, icon_button, mix, symbol, text_button};
+use crate::parts_overlay::{
+    Ink, SMALL_CONTROL_TEXT, Symbol, icon_button, mix, symbol, text_button,
+};
+use crate::typography;
 
 use crate::fl;
 
@@ -1004,7 +1007,7 @@ impl SchematicPane {
                             .size(40)
                             .icon(),
                     )
-                    .push(text(fl!("nessun-modello")).size(18))
+                    .push(text(fl!("nessun-modello")).size(typography::TITLE2))
                     .push(
                         text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
                             .class(dim_text_class()),
@@ -1181,13 +1184,13 @@ impl SchematicPane {
             ))
             .push(text_button(
                 fl!("adatta"),
-                11,
+                SMALL_CONTROL_TEXT,
                 Ink::Secondary,
                 has_sheet.then_some(Message::Fit),
             ))
             .push(text_button(
                 fl!("apri-in-anteprima"),
-                11,
+                SMALL_CONTROL_TEXT,
                 Ink::Secondary,
                 can_preview.then_some(Message::OpenInPreview),
             ));
@@ -1200,7 +1203,7 @@ impl SchematicPane {
             .push(Space::new().width(Length::Fill))
             .push(
                 text(info)
-                    .size(11)
+                    .size(typography::scaled(11.0))
                     .font(cosmic::font::mono())
                     .class(Ink::Secondary.text_class()),
             );
@@ -1261,9 +1264,9 @@ impl SchematicPane {
             total = pages,
             title = title
         ))
-        .text_size(11)
+        .text_size(SMALL_CONTROL_TEXT)
         // the list reserves one text size for its own (hidden) handle
-        .padding([0.0, CHEVRON + 2.0 - 11.0, 0.0, 4.0])
+        .padding([0.0, CHEVRON + 2.0 - SMALL_CONTROL_TEXT, 0.0, 4.0])
         .handle(cosmic::iced::widget::pick_list::Handle::None);
         let menu = cosmic::iced::widget::stack![
             list,

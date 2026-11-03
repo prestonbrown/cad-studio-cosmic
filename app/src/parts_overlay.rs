@@ -33,6 +33,7 @@ use viewer::tools::arrangement::PartGroup;
 use viewer::tools::section;
 
 use crate::fl;
+use crate::typography;
 use crate::viewer_pane::{Message, format_length};
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools};
 
@@ -232,7 +233,7 @@ pub(crate) fn icon_button<M: Clone + 'static>(
 /// disabled shows tertiary ink.
 pub(crate) fn text_button<M: Clone + 'static>(
     label: String,
-    size: u16,
+    size: f32,
     ink: Ink,
     on_press: Option<M>,
 ) -> Element<'static, M> {
@@ -276,16 +277,38 @@ pub(crate) fn separator(theme: &cosmic::Theme) -> Color {
     Color { a: 0.1, ..on }
 }
 
+/// A floating card's outline, as a COSMIC roundness class (the user's
+/// corner-radius setting): an overlay panel takes the small container
+/// radius (upstream 10-12 pt), a capsule the pill radius.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CardShape {
+    Panel,
+    Capsule,
+}
+
+impl CardShape {
+    fn radius(self, theme: &cosmic::Theme) -> cosmic::iced::border::Radius {
+        let radii = &theme.cosmic().corner_radii;
+        match self {
+            Self::Panel => radii.radius_s.into(),
+            Self::Capsule => radii.radius_xl.into(),
+        }
+    }
+}
+
 /// The floating card: material fill, hairline separator border, and the
 /// drop shadow (`.shadow(color: .black.opacity(0.15), radius:, y: 2)` —
 /// SwiftUI's radius is a Gaussian sigma, iced's blur a diameter).
-pub(crate) fn card_style(radius: f32, shadow_radius: f32) -> cosmic::theme::Container<'static> {
+pub(crate) fn card_style(
+    shape: CardShape,
+    shadow_radius: f32,
+) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
         background: Some(Background::Color(material(theme))),
         border: Border {
             color: separator(theme),
             width: 1.0,
-            radius: radius.into(),
+            radius: shape.radius(theme),
         },
         shadow: Shadow {
             color: Color::from_rgba(0.0, 0.0, 0.0, 0.15),
@@ -312,8 +335,13 @@ fn capsule_style() -> cosmic::theme::Container<'static> {
 // ─── segmented picker ──────────────────────────────────────────────────────
 
 /// The segmented control's height at `.controlSize(.small)` (measured
-/// 18 px; the selected pill insets 1 px).
-const SEGMENT_HEIGHT: f32 = 18.0;
+/// 18 pt on upstream's 13 pt body, kept in proportion to the label's
+/// scale; the selected pill insets 1 px).
+const SEGMENT_HEIGHT: f32 = 18.0 * typography::COSMIC_BODY / typography::MACOS_BODY;
+
+/// Label size of a `.controlSize(.small)` control: macOS's 11 pt small
+/// system font.
+pub(crate) const SMALL_CONTROL_TEXT: f32 = typography::scaled(11.0);
 
 /// The track: a lighter inset on the material (242 on the 228 card in
 /// light mode; a faint lift in dark mode).
@@ -352,7 +380,7 @@ pub(crate) fn segmented<M: Clone + 'static>(
             (false, true) => Ink::Primary,
             (false, false) => Ink::Tertiary,
         };
-        let mut label = text(label).size(11).class(ink.text_class());
+        let mut label = text(label).size(SMALL_CONTROL_TEXT).class(ink.text_class());
         if is_selected {
             label = label.font(cosmic::font::semibold());
         }
@@ -366,7 +394,7 @@ pub(crate) fn segmented<M: Clone + 'static>(
                 cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
                     background: Some(Background::Color(segment_selected(theme))),
                     border: Border {
-                        radius: 4.0.into(),
+                        radius: theme.cosmic().corner_radii.radius_xs.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -396,7 +424,7 @@ pub(crate) fn segmented<M: Clone + 'static>(
             cosmic::iced::widget::container::Style {
                 background: Some(Background::Color(segment_track(theme))),
                 border: Border {
-                    radius: 5.0.into(),
+                    radius: theme.cosmic().corner_radii.radius_xs.into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -562,7 +590,7 @@ pub fn view_parts_panel(
         } else {
             Length::Fixed(PANEL_WIDTH)
         })
-        .class(card_style(10.0, 6.0))
+        .class(card_style(CardShape::Panel, 6.0))
         .into()
 }
 
@@ -576,7 +604,7 @@ fn header(tools: &ViewerTools, groups: &[PartGroup]) -> Element<'static, Message
         .push(symbol(Symbol::SquareStack3dUp, 16, Ink::Primary))
         .push(
             text(fl!("parti"))
-                .size(12)
+                .size(typography::CALLOUT)
                 .font(cosmic::font::semibold())
                 .class(Ink::Primary.text_class()),
         );
@@ -704,7 +732,7 @@ fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<
         .push(color_dot(group.color, 9.0))
         .push(
             text(group.name.clone())
-                .size(12)
+                .size(typography::CALLOUT)
                 .wrapping(Wrapping::None)
                 .ellipsize(cosmic::iced::core::text::Ellipsize::Middle(
                     cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
@@ -718,7 +746,7 @@ fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<
     if group.members.len() > 1 {
         cluster = cluster.push(
             text(fl!("lld-3", count = group.members.len()))
-                .size(10)
+                .size(typography::CAPTION)
                 .class(Ink::Secondary.text_class()),
         );
     }
@@ -782,7 +810,7 @@ fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<
 /// `.caption.monospacedDigit()`, secondary).
 fn count_badge(count: usize) -> Text<'static> {
     text(count.to_string())
-        .size(10)
+        .size(typography::CAPTION)
         .class(Ink::Secondary.text_class())
 }
 
@@ -792,7 +820,7 @@ fn plate_note() -> Element<'static, Message> {
     text(fl!(
         "l-agente-non-ha-ancora-preparato-il-piatto-di-stampa-le-parti-sono-affiancate-senza-ruotarle-chiedi-di-prepararlo-nella-chat"
     ))
-    .size(10)
+    .size(typography::CAPTION)
     .class(Ink::Secondary.text_class())
     .wrapping(Wrapping::Word)
     .width(Length::Fill)
