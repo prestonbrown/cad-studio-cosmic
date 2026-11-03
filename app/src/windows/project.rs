@@ -69,7 +69,7 @@ const GRID_SPACING: f32 = 1.0;
 
 /// The pane divider's on-background wash: #D4D4D5 between #EBEBEC panes
 /// (project-model.png).
-const DIVIDER_ALPHA: f32 = 0.1;
+const DIVIDER_ALPHA: f32 = 0.117;
 
 /// The pane grid's minimum pane extent (iced's default, named so the drag
 /// hit-test computes the same regions the grid lays out).
@@ -81,10 +81,10 @@ const HEADER_HEIGHT: f32 = 52.0;
 
 /// The ActivityViewer capsule's `.quaternary.opacity(0.6)` fill as an
 /// on-background wash: #DFDFE1 over the toolbar's #EEEEF0.
-const CAPSULE_ALPHA: f32 = 0.063;
+const CAPSULE_ALPHA: f32 = 0.076;
 
 /// The toolbar's bottom hairline: #C5C5C6 over #EEEEF0.
-const HAIRLINE_ALPHA: f32 = 0.17;
+const HAIRLINE_ALPHA: f32 = 0.21;
 
 /// The version card's width: the visible span of upstream's menu inside
 /// the window (version-menu.png: x 968 to the 1320 edge, less an 8 px
@@ -1782,7 +1782,7 @@ impl ProjectWindow {
         // mid-turn; version_menu's module doc carries the chain). Dynamic
         // dropdowns — the version history — live as popovers instead.
         cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
-            .item_width(ItemWidth::Static(150))
+            .item_width(ItemWidth::Static(220))
             .item_height(ItemHeight::Dynamic(30))
             .into()
     }
@@ -2018,11 +2018,11 @@ pub mod chrome {
         /// #DFDFE1; #6B6B6C / #B2B2B4 over the toolbar #EEEEF0).
         fn alpha(self) -> f32 {
             match self {
-                Tone::Primary => 0.70,
+                Tone::Primary => 0.75,
                 Tone::Secondary => 0.57,
                 Tone::Tertiary => 0.29,
                 Tone::Toolbar => 0.55,
-                Tone::Disabled => 0.25,
+                Tone::Disabled => 0.20,
             }
         }
 

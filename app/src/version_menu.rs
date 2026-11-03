@@ -270,13 +270,13 @@ pub fn view_versions<Message: Clone + 'static>(
             let body = Column::new()
                 .push(
                     container(head)
-                        .height(Length::Fixed(21.0))
+                        .height(Length::Fixed(20.0))
                         .align_y(Vertical::Center),
                 )
                 .push(
                     container(line(subtitle(entry, now), 11, Tone::Tertiary, false))
                         .padding([0.0, TEXT_INSET])
-                        .height(Length::Fixed(13.0)),
+                        .height(Length::Fixed(14.0)),
                 )
                 .width(Length::Fill)
                 .height(Length::Fixed(ROW_HEIGHT));
