@@ -4,8 +4,8 @@
 //!
 //! Split like the other widget modules: the entry projection
 //! ([`menu_entries`], [`prompt_summary`]) and the subtitle's date
-//! formatting ([`relative`], [`abbreviated`]) are pure; [`version_tree`]
-//! only maps that state onto a libcosmic menu-bar root. The shell owns the
+//! formatting ([`relative`], [`abbreviated`]) are pure; [`version_button`]
+//! and [`view_versions`] only map that state onto widgets. The shell owns the
 //! restore itself — a leaf press emits the shell's own message through the
 //! `on_restore` closure, exactly how the parameters overlay's picker
 //! reports through its message.
@@ -13,25 +13,15 @@
 //! User-visible strings read through `fl!` at render time (the key names
 //! the en/main.ftl entry); the relative/abbreviated date halves stay
 //! hand-formatted English — upstream gets them from SwiftUI's
-//! locale-aware formatters, which no catalog key backs. Icons are
-//! freedesktop-theme approximations of upstream SF Symbols
-//! (`clock.arrow.circlepath` → `document-open-recent`, `checkmark` →
-//! `object-select`).
+//! locale-aware formatters, which no catalog key backs. Icons are the
+//! project window's SF-Symbol-shaped glyphs (`clock.arrow.circlepath`,
+//! `chevron.down`, `checkmark`).
 
 use time::OffsetDateTime;
 
 use engine::project::versions::ProjectVersion;
 
 use crate::fl;
-
-/// Upstream's `clock.arrow.circlepath` (VersionMenu.swift:29).
-const CLOCK_ICON: &str = "document-open-recent";
-/// Upstream's `checkmark` (VersionMenu.swift:17).
-const CHECK_ICON: &str = "object-select";
-
-/// The dropdown's width — the two-line entries (label + subtitle) need
-/// more than the menu bar's 150 px default.
-const MENU_WIDTH: u16 = 340;
 
 // ─── the entry projection (pure) ────────────────────────────────────────────
 
@@ -131,141 +121,193 @@ fn subtitle(entry: &VersionEntry, now: OffsetDateTime) -> String {
 
 // ─── the widget ─────────────────────────────────────────────────────────────
 
-/// The toolbar's version menu as a menu-bar root (VersionMenu.swift): a
-/// clock button labeled `v{current}` when one is set, whose dropdown is
-/// the empty notice or the section (busy-titled while working) with one
-/// two-line entry per version — label line, checkmark on the current one,
-/// subtitle below — each inert while busy (upstream `.disabled(isBusy)`).
-///
-/// The toolbar's clock button (upstream's VersionMenu trigger): clock icon
-/// plus the current version's tag, opening the history card. NOT a
-/// menu-bar root — cosmic's menu overlay corrupts widget state when the
-/// item set changes between rebuilds (a version landing mid-turn turned
-/// the closed menu's item texts into stateless shells; the next overlay
-/// layout panicked "Downcast widget state" at iced tree.rs:507 — the
-/// same corruption class as the text-editor id bug, through menu_inner's
-/// RcWrapper). The static command roots are safe in the bar; anything
-/// whose items change lives in a popover like this one.
+/// The menu card's measured geometry (version-menu.png, halved to the 1x
+/// basis): the card's top-left sits 115 px left of and 38 px below the
+/// pill's top-left; 5 px top inset, a 23 px section header, 34 px rows,
+/// 14.5 px text inset.
+pub const CARD_OFFSET: (f32, f32) = (-115.0, 38.0);
+const CARD_INSET_TOP: f32 = 5.0;
+const HEADER_HEIGHT: f32 = 23.0;
+const ROW_HEIGHT: f32 = 34.0;
+const TEXT_INSET: f32 = 14.5;
+
+/// The toolbar's version menu label (VersionMenu.swift:27-35) in its
+/// bordered toolbar pill: `clock.arrow.circlepath`, the current version's
+/// "v<N>" (monospaced digits), and the menu's `chevron.down` indicator —
+/// 70×27, 8 px side insets, the measured 6/8 px gaps. Pressing opens the
+/// history card. NOT a menu-bar root — cosmic's menu overlay corrupts
+/// widget state when the item set changes between rebuilds
+/// (docs/research/libcosmic-menu-dynamic-items-bug.md); anything whose
+/// items change lives in a popover like this one.
 pub fn version_button<Message: Clone + 'static>(
     current: Option<i64>,
     open: bool,
     on_toggle: Message,
 ) -> cosmic::Element<'static, Message> {
-    use cosmic::widget::{button, text};
-    let mut label = cosmic::widget::Row::new()
-        .spacing(4)
-        .push(cosmic::widget::icon::from_name(CLOCK_ICON).size(14).icon());
+    use crate::windows::project::chrome::{self, Tone};
+    use cosmic::iced::{Alignment, Length};
+    use cosmic::widget::{Row, Space, button, text};
+    let mut label = Row::new().align_y(Alignment::Center).push(chrome::glyph(
+        chrome::CLOCK_ARROW,
+        (18.0, 18.0),
+        Tone::Toolbar,
+    ));
     if let Some(current) = current {
-        label = label.push(
+        label = label.push(Space::new().width(Length::Fixed(6.0))).push(
             text(fl!("v-lld", version = current))
-                .size(12)
-                .font(cosmic::font::mono()),
+                .size(crate::typography::BODY)
+                .class(chrome::text_class(Tone::Toolbar)),
         );
     }
-    let root = button::custom(label.padding([4, 10]))
-        .class(if open {
-            cosmic::theme::Button::Suggested
-        } else {
-            cosmic::theme::Button::Standard
-        })
+    let label = label
+        .push(Space::new().width(Length::Fixed(8.0)))
+        .push(chrome::glyph(
+            chrome::CHEVRON_DOWN,
+            (8.0, 5.0),
+            Tone::Toolbar,
+        ))
+        .padding([0, 8])
+        .height(Length::Fixed(27.0));
+    let root = button::custom(label)
+        .padding(0)
+        .class(chrome::button_class(true, chrome::Corner::S))
+        .selected(open)
         .on_press(on_toggle)
         .name(fl!("versioni"));
     cosmic::widget::tooltip(
         root,
-        cosmic::widget::text(fl!("storico-delle-versioni")),
-        cosmic::widget::tooltip::Position::FollowCursor,
+        text(fl!("storico-delle-versioni")).size(crate::typography::scaled(11.0)),
+        cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
 }
 
-/// The history card the popover shows: header, then one row per version
-/// newest-first — the label line (checkmark + "Version N · summary") over
-/// the subtitle (relative · abbreviated date), pressing — unless busy —
-/// restores that version. `now` is the CALLER-supplied clock, frozen
-/// while the card is open: a live per-frame time-ago would rebuild every
-/// row's text every second.
+/// The history card the version button opens, laid out like upstream's
+/// `Menu` (VersionMenu.swift:7-25): the section header (busy-titled while
+/// working), then one row per version newest-first — the label line
+/// ("Version N · summary", the current one checkmarked in the leading
+/// gutter) over the subtitle (relative · abbreviated date); pressing —
+/// unless busy — restores that version. `now` is the CALLER-supplied
+/// clock, frozen while the card is open: a live per-frame time-ago would
+/// rebuild every row's text every second.
 pub fn view_versions<Message: Clone + 'static>(
     entries: &[VersionEntry],
     busy: bool,
     now: OffsetDateTime,
+    width: f32,
     on_restore: impl Fn(i64) -> Message + Clone + 'static,
 ) -> cosmic::Element<'static, Message> {
-    use cosmic::iced::Length;
-    use cosmic::widget::{button, container, scrollable, text};
+    use crate::windows::project::chrome::{self, Tone};
+    use cosmic::iced::alignment::Vertical;
+    use cosmic::iced::{Alignment, Length};
+    use cosmic::widget::{Column, Row, Space, button, container, scrollable, text};
 
-    let mut list = cosmic::widget::Column::new().spacing(2);
+    let line = |label: String, size: f32, tone: Tone, bold: bool| {
+        let mut t = text(label)
+            .size(size)
+            .wrapping(cosmic::iced::widget::text::Wrapping::None)
+            .class(chrome::text_class(tone));
+        if bold {
+            t = t.font(cosmic::font::semibold());
+        }
+        t
+    };
+
+    let mut list = Column::new();
     if entries.is_empty() {
+        // `Text("Nessuna versione salvata")` — a disabled menu line
         list = list.push(
-            container(
-                cosmic::widget::Column::new()
-                    .spacing(4)
-                    .push(text(fl!("nessuna-versione-salvata")).size(12))
-                    .push(
-                        text(fl!("disponibili-al-termine-della-generazione"))
-                            .size(11)
-                            .class(dim_subtitle()),
-                    ),
-            )
-            .padding([10, 16]),
+            container(line(
+                fl!("nessuna-versione-salvata"),
+                crate::typography::BODY,
+                Tone::Tertiary,
+                false,
+            ))
+            .padding([0.0, TEXT_INSET])
+            .height(Length::Fixed(ROW_HEIGHT - 12.0))
+            .align_y(Vertical::Center),
         );
     } else {
         list = list.push(
-            container(text(if busy {
-                fl!("disponibili-al-termine-della-generazione")
-            } else {
-                fl!("torna-a-una-versione")
-            }))
-            .padding([10, 16, 6, 16]),
+            container(line(
+                if busy {
+                    fl!("disponibili-al-termine-della-generazione")
+                } else {
+                    fl!("torna-a-una-versione")
+                },
+                crate::typography::scaled(11.0),
+                Tone::Tertiary,
+                true,
+            ))
+            .padding([0.0, TEXT_INSET])
+            .height(Length::Fixed(HEADER_HEIGHT))
+            .align_y(Vertical::Center),
         );
         for entry in entries {
             let restore = on_restore.clone();
             let on_press = (!busy).then(move || restore(entry.number));
-            let mut head = cosmic::widget::Row::new().spacing(6);
-            if entry.is_current {
-                head = head.push(cosmic::widget::icon::from_name(CHECK_ICON).size(12).icon());
-            }
-            head = head.push(text(fl!(
-                "versione-lld-2",
-                version = entry.number,
-                summary = entry.prompt_summary
-            )));
-            let body = cosmic::widget::Column::new()
-                .spacing(2)
-                .push(head)
-                .push(text(subtitle(entry, now)).size(11).class(dim_subtitle()))
-                .padding([6, 16]);
+            let tone = if busy { Tone::Tertiary } else { Tone::Primary };
+            let gutter: cosmic::Element<'static, Message> = if entry.is_current {
+                chrome::glyph(chrome::CHECKMARK, (10.0, 9.0), tone)
+            } else {
+                Space::new().width(Length::Fixed(10.0)).into()
+            };
+            let head = Row::new()
+                .align_y(Alignment::Center)
+                .push(Space::new().width(Length::Fixed(TEXT_INSET - 12.0)))
+                .push(gutter)
+                .push(Space::new().width(Length::Fixed(2.0)))
+                .push(line(
+                    fl!(
+                        "versione-lld-2",
+                        version = entry.number,
+                        summary = entry.prompt_summary
+                    ),
+                    crate::typography::BODY,
+                    tone,
+                    false,
+                ));
+            let body = Column::new()
+                .push(
+                    container(head)
+                        .height(Length::Fixed(20.0))
+                        .align_y(Vertical::Center),
+                )
+                .push(
+                    container(line(
+                        subtitle(entry, now),
+                        crate::typography::scaled(11.0),
+                        Tone::Tertiary,
+                        false,
+                    ))
+                    .padding([0.0, TEXT_INSET])
+                    .height(Length::Fixed(14.0)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(ROW_HEIGHT));
             list = list.push(
-                button::custom(body)
-                    .class(cosmic::theme::Button::Standard)
-                    .on_press_maybe(on_press)
-                    .width(Length::Fill),
+                container(
+                    button::custom(body)
+                        .padding(0)
+                        .class(chrome::button_class(false, chrome::Corner::Xs))
+                        .on_press_maybe(on_press)
+                        .width(Length::Fill),
+                )
+                .padding([0, 5]),
             );
         }
     }
     container(
         scrollable(
-            cosmic::widget::Column::new()
-                .push(list)
-                .width(Length::Fixed(MENU_WIDTH as f32)),
+            list.push(Space::new().height(Length::Fixed(4.0)))
+                .width(Length::Fixed(width)),
         )
         .height(Length::Shrink),
     )
+    .padding([CARD_INSET_TOP, 0.0, 0.0, 0.0])
     .max_height(360.0)
-    .class(cosmic::theme::Container::Dialog(false))
+    .class(chrome::card_class())
     .into()
-}
-
-/// The subtitle's dimmed text (the pane modules' shared secondary style;
-/// kept local so modules stay self-contained, the house note).
-fn dim_subtitle() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
 }
 
 #[cfg(test)]
@@ -313,12 +355,12 @@ mod tests {
     #[test]
     fn card_builds_in_every_shape() {
         let now = OffsetDateTime::now_utc();
-        let _ = view_versions(&[], false, now, |n| n);
-        let _ = view_versions(&[], true, now, |n| n);
+        let _ = view_versions(&[], false, now, 340.0, |n| n);
+        let _ = view_versions(&[], true, now, 340.0, |n| n);
         let mut current = entry(2, 1);
         current.is_current = true;
-        let _ = view_versions(&[current.clone(), entry(1, 300)], false, now, |n| n);
-        let _ = view_versions(&[current, entry(1, 300)], true, now, |n| n);
+        let _ = view_versions(&[current.clone(), entry(1, 300)], false, now, 340.0, |n| n);
+        let _ = view_versions(&[current, entry(1, 300)], true, now, 340.0, |n| n);
         let _ = version_button(None, false, ());
         let _ = version_button(Some(2), true, ());
     }

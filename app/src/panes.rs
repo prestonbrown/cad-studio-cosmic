@@ -342,6 +342,71 @@ fn find_split<'a>(
     }
 }
 
+// ─── pane drag (PaneContainer.swift + PaneSplitViewController.locate) ──────
+
+/// An in-flight pane drag (upstream `PaneDrag`): the pane being dragged and,
+/// once the cursor is over ANOTHER pane, that target and its nearest edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneDrag {
+    pub pane: PaneKind,
+    pub target: Option<PaneKind>,
+    pub edge: Option<DropEdge>,
+}
+
+/// The pane under `point` and the edge nearest it
+/// (PaneSplitViewController.swift:38-51): the smallest of the normalized
+/// distances to leading, trailing, top, bottom wins, in that order on ties.
+pub fn locate<K: Copy>(
+    regions: impl IntoIterator<Item = (K, cosmic::iced::Rectangle)>,
+    point: cosmic::iced::Point,
+) -> Option<(K, DropEdge)> {
+    regions.into_iter().find_map(|(kind, bounds)| {
+        if !bounds.contains(point) || bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+        let x = (point.x - bounds.x) / bounds.width;
+        let y = (point.y - bounds.y) / bounds.height;
+        let distances = [
+            (DropEdge::Leading, x),
+            (DropEdge::Trailing, 1.0 - x),
+            (DropEdge::Top, y),
+            (DropEdge::Bottom, 1.0 - y),
+        ];
+        let edge = distances
+            .iter()
+            .fold(None::<(DropEdge, f32)>, |best, &(edge, d)| match best {
+                Some((_, b)) if b <= d => best,
+                _ => Some((edge, d)),
+            })
+            .map_or(DropEdge::Trailing, |(edge, _)| edge);
+        Some((kind, edge))
+    })
+}
+
+/// Upstream `dragPane(_:to:)` (Project.swift:148-154): hovering the dragged
+/// pane itself (or no pane) leaves no target.
+pub fn drag_to(pane: PaneKind, hit: Option<(PaneKind, DropEdge)>) -> PaneDrag {
+    match hit {
+        Some((target, edge)) if target != pane => PaneDrag {
+            pane,
+            target: Some(target),
+            edge: Some(edge),
+        },
+        _ => PaneDrag {
+            pane,
+            target: None,
+            edge: None,
+        },
+    }
+}
+
+/// Upstream `dropPane()` (Project.swift:156-160): the layout a release
+/// lands, or `None` when the drag has no target.
+pub fn drop(node: &LayoutNode, drag: &PaneDrag) -> Option<LayoutNode> {
+    let (target, edge) = (drag.target?, drag.edge?);
+    Some(moving(node, drag.pane, edge, target))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,5 +724,68 @@ mod tests {
             LayoutNode::chat_leading(),
             "undecodable -> chatLeading (upstream `try? ?? .chatLeading`)"
         );
+    }
+    /// The nearest-edge rule (PaneSplitViewController.locate): normalized
+    /// distances pick the edge; points outside every region hit nothing.
+    #[test]
+    fn locate_picks_the_pane_and_nearest_edge() {
+        use cosmic::iced::{Point, Rectangle};
+        let regions = [
+            (
+                PaneKind::Chat,
+                Rectangle::new(Point::new(0.0, 0.0), (400.0, 800.0).into()),
+            ),
+            (
+                PaneKind::Model3D,
+                Rectangle::new(Point::new(408.0, 0.0), (600.0, 400.0).into()),
+            ),
+        ];
+        assert_eq!(
+            locate(regions, Point::new(20.0, 400.0)),
+            Some((PaneKind::Chat, DropEdge::Leading))
+        );
+        assert_eq!(
+            locate(regions, Point::new(390.0, 400.0)),
+            Some((PaneKind::Chat, DropEdge::Trailing))
+        );
+        assert_eq!(
+            locate(regions, Point::new(700.0, 10.0)),
+            Some((PaneKind::Model3D, DropEdge::Top))
+        );
+        assert_eq!(
+            locate(regions, Point::new(700.0, 390.0)),
+            Some((PaneKind::Model3D, DropEdge::Bottom))
+        );
+        // the split gap and the space below the 3D pane hit nothing
+        assert_eq!(locate(regions, Point::new(404.0, 100.0)), None);
+        assert_eq!(locate(regions, Point::new(700.0, 600.0)), None);
+    }
+
+    /// dragPane/dropPane: over itself → no target, no drop; over another
+    /// pane → the move lands on that pane's edge.
+    #[test]
+    fn drag_over_another_pane_drops_on_its_edge() {
+        let layout = LayoutNode::chat_leading();
+        let own = drag_to(PaneKind::Chat, Some((PaneKind::Chat, DropEdge::Bottom)));
+        assert_eq!(own.target, None);
+        assert_eq!(drop(&layout, &own), None);
+        assert_eq!(drop(&layout, &drag_to(PaneKind::Chat, None)), None);
+
+        let over = drag_to(
+            PaneKind::Chat,
+            Some((PaneKind::Schematic, DropEdge::Trailing)),
+        );
+        assert_eq!(over.target, Some(PaneKind::Schematic));
+        let moved = drop(&layout, &over).expect("a targeted drag drops");
+        assert_eq!(
+            moved,
+            moving(
+                &layout,
+                PaneKind::Chat,
+                DropEdge::Trailing,
+                PaneKind::Schematic
+            )
+        );
+        assert_ne!(moved, layout);
     }
 }

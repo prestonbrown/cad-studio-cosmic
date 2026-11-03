@@ -174,7 +174,11 @@ impl Application for CadStudio {
     /// the SIGTERM handler BEFORE any window opens, load the settings and
     /// the recents, decide the first-run sheet, and kick the agent locate
     /// and the python check (:50-52 — the check runs before the locate).
-    fn init(core: Core, _flags: ()) -> (Self, Task<Action<Message>>) {
+    fn init(mut core: Core, _flags: ()) -> (Self, Task<Action<Message>>) {
+        // Every window draws its own header (`decorate`, and the project
+        // toolbar's one-row header); libcosmic's main-window template would
+        // stack its own header bar above whichever window is main.
+        core.window.use_template = false;
         engine::processes::reap_orphans();
 
         let config = Config::new(Self::APP_ID, 1).expect("cosmic-config for app UI state");
@@ -426,7 +430,7 @@ impl Application for CadStudio {
                         .align_x(cosmic::iced::alignment::Horizontal::Center)
                         .align_y(cosmic::iced::alignment::Vertical::Center)
                         .into();
-                    return self.decorate(id, focused, centered, "Welcome to CAD Studio");
+                    return self.decorate_borderless(id, focused, centered);
                 }
                 let body = self
                     .welcome
@@ -450,14 +454,16 @@ impl Application for CadStudio {
                     None => body,
                 };
                 let with_sheet = self.apply_sheets(body);
-                self.decorate(id, focused, with_sheet, "Welcome to CAD Studio")
+                self.decorate_borderless(id, focused, with_sheet)
             }
             Some(WindowKind::Project(project)) => {
                 // ONE header: the window's own view_header is the ProjectToolbar
                 // port and already carries the close button (ProjectWindow.swift:54-56
                 // `.toolbar { ProjectToolbar(project) }` + `.toolbar(removing: .title)`);
                 // decorating again would stack a second bar.
-                let body = project.view().map(move |m| Message::Project(id, m));
+                let body = project
+                    .view_with_focus(focused)
+                    .map(move |m| Message::Project(id, m));
                 // the app-level sheets present over project windows too
                 // (upstream attaches the python and agent-missing sheets to
                 // ProjectWindow, ProjectWindow.swift:59-68; the first-run
@@ -632,6 +638,14 @@ impl CadStudio {
         if matches!(msg, project::Message::CloseRequested) {
             return self.close_window(id);
         }
+        if let project::Message::Window(op) = msg {
+            return match op {
+                project::WindowOp::Drag => cosmic::iced::window::drag(id),
+                project::WindowOp::ToggleMaximize => cosmic::iced::window::toggle_maximize(id),
+                project::WindowOp::Minimize => cosmic::iced::window::minimize(id, true),
+                project::WindowOp::Menu => cosmic::iced::window::show_system_menu(id),
+            };
+        }
         if matches!(msg, project::Message::PresentSetupSheet) {
             // a python-readiness refusal presents the setup sheet over
             // whatever window is up, UNCONDITIONALLY (Project.swift:184-197
@@ -643,14 +657,26 @@ impl CadStudio {
         if matches!(msg, project::Message::PresentAgentSheet) {
             return self.update(Message::PresentAgentSheet);
         }
+        if let project::Message::OpenRecentPath(path) = msg {
+            project.recent_card = None;
+            return self.open_project(path);
+        }
+        if matches!(msg, project::Message::ClearRecents) {
+            // Commands.swift:36-40 `recents.clear()`
+            project.recent_card = Some(Vec::new());
+            self.recents.clear();
+            return Task::none();
+        }
         if let project::Message::App(request) = msg {
             let translated = match request {
                 project::AppRequest::NewProject => welcome::Message::NewProject,
                 project::AppRequest::OpenProject => welcome::Message::OpenExisting,
-                // the recents list lives in the welcome window
-                project::AppRequest::OpenRecent | project::AppRequest::Welcome => {
-                    return self.show_welcome();
+                // "Apri recenti" drops the recents card from the File root
+                project::AppRequest::OpenRecent => {
+                    project.recent_card = Some(self.recents.paths().to_vec());
+                    return Task::none();
                 }
+                project::AppRequest::Welcome => return self.show_welcome(),
                 project::AppRequest::Settings => {
                     return self.open_settings(settings::Tab::General);
                 }
@@ -1115,6 +1141,45 @@ impl CadStudio {
             pop = pop.modal(true);
         }
         pop.into()
+    }
+
+    /// The welcome window's chrome (WelcomeWindow.swift: a full-size
+    /// content view with no title row): the body fills the window, the
+    /// close control floats over its top corner, and any press on the body
+    /// that no control captures drags the window (right-click: the window
+    /// menu).
+    fn decorate_borderless<'a>(
+        &self,
+        id: window::Id,
+        focused: bool,
+        body: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let close = cosmic::widget::button::icon(
+            cosmic::widget::icon::from_name("window-close-symbolic").size(16),
+        )
+        .padding(8)
+        .class(cosmic::theme::Button::HeaderBar)
+        .selected(focused)
+        .on_press(Message::CloseWindow(id));
+        let controls = container(close)
+            .width(Length::Fill)
+            .align_x(cosmic::iced::alignment::Horizontal::Right)
+            .padding([7, 7]);
+        let draggable =
+            cosmic::widget::mouse_area(container(body).width(Length::Fill).height(Length::Fill))
+                .on_drag(Message::DragWindow(id))
+                .on_right_press(Message::WindowMenu(id));
+        container(
+            cosmic::iced::widget::Stack::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .push(draggable)
+                .push(controls),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::WindowBackground)
+        .into()
     }
 
     /// Give a window its CSD header bar and background.
