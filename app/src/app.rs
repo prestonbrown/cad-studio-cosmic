@@ -313,9 +313,23 @@ impl Application for CadStudio {
             Message::PresentAgentSheet => {
                 // ChatView.swift:101-102: `AgentLocator.current
                 // .isMissingSheetPresented = true` — the sheet, never the
-                // settings window. No red missing line: this action rides
-                // an auth-failed row, whose engine by definition ran.
-                self.present_agent_sheet(false);
+                // settings window. The field seeds from the persisted
+                // custom path (upstream's @AppStorage binding shows the
+                // stored value), and no red missing line: this action
+                // rides an auth-failed row, whose engine by definition
+                // ran.
+                if self.agent_missing.is_none() {
+                    let kind = self.settings.agent_kind();
+                    self.agent_missing = Some(sheets::AgentMissing {
+                        kind,
+                        custom_path: self
+                            .settings
+                            .agent_path(kind)
+                            .unwrap_or_default()
+                            .to_string(),
+                        ..sheets::AgentMissing::default()
+                    });
+                }
                 Task::none()
             }
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
@@ -327,8 +341,24 @@ impl Application for CadStudio {
             Message::AgentLocated(found) => {
                 if found {
                     self.agent_missing = None;
-                } else {
-                    self.present_agent_sheet(true);
+                } else if self.agent_missing.is_none() {
+                    // the missing line shows from first presentation
+                    // (AgentMissingSheet.swift:42 gates on
+                    // `locator.state == .missing`, not on a Verify)
+                    let kind = self.settings.agent_kind();
+                    self.agent_missing = Some(sheets::AgentMissing {
+                        kind,
+                        // the field opens on the persisted custom path
+                        // (upstream's @AppStorage binding), so an untouched
+                        // Verify cannot clear a stored path
+                        custom_path: self
+                            .settings
+                            .agent_path(kind)
+                            .unwrap_or_default()
+                            .to_string(),
+                        last_verified_missing: true,
+                        ..sheets::AgentMissing::default()
+                    });
                 }
                 Task::none()
             }
@@ -646,31 +676,6 @@ impl CadStudio {
         }
     }
 
-    /// Present the agent-missing sheet unless it is already up (upstream
-    /// `isMissingSheetPresented = true`). The field seeds from the
-    /// persisted custom path (upstream's @AppStorage binding shows the
-    /// stored value, so an untouched Verify cannot clear it). `missing`
-    /// shows the red line from first presentation, the way
-    /// AgentMissingSheet.swift:42 gates on `locator.state == .missing`
-    /// rather than on a Verify.
-    fn present_agent_sheet(&mut self, missing: bool) {
-        if let Some(sheet) = self.agent_missing.as_mut() {
-            sheet.last_verified_missing |= missing;
-            return;
-        }
-        let kind = self.settings.agent_kind();
-        self.agent_missing = Some(sheets::AgentMissing {
-            kind,
-            custom_path: self
-                .settings
-                .agent_path(kind)
-                .unwrap_or_default()
-                .to_string(),
-            last_verified_missing: missing,
-            ..sheets::AgentMissing::default()
-        });
-    }
-
     fn update_project(&mut self, id: window::Id, msg: project::Message) -> Task<Action<Message>> {
         let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) else {
             return Task::none();
@@ -708,18 +713,6 @@ impl CadStudio {
         if matches!(msg, project::Message::PresentAgentSheet) {
             return self.update(Message::PresentAgentSheet);
         }
-        // a turn that found no agent executable presents the sheet, every
-        // turn it happens (AgentSession.swift:41-47 resolves per turn and
-        // sets isMissingSheetPresented with the locator state .missing);
-        // the window still folds the event into its chat row and activity
-        let agent_missing = matches!(
-            msg,
-            project::Message::Bridge(crate::bridge::Message::Event(
-                engine::agent::session::EngineEvent::TurnFinished(
-                    engine::agent::session::TurnOutcome::AgentMissing
-                )
-            ))
-        );
         if let project::Message::OpenRecentPath(path) = msg {
             project.recent_card = None;
             return self.open_project(path);
@@ -748,9 +741,6 @@ impl CadStudio {
             return self.update_welcome(translated);
         }
         let task = project.update(msg).map(move |m| Message::Project(id, m));
-        if agent_missing {
-            self.present_agent_sheet(true);
-        }
         task.map(Action::App)
     }
 
@@ -2065,78 +2055,6 @@ mod shell_behavior {
             f.app.windows.get(&f.welcome),
             Some(WindowKind::Welcome)
         ));
-    }
-
-    /// 3.9: a turn that finds no agent executable presents the agent sheet
-    /// with the missing line, on every such turn (AgentSession.swift:41-47
-    /// resolves per turn). The outcome comes from a real bridge whose
-    /// scripted-agent override names a file that does not exist.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn every_agent_missing_turn_presents_the_agent_sheet() {
-        use crate::bridge::{self, Bridge};
-        use cosmic::iced::futures::StreamExt;
-        use engine::agent::session::{EngineEvent, TurnOutcome};
-
-        let _lang = crate::localize::pin_en();
-        let _guard = crate::bridge::tests::ENV_LOCK.lock().await;
-        let mut f = fixture();
-        let id = open_real_project(&mut f, "Staffa");
-        // SAFETY: agent-fake env holds the bridge suite's ENV_LOCK.
-        unsafe {
-            std::env::set_var("CAD_TEST_CLAUDE", f.dir.join("vanished-claude"));
-        }
-        let (agent, mut messages) = Bridge::launch(EngineSettings::default(), f.dir.join("Staffa"));
-        agent.mark_python_ready_for_test();
-        let mut outcomes = Vec::new();
-        for prompt in ["a bracket", "a bracket, again"] {
-            agent
-                .enqueue(prompt.into(), Vec::new())
-                .expect("a send with python ready is not refused");
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let message = tokio::time::timeout_at(deadline, messages.next())
-                    .await
-                    .expect("the turn ends within 5 s")
-                    .expect("the bridge stream stays open");
-                if let bridge::Message::Event(EngineEvent::TurnFinished(outcome)) = &message {
-                    assert_eq!(outcome, &TurnOutcome::AgentMissing);
-                    outcomes.push(message);
-                    break;
-                }
-            }
-        }
-        unsafe {
-            std::env::remove_var("CAD_TEST_CLAUDE");
-        }
-
-        for (turn, finished) in outcomes.into_iter().enumerate() {
-            assert!(f.app.agent_missing.is_none(), "turn {turn}: no sheet yet");
-            let _ = f
-                .app
-                .update(Message::Project(id, project::Message::Bridge(finished)));
-            let sheet = f
-                .app
-                .agent_missing
-                .as_ref()
-                .unwrap_or_else(|| panic!("turn {turn}: the sheet is presented"));
-            assert!(sheet.last_verified_missing, "the missing line shows");
-            assert_eq!(sheet.kind, f.app.settings.agent_kind());
-            // Chiudi; the next missing turn presents it again
-            let _ = f
-                .app
-                .update(Message::AgentSheet(sheets::AgentMessage::Close));
-        }
-    }
-
-    /// A Configure-row presentation that a missing turn then finds up
-    /// turns its missing line on (the locator state is .missing).
-    #[test]
-    fn a_missing_turn_marks_an_open_agent_sheet_missing() {
-        let mut f = fixture();
-        f.app.present_agent_sheet(false);
-        assert!(!f.app.agent_missing.as_ref().unwrap().last_verified_missing);
-        f.app.present_agent_sheet(true);
-        assert!(f.app.agent_missing.as_ref().unwrap().last_verified_missing);
     }
 
     /// Only bare Return / Esc are sheet keys.
