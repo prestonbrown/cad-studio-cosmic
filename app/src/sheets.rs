@@ -15,9 +15,9 @@
 //!
 //! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
 //! copy button; pickers are compact dropdowns, and the print-preferences
-//! section renders as macOS's grouped-Form rows — label leading, control
-//! trailing, the box spanning its surface. Sheets render as Dialog
-//! cards (opaque, rounded, shadowed) in a modal popover, with scrollable
+//! section renders as a grouped Form ([`ui::form`]). Sheets are COSMIC
+//! dialog cards: the welcome window's over its dimmed body ([`present`]),
+//! the python and agent-missing sheets in a modal popover with scrollable
 //! content and pinned action rows so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
 //! mono log. User-visible strings read through `fl!` at render time (the
@@ -34,8 +34,8 @@ use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
-use crate::fl;
 use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
+use crate::{fl, typography};
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -140,8 +140,9 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
             Tone::Warning,
             Backdrop::Plain,
         ))
-        .push(bold(fl!("non-trovato", agent = engine), 18.0));
-    let intro = body(fl!(
+        .align_y(cosmic::iced::Alignment::Center)
+        .push(headline(fl!("non-trovato", agent = engine)));
+    let intro = callout(fl!(
         "cad-studio-usa-installato-su-questo-mac-installalo-dal-terminale-con-uno-dei-comandi-seguenti-poi-esegui-per-effettuare-l-accesso",
         arg = engine,
         arg_2 = sheet.kind.login_command()
@@ -155,18 +156,29 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
             AgentMessage::Copy(command.to_string()),
         ));
     }
+    // `LabeledContent` at `.callout`: the label beside the field
+    // (AgentMissingSheet.swift:33-38)
     stack = stack
-        .push(body(fl!("percorso-dell-eseguibile")))
         .push(
-            text_input::text_input(custom_path_placeholder(sheet.kind), &sheet.custom_path)
-                .on_input(AgentMessage::CustomPath)
-                // Return runs Verify (upstream's default action)
-                .on_submit(|_| AgentMessage::Verify)
-                .font(cosmic::font::mono())
-                .size(14),
+            Row::new()
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(callout(fl!("percorso-dell-eseguibile")))
+                .push(
+                    text_input::text_input(
+                        custom_path_placeholder(sheet.kind),
+                        &sheet.custom_path,
+                    )
+                    .on_input(AgentMessage::CustomPath)
+                    // Return runs Verify (upstream's default action)
+                    .on_submit(|_| AgentMessage::Verify)
+                    .font(cosmic::font::mono())
+                    .size(typography::CALLOUT)
+                    .width(Length::Fill),
+                ),
         )
         .push_maybe(sheet.last_verified_missing.then(|| {
-            body(fl!("nessun-eseguibile-funzionante-trovato"))
+            callout(fl!("nessun-eseguibile-funzionante-trovato"))
                 .class(Tone::Danger.text(Backdrop::Plain))
         }));
     let actions = Row::new()
@@ -196,7 +208,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         .push(actions);
     container(card)
         .padding(20)
-        .width(560.0)
+        .width(SHEET_WIDTH)
         .class(cosmic::theme::Container::Dialog(true))
         .into()
 }
@@ -296,146 +308,151 @@ pub enum PrintPrefMessage {
     Unit(MeasurementUnit),
 }
 
-/// The PrintPreferencesSection port (PrintPreferences.swift:111-134): the
-/// section's grouped box — one row per setting, hairline-separated, the box
-/// spanning its surface — plus the footer below it. One renderer for both
-/// surfaces that embed it: the first-run SetupSheet and the settings
-/// window's Generale tab (SettingsView.swift:57), whose own rows use the
-/// same Form-row idiom (SettingsView.swift:30-52), so the one shape serves
-/// both. Compact dropdowns (the sheets idiom; a nested popup inside the
-/// modal sheet clipped in the 460 px welcome window).
-pub fn view_print_preferences<'a>(
+/// The PrintPreferencesSection port (PrintPreferences.swift:111-134): one
+/// grouped section — the printer-type picker, the model field, the unit
+/// picker — and its footer. One renderer for both surfaces that embed it:
+/// the first-run SetupSheet and the settings window's Generale tab
+/// (SettingsView.swift:57). Returns the section and the footer as two
+/// form parts, for the caller's [`ui::form::form`].
+pub fn print_preferences_parts<'a>(
     printer_type: PrinterType,
     printer_model: &'a str,
     unit: MeasurementUnit,
-) -> Element<'a, PrintPrefMessage> {
+) -> [Element<'a, PrintPrefMessage>; 2] {
     let printer_types = PRINTER_TYPES.map(printer_type_title).to_vec();
     let units = MEASUREMENT_UNITS.map(measurement_unit_title).to_vec();
-    let form = Column::new()
-        .push(form_row(
-            body(fl!("tipo-di-stampante")),
-            trailing(cosmic::widget::dropdown(
-                printer_types,
-                Some(printer_type as usize),
-                |index| PrintPrefMessage::PrinterType(PRINTER_TYPES[index]),
-            )),
-        ))
-        .push(cosmic::widget::divider::horizontal::default())
-        .push(form_row(
-            body(fl!("modello-2")),
-            text_input::text_input(fl!("facoltativo-ad-esempio-bambu-lab-p1s"), printer_model)
-                .on_input(PrintPrefMessage::PrinterModel)
-                .size(14)
-                .width(Length::Fill)
-                .into(),
-        ))
-        .push(cosmic::widget::divider::horizontal::default())
-        .push(form_row(
-            body(fl!("unit-di-misura")),
-            trailing(cosmic::widget::dropdown(
-                units,
-                Some(unit as usize),
-                |index| PrintPrefMessage::Unit(MEASUREMENT_UNITS[index]),
-            )),
-        ));
-    Column::new()
-        .spacing(8)
-        .push(container(form).width(Length::Fill).class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true)))
-        .push(
-            body(fl!(
-                "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
-            ))
-            .class(Tone::Secondary.text(Backdrop::Plain)),
-        )
-        .into()
-}
-
-/// One grouped-Form row (the `.formStyle(.grouped)` row shape,
-/// PrintPreferences.swift:118-127): label at the leading edge, control at
-/// the trailing one, the pair spanning the box.
-fn form_row<'a, Message>(
-    label: Text<'a>,
-    control: Element<'a, Message>,
-) -> Row<'a, Message, cosmic::theme::Theme, cosmic::Renderer> {
-    Row::new()
-        .padding([8.0, 12.0])
-        .spacing(12.0)
-        .align_y(cosmic::iced::alignment::Alignment::Center)
-        .push(label)
-        .push(control)
-}
-
-/// A shrink-wrapped control pinned to its row's trailing edge — where a
-/// Form row's picker value + chevron sit.
-fn trailing<'a, Message: 'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(control)
-        .width(Length::Fill)
-        .align_x(cosmic::iced::alignment::Horizontal::Right)
-        .into()
+    let section = ui::form::section(vec![
+        ui::form::row(
+            fl!("tipo-di-stampante"),
+            cosmic::widget::dropdown(printer_types, Some(printer_type as usize), |index| {
+                PrintPrefMessage::PrinterType(PRINTER_TYPES[index])
+            }),
+        ),
+        ui::form::row(
+            fl!("modello-2"),
+            ui::form::field(
+                fl!("facoltativo-ad-esempio-bambu-lab-p1s"),
+                printer_model,
+                false,
+                PrintPrefMessage::PrinterModel,
+            ),
+        ),
+        ui::form::row(
+            fl!("unit-di-misura"),
+            cosmic::widget::dropdown(units, Some(unit as usize), |index| {
+                PrintPrefMessage::Unit(MEASUREMENT_UNITS[index])
+            }),
+        ),
+    ]);
+    let footer = ui::form::footer(fl!(
+        "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
+    ));
+    [section, footer]
 }
 
 /// SetupSheet (SetupSheet.swift:6-41): the 64 px app icon beside the
-/// headline/callout stack (upstream's `HStack(spacing: 14)`, :8-22 — the
-/// same head shape as the python sheet's), the print-preferences section
-/// as the sheet-spanning grouped Form (:23-28), and Continue pinned
-/// bottom-right (:29-36), on upstream's 520-wide frame (:39). The picks
-/// batch into the settings on Continue (the port's staged write;
-/// upstream's section binds @AppStorage live and Continue writes only
-/// hasCompletedSetup).
+/// headline/callout stack (`HStack(spacing: 14)`, :8-22), the
+/// print-preferences section as a grouped Form 20 px below it (:23-28),
+/// and Continue bottom-right (:29-36), on upstream's 520-wide frame
+/// (:39). The picks batch into the settings on Continue (the port's
+/// staged write; upstream's section binds @AppStorage live and Continue
+/// writes only hasCompletedSetup).
 pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
-    let head = Row::new()
-        .spacing(14)
-        .align_y(cosmic::iced::alignment::Alignment::Center)
-        .push(ui::icon::named(APP_ICON, 64))
-        .push(
-            Column::new()
-                .spacing(4)
-                .push(bold(fl!("benvenuto-in-cad-studio"), 18.0))
-                .push(
-                    body(fl!(
-                        "indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"
-                    ))
-                    .class(Tone::Secondary.text(Backdrop::Plain)),
-                ),
-        );
-
-    let form = view_print_preferences(sheet.printer_type, &sheet.printer_model, sheet.unit).map(
-        |message| match message {
-            PrintPrefMessage::PrinterType(kind) => SetupMessage::PrinterType(kind),
-            PrintPrefMessage::PrinterModel(model) => SetupMessage::PrinterModel(model),
-            PrintPrefMessage::Unit(unit) => SetupMessage::Unit(unit),
-        },
+    let head = sheet_head(
+        fl!("benvenuto-in-cad-studio"),
+        fl!("indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"),
+        cosmic::iced::Alignment::Center,
     );
+    let form = ui::form::form(
+        print_preferences_parts(sheet.printer_type, &sheet.printer_model, sheet.unit)
+            .into_iter()
+            .collect(),
+    );
+    let form: Element<'_, SetupMessage> = form.map(|message| match message {
+        PrintPrefMessage::PrinterType(kind) => SetupMessage::PrinterType(kind),
+        PrintPrefMessage::PrinterModel(model) => SetupMessage::PrinterModel(model),
+        PrintPrefMessage::Unit(unit) => SetupMessage::Unit(unit),
+    });
 
-    // The form scrolls if it ever outgrows the cap (a small window);
-    // Continue stays pinned below it, never scrolled away.
-    let stack = Column::new().spacing(14).push(head).push(form);
     let actions = Row::new().push(Space::new().width(Length::Fill)).push(
         button::text(fl!("continua"))
             .class(cosmic::theme::Button::Suggested)
             .on_press(SetupMessage::Continue),
     );
-    let card = Column::new()
-        .spacing(14)
-        .push(container(scrollable(stack)).max_height(420.0))
+    // the form's footer carries its own bottom gap before Continue
+    let stack = Column::new()
+        .push(head)
+        .push(Space::new().height(ui::form::MARGIN))
+        .push(form)
         .push(actions);
-    container(card)
+    container(stack)
         .padding(20)
-        .width(520.0)
+        .width(SHEET_WIDTH)
         .class(cosmic::theme::Container::Dialog(true))
+        .into()
+}
+
+/// The sheets' frame width (`.frame(width: 520)`).
+const SHEET_WIDTH: f32 = 520.0;
+
+/// The app-icon head the setup and python sheets open with: the 64 px icon
+/// beside the `.headline` title over the secondary `.callout` description
+/// (`HStack(spacing: 14)` / `VStack(alignment: .leading, spacing: 4)`).
+fn sheet_head<'a, M: 'a>(
+    title: String,
+    description: String,
+    align: cosmic::iced::Alignment,
+) -> Element<'a, M> {
+    Row::new()
+        .spacing(14)
+        .align_y(align)
+        .push(ui::icon::app(64.0))
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(headline(title))
+                .push(callout(description).class(Tone::Secondary.text(Backdrop::Plain))),
+        )
+        .into()
+}
+
+/// `card` presented as a sheet over `body`: the body dimmed under the
+/// theme's dialog shade, the card centered on it. Presses that miss the
+/// card land on the shade (`swallow`), never on the body below.
+pub fn present<'a, M: Clone + 'a>(
+    body: Element<'a, M>,
+    card: Element<'a, M>,
+    swallow: M,
+) -> Element<'a, M> {
+    let shade = cosmic::widget::mouse_area(
+        container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(cosmic::iced::Alignment::Center)
+            .align_y(cosmic::iced::Alignment::Center)
+            .class(cosmic::theme::Container::custom(|theme| {
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(
+                        theme.cosmic().shade.into(),
+                    )),
+                    ..Default::default()
+                }
+            })),
+    )
+    .on_press(swallow);
+    cosmic::iced::widget::Stack::new()
+        .push(body)
+        .push(shade)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 
 // ─── python setup sheet ─────────────────────────────────────────────────────
 
-/// The app icon's freedesktop name (upstream shows
-/// NSApp.applicationIconImage; the freedesktop lookup resolves once the
-/// app ships its icon — libcosmic's own About-page convention). Keep in
-/// sync with `CadStudio::APP_ID`.
+/// The app icon's freedesktop name, which the desktop file and the
+/// installed icon carry. Keep in sync with `CadStudio::APP_ID`.
 pub const APP_ICON: &str = "net.brownhouse.CadStudio";
-
-/// The python sheet's head icon ([`APP_ICON`]).
-const PYTHON_SHEET_ICON: &str = APP_ICON;
 
 /// PythonSetupSheet messages. The driver kicks are the shell's: it acts on
 /// `Install` (reinstall through the engine seams) and folds `Event`s into
@@ -575,20 +592,13 @@ pub struct PythonSetup {
 /// disclosure over the monospaced log, and the state-driven button row.
 /// Width 520, padding 20.
 pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
-    let head = Row::new()
-        .spacing(14)
-        .push(ui::icon::named(PYTHON_SHEET_ICON, 64))
-        .push(
-            Column::new()
-                .spacing(4)
-                .push(bold(fl!("installazione-componenti"), 18.0))
-                .push(
-                    body(fl!(
-                        "cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-per-generare-modelli-e-tavole-tecniche-l-installazione-scarica-circa-200-mb"
-                    ))
-                    .class(Tone::Secondary.text(Backdrop::Plain)),
-                ),
-        );
+    let head = sheet_head(
+        fl!("installazione-componenti"),
+        fl!(
+            "cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-per-generare-modelli-e-tavole-tecniche-l-installazione-scarica-circa-200-mb"
+        ),
+        cosmic::iced::Alignment::Start,
+    );
     let state = &sheet.state;
     let mut stack = Column::new().spacing(14).push(head);
     // the bar shows while installing, or once any progress moved (a failed
@@ -602,7 +612,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
                     0.0..=1.0,
                     state.progress as f32,
                 ))
-                .push(body(state.step.clone()).class(Tone::Secondary.text(Backdrop::Plain))),
+                .push(callout(state.step.clone()).class(Tone::Secondary.text(Backdrop::Plain))),
         );
     }
     if let EnvState::Failed(message) = &state.state {
@@ -613,7 +623,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
                     Symbol::XmarkOctagonFillMulticolor,
                     18.0,
                 ))
-                .push(body(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
+                .push(callout(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
         );
     }
     // the disclosure (upstream DisclosureGroup): the label toggles the
@@ -639,7 +649,19 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             )
             .padding(8)
             .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true)),
+            // `textBackgroundColor` in a 6 pt rounded rectangle
+            .class(cosmic::theme::Container::custom(|theme| {
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(
+                        ui::surface::text_background(theme),
+                    )),
+                    border: cosmic::iced::Border {
+                        radius: Corner::S.radius(theme),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })),
         );
     }
     let actions = Row::new()
@@ -654,7 +676,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         .push(actions);
     container(card)
         .padding(20)
-        .width(520.0)
+        .width(SHEET_WIDTH)
         .class(cosmic::theme::Container::Dialog(true))
         .into()
 }
@@ -718,11 +740,19 @@ fn body<'a>(label: impl Into<String>) -> Text<'a> {
     cosmic::widget::text(label.into()).wrapping(Wrapping::Word)
 }
 
-fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
-    body(label).size(size).font(cosmic::iced::font::Font {
-        weight: cosmic::iced::font::Weight::Bold,
-        ..cosmic::font::default()
-    })
+/// `.headline`: semibold at body size.
+fn headline<'a>(label: impl Into<String>) -> Text<'a> {
+    body(label)
+        .size(typography::HEADLINE)
+        .font(cosmic::iced::font::Font {
+            weight: cosmic::iced::font::Weight::Semibold,
+            ..cosmic::font::default()
+        })
+}
+
+/// `.callout`.
+fn callout<'a>(label: impl Into<String>) -> Text<'a> {
+    body(label).size(typography::CALLOUT)
 }
 
 #[cfg(test)]
@@ -887,7 +917,7 @@ mod tests {
         }
         sheet.printer_model = "Bambu Lab P1S".into();
         let _ = view_setup(&sheet);
-        let _ = view_print_preferences(
+        let _ = print_preferences_parts(
             PrinterType::FdmMultiMaterial,
             &String::new(),
             MeasurementUnit::Inches,

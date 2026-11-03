@@ -37,15 +37,16 @@ use std::path::{Path, PathBuf};
 use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::widget::segmented_button::{Entity, SingleSelectModel};
-use cosmic::widget::{Column, Row, Space, button, container, scrollable, text_input};
+use cosmic::iced::Alignment;
+use cosmic::iced::font::Weight;
+use cosmic::widget::{Column, Row, Space, button, container, scrollable};
 use engine::agent::locator::{AgentKind, AgentPath};
 use engine::python::env::EnvState;
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
-use crate::fl;
 use crate::sheets::PrintPrefMessage;
-use crate::ui::{Backdrop, Tone};
+use crate::ui::{self, Backdrop, Corner, Symbol, Tone, form};
+use crate::{fl, typography};
 
 /// Upstream's window geometry (SettingsView.swift:19 `.frame(width: 600)`).
 pub const WIDTH: f32 = 600.0;
@@ -54,9 +55,10 @@ pub const WIDTH: f32 = 600.0;
 /// the window.
 pub const HEIGHT: f32 = 560.0;
 
-/// The About window's geometry (upstream's is a small system panel).
-pub const ABOUT_WIDTH: f32 = 400.0;
-pub const ABOUT_HEIGHT: f32 = 280.0;
+/// The About window's geometry: AppKit's standard About panel, 284 wide,
+/// 206 under its title bar (shots/upstream/about.png), plus the header.
+pub const ABOUT_WIDTH: f32 = 284.0;
+pub const ABOUT_HEIGHT: f32 = 270.0;
 
 /// The two engines, picker order (AgentEngine.allCases).
 pub const ENGINES: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
@@ -98,6 +100,16 @@ impl Tab {
             Tab::Agent => fl!("agente"),
             Tab::Python => fl!("python"),
             Tab::Advanced => fl!("avanzate"),
+        }
+    }
+
+    /// The tab item's symbol (SettingsView.swift:6-17's `systemImage`).
+    pub fn symbol(self) -> Symbol {
+        match self {
+            Tab::General => Symbol::Gearshape,
+            Tab::Agent => Symbol::Sparkles,
+            Tab::Python => Symbol::ChevronLeftForwardslashChevronRight,
+            Tab::Advanced => Symbol::Gearshape2,
         }
     }
 }
@@ -254,7 +266,7 @@ impl LocateState {
 // ─── the window state ───────────────────────────────────────────────────────
 
 /// The settings window's state: the selected tab, the per-engine locate
-/// rows, the engine picker's segmented model, and the field mirrors. The
+/// rows, and the field mirrors. The
 /// mirrors seed from the settings on open; every write folds the same
 /// message into both the mirror ([`SettingsState::update`]) and the
 /// persisted settings ([`stage`]) so the two never drift.
@@ -262,11 +274,6 @@ pub struct SettingsState {
     pub tab: Tab,
     /// Per-engine locate rows, [`ENGINES`] order.
     pub locate: [LocateState; 2],
-    /// The engine picker's segmented model (Claude | Codex, upstream
-    /// `.pickerStyle(.segmented)`); the entities ride the state so the
-    /// view's 'static `on_activate` closure can identify them.
-    engine_model: SingleSelectModel,
-    engine_entities: [Entity; 2],
     /// Generale: the default project location and the language override.
     pub location: PathBuf,
     pub language: LanguageChoice,
@@ -292,24 +299,10 @@ impl SettingsState {
     /// kicks both locates when it opens the window — upstream's
     /// auto-locate on section appear).
     pub fn new(settings: &Settings) -> Self {
-        let mut engine_model = SingleSelectModel::default();
-        let mut ids = Vec::with_capacity(2);
-        for kind in ENGINES {
-            ids.push(
-                engine_model
-                    .insert()
-                    .text(kind.display_name())
-                    .data(kind)
-                    .id(),
-            );
-        }
         let engine = settings.agent_kind();
-        engine_model.activate_position(engine_index(engine) as u16);
         Self {
             tab: Tab::General,
             locate: [LocateState::Unknown, LocateState::Unknown],
-            engine_model,
-            engine_entities: [ids[0], ids[1]],
             location: settings.default_project_location.clone(),
             language: LanguageChoice::from_setting(settings.language.as_deref()),
             printer_type: settings.printer_type,
@@ -331,24 +324,6 @@ impl SettingsState {
         }
     }
 
-    /// The segmented picker's entity for `kind` (the view's 'static
-    /// activation closure matches on it).
-    pub(crate) fn engine_entity(&self, kind: AgentKind) -> Entity {
-        self.engine_entities[engine_index(kind)]
-    }
-
-    /// The engine picker widget over the state's model (upstream
-    /// `.pickerStyle(.segmented)`).
-    pub(crate) fn engine_picker(
-        &self,
-    ) -> cosmic::widget::segmented_button::HorizontalSegmentedButton<
-        '_,
-        cosmic::widget::segmented_button::SingleSelect,
-        Message,
-    > {
-        cosmic::widget::segmented_control::horizontal(&self.engine_model)
-    }
-
     /// Fold one message into the mirror — the field messages' other half
     /// is [`stage`]; the effect messages keep their state in the app.
     pub fn update(&mut self, message: &Message) {
@@ -362,11 +337,7 @@ impl SettingsState {
                 PrintPrefMessage::PrinterModel(model) => self.printer_model = model.clone(),
                 PrintPrefMessage::Unit(unit) => self.measurement_unit = *unit,
             },
-            Message::Engine(engine) => {
-                self.engine = *engine;
-                self.engine_model
-                    .activate_position(engine_index(*engine) as u16);
-            }
+            Message::Engine(engine) => self.engine = *engine,
             Message::CustomPath(kind, path) => {
                 self.custom_paths[engine_index(*kind)] = path.clone()
             }
@@ -493,24 +464,16 @@ pub fn stage(message: &Message, settings: &mut Settings) -> bool {
 
 // ─── the window view ────────────────────────────────────────────────────────
 
-/// The window body (SettingsView.swift:3-21): the tab row, then the
-/// selected tab. `python` is the app's shared environment state — the
-/// Python tab renders it, the app's drivers own it.
+/// The window body (SettingsView.swift:3-21): the toolbar's tab items,
+/// then the selected tab's grouped Form. `python` is the app's shared
+/// environment state — the Python tab renders it, the app's drivers own
+/// it.
 pub fn view<'a>(state: &'a SettingsState, python: &EnvState) -> Element<'a, Message> {
-    let mut tabs = Row::new().spacing(8).padding([16, 20, 8, 20]);
+    let mut tabs = Row::new().spacing(TAB_GAP).align_y(Alignment::Center);
     for tab in Tab::ALL {
-        let selected = state.tab == tab;
-        tabs = tabs.push(
-            button::text(tab.title())
-                .class(if selected {
-                    cosmic::theme::Button::Suggested
-                } else {
-                    cosmic::theme::Button::Standard
-                })
-                .on_press(Message::Tab(tab)),
-        );
+        tabs = tabs.push(tab_item(tab, state.tab == tab));
     }
-    let body = match state.tab {
+    let parts = match state.tab {
         Tab::General => view_general(state),
         Tab::Agent => view_agent(state),
         Tab::Python => view_python(python),
@@ -520,25 +483,71 @@ pub fn view<'a>(state: &'a SettingsState, python: &EnvState) -> Element<'a, Mess
         .push(
             container(tabs)
                 .width(Length::Fill)
-                .align_x(cosmic::iced::alignment::Horizontal::Center),
+                .padding([4, 0, 8, 0])
+                .align_x(Alignment::Center),
         )
-        .push(cosmic::widget::divider::horizontal::default())
         .push(scrollable(
-            container(body).width(Length::Fill).padding([16, 20]),
+            container(form::form(parts)).width(Length::Fill).padding([
+                form::MARGIN,
+                form::MARGIN,
+                form::MARGIN - FOOTER_TAIL,
+                form::MARGIN,
+            ]),
         ))
         .height(Length::Fill)
         .into()
 }
 
+/// Between two toolbar tab items.
+const TAB_GAP: f32 = 2.0;
+/// The tab item's symbol height.
+const TAB_SYMBOL: f32 = 22.0;
+/// The selected tab item's fill against [`Tone::Quaternary`] (222 on the
+/// 236 toolbar).
+const TAB_SELECTED_FILL: f32 = 0.55;
+/// The last footer's own bottom gap, folded into the window's margin.
+const FOOTER_TAIL: f32 = 16.0;
+
+/// One toolbar tab item (the settings `TabView`'s toolbar style): the
+/// symbol over the label; the selected item in the accent on a rounded
+/// wash, the others secondary.
+fn tab_item(tab: Tab, selected: bool) -> Element<'static, Message> {
+    let tone = if selected { Tone::Accent } else { Tone::Secondary };
+    let face = Column::new()
+        .spacing(3)
+        .align_x(Alignment::Center)
+        .push(ui::icon::icon(tab.symbol(), TAB_SYMBOL, tone, Backdrop::Titlebar))
+        .push(
+            cosmic::widget::text(tab.title())
+                .size(typography::SUBHEADLINE)
+                .class(tone.text(Backdrop::Titlebar)),
+        );
+    let cell = container(face)
+        .padding([3, 8])
+        .height(Length::Fixed(45.0))
+        .align_y(Alignment::Center);
+    let cell = if selected {
+        cell.class(ui::surface::fill(
+            Tone::Quaternary,
+            TAB_SELECTED_FILL,
+            Corner::S,
+            false,
+        ))
+    } else {
+        cell
+    };
+    ui::button::borderless(cell, Some(Message::Tab(tab))).into()
+}
+
 /// Generale (SettingsView.swift:23-62): the default project location +
 /// Scegli…, the language picker with the next-launch footer, then the
 /// shared print-preferences section (:57).
-fn view_general(state: &SettingsState) -> Element<'_, Message> {
+fn view_general(state: &SettingsState) -> Vec<Element<'_, Message>> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let location_row = Row::new()
+    let location = Row::new()
         .spacing(8)
-        .push(mono(abbreviate_with_tilde(&state.location, &home)))
-        .push(Space::new().width(Length::Fill))
+        .align_y(Alignment::Center)
+        .push(path_text(abbreviate_with_tilde(&state.location, &home)))
         .push(
             button::text(fl!("scegli-2"))
                 .class(cosmic::theme::Button::Standard)
@@ -552,152 +561,160 @@ fn view_general(state: &SettingsState) -> Element<'_, Message> {
         .iter()
         .position(|choice| *choice == state.language)
         .unwrap_or(0);
-    section(fl!("posizione-dei-nuovi-progetti"))
-        .push(location_row)
-        .push(space())
-        .push(section(fl!("lingua")))
-        .push(cosmic::widget::dropdown(
-            language_titles,
-            Some(language_row),
-            |index| Message::Language(LanguageChoice::ALL[index]),
-        ))
-        .push(footer(fl!(
+    let mut parts = vec![
+        form::section(vec![form::row(fl!("posizione-dei-nuovi-progetti"), location)]),
+        form::section(vec![form::row(
+            fl!("lingua"),
+            cosmic::widget::dropdown(language_titles, Some(language_row), |index| {
+                Message::Language(LanguageChoice::ALL[index])
+            }),
+        )]),
+        form::footer(fl!(
             "la-nuova-lingua-viene-applicata-al-prossimo-avvio-di-cad-studio"
-        )))
-        .push(space())
-        .push(
-            crate::sheets::view_print_preferences(
-                state.printer_type,
-                &state.printer_model,
-                state.measurement_unit,
-            )
-            .map(Message::PrintPref),
+        )),
+    ];
+    parts.extend(
+        crate::sheets::print_preferences_parts(
+            state.printer_type,
+            &state.printer_model,
+            state.measurement_unit,
         )
-        .into()
+        .map(|part| part.map(Message::PrintPref)),
+    );
+    parts
 }
 
+/// The engine picker's width (upstream's segmented control spans about
+/// half the row).
+const ENGINE_PICKER_WIDTH: f32 = 300.0;
+
 /// Agente (SettingsView.swift:64-169).
-fn view_agent(state: &SettingsState) -> Element<'_, Message> {
-    let claude_entity = state.engine_entity(AgentKind::Claude);
-    let codex_entity = state.engine_entity(AgentKind::Codex);
-    let fallback = state.engine;
-    let engine_picker = state.engine_picker().on_activate(move |entity| {
-        Message::Engine(if entity == codex_entity {
-            AgentKind::Codex
-        } else if entity == claude_entity {
-            AgentKind::Claude
-        } else {
-            fallback
-        })
-    });
+fn view_agent(state: &SettingsState) -> Vec<Element<'_, Message>> {
+    let engines = ENGINES
+        .iter()
+        .map(|kind| (kind.display_name().to_string(), Some(Message::Engine(*kind))))
+        .collect();
+    let picker = container(ui::segmented::segmented(
+        engines,
+        Some(engine_index(state.engine)),
+        ui::segmented::Look::Raised,
+        Length::Fill,
+    ))
+    .width(Length::Fixed(ENGINE_PICKER_WIDTH));
     let effort_titles = Effort::ALL.iter().map(|e| e.title()).collect::<Vec<_>>();
     let effort_row = Effort::ALL
         .iter()
         .position(|e| *e == state.effort)
         .unwrap_or(0);
-    let mut column = section(fl!("agente-2"))
-        .push(engine_picker)
-        .push(footer(fl!(
+    let mut parts = vec![
+        form::section(vec![form::row(fl!("agente-2"), picker)]),
+        form::footer(fl!(
             "cad-studio-usa-l-agente-installato-su-questo-mac-e-il-tuo-piano-puoi-cambiarlo-in-qualsiasi-momento-i-progetti-esistenti-continuano-con-l-agente-scelto-qui"
-        )))
-        .push(space())
-        .push(engine_section(state))
-        .push(space())
-        .push(section(fl!("effort")))
-        .push(cosmic::widget::dropdown(
-            effort_titles,
-            Some(effort_row),
-            |index| Message::Effort(Effort::ALL[index]),
-        ))
-        .push(footer(fl!(
+        )),
+        engine_section(state),
+        form::section(vec![form::row(
+            fl!("effort"),
+            cosmic::widget::dropdown(effort_titles, Some(effort_row), |index| {
+                Message::Effort(Effort::ALL[index])
+            }),
+        )]),
+        form::footer(fl!(
             "un-effort-pi-basso-fa-ragionare-meno-l-agente-prima-di-agire-le-risposte-arrivano-prima-ma-per-pezzi-complessi-potrebbero-servire-pi-correzioni"
-        )));
+        )),
+    ];
     // claude-only restricted bash; codex-only the sandbox note
     // (SettingsView.swift:97-109)
     if state.engine == AgentKind::Claude {
-        column = column
-            .push(space())
-            .push(
-                section(fl!("bash-limitato")).push(
-                    cosmic::widget::toggler(state.restricted_bash)
-                        .on_toggle(Message::RestrictedBash),
-                ),
-            )
-            .push(footer(fl!(
-                "con-bash-limitato-l-agente-pu-eseguire-solo-l-interprete-python-dell-ambiente-di-cad-studio-e-alcuni-comandi-di-sola-lettura-ls-cat-head-pi-sicuro-ma-l-agente-ha-meno-autonomia-per-diagnosticare-i-problemi-e-alcuni-tentativi-potrebbero-essere-rifiutati"
-            )));
+        parts.push(form::section(vec![form::row(
+            fl!("bash-limitato"),
+            cosmic::widget::toggler(state.restricted_bash).on_toggle(Message::RestrictedBash),
+        )]));
+        parts.push(form::footer(fl!(
+            "con-bash-limitato-l-agente-pu-eseguire-solo-l-interprete-python-dell-ambiente-di-cad-studio-e-alcuni-comandi-di-sola-lettura-ls-cat-head-pi-sicuro-ma-l-agente-ha-meno-autonomia-per-diagnosticare-i-problemi-e-alcuni-tentativi-potrebbero-essere-rifiutati"
+        )));
     } else {
-        column = column.push(space()).push(
-            section(fl!("agente")).push(footer(fl!(
+        parts.push(form::section(vec![form::full_row(
+            body(fl!(
                 "codex-lavora-nella-sua-sandbox-pu-scrivere-solo-nella-cartella-del-progetto-e-non-usa-la-rete"
-            ))),
-        );
+            ))
+            .class(Tone::Secondary.text(Backdrop::Plain)),
+        )]));
     }
-    column.into()
+    parts
 }
 
 /// One engine's section (AgentEngineSection,
 /// SettingsView.swift:116-169): executable and version by locate state,
-/// the custom-path and model fields, Verifica right-aligned (:156-161).
-fn engine_section(
-    state: &SettingsState,
-) -> Column<'_, Message, cosmic::theme::Theme, cosmic::Renderer> {
+/// the custom-path and model fields (monospaced, labels included), Verifica
+/// right-aligned (:156-161).
+fn engine_section(state: &SettingsState) -> Element<'_, Message> {
     let kind = state.engine;
     let slot = engine_index(kind);
     let home = std::env::var("HOME").unwrap_or_default();
     let executable: Element<'_, Message> = match &state.locate[slot] {
-        LocateState::Found { path, .. } => mono(abbreviate_with_tilde(path, &home)).into(),
-        LocateState::Checking => cosmic::widget::progress_bar::indeterminate_circular().into(),
-        LocateState::Unknown => body(fl!("settings-none")).into(),
+        LocateState::Found { path, .. } => path_text(abbreviate_with_tilde(path, &home)).into(),
+        LocateState::Checking => cosmic::widget::progress_bar::indeterminate_circular()
+            .size(16.0)
+            .into(),
+        LocateState::Unknown => value_text(fl!("settings-none")).into(),
         LocateState::Missing => body(fl!("non-trovato-2"))
             .class(Tone::Danger.text(Backdrop::Plain))
             .into(),
     };
     let version: Element<'_, Message> = match &state.locate[slot] {
-        LocateState::Found { version, .. } => mono(version.clone()).into(),
-        _ => body(fl!("settings-none")).into(),
+        LocateState::Found { version, .. } => value_text(version.clone())
+            .font(cosmic::font::mono())
+            .into(),
+        _ => value_text(fl!("settings-none")).into(),
     };
     let checking = matches!(state.locate[slot], LocateState::Checking);
-    section(fl!("percorso-dell-eseguibile"))
-        .push(labeled_row(fl!("eseguibile"), executable))
-        .push(labeled_row(fl!("versione-2"), version))
-        .push(
-            text_input::text_input(fl!("automatico"), state.custom_paths[slot].as_str())
-                .on_input(move |path| Message::CustomPath(kind, path))
-                .font(cosmic::font::mono())
-                .size(14),
-        )
-        .push(
-            text_input::text_input(
+    form::section(vec![
+        form::row(fl!("eseguibile"), executable),
+        form::row(fl!("versione-2"), version),
+        mono_row(
+            fl!("percorso-personalizzato"),
+            form::field(
+                fl!("automatico"),
+                state.custom_paths[slot].as_str(),
+                true,
+                move |path| Message::CustomPath(kind, path),
+            ),
+        ),
+        mono_row(
+            fl!("modello-2"),
+            form::field(
                 fl!("predefinito-di", agent = kind.display_name()),
                 state.models[slot].as_str(),
-            )
-            .on_input(move |model| Message::Model(kind, model))
-            .font(cosmic::font::mono())
-            .size(14),
-        )
-        .push(
+                true,
+                move |model| Message::Model(kind, model),
+            ),
+        ),
+        form::full_row(
             Row::new().push(Space::new().width(Length::Fill)).push(
                 button::text(fl!("verifica"))
                     .class(cosmic::theme::Button::Standard)
                     .on_press_maybe((!checking).then_some(Message::Verify(kind))),
             ),
-        )
+        ),
+    ])
 }
 
 /// Python (SettingsView.swift:171-215): interpreter path, build123d by
 /// environment state, Verifica + Reinstalla… (disabled while installing,
 /// :206), the packages footer.
-fn view_python(python: &EnvState) -> Element<'static, Message> {
+fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
     let interpreter = engine::python::env::interpreter_path(&engine::python::env::venv_dir());
+    let home = std::env::var("HOME").unwrap_or_default();
     let build123d: Element<'_, Message> = match python {
-        EnvState::Ready { build123d_version } => mono(build123d_version.clone()).into(),
-        EnvState::Installing | EnvState::Checking | EnvState::Unknown => {
-            cosmic::widget::progress_bar::indeterminate_circular().into()
-        }
-        EnvState::Missing => body(fl!("non-installato"))
-            .class(Tone::Secondary.text(Backdrop::Plain))
+        EnvState::Ready { build123d_version } => value_text(build123d_version.clone())
+            .font(cosmic::font::mono())
             .into(),
+        EnvState::Installing | EnvState::Checking | EnvState::Unknown => {
+            cosmic::widget::progress_bar::indeterminate_circular()
+                .size(16.0)
+                .into()
+        }
+        EnvState::Missing => value_text(fl!("non-installato")).into(),
         EnvState::Failed(_) => body(fl!("non-funzionante"))
             .class(Tone::Danger.text(Backdrop::Plain))
             .into(),
@@ -716,119 +733,130 @@ fn view_python(python: &EnvState) -> Element<'static, Message> {
                 .class(cosmic::theme::Button::Standard)
                 .on_press_maybe((!installing).then_some(Message::PythonReinstall)),
         );
-    section(fl!("interprete"))
-        .push(labeled_row(
-            fl!("interprete"),
-            mono(interpreter.to_string_lossy()).into(),
-        ))
-        .push(labeled_row(fl!("build123d"), build123d))
-        .push(actions)
-        .push(footer(fl!("pacchetti-build123d-matplotlib-numpy")))
-        .into()
+    vec![
+        form::section(vec![
+            form::row(
+                fl!("interprete"),
+                path_text(abbreviate_with_tilde(&interpreter, &home)),
+            ),
+            form::row(fl!("build123d"), build123d),
+            form::full_row(actions),
+        ]),
+        form::footer(fl!("pacchetti-build123d-matplotlib-numpy")),
+    ]
 }
 
 /// Avanzate (SettingsView.swift:217-242).
-fn view_advanced(state: &SettingsState) -> Element<'_, Message> {
+fn view_advanced(state: &SettingsState) -> Vec<Element<'_, Message>> {
     let formats = vec![
         fl!("stream-json-in-tempo-reale"),
         fl!("json-risposta-unica"),
     ];
     let selected = usize::from(!state.streaming);
-    section(fl!("formato-di-output"))
-        .push(cosmic::widget::dropdown(
-            formats,
-            Some(selected),
-            |index| Message::Streaming(index == 0),
-        ))
-        .push(footer(fl!(
+    vec![
+        form::section(vec![form::row(
+            fl!("formato-di-output"),
+            cosmic::widget::dropdown(formats, Some(selected), |index| {
+                Message::Streaming(index == 0)
+            }),
+        )]),
+        form::footer(fl!(
             "vale-per-claude-code-il-formato-json-non-mostra-il-testo-in-streaming-n-le-singole-attivit-ma-pu-essere-utile-con-versioni-che-non-supportano-lo-streaming"
-        )))
-        .push(space())
-        .push(
-            cosmic::widget::toggler(state.isolates)
-                .label(fl!(
-                    "ignora-le-configurazioni-personali-dell-agente"
-                ))
-                .on_toggle(Message::Isolates),
-        )
-        .push(footer(fl!(
+        )),
+        form::section(vec![form::row(
+            fl!("ignora-le-configurazioni-personali-dell-agente"),
+            cosmic::widget::toggler(state.isolates).on_toggle(Message::Isolates),
+        )]),
+        form::footer(fl!(
             "l-agente-cad-non-carica-le-tue-impostazioni-utente-hook-plugin-e-server-mcp-di-claude-code-config-toml-di-codex-cos-parte-pi-velocemente-e-risponde-in-modo-prevedibile-disattiva-se-la-tua-autenticazione-dipende-da-impostazioni-utente-ad-esempio-apikeyhelper"
-        )))
-        .into()
+        )),
+    ]
 }
 
 // ─── About ──────────────────────────────────────────────────────────────────
 
 /// The About window (upstream `showAboutPanel`,
-/// Commands.swift:141-152): app icon, name, version, and the credits
-/// paragraph — the catalog's literal-\n key, rendered as its two lines.
-/// Nothing is interactive, so the element is generic over the host's
-/// message type.
+/// Commands.swift:141-152, AppKit's standard About panel): the 64 px app
+/// icon, the bold name, the version, the credits paragraph centered in
+/// the small system font and secondary, and the copyright line. Nothing
+/// is interactive, so the element is generic over the host's message type.
 pub fn view_about<Message: 'static>() -> Element<'static, Message> {
-    let credits =
-        fl!("software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke");
-    let mut column = Column::new()
-        .spacing(10)
-        .push(Space::new().height(Length::Fill))
+    let small = |label: String| {
+        body(label)
+            .size(typography::SMALL_CONTROL)
+            .align_x(cosmic::iced::alignment::Horizontal::Center)
+    };
+    let column = Column::new()
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .push(ui::icon::app(64.0))
+        .push(Space::new().height(12))
         .push(
-            Row::new()
-                .push(Space::new().width(Length::Fill))
-                .push(crate::ui::icon::named(crate::sheets::APP_ICON, 64))
-                .push(Space::new().width(Length::Fill)),
+            body("CAD Studio")
+                .size(typography::TITLE3)
+                .font(weighted(Weight::Bold))
+                .class(Tone::Primary.text(Backdrop::Plain)),
         )
-        .push(bold("CAD Studio".to_string(), 20.0))
-        .push(body(env!("CARGO_PKG_VERSION").to_string()));
-    for line in credits.lines() {
-        column = column.push(body(line.to_string()).class(Tone::Secondary.text(Backdrop::Plain)));
-    }
-    container(column.push(Space::new().height(Length::Fill)))
+        .push(Space::new().height(6))
+        .push(
+            small(fl!("versione", version = env!("CARGO_PKG_VERSION")))
+                .class(Tone::Primary.text(Backdrop::Plain)),
+        )
+        .push(Space::new().height(6))
+        .push(
+            small(fl!(
+                "software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke"
+            ))
+            .class(Tone::Secondary.text(Backdrop::Plain)),
+        )
+        .push(Space::new().height(6))
+        .push(small(fl!("about-copyright")).class(Tone::Primary.text(Backdrop::Plain)));
+    container(column)
         .width(Length::Fill)
         .height(Length::Fill)
-        .align_x(cosmic::iced::alignment::Horizontal::Center)
+        .padding([14, 20, 14, 20])
         .class(cosmic::theme::Container::WindowBackground)
         .into()
 }
 
 // ─── view helpers ───────────────────────────────────────────────────────────
 
-/// A titled group of rows (upstream's Form sections).
-fn section<'a>(title: String) -> Column<'a, Message, cosmic::theme::Theme, cosmic::Renderer> {
-    Column::new().spacing(10).push(bold(title, 14.0))
-}
-
-/// A section-gap row (upstream's grouped-form spacing).
-fn space() -> Space {
-    Space::new().height(14.0)
-}
-
-fn footer<'a>(text: String) -> Text<'a> {
-    body(text).class(Tone::Secondary.text(Backdrop::Plain))
-}
-
-/// A "Label: value" row (upstream LabeledContent).
-fn labeled_row<'a>(
-    label: String,
-    value: Element<'a, Message>,
-) -> Row<'a, Message, cosmic::theme::Theme, cosmic::Renderer> {
+/// A form row whose label is monospaced along with its field (upstream's
+/// `.fontDesign(.monospaced)` on a labeled `TextField` sets both).
+fn mono_row<'a>(label: String, field: Element<'a, Message>) -> Element<'a, Message> {
     Row::new()
-        .spacing(8)
-        .push(body(label).width(Length::Fixed(150.0)))
-        .push(value)
+        .push(form::label_text(label).font(cosmic::font::mono()))
+        .push(Space::new().width(Length::Fill))
+        .push(field)
+        .spacing(12.0)
+        .padding([0.0, form::INSET])
+        .height(Length::Fixed(form::ROW_HEIGHT))
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// A `LabeledContent` value: secondary, as a grouped Form draws it.
+fn value_text<'a>(label: impl Into<String>) -> Text<'a> {
+    body(label).class(Tone::Secondary.text(Backdrop::Plain))
+}
+
+/// Upstream `PathText`: a monospaced, single-line, tilde-abbreviated path.
+fn path_text<'a>(path: String) -> Text<'a> {
+    value_text(path)
+        .font(cosmic::font::mono())
+        .wrapping(Wrapping::None)
 }
 
 fn body<'a>(label: impl Into<String>) -> Text<'a> {
     cosmic::widget::text(label.into()).wrapping(Wrapping::Word)
 }
 
-fn mono<'a>(label: impl Into<String>) -> Text<'a> {
-    body(label).font(cosmic::font::mono())
-}
-
-fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
-    body(label).size(size).font(cosmic::iced::font::Font {
-        weight: cosmic::iced::font::Weight::Bold,
+/// The default font at `weight`.
+fn weighted(weight: Weight) -> cosmic::iced::Font {
+    cosmic::iced::Font {
+        weight,
         ..cosmic::font::default()
-    })
+    }
 }
 
 /// `~/`-abbreviate `path` against `home` (upstream

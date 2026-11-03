@@ -73,6 +73,7 @@ symbols! {
     ClockArrowCirclepath => "clock.arrow.circlepath",
     Cube => "cube",
     CubeTransparent => "cube.transparent",
+    ChevronLeftForwardslashChevronRight => "chevron.left.forwardslash.chevron.right",
     DocBadgePlus => "doc.badge.plus",
     DocOnDoc => "doc.on.doc",
     DocTextMagnifyingglass => "doc.text.magnifyingglass",
@@ -82,6 +83,8 @@ symbols! {
     Eye => "eye",
     EyeSlash => "eye.slash",
     Folder => "folder",
+    Gearshape => "gearshape",
+    Gearshape2 => "gearshape.2",
     Grid => "grid",
     InfoCircleFill => "info.circle.fill",
     Line3Horizontal => "line.3.horizontal",
@@ -96,6 +99,7 @@ symbols! {
     PlayCircle => "play.circle",
     PlayFill => "play.fill",
     PlusMagnifyingglass => "plus.magnifyingglass",
+    PlusSquare => "plus.square",
     Ruler => "ruler",
     SidebarLeft => "sidebar.left",
     SliderHorizontal3 => "slider.horizontal.3",
@@ -174,6 +178,32 @@ pub fn in_cell<'a, M: 'a>(
 /// `NSWorkspace`, the app icon), the icon theme supplies it.
 pub fn named(name: &str, size: u16) -> Icon {
     cosmic::widget::icon::from_name(name).size(size).icon()
+}
+
+/// The app icon (`NSApp.applicationIconImage`) `size` px square: the
+/// original app's icon PNG, shipped in the binary so it draws whether or
+/// not the icon theme has the app installed. Decoded once per thread.
+pub fn app<'a, M: 'a>(size: f32) -> cosmic::Element<'a, M> {
+    thread_local! {
+        static CACHED: Option<cosmic::widget::image::Handle> = {
+            const PNG: &[u8] = include_bytes!("../../resources/app-icon.png");
+            let decoded = image::load_from_memory(PNG).ok().map(|i| i.to_rgba8());
+            decoded.map(|rgba| {
+                let (width, height) = rgba.dimensions();
+                cosmic::widget::image::Handle::from_rgba(width, height, rgba.into_raw())
+            })
+        };
+    }
+    match CACHED.with(Clone::clone) {
+        Some(handle) => cosmic::widget::image(handle)
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .into(),
+        None => cosmic::widget::Space::new()
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .into(),
+    }
 }
 
 /// A `.multicolor` symbol `height` px tall, in its own colors.
