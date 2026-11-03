@@ -16,9 +16,9 @@
 //! a PNG fallback (`schematic.png` sibling) when an SVG fails to parse —
 //! upstream just shows a blank page in that case.
 //!
-//! M4 status: this module is the pane model + view; the shell task wires it
-//! into a window (zoom/fit menu commands, i18n via the extracted ftl keys,
-//! and the "Open in Preview" external handoff all land there).
+//! The pane owns its status bar too, "Open in Preview" included (the
+//! system opener on the drawing files); the window adds the zoom/fit menu
+//! commands on top of the pane's messages.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -38,8 +38,13 @@ use cosmic::iced::time;
 use cosmic::iced::widget::image::{FilterMethod, Handle};
 use cosmic::iced::widget::responsive;
 use cosmic::iced::{Length, Padding, Point, Rectangle, Size, Subscription, Task};
-use cosmic::widget::{Column, Image, Row, Space, button, container, mouse_area, text};
+use cosmic::widget::{Column, Image, Row, Space, container, mouse_area, text, tooltip};
 use engine::project::manifest::Manifest;
+
+use crate::parts_overlay::{
+    Ink, SMALL_CONTROL_TEXT, Symbol, icon_button, mix, symbol, text_button,
+};
+use crate::typography;
 
 use crate::fl;
 
@@ -697,6 +702,9 @@ pub enum Message {
     Fit,
     SelectPage(usize),
     PrevPage,
+    /// "Open in Preview": hand the drawing to the system viewer
+    /// (SchematicPane.swift:75-78, 118-141).
+    OpenInPreview,
     NextPage,
     Resized(Size),
     DebounceTick,
@@ -837,6 +845,11 @@ impl SchematicPane {
             Message::PrevPage => {
                 self.tabs.step(-1);
                 self.page_changed();
+            }
+            Message::OpenInPreview => {
+                for file in self.preview_files() {
+                    crate::app::open_path(&file);
+                }
             }
             Message::NextPage => {
                 self.tabs.step(1);
@@ -994,7 +1007,7 @@ impl SchematicPane {
                             .size(40)
                             .icon(),
                     )
-                    .push(text(fl!("nessun-modello")).size(18))
+                    .push(text(fl!("nessun-modello")).size(typography::TITLE2))
                     .push(
                         text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
                             .class(dim_text_class()),
@@ -1010,10 +1023,27 @@ impl SchematicPane {
         } else {
             self.view_sheet()
         };
-        Column::new()
-            .push(content)
-            .push(self.view_status_bar())
+        container(Column::new().push(content).push(self.view_status_bar()))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .class(cosmic::theme::Container::custom(|theme| {
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(under_page(theme))),
+                    ..Default::default()
+                }
+            }))
             .into()
+    }
+
+    /// What "Open in Preview" opens (SchematicPane.swift:116-129): the
+    /// output's `schematic.pdf`, else `schematic.png`; when the PDF holds
+    /// fewer pages than the drawing has, each later page's own PDF too.
+    /// The output folder is the pages' folder, so a pane with no pages
+    /// offers nothing.
+    fn preview_files(&self) -> Vec<PathBuf> {
+        preview_files(&self.tabs.pages, |pdf| {
+            engine::project::outputs::pdf_page_count(pdf).unwrap_or(0) as usize
+        })
     }
 
     fn view_sheet(&self) -> Element<'_, Message> {
@@ -1076,9 +1106,27 @@ impl SchematicPane {
             .width(Length::Fixed(region_w as f32))
             .height(Length::Fixed(region_h as f32))
             .filter_method(FilterMethod::Linear);
+        // the web view's page: white, `box-shadow: 0 1px 4px
+        // rgba(0,0,0,.25), 0 0 0 .5px rgba(0,0,0,.12)` (SVGWebView.swift:45)
         let paper = container(image)
             .width(Length::Fixed(region_w as f32))
-            .height(Length::Fixed(region_h as f32));
+            .height(Length::Fixed(region_h as f32))
+            .class(cosmic::theme::Container::custom(|_| {
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(cosmic::iced::Color::WHITE)),
+                    border: cosmic::iced::Border {
+                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.06),
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    shadow: cosmic::iced::Shadow {
+                        color: cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.25),
+                        offset: cosmic::iced::Vector::new(0.0, 1.0),
+                        blur_radius: 4.0,
+                    },
+                    ..Default::default()
+                }
+            }));
         container(paper)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1101,49 +1149,210 @@ impl SchematicPane {
         }
     }
 
+    /// The pane's status bar (Shared/PaneStatusBar.swift): a top rule,
+    /// then — 28 tall, 8 in from the sides, 8 apart — the page picker
+    /// (multi-page only), zoom out / zoom in / Fit, Open in Preview, and
+    /// the zoom percent at the far right in secondary monospace
+    /// (SchematicPane.swift:21-23, 50-80).
     fn view_status_bar(&self) -> Element<'_, Message> {
         let has_sheet = self.displayed.is_some();
         let pages = self.tabs.pages.len();
-        let zoom = if has_sheet {
-            text(format!("{:.0}%", self.viewport.scale * 100.0))
+        let info = if has_sheet {
+            format!("{:.0}%", self.viewport.scale * 100.0)
         } else {
-            text("")
+            String::new()
         };
-        let mut controls = Row::new().spacing(8);
+        let mut controls = Row::new().spacing(8).align_y(Alignment::Center);
         if pages > 1 {
-            let index = self.tabs.current_index().unwrap_or(0);
-            let title = self
-                .tabs
-                .current()
-                .map(|p| p.title.as_str())
-                .unwrap_or_default();
-            controls = controls
-                .push(button::text("<").on_press_maybe((index > 0).then_some(Message::PrevPage)))
-                .push(text(fl!(
-                    "lld-lld",
-                    page = index + 1,
-                    total = pages,
-                    title = title
-                )))
-                .push(
-                    button::text(">")
-                        .on_press_maybe((index + 1 < pages).then_some(Message::NextPage)),
-                )
+            controls = controls.push(self.page_picker());
         }
+        let can_preview = !self.preview_files().is_empty();
         controls = controls
-            .push(button::text("-").on_press_maybe(has_sheet.then_some(Message::ZoomOut)))
-            .push(button::text("+").on_press_maybe(has_sheet.then_some(Message::ZoomIn)))
-            .push(button::text(fl!("adatta")).on_press_maybe(has_sheet.then_some(Message::Fit)));
-        container(
-            Row::new()
-                .push(zoom)
-                .push(Space::new().width(Length::Fill))
-                .push(controls)
-                .padding([4.0, 12.0]),
-        )
-        .width(Length::Fill)
-        .into()
+            .push(icon_button(
+                Symbol::MinusMagnifyingGlass,
+                13,
+                Ink::Secondary,
+                fl!("riduci-2"),
+                has_sheet.then_some(Message::ZoomOut),
+            ))
+            .push(icon_button(
+                Symbol::PlusMagnifyingGlass,
+                13,
+                Ink::Secondary,
+                fl!("ingrandisci-2"),
+                has_sheet.then_some(Message::ZoomIn),
+            ))
+            .push(text_button(
+                fl!("adatta"),
+                SMALL_CONTROL_TEXT,
+                Ink::Secondary,
+                has_sheet.then_some(Message::Fit),
+            ))
+            .push(text_button(
+                fl!("apri-in-anteprima"),
+                SMALL_CONTROL_TEXT,
+                Ink::Secondary,
+                can_preview.then_some(Message::OpenInPreview),
+            ));
+        let bar = Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .height(Length::Fixed(28.0))
+            .padding([0.0, 8.0])
+            .push(controls)
+            .push(Space::new().width(Length::Fill))
+            .push(
+                text(info)
+                    .size(typography::scaled(11.0))
+                    .font(cosmic::font::mono())
+                    .class(Ink::Secondary.text_class()),
+            );
+        Column::new()
+            .push(
+                container(Space::new().width(Length::Fill).height(1.0))
+                    .width(Length::Fill)
+                    .class(cosmic::theme::Container::custom(|theme| {
+                        cosmic::iced::widget::container::Style {
+                            background: Some(cosmic::iced::Background::Color(mix(
+                                under_page(theme),
+                                cosmic::iced::Color::from(theme.cosmic().background(false).on),
+                                0.07,
+                            ))),
+                            ..Default::default()
+                        }
+                    })),
+            )
+            .push(bar)
+            .width(Length::Fill)
+            .into()
     }
+
+    /// The page picker (SchematicPane.swift:83-115): previous, the
+    /// "n/N · title" menu label listing every page as "n. title", next —
+    /// 2 apart. The list is iced's pick list (an in-window overlay, not a
+    /// cosmic menu); its label is the placeholder, so the shown text keeps
+    /// upstream's "n/N" form while the items read "n. title", unchecked
+    /// like upstream's menu buttons. The chevron is drawn over the list's
+    /// right padding and takes no input.
+    fn page_picker(&self) -> Element<'_, Message> {
+        let pages = self.tabs.pages.len();
+        let index = self.tabs.current_index().unwrap_or(0);
+        let title = self
+            .tabs
+            .current()
+            .map(|page| page.title.as_str())
+            .unwrap_or_default();
+        let items: Vec<PageItem> = self
+            .tabs
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| PageItem {
+                index,
+                label: fl!("lld-2", page = index + 1, title = page.title.clone()),
+            })
+            .collect();
+        const CHEVRON: f32 = 12.0;
+        let list = cosmic::iced::widget::pick_list::PickList::new(
+            items,
+            None::<PageItem>,
+            |item: PageItem| Message::SelectPage(item.index),
+        )
+        .placeholder(fl!(
+            "lld-lld",
+            page = index + 1,
+            total = pages,
+            title = title
+        ))
+        .text_size(SMALL_CONTROL_TEXT)
+        // the list reserves one text size for its own (hidden) handle
+        .padding([0.0, CHEVRON + 2.0 - SMALL_CONTROL_TEXT, 0.0, 4.0])
+        .handle(cosmic::iced::widget::pick_list::Handle::None);
+        let menu = cosmic::iced::widget::stack![
+            list,
+            container(symbol(Symbol::ChevronDown, CHEVRON as u16, Ink::Primary))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Center),
+        ];
+        let menu = tooltip(
+            menu,
+            text(fl!("scegli-la-pagina-della-tavola")),
+            cosmic::widget::tooltip::Position::Top,
+        );
+        Row::new()
+            .spacing(2)
+            .align_y(Alignment::Center)
+            .push(icon_button(
+                Symbol::ChevronLeft,
+                13,
+                Ink::Secondary,
+                fl!("pagina-precedente"),
+                (index > 0).then_some(Message::PrevPage),
+            ))
+            .push(menu)
+            .push(icon_button(
+                Symbol::ChevronRight,
+                13,
+                Ink::Secondary,
+                fl!("pagina-successiva"),
+                (index + 1 < pages).then_some(Message::NextPage),
+            ))
+            .into()
+    }
+}
+
+/// One entry of the page menu: "n. title", selecting page `index`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PageItem {
+    index: usize,
+    label: String,
+}
+
+impl std::fmt::Display for PageItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// The pane's backdrop behind the page (upstream
+/// `.underPageBackgroundColor`): the window base pressed 26 % toward
+/// black — 159 under a 215 base, the gallery's mid gray; near-black in
+/// dark mode.
+fn under_page(theme: &cosmic::Theme) -> cosmic::iced::Color {
+    mix(
+        cosmic::iced::Color::from(theme.cosmic().background(false).base),
+        cosmic::iced::Color::BLACK,
+        0.26,
+    )
+}
+
+/// The files "Open in Preview" hands to the system viewer, from the
+/// pages' folder (SchematicPane.swift:116-129): `schematic.pdf` when it
+/// exists, else `schematic.png`, else nothing. With the PDF, the later
+/// pages' own PDFs (`schematic-N.pdf` beside each page's SVG) follow it
+/// when any exist and the PDF holds fewer pages (`count_pages`) than
+/// the drawing has.
+fn preview_files(pages: &[Page], count_pages: impl Fn(&Path) -> usize) -> Vec<PathBuf> {
+    let Some(folder) = pages.first().and_then(|page| page.file.parent()) else {
+        return Vec::new();
+    };
+    let pdf = folder.join("schematic.pdf");
+    let png = folder.join("schematic.png");
+    let Some(file) = [&pdf, &png].into_iter().find(|file| file.exists()).cloned() else {
+        return Vec::new();
+    };
+    let page_pdfs: Vec<PathBuf> = pages
+        .iter()
+        .skip(1)
+        .map(|page| page.file.with_extension("pdf"))
+        .filter(|file| file.exists())
+        .collect();
+    if file != pdf || page_pdfs.is_empty() || count_pages(&file) >= pages.len() {
+        return vec![file];
+    }
+    std::iter::once(file).chain(page_pdfs).collect()
 }
 
 /// The relay stream: one thread draining the std event channel into the
@@ -1204,6 +1413,65 @@ mod tests {
     use super::*;
     use cosmic::iced::futures::FutureExt;
     use std::io::Cursor;
+
+    /// A fresh output folder holding `files` (empty contents), and the
+    /// two drawing pages living in it.
+    fn preview_fixture(files: &[&str]) -> (PathBuf, Vec<Page>) {
+        let dir = std::env::temp_dir().join(format!("cad-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in files {
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+        let pages = ["schematic.svg", "schematic-2.svg"]
+            .iter()
+            .map(|name| Page {
+                file: dir.join(name),
+                title: name.to_string(),
+            })
+            .collect();
+        (dir, pages)
+    }
+
+    /// "Open in Preview" picks the PDF, falls back to the PNG, offers
+    /// nothing without either, and appends the later pages' PDFs only
+    /// while the main PDF is short of pages (SchematicPane.swift:116-129).
+    #[test]
+    fn preview_files_follow_upstream_choice() {
+        let (dir, pages) = preview_fixture(&["schematic.png"]);
+        assert_eq!(
+            preview_files(&pages, |_| 0),
+            vec![dir.join("schematic.png")]
+        );
+
+        let (dir, pages) = preview_fixture(&["schematic.pdf", "schematic.png"]);
+        assert_eq!(
+            preview_files(&pages, |_| 1),
+            vec![dir.join("schematic.pdf")]
+        );
+
+        let (dir, pages) = preview_fixture(&["schematic.pdf", "schematic-2.pdf"]);
+        assert_eq!(
+            preview_files(&pages, |_| 1),
+            vec![dir.join("schematic.pdf"), dir.join("schematic-2.pdf")],
+            "a one-page PDF for a two-page drawing brings the page PDFs",
+        );
+        assert_eq!(
+            preview_files(&pages, |_| 2),
+            vec![dir.join("schematic.pdf")],
+            "a complete PDF stands alone",
+        );
+
+        let (dir, pages) = preview_fixture(&["schematic.png", "schematic-2.pdf"]);
+        assert_eq!(
+            preview_files(&pages, |_| 0),
+            vec![dir.join("schematic.png")],
+            "page PDFs only ever follow the main PDF",
+        );
+
+        let (_, pages) = preview_fixture(&[]);
+        assert!(preview_files(&pages, |_| 0).is_empty());
+        assert!(preview_files(&[], |_| 0).is_empty());
+    }
 
     fn approx(actual: f64, expected: f64) {
         assert!(
