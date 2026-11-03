@@ -122,23 +122,21 @@ pub(crate) fn with_rail_ends<'a, M: 'a>(
 ) -> Element<'a, M> {
     let cap = |leading: bool| {
         container(Space::new().width(KNOB / 2.0).height(4.0)).class(
-            cosmic::theme::Container::custom(move |theme| {
-                cosmic::iced::widget::container::Style {
-                    background: Some(Background::Color(if leading {
-                        Tone::Accent.solid(theme)
+            cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(if leading {
+                    Tone::Accent.solid(theme)
+                } else {
+                    wash(theme, 0.1)
+                })),
+                border: Border {
+                    radius: if leading {
+                        [2.0, 0.0, 0.0, 2.0].into()
                     } else {
-                        wash(theme, 0.1)
-                    })),
-                    border: Border {
-                        radius: if leading {
-                            [2.0, 0.0, 0.0, 2.0].into()
-                        } else {
-                            [0.0, 2.0, 2.0, 0.0].into()
-                        },
-                        ..Default::default()
+                        [0.0, 2.0, 2.0, 0.0].into()
                     },
                     ..Default::default()
-                }
+                },
+                ..Default::default()
             }),
         )
     };
@@ -280,7 +278,12 @@ fn explode_row(tools: &ViewerTools) -> Element<'static, Message> {
     Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(icon(Symbol::ArrowDownRightAndArrowUpLeft, 13.0, Tone::Secondary, BACKDROP))
+        .push(icon(
+            Symbol::ArrowDownRightAndArrowUpLeft,
+            13.0,
+            Tone::Secondary,
+            BACKDROP,
+        ))
         .push(with_rail_ends(
             tooltip(
                 distance,
@@ -289,7 +292,12 @@ fn explode_row(tools: &ViewerTools) -> Element<'static, Message> {
             ),
             Length::Fill,
         ))
-        .push(icon(Symbol::ArrowUpLeftAndArrowDownRight, 13.0, Tone::Secondary, BACKDROP))
+        .push(icon(
+            Symbol::ArrowUpLeftAndArrowDownRight,
+            13.0,
+            Tone::Secondary,
+            BACKDROP,
+        ))
         .into()
 }
 

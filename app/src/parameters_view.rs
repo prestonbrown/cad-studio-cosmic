@@ -171,12 +171,17 @@ fn scroll_height(rows: usize) -> f32 {
 
 /// The panel's `slider.horizontal.3` glyph, centered in its 16 px cell.
 fn slider_glyph() -> Element<'static, Message> {
-    container(icon(Symbol::SliderHorizontal3, 13.6, Tone::Primary, BACKDROP))
-        .width(16.0)
-        .height(16.0)
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .into()
+    container(icon(
+        Symbol::SliderHorizontal3,
+        13.6,
+        Tone::Primary,
+        BACKDROP,
+    ))
+    .width(16.0)
+    .height(16.0)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// The collapsed state: the material capsule button that expands the
@@ -403,25 +408,30 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         .padding([0.0, POPUP_BADGE + POPUP_GAP, 0.0, 0.0])
         .into()
     };
-    let badge = container(icon(Symbol::ChevronUpChevronDown, 12.0, Tone::OnAccent, BACKDROP))
-        .width(POPUP_BADGE)
-        .height(POPUP_BADGE)
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .class(cosmic::theme::Container::custom(move |theme| {
-            cosmic::iced::widget::container::Style {
-                background: Some(cosmic::iced::Background::Color(if enabled {
-                    Tone::Accent.color(theme, BACKDROP)
-                } else {
-                    Tone::Tertiary.color(theme, BACKDROP)
-                })),
-                border: cosmic::iced::Border {
-                    radius: theme.cosmic().corner_radii.radius_xs.into(),
-                    ..Default::default()
-                },
+    let badge = container(icon(
+        Symbol::ChevronUpChevronDown,
+        12.0,
+        Tone::OnAccent,
+        BACKDROP,
+    ))
+    .width(POPUP_BADGE)
+    .height(POPUP_BADGE)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .class(cosmic::theme::Container::custom(move |theme| {
+        cosmic::iced::widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(if enabled {
+                Tone::Accent.color(theme, BACKDROP)
+            } else {
+                Tone::Tertiary.color(theme, BACKDROP)
+            })),
+            border: cosmic::iced::Border {
+                radius: theme.cosmic().corner_radii.radius_xs.into(),
                 ..Default::default()
-            }
-        }));
+            },
+            ..Default::default()
+        }
+    }));
     // the badge sits over the picker's right padding; it takes no input,
     // so presses reach the picker underneath
     let popup = cosmic::iced::widget::stack![

@@ -1404,8 +1404,13 @@ impl ProjectWindow {
             self.grip_hover == Some(kind) || self.pane_drag.is_some_and(|drag| drag.pane == kind);
         let opacity = if lit { 1.0 } else { 0.45 };
         let pill = container(
-            ui::icon::icon(Symbol::Line3Horizontal, 7.0, Tone::Secondary, Backdrop::Material)
-                .opacity(opacity * Tone::Secondary.alpha(Backdrop::Material)),
+            ui::icon::icon(
+                Symbol::Line3Horizontal,
+                7.0,
+                Tone::Secondary,
+                Backdrop::Material,
+            )
+            .opacity(opacity * Tone::Secondary.alpha(Backdrop::Material)),
         )
         .width(Length::Fixed(28.0))
         .height(Length::Fixed(16.0))
@@ -1642,7 +1647,12 @@ impl ProjectWindow {
         let mut row = Row::new()
             .spacing(8)
             .align_y(cosmic::iced::Alignment::Center)
-            .push(ui::icon::icon(Symbol::Cube, 13.0, Tone::Secondary, TITLEBAR))
+            .push(ui::icon::icon(
+                Symbol::Cube,
+                13.0,
+                Tone::Secondary,
+                TITLEBAR,
+            ))
             .push(
                 text(self.name.clone())
                     .size(CAPSULE_TEXT)
@@ -2046,12 +2056,13 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
     if !paths.is_empty() {
         list = list.push(
             container(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(surface::fill(
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
+                    surface::fill(
                         Tone::Separator.alpha(Backdrop::Material),
                         Corner::None,
                         false,
-                    )),
+                    ),
+                ),
             )
             .padding([5, 14]),
         );
@@ -2735,7 +2746,8 @@ mod tests {
             )
             .unwrap();
         }
-        let mut metadata = store::load_metadata(&root).unwrap_or_else(|_| store::ProjectMetadata::new("test"));
+        let mut metadata =
+            store::load_metadata(&root).unwrap_or_else(|_| store::ProjectMetadata::new("test"));
         metadata.current_version = Some(2);
         store::save_metadata(&root, &metadata).unwrap();
 
@@ -2745,7 +2757,11 @@ mod tests {
         assert_eq!(window.chat.current_version, Some(2));
 
         let _ = window.update(Message::Chat(chat_view::Message::RestoreVersion(1)));
-        assert_eq!(window.metadata.current_version, Some(1), "the shell restored");
+        assert_eq!(
+            window.metadata.current_version,
+            Some(1),
+            "the shell restored"
+        );
         assert_eq!(window.chat.current_version, Some(1), "the mirror followed");
         assert_eq!(window.chat.versions, vec![1, 2]);
         assert_eq!(

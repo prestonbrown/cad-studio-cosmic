@@ -129,9 +129,7 @@ use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::markers;
-use viewer::render::{
-    ModelScene, PartAppearance, PartPose, PartScene, camera, camera::Preset,
-};
+use viewer::render::{ModelScene, PartAppearance, PartPose, PartScene, camera, camera::Preset};
 use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::picking;
 use viewer::tools::section::{self, SectionAxis};
@@ -142,7 +140,11 @@ use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
-use crate::ui::{self, Backdrop, Symbol, Tone, icon::icon, segmented::{Look, segmented}};
+use crate::ui::{
+    self, Backdrop, Symbol, Tone,
+    icon::icon,
+    segmented::{Look, segmented},
+};
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
@@ -991,9 +993,11 @@ impl ViewerPane {
             // 101-112): a parse failure with nothing ever loaded names the
             // error; otherwise the no-model invitation
             match &self.mesh_error {
-                Some(error) => {
-                    content_unavailable(Symbol::ExclamationmarkTriangle, fl!("modello-non-leggibile"), error.clone())
-                }
+                Some(error) => content_unavailable(
+                    Symbol::ExclamationmarkTriangle,
+                    fl!("modello-non-leggibile"),
+                    error.clone(),
+                ),
                 None => content_unavailable(
                     Symbol::CubeTransparent,
                     fl!("nessun-modello"),
@@ -1754,10 +1758,15 @@ impl ViewerPane {
             .padding([0.0, BAR_PADDING])
             .width(Length::Fill)
             .height(Length::Fixed(BAR_HEIGHT));
-        container(Column::new().push(ui::surface::divider()).push(row).width(Length::Fill))
-            .width(Length::Fill)
-            .class(ui::surface::text_background_class())
-            .into()
+        container(
+            Column::new()
+                .push(ui::surface::divider())
+                .push(row)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .class(ui::surface::text_background_class())
+        .into()
     }
 
     /// The bar's size label: the ASSEMBLED model's size whatever the
@@ -2116,10 +2125,7 @@ fn tool_toggle(
     help: String,
     message: Option<Message>,
 ) -> Element<'static, Message> {
-    let tone = ui::button::content_tone(
-        if on { Tone::Accent } else { Tone::Secondary },
-        &message,
-    );
+    let tone = ui::button::content_tone(if on { Tone::Accent } else { Tone::Secondary }, &message);
     let cell = container(icon(symbol, TOGGLE_CELL, tone, BACKDROP))
         .width(Length::Fixed(TOGGLE_CELL))
         .height(Length::Fixed(BAR_HEIGHT))

@@ -52,10 +52,18 @@ pub fn material(theme: &cosmic::Theme) -> Color {
     mix(background.base.into(), background.on.into(), 0.05)
 }
 
-/// `textBackgroundColor`: the theme's component surface (white in the
-/// light theme), the field and pane-bar background.
+/// `textBackgroundColor` (white in light mode, #1E1E1E in dark), the
+/// field and pane-bar background: the palette's lightest neutral in a
+/// light theme; in a dark one the window background, which sits just
+/// below the viewport's gray as macOS's does. (The component and
+/// container surfaces read 245 / 252 in the light theme, not white.)
 pub fn text_background(theme: &cosmic::Theme) -> Color {
-    theme.cosmic().background(false).component.base.into()
+    let cosmic = theme.cosmic();
+    if cosmic.is_dark {
+        cosmic.background(false).base.into()
+    } else {
+        cosmic.palette.neutral_0.into()
+    }
 }
 
 /// A drop shadow under a floating surface.
@@ -143,6 +151,10 @@ pub fn text_background_class() -> cosmic::theme::Container<'static> {
 pub fn divider<'a, M: 'a>() -> Element<'a, M> {
     container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
         .width(Length::Fill)
-        .class(fill(Tone::Separator.alpha(super::tone::Backdrop::Plain), Corner::None, false))
+        .class(fill(
+            Tone::Separator.alpha(super::tone::Backdrop::Plain),
+            Corner::None,
+            false,
+        ))
         .into()
 }

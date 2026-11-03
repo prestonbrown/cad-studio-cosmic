@@ -15,7 +15,11 @@ use super::tone::{Backdrop, Tone, wash};
 /// The tone a button's content draws in: `tone` while it has a message,
 /// tertiary while disabled.
 pub fn content_tone<M>(tone: Tone, on_press: &Option<M>) -> Tone {
-    if on_press.is_some() { tone } else { Tone::Tertiary }
+    if on_press.is_some() {
+        tone
+    } else {
+        Tone::Tertiary
+    }
 }
 
 /// A button class that draws nothing in any state: the content carries
@@ -101,7 +105,9 @@ pub fn text<M: Clone + 'static>(
 ) -> Element<'static, M> {
     let tone = content_tone(tone, &on_press);
     borderless(
-        cosmic::widget::text(label).size(size).class(tone.text(backdrop)),
+        cosmic::widget::text(label)
+            .size(size)
+            .class(tone.text(backdrop)),
         on_press,
     )
     .into()

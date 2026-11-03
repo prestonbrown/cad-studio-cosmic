@@ -149,7 +149,6 @@ pub mod new_project {
             .class(cosmic::theme::Container::Dialog(true))
             .into()
     }
-
 }
 
 /// The welcome window's messages.
@@ -251,7 +250,8 @@ impl Welcome {
             )
             .push(
                 container(
-                    text(fl!("versione", version = env!("CARGO_PKG_VERSION"))).class(Tone::Secondary.text(Backdrop::Plain)),
+                    text(fl!("versione", version = env!("CARGO_PKG_VERSION")))
+                        .class(Tone::Secondary.text(Backdrop::Plain)),
                 )
                 .padding([2, 0, 0, 0]),
             )
@@ -351,8 +351,16 @@ impl Welcome {
                     // the name needs the explicit class: it sits under a
                     // Transparent button, whose inherited text color is
                     // fully transparent
-                    .push(text(name.clone()).size(14).class(Tone::Primary.text(Backdrop::Plain)))
-                    .push(text(parent).size(11).class(Tone::Secondary.text(Backdrop::Plain))),
+                    .push(
+                        text(name.clone())
+                            .size(14)
+                            .class(Tone::Primary.text(Backdrop::Plain)),
+                    )
+                    .push(
+                        text(parent)
+                            .size(11)
+                            .class(Tone::Secondary.text(Backdrop::Plain)),
+                    ),
             )
             .padding([3, 6])
             .width(Length::Fill);

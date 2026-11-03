@@ -81,7 +81,11 @@ impl Tone {
             (Self::Tertiary, Backdrop::Titlebar) => 0.27,
             (Self::Quaternary | Self::Separator, _) => 0.10,
             (
-                Self::Accent | Self::OnAccent | Self::OnFill | Self::Success | Self::Warning
+                Self::Accent
+                | Self::OnAccent
+                | Self::OnFill
+                | Self::Success
+                | Self::Warning
                 | Self::Danger,
                 _,
             ) => 1.0,
@@ -94,7 +98,10 @@ impl Tone {
         let cosmic = theme.cosmic();
         let opaque = |color: Color| Color { a: 1.0, ..color };
         match self {
-            Self::Primary | Self::Secondary | Self::Tertiary | Self::Quaternary
+            Self::Primary
+            | Self::Secondary
+            | Self::Tertiary
+            | Self::Quaternary
             | Self::Separator => opaque(cosmic.background(false).on.into()),
             Self::Accent => opaque(cosmic.accent_color().into()),
             Self::OnAccent => opaque(cosmic.accent.on.into()),
@@ -244,7 +251,12 @@ mod tests {
         let theme = custom_theme();
         let on = Color::from(theme.cosmic().background(false).on);
         for backdrop in BACKDROPS {
-            for tone in [Tone::Primary, Tone::Secondary, Tone::Tertiary, Tone::Separator] {
+            for tone in [
+                Tone::Primary,
+                Tone::Secondary,
+                Tone::Tertiary,
+                Tone::Separator,
+            ] {
                 let color = tone.color(&theme, backdrop);
                 assert_eq!((color.r, color.g, color.b), (on.r, on.g, on.b), "{tone:?}");
                 assert_eq!(color.a, tone.alpha(backdrop));

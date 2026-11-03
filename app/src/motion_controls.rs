@@ -219,9 +219,15 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
     // pause.fill draws on a 16-unit grid; play.fill is cropped to its
     // glyph, 12 px tall like the grid's triangle
     let (glyph, help) = if player.is_playing {
-        (icon(Symbol::PauseFill, 16.0, Tone::Secondary, BACKDROP), fl!("pausa"))
+        (
+            icon(Symbol::PauseFill, 16.0, Tone::Secondary, BACKDROP),
+            fl!("pausa"),
+        )
     } else {
-        (icon(Symbol::PlayFill, 12.2, Tone::Secondary, BACKDROP), fl!("riproduci"))
+        (
+            icon(Symbol::PlayFill, 12.2, Tone::Secondary, BACKDROP),
+            fl!("riproduci"),
+        )
     };
     let cell = container(glyph)
         .width(16.0)
@@ -306,7 +312,12 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
             Row::new()
                 .spacing(4)
                 .align_y(cosmic::iced::Alignment::Center)
-                .push(icon(Symbol::ExclamationmarkTriangleFill, 11.0, Tone::Danger, BACKDROP))
+                .push(icon(
+                    Symbol::ExclamationmarkTriangleFill,
+                    11.0,
+                    Tone::Danger,
+                    BACKDROP,
+                ))
                 .push(
                     text(collision_text(&state.collisions))
                         .size(CAPTION)
@@ -325,4 +336,3 @@ fn mono_dim(body: String) -> Text<'static> {
         .font(cosmic::font::mono())
         .class(Tone::Secondary.text(BACKDROP))
 }
-

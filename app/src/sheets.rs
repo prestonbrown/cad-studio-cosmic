@@ -158,11 +158,10 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .font(cosmic::font::mono())
                 .size(14),
         )
-        .push_maybe(
-            sheet
-                .last_verified_missing
-                .then(|| body(fl!("nessun-eseguibile-funzionante-trovato")).class(Tone::Danger.text(Backdrop::Plain))),
-        );
+        .push_maybe(sheet.last_verified_missing.then(|| {
+            body(fl!("nessun-eseguibile-funzionante-trovato"))
+                .class(Tone::Danger.text(Backdrop::Plain))
+        }));
     let actions = Row::new()
         .spacing(8)
         .push(

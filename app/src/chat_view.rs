@@ -597,10 +597,14 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     if let Some(action) = message.action {
         // .controlSize(.small): the small push button's 11pt label
         stack = stack.push(
-            button::custom(styled_text(action_title(action), CAPTION_LINK, Tone::Primary))
-                .padding([3.0, 9.0])
-                .class(cosmic::theme::Button::Standard)
-                .on_press(Message::RowAction(message.id, action)),
+            button::custom(styled_text(
+                action_title(action),
+                CAPTION_LINK,
+                Tone::Primary,
+            ))
+            .padding([3.0, 9.0])
+            .class(cosmic::theme::Button::Standard)
+            .on_press(Message::RowAction(message.id, action)),
         );
     }
     container(stack)
@@ -770,7 +774,11 @@ fn disclosure_label<'a>(
     on_press: Message,
 ) -> Element<'a, Message> {
     let chevron = container(sf_icon(
-        if open { Symbol::ChevronDown } else { Symbol::ChevronRight },
+        if open {
+            Symbol::ChevronDown
+        } else {
+            Symbol::ChevronRight
+        },
         9,
         Tone::Secondary,
     ))
@@ -971,7 +979,11 @@ fn input_bar<'a>(
     stack = stack.push(
         container(Space::new().height(Length::Fixed(1.0)))
             .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Separator.alpha(BACKDROP), Corner::None, false)),
+            .class(ui::surface::fill(
+                Tone::Separator.alpha(BACKDROP),
+                Corner::None,
+                false,
+            )),
     );
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
@@ -999,7 +1011,11 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
         .spacing(6)
         .align_y(Alignment::Center)
         .push(sf_icon(
-            if paused { Symbol::PauseCircle } else { Symbol::Clock },
+            if paused {
+                Symbol::PauseCircle
+            } else {
+                Symbol::Clock
+            },
             13,
             Tone::Secondary,
         ))

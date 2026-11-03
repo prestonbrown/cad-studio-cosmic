@@ -211,7 +211,10 @@ mod tests {
         let narrow = segment_width(&["Iso", "Top"]);
         let wide = segment_width(&["Iso", "Fronte"]);
         assert!(wide > narrow);
-        assert_eq!(segment_width(&["Iso", "Fronte"]), segment_width(&["Fronte"]));
+        assert_eq!(
+            segment_width(&["Iso", "Fronte"]),
+            segment_width(&["Fronte"])
+        );
         // upstream's "Front" segment: 37.5 pt at 11 pt labels
         assert!((segment_width(&["Front"]) - pt(37.0)).abs() < 1.0);
     }

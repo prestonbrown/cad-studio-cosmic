@@ -649,7 +649,9 @@ fn engine_section(
         LocateState::Found { path, .. } => mono(abbreviate_with_tilde(path, &home)).into(),
         LocateState::Checking => cosmic::widget::progress_bar::indeterminate_circular().into(),
         LocateState::Unknown => body(fl!("settings-none")).into(),
-        LocateState::Missing => body(fl!("non-trovato-2")).class(Tone::Danger.text(Backdrop::Plain)).into(),
+        LocateState::Missing => body(fl!("non-trovato-2"))
+            .class(Tone::Danger.text(Backdrop::Plain))
+            .into(),
     };
     let version: Element<'_, Message> = match &state.locate[slot] {
         LocateState::Found { version, .. } => mono(version.clone()).into(),
@@ -693,8 +695,12 @@ fn view_python(python: &EnvState) -> Element<'static, Message> {
         EnvState::Installing | EnvState::Checking | EnvState::Unknown => {
             cosmic::widget::progress_bar::indeterminate_circular().into()
         }
-        EnvState::Missing => body(fl!("non-installato")).class(Tone::Secondary.text(Backdrop::Plain)).into(),
-        EnvState::Failed(_) => body(fl!("non-funzionante")).class(Tone::Danger.text(Backdrop::Plain)).into(),
+        EnvState::Missing => body(fl!("non-installato"))
+            .class(Tone::Secondary.text(Backdrop::Plain))
+            .into(),
+        EnvState::Failed(_) => body(fl!("non-funzionante"))
+            .class(Tone::Danger.text(Backdrop::Plain))
+            .into(),
     };
     let installing = matches!(python, EnvState::Installing);
     let actions = Row::new()

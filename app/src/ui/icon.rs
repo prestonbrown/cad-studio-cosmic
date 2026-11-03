@@ -136,18 +136,28 @@ fn view_box(svg: &[u8]) -> Option<[f32; 4]> {
 
 /// A symbol `height` px tall in `tone` over `backdrop`.
 pub fn icon(symbol: Symbol, height: f32, tone: Tone, backdrop: Backdrop) -> Icon {
-    sized(cosmic_icon::from_svg_bytes(symbol.svg()).symbolic(true).icon(), symbol, height)
-        .opacity(tone.alpha(backdrop))
-        .class(cosmic::theme::Svg::custom(move |theme| {
-            cosmic::iced::widget::svg::Style {
-                color: Some(tone.solid(theme)),
-            }
-        }))
+    sized(
+        cosmic_icon::from_svg_bytes(symbol.svg())
+            .symbolic(true)
+            .icon(),
+        symbol,
+        height,
+    )
+    .opacity(tone.alpha(backdrop))
+    .class(cosmic::theme::Svg::custom(move |theme| {
+        cosmic::iced::widget::svg::Style {
+            color: Some(tone.solid(theme)),
+        }
+    }))
 }
 
 /// A `.multicolor` symbol `height` px tall, in its own colors.
 pub fn multicolor(symbol: Symbol, height: f32) -> Icon {
-    sized(cosmic_icon::from_svg_bytes(symbol.svg()).icon(), symbol, height)
+    sized(
+        cosmic_icon::from_svg_bytes(symbol.svg()).icon(),
+        symbol,
+        height,
+    )
 }
 
 fn sized(icon: Icon, symbol: Symbol, height: f32) -> Icon {
@@ -189,17 +199,29 @@ mod tests {
         let names: HashSet<&str> = Symbol::ALL.iter().map(|symbol| symbol.name()).collect();
         for entry in std::fs::read_dir(icon_dir()).unwrap() {
             let path = entry.unwrap().path();
-            assert!(path.is_file(), "{} is not a file: one flat directory", path.display());
+            assert!(
+                path.is_file(),
+                "{} is not a file: one flat directory",
+                path.display()
+            );
             let file = path.file_name().unwrap().to_string_lossy().into_owned();
-            let stem = file.strip_suffix(".svg").unwrap_or_else(|| panic!("{file} is not an svg"));
+            let stem = file
+                .strip_suffix(".svg")
+                .unwrap_or_else(|| panic!("{file} is not an svg"));
             assert!(names.contains(stem), "{file} has no Symbol");
         }
     }
 
     #[test]
     fn the_view_box_sets_the_width() {
-        assert_eq!(view_box(br#"<svg viewBox="3 0 10 16">"#), Some([3.0, 0.0, 10.0, 16.0]));
-        assert_eq!(view_box(br#"<svg viewBox="0,0,4,2">"#), Some([0.0, 0.0, 4.0, 2.0]));
+        assert_eq!(
+            view_box(br#"<svg viewBox="3 0 10 16">"#),
+            Some([3.0, 0.0, 10.0, 16.0])
+        );
+        assert_eq!(
+            view_box(br#"<svg viewBox="0,0,4,2">"#),
+            Some([0.0, 0.0, 4.0, 2.0])
+        );
         assert_eq!(view_box(b"<svg>"), None);
         assert_eq!(view_box(br#"<svg viewBox="0 0 0 2">"#), None);
         assert_eq!(Symbol::Xmark.aspect(), 1.0);

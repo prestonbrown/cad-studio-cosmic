@@ -181,7 +181,12 @@ pub fn version_button<Message: Clone + 'static>(
     // shrink by that margin
     let label = label
         .push(Space::new().width(Length::Fixed(8.0 - CHEVRON_MARGIN)))
-        .push(icon(Symbol::ChevronDown, CHEVRON_CELL, Tone::Secondary, TITLEBAR))
+        .push(icon(
+            Symbol::ChevronDown,
+            CHEVRON_CELL,
+            Tone::Secondary,
+            TITLEBAR,
+        ))
         .padding([0.0, 8.0 - CHEVRON_MARGIN, 0.0, 8.0])
         .height(Length::Fixed(27.0));
     let root = button::custom(label)
