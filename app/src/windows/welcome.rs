@@ -11,25 +11,32 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use cosmic::iced::Length;
+use cosmic::iced::font::Weight;
 use cosmic::iced::widget::image::Handle;
+use cosmic::iced::widget::text::Wrapping;
+use cosmic::iced::{Alignment, Length};
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::menu::{Item, items};
 use cosmic::widget::{Column, Row, Space, button, container, scrollable, text, text_input};
 use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
 
-use crate::fl;
-use crate::ui::{self, Backdrop, Symbol, Tone};
+use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
+use crate::{fl, typography};
 
 /// Upstream's welcome geometry (WelcomeWindow.swift:14-21): a 480 px
-/// actions pane beside a 300 px recents list, 460 px tall. The port runs
-/// 560 px: the first-run setup sheet must fit inside the window with its
-/// action row pinned (macOS sheets may exceed the window; popovers may
-/// not), and 460 clipped it.
+/// actions pane beside a 300 px recents list, 460 px tall.
 pub const ACTIONS_WIDTH: f32 = 480.0;
 pub const RECENTS_WIDTH: f32 = 300.0;
-pub const WINDOW_HEIGHT: f32 = 560.0;
+pub const WINDOW_HEIGHT: f32 = 460.0;
+
+/// The recents list's fill against [`Tone::Quaternary`]: upstream's
+/// sidebar list reads 205 beside the 235 actions pane, three quaternary
+/// fills deep.
+const RECENTS_FILL: f32 = 1.4;
+/// The action buttons' fill (`.quaternary.opacity(0.7)`,
+/// WelcomeWindow.swift:108).
+const ACTION_FILL: f32 = 0.7;
 
 /// The new-project sheet (NewProjectSheet.swift).
 pub mod new_project {
@@ -95,16 +102,22 @@ pub mod new_project {
         }
     }
 
-    /// The sheet body (NewProjectSheet.swift:20-54): heading, the name
-    /// field, the folder note, Cancel/Avanti.
+    /// The sheet body (NewProjectSheet.swift:20-54): the headline, the
+    /// labeled name field, the callout note, Cancel/Avanti; 460 wide,
+    /// 20 padding, 16 between rows.
     pub fn view(sheet: &NewProject) -> Element<'_, Message> {
         let valid = sheet.validation_error().is_none();
         let mut stack = Column::new()
             .spacing(16)
-            .push(text(fl!("scegli-le-opzioni-per-il-nuovo-progetto")).size(18))
             .push(
-                Column::new()
-                    .spacing(6)
+                text(fl!("scegli-le-opzioni-per-il-nuovo-progetto"))
+                    .size(typography::HEADLINE)
+                    .font(weighted(Weight::Semibold)),
+            )
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
                     .push(text(fl!("nome-progetto-2")))
                     .push(
                         text_input::text_input(fl!("staffa-a-l"), &sheet.name)
@@ -112,13 +125,14 @@ pub mod new_project {
                             // Return runs Avanti (upstream `.onSubmit(create)`,
                             // NewProjectSheet.swift:27)
                             .on_submit(|_| Message::Advance)
-                            .size(14),
+                            .width(Length::Fill),
                     ),
             )
             .push(
                 text(fl!(
                     "nel-passaggio-successivo-sceglierai-dove-creare-la-cartella-del-progetto"
                 ))
+                .size(typography::CALLOUT)
                 .class(Tone::Secondary.text(Backdrop::Plain)),
             );
         if let Some(error) = &sheet.error {
@@ -146,11 +160,10 @@ pub mod new_project {
                 )
                 .spacing(8),
         );
-        // Dialog card (opaque) — a bare container let the welcome content
-        // behind bleed through the sheet in its popover.
+        // the sheet card: COSMIC's dialog surface, one step above the window
         container(stack)
             .padding(20)
-            .width(480.0)
+            .width(460.0)
             .class(cosmic::theme::Container::Dialog(true))
             .into()
     }
@@ -244,14 +257,12 @@ impl Welcome {
         let actions = Column::new()
             .spacing(0)
             .push(Space::new().height(Length::Fill))
-            .push_maybe(app_icon().map(|h| cosmic::widget::image(h).width(128).height(128)))
+            .push(ui::icon::app(128.0))
             .push(
                 text(fl!("cad-studio"))
-                    .size(36)
-                    .font(cosmic::iced::font::Font {
-                        weight: cosmic::iced::font::Weight::Bold,
-                        ..cosmic::font::default()
-                    }),
+                    .size(typography::scaled(36.0))
+                    .font(weighted(Weight::Bold))
+                    .class(Tone::Primary.text(Backdrop::Plain)),
             )
             .push(
                 container(
@@ -262,28 +273,39 @@ impl Welcome {
             )
             .push(Space::new().height(Length::Fill))
             .push(action_button(
-                "list-add",
-                &fl!("crea-nuovo-progetto"),
+                Symbol::PlusSquare,
+                fl!("crea-nuovo-progetto"),
                 Message::NewProject,
             ))
             .push(Space::new().height(8))
             .push(action_button(
-                "folder",
-                &fl!("apri-progetto-esistente"),
+                Symbol::Folder,
+                fl!("apri-progetto-esistente"),
                 Message::OpenExisting,
             ))
             .push(Space::new().height(Length::Fill))
             .width(Length::Fill)
-            .align_x(cosmic::iced::alignment::Alignment::Center);
+            .align_x(Alignment::Center);
 
         let recents_list = self.view_recents(recents);
         Row::new()
             // upstream's pane is the bare frame — `actions.frame(width: 480)`
             // (WelcomeWindow.swift:15-16), no horizontal padding
-            .push(container(actions).width(ACTIONS_WIDTH))
-            .push(container(
-                cosmic::widget::divider::vertical::default().height(Length::Fill),
-            ))
+            .push(
+                container(actions)
+                    .width(ACTIONS_WIDTH)
+                    .height(Length::Fill)
+                    .class(cosmic::theme::Container::WindowBackground),
+            )
+            // `Divider()`: the separator hairline between the panes
+            .push(
+                container(Space::new().width(1).height(Length::Fill)).class(ui::surface::fill(
+                    Tone::Separator,
+                    1.0,
+                    Corner::None,
+                    false,
+                )),
+            )
             .push(recents_list)
             .height(Length::Fill)
             .into()
@@ -291,21 +313,21 @@ impl Welcome {
 
     /// The recents sidebar (WelcomeWindow.swift:63-88): rows with the
     /// project's `schematic.png` thumbnail, name and parent path, a
-    /// context menu, and the empty state.
+    /// context menu, and the empty state, on the sidebar list's fill.
     fn view_recents(&self, recents: &[PathBuf]) -> Element<'_, Message> {
         let list: Element<'_, Message> = if recents.is_empty() {
             container(
-                text(fl!("nessun-progetto-recente"))
-                    .class(Tone::Secondary.text(Backdrop::Plain))
-                    .width(Length::Fill),
+                text(fl!("nessun-progetto-recente")).class(Tone::Secondary.text(Backdrop::Plain)),
             )
-            .align_x(cosmic::iced::alignment::Alignment::Center)
-            .align_y(cosmic::iced::alignment::Alignment::Center)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
         } else {
-            let mut rows = Column::new().spacing(2).padding(8);
+            // the sidebar list's insets: rows start 16 px in, the first
+            // 17 px down, 46 px apart
+            let mut rows = Column::new().spacing(2).padding([12, 10]);
             for (index, path) in recents.iter().enumerate() {
                 rows = rows.push(self.recent_row(index, path));
             }
@@ -317,10 +339,17 @@ impl Welcome {
         container(list)
             .width(RECENTS_WIDTH)
             .height(Length::Fill)
+            .class(ui::surface::fill(
+                Tone::Quaternary,
+                RECENTS_FILL,
+                Corner::None,
+                false,
+            ))
             .into()
     }
 
-    /// One recents row (upstream `RecentProjectRow`): thumbnail, name,
+    /// One recents row (upstream `RecentProjectRow`,
+    /// WelcomeWindow.swift:115-151): thumbnail, semibold name, caption
     /// tilde-abbreviated parent, wrapped in the row's context menu.
     fn recent_row(&self, index: usize, path: &Path) -> Element<'_, Message> {
         let name = path
@@ -332,38 +361,58 @@ impl Welcome {
             .map(|p| abbreviate_tilde(p))
             .unwrap_or_default();
 
+        // the schematic on white, fit into 40×30 with a 3 pt clip; no
+        // schematic: the `cube` glyph at `.title2`, secondary
         let thumbnail: Element<'_, Message> = match self.thumbnail(path) {
-            Some(handle) => cosmic::widget::image(handle).width(40).height(30).into(),
+            Some(handle) => container(
+                cosmic::widget::image(handle)
+                    .content_fit(cosmic::iced::ContentFit::Contain)
+                    .width(40)
+                    .height(30),
+            )
+            .class(cosmic::theme::Container::custom(|theme| {
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Background::Color(cosmic::iced::Color::WHITE)),
+                    border: cosmic::iced::Border {
+                        radius: Corner::Xs.radius(theme),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }))
+            .into(),
             None => container(ui::icon::icon(
                 Symbol::Cube,
-                18.0,
+                typography::TITLE2,
                 Tone::Secondary,
                 Backdrop::Plain,
             ))
             .width(40)
             .height(30)
-            .align_x(cosmic::iced::alignment::Alignment::Center)
-            .align_y(cosmic::iced::alignment::Alignment::Center)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
             .into(),
         };
 
         let row = Row::new()
             .spacing(10)
+            .align_y(Alignment::Center)
             .push(thumbnail)
             .push(
                 Column::new()
                     .spacing(2)
-                    // the name needs the explicit class: it sits under a
-                    // Transparent button, whose inherited text color is
-                    // fully transparent
+                    // the labels need explicit classes: they sit under a
+                    // plain button, which hands its content no text color
                     .push(
-                        text(name.clone())
-                            .size(14)
+                        text(name)
+                            .font(weighted(Weight::Semibold))
+                            .wrapping(Wrapping::None)
                             .class(Tone::Primary.text(Backdrop::Plain)),
                     )
                     .push(
                         text(parent)
-                            .size(11)
+                            .size(typography::CAPTION)
+                            .wrapping(Wrapping::None)
                             .class(Tone::Secondary.text(Backdrop::Plain)),
                     ),
             )
@@ -371,9 +420,7 @@ impl Welcome {
             .width(Length::Fill);
 
         let open = Message::OpenRecent(path.to_path_buf());
-        let button = button::custom(row)
-            .class(cosmic::theme::Button::Transparent)
-            .on_press(open);
+        let button = ui::button::borderless(row, Some(open)).width(Length::Fill);
 
         // the row's context menu (WelcomeWindow.swift:68-81); the index
         // travels in the Copy action, the app resolves it to this row
@@ -413,20 +460,6 @@ impl Welcome {
     }
 }
 
-/// The app icon (upstream `NSApp.applicationIconImage`, shown 128×128
-/// above the wordmark): the original app's actual icon PNG, decoded once.
-fn app_icon() -> Option<Handle> {
-    thread_local! {
-        static CACHED: Option<Handle> = {
-            const PNG: &[u8] = include_bytes!("../../resources/app-icon.png");
-            let decoded = image::load_from_memory(PNG).ok()?.to_rgba8();
-            let (width, height) = decoded.dimensions();
-            Some(Handle::from_rgba(width, height, decoded.into_raw()))
-        };
-    }
-    CACHED.with(Clone::clone)
-}
-
 /// Decode a PNG into an image handle (upstream `NSImage(contentsOf:)` +
 /// `aspectRatio(contentMode: .fit)`; the fit sizing is the widget's).
 pub fn load_thumbnail(png: &Path) -> Option<Handle> {
@@ -449,38 +482,49 @@ pub fn abbreviate_tilde(path: &Path) -> String {
     }
 }
 
-/// The action buttons (upstream `WelcomeActionButton`): icon + label on a
-/// subtle rounded fill.
-fn action_button<'a>(icon_name: &str, label: &str, message: Message) -> Element<'a, Message> {
-    button::custom(
-        Row::new()
-            .spacing(10)
-            // upstream's HStack+frame centers the pair; iced Rows
-            // cross-align Start by default, leaving the glyph top-hung
-            // ~10px in the 40px button (review F5)
-            .align_y(cosmic::iced::alignment::Alignment::Center)
-            .push(
-                // the icon sits in a fixed 24 px column
-                // (`Image.frame(width: 24)`, WelcomeWindow.swift:101) so the
-                // two buttons' labels start on one x
-                container(
-                    cosmic::widget::icon::from_name(icon_name.to_string())
-                        .size(18)
-                        .icon(),
-                )
-                .width(24)
-                .align_x(cosmic::iced::alignment::Alignment::Center),
-            )
-            .push(text(label.to_string()))
-            .push(Space::new().width(Length::Fill))
-            .padding([0, 12])
-            .height(40)
-            .width(Length::Fill),
+/// The action buttons (upstream `WelcomeActionButton`,
+/// WelcomeWindow.swift:91-113): the symbol at `.title3` in a 24 px
+/// column, the medium-weight label, on a 320×40 quaternary fill with the
+/// small control radius.
+fn action_button<'a>(symbol: Symbol, label: String, message: Message) -> Element<'a, Message> {
+    let face = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(ui::icon::in_cell(
+            symbol,
+            typography::TITLE3,
+            24.0,
+            Tone::Primary,
+            Backdrop::Plain,
+        ))
+        .push(
+            text(label)
+                .font(weighted(Weight::Medium))
+                .class(Tone::Primary.text(Backdrop::Plain)),
+        )
+        .push(Space::new().width(Length::Fill))
+        .padding([0, 12])
+        .height(40)
+        .width(Length::Fill);
+    ui::button::borderless(
+        container(face).class(ui::surface::fill(
+            Tone::Quaternary,
+            ACTION_FILL,
+            Corner::S,
+            false,
+        )),
+        Some(message),
     )
-    .class(cosmic::theme::Button::Standard)
-    .on_press(message)
     .width(320)
     .into()
+}
+
+/// The default font at `weight`.
+fn weighted(weight: Weight) -> cosmic::iced::Font {
+    cosmic::iced::Font {
+        weight,
+        ..cosmic::font::default()
+    }
 }
 
 #[cfg(test)]

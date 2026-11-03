@@ -373,3 +373,6 @@ version-month-sep = sept.
 version-month-oct = oct.
 version-month-nov = nov.
 version-month-dec = déc.
+
+# conv2-wave3-shell
+about-copyright = © 2026 Filippo Finke · MIT License

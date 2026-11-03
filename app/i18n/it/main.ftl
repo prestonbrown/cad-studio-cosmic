@@ -373,3 +373,6 @@ version-month-sep = set
 version-month-oct = ott
 version-month-nov = nov
 version-month-dec = dic
+
+# conv2-wave3-shell
+about-copyright = © 2026 Filippo Finke · MIT License
