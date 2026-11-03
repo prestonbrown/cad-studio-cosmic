@@ -1,84 +1,139 @@
 //! Tool-use summaries: chat-row titles for agent tool calls.
 //!
 //! Classification transcribed from the vendored
-//! `fixtures/upstream-source/ToolSummary.swift`; title strings are the
-//! `app/i18n/en/main.ftl` catalog values (each constant below names its key).
+//! `fixtures/upstream-source/ToolSummary.swift`; titles are [`ToolAction`]
+//! ids the app localizes (each variant names its catalog key).
 //! [`summarize`] and [`live_title`] classify root-free — no project root or
 //! venv path at hand — so model and extension checks work on the basename and
 //! reference material is recognized by a `references/` path segment.
 //! [`rel_path`] and [`short_command`] carry the root/venv display
 //! normalization for callers that know the project folder.
 
-/// `installa-i-componenti`
-const INSTALL_COMPONENTS: &str = "Installing components";
-/// `compila-il-modello`
-const BUILD_MODEL: &str = "Building the model";
-/// `analizza-il-modello`
-const ANALYZE_MODEL: &str = "Analyzing the model";
-/// `prepara-un-anteprima`
-const PREPARE_PREVIEW: &str = "Preparing a preview";
-/// `esamina-i-file`
-const EXAMINE_FILES: &str = "Looking through files";
-/// `modifica-il-modello`
-const EDIT_MODEL: &str = "Editing the model";
-/// `sistema-i-file`
-const TIDY_FILES: &str = "Tidying up files";
-/// `lavora-sul-progetto`
-const WORK_PROJECT: &str = "Working on the project";
-/// `scrive-un-file`
-const WRITE_FILE: &str = "Writing a file";
-/// `scrive-il-modello`
-const WRITE_MODEL: &str = "Writing the model";
-/// `prepara-un-file-di-supporto`
-const WRITE_HELPER: &str = "Preparing a helper file";
-/// `modifica-un-file-di-supporto`
-const EDIT_HELPER: &str = "Editing a helper file";
-/// `legge-un-file`
-const READ_FILE: &str = "Reading a file";
-/// `studia-il-riferimento`
-const STUDY_REFERENCE: &str = "Studying the reference";
-/// `rilegge-il-modello`
-const REREAD_MODEL: &str = "Reviewing the model";
-/// `controlla-il-disegno`
-const CHECK_DRAWING: &str = "Checking the drawing";
-/// `controlla-i-risultati`
-const CHECK_RESULTS: &str = "Checking the results";
-/// `controlla-un-anteprima`
-const CHECK_PREVIEW: &str = "Checking a preview";
-/// `cerca-nel-progetto`
-const SEARCH_PROJECT: &str = "Searching the project";
-/// `aggiorna-il-piano-di-lavoro`
-const UPDATE_PLAN: &str = "Updates the task plan";
-/// `cerca-sul-web`
-const SEARCH_WEB: &str = "Searching the web";
+/// What a tool row's title says the agent is doing (upstream
+/// `ToolSummary`'s localized titles). The engine has no catalog, so it
+/// names the action and the app localizes it — the ids are the stable
+/// contract; each variant names its catalog key and en value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAction {
+    /// `installa-i-componenti`: "Installing components"
+    InstallComponents,
+    /// `compila-il-modello`: "Building the model"
+    BuildModel,
+    /// `analizza-il-modello`: "Analyzing the model"
+    AnalyzeModel,
+    /// `prepara-un-anteprima`: "Preparing a preview"
+    PreparePreview,
+    /// `esamina-i-file`: "Looking through files"
+    ExamineFiles,
+    /// `modifica-il-modello`: "Editing the model"
+    EditModel,
+    /// `sistema-i-file`: "Tidying up files"
+    TidyFiles,
+    /// `lavora-sul-progetto`: "Working on the project"
+    WorkProject,
+    /// `scrive-un-file`: "Writing a file"
+    WriteFile,
+    /// `scrive-il-modello`: "Writing the model"
+    WriteModel,
+    /// `prepara-un-file-di-supporto`: "Preparing a helper file"
+    WriteHelper,
+    /// `modifica-un-file-di-supporto`: "Editing a helper file"
+    EditHelper,
+    /// `legge-un-file`: "Reading a file"
+    ReadFile,
+    /// `studia-il-riferimento`: "Studying the reference"
+    StudyReference,
+    /// `rilegge-il-modello`: "Reviewing the model"
+    RereadModel,
+    /// `controlla-il-disegno`: "Checking the drawing"
+    CheckDrawing,
+    /// `controlla-i-risultati`: "Checking the results"
+    CheckResults,
+    /// `controlla-un-anteprima`: "Checking a preview"
+    CheckPreview,
+    /// `cerca-nel-progetto`: "Searching the project"
+    SearchProject,
+    /// `aggiorna-il-piano-di-lavoro`: "Updates the task plan"
+    UpdatePlan,
+    /// `cerca-sul-web`: "Searching the web"
+    SearchWeb,
+}
+
+impl ToolAction {
+    /// Every action id, for exhaustive catalog checks.
+    pub const ALL: [ToolAction; 21] = [
+        ToolAction::InstallComponents,
+        ToolAction::BuildModel,
+        ToolAction::AnalyzeModel,
+        ToolAction::PreparePreview,
+        ToolAction::ExamineFiles,
+        ToolAction::EditModel,
+        ToolAction::TidyFiles,
+        ToolAction::WorkProject,
+        ToolAction::WriteFile,
+        ToolAction::WriteModel,
+        ToolAction::WriteHelper,
+        ToolAction::EditHelper,
+        ToolAction::ReadFile,
+        ToolAction::StudyReference,
+        ToolAction::RereadModel,
+        ToolAction::CheckDrawing,
+        ToolAction::CheckResults,
+        ToolAction::CheckPreview,
+        ToolAction::SearchProject,
+        ToolAction::UpdatePlan,
+        ToolAction::SearchWeb,
+    ];
+}
+
+/// A tool row's title: the action, plus — while a Write's content streams —
+/// its line count so far (upstream's `lld-righe` format,
+/// ToolSummary.swift:74), and the trailing `…` while the input is still
+/// arriving. The app renders it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolTitle {
+    pub action: ToolAction,
+    pub lines: Option<usize>,
+    pub streaming: bool,
+}
+
+impl From<ToolAction> for ToolTitle {
+    fn from(action: ToolAction) -> Self {
+        Self {
+            action,
+            lines: None,
+            streaming: false,
+        }
+    }
+}
 
 /// Title for a completed tool use, upstream `ToolSummary.title` minus the
 /// root/python display context.
-pub fn summarize(name: &str, input: &serde_json::Value) -> String {
+pub fn summarize(name: &str, input: &serde_json::Value) -> ToolAction {
     match name {
         "Bash" => command_title(&short_command(input_str(input, "command"), "", "")),
         "Write" => {
             let path = file_path(input);
             if path.is_empty() {
-                WRITE_FILE.to_string()
+                ToolAction::WriteFile
             } else if is_model(path) {
-                WRITE_MODEL.to_string()
+                ToolAction::WriteModel
             } else {
-                WRITE_HELPER.to_string()
+                ToolAction::WriteHelper
             }
         }
         "Edit" | "MultiEdit" => {
             if is_model(file_path(input)) {
-                EDIT_MODEL.to_string()
+                ToolAction::EditModel
             } else {
-                EDIT_HELPER.to_string()
+                ToolAction::EditHelper
             }
         }
         "Read" => read_title(file_path(input)),
-        "Glob" | "Grep" => SEARCH_PROJECT.to_string(),
-        "TodoWrite" => UPDATE_PLAN.to_string(),
-        "WebSearch" | "WebFetch" => SEARCH_WEB.to_string(),
-        _ => WORK_PROJECT.to_string(),
+        "Glob" | "Grep" => ToolAction::SearchProject,
+        "TodoWrite" => ToolAction::UpdatePlan,
+        "WebSearch" | "WebFetch" => ToolAction::SearchWeb,
+        _ => ToolAction::WorkProject,
     }
 }
 
@@ -90,7 +145,7 @@ pub fn summarize(name: &str, input: &serde_json::Value) -> String {
 /// unescaped quotes) the input is still arriving, so the title gets a
 /// trailing `…`; a Write with parseable content additionally reports the
 /// line count so far (`lld-righe` format).
-pub fn live_title(name: &str, partial_json: &str) -> String {
+pub fn live_title(name: &str, partial_json: &str) -> ToolTitle {
     let mut fields = serde_json::Map::new();
     for key in ["file_path", "pattern"] {
         if let Some(value) = partial_string(key, partial_json) {
@@ -106,16 +161,15 @@ pub fn live_title(name: &str, partial_json: &str) -> String {
     if let Some(command) = partial_string("command", partial_json) {
         fields.insert("command".to_string(), serde_json::Value::String(command));
     }
-    let mut title = summarize(name, &serde_json::Value::Object(fields));
-    if name == "Write" {
-        if let Some(content) = partial_string("content", partial_json) {
-            title = format!("{title} · {} lines", content.split('\n').count());
-        }
+    let lines = (name == "Write")
+        .then(|| partial_string("content", partial_json))
+        .flatten()
+        .map(|content| content.split('\n').count());
+    ToolTitle {
+        action: summarize(name, &serde_json::Value::Object(fields)),
+        lines,
+        streaming: ends_inside_string(partial_json),
     }
-    if ends_inside_string(partial_json) {
-        title.push('…');
-    }
-    title
 }
 
 /// Last four non-empty lines of the `content` (Write) or `new_string` (Edit)
@@ -167,28 +221,28 @@ pub fn short_command(command: &str, root: &str, python: &str) -> String {
 }
 
 /// Upstream `commandTitle`: classes keyed off the first word (by basename).
-fn command_title(command: &str) -> String {
+fn command_title(command: &str) -> ToolAction {
     let text = command.trim();
     if text.is_empty() {
-        return WORK_PROJECT.to_string();
+        return ToolAction::WorkProject;
     }
     let words: Vec<&str> = text.split([' ', '\t']).filter(|w| !w.is_empty()).collect();
     let tool = words.first().map(|w| base_name(w)).unwrap_or("");
     if text.contains("pip install") || tool == "uv" {
-        return INSTALL_COMPONENTS.to_string();
+        return ToolAction::InstallComponents;
     }
     if tool.starts_with("python") {
         return if words.get(1) == Some(&"model.py") {
-            BUILD_MODEL.to_string()
+            ToolAction::BuildModel
         } else {
-            ANALYZE_MODEL.to_string()
+            ToolAction::AnalyzeModel
         };
     }
     if matches!(
         tool,
         "rsvg-convert" | "sips" | "magick" | "convert" | "qlmanage"
     ) {
-        return PREPARE_PREVIEW.to_string();
+        return ToolAction::PreparePreview;
     }
     // read-only sed is checked here, BEFORE the model.py-edit case below
     if matches!(
@@ -196,44 +250,44 @@ fn command_title(command: &str) -> String {
         "ls" | "cat" | "head" | "tail" | "grep" | "rg" | "find" | "wc" | "file" | "stat"
     ) || (tool == "sed" && !text.contains(" -i"))
     {
-        return EXAMINE_FILES.to_string();
+        return ToolAction::ExamineFiles;
     }
     if matches!(tool, "sed" | "perl") && text.contains("model.py") {
-        return EDIT_MODEL.to_string();
+        return ToolAction::EditModel;
     }
     if matches!(
         tool,
         "sed" | "mv" | "cp" | "rm" | "mkdir" | "touch" | "perl"
     ) {
-        return TIDY_FILES.to_string();
+        return ToolAction::TidyFiles;
     }
-    WORK_PROJECT.to_string()
+    ToolAction::WorkProject
 }
 
 /// Upstream `readTitle`, same check order: empty, references/, model.py,
 /// schematic*/pdf, manifest.json, image extensions, default.
-fn read_title(path: &str) -> String {
+fn read_title(path: &str) -> ToolAction {
     if path.is_empty() {
-        return READ_FILE.to_string();
+        return ToolAction::ReadFile;
     }
     if path.starts_with("references/") || path.contains("/references/") {
-        return STUDY_REFERENCE.to_string();
+        return ToolAction::StudyReference;
     }
     if is_model(path) {
-        return REREAD_MODEL.to_string();
+        return ToolAction::RereadModel;
     }
     let name = base_name(path).to_lowercase();
     let ext = file_ext(&name);
     if name.starts_with("schematic") || ext == "pdf" {
-        return CHECK_DRAWING.to_string();
+        return ToolAction::CheckDrawing;
     }
     if name == "manifest.json" {
-        return CHECK_RESULTS.to_string();
+        return ToolAction::CheckResults;
     }
     if matches!(ext, "png" | "jpg" | "jpeg" | "svg" | "webp") {
-        return CHECK_PREVIEW.to_string();
+        return ToolAction::CheckPreview;
     }
-    READ_FILE.to_string()
+    ToolAction::ReadFile
 }
 
 /// The file a tool input points at: `file_path`, falling back to `path` —

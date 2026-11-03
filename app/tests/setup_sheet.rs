@@ -2,23 +2,24 @@
 //! synthetic EnvEvents, no processes.
 
 use app::sheets::{SetupButtons, SetupSheetState};
-use engine::python::env::{EnvEvent, EnvState};
+use engine::python::env::{EnvEvent, EnvFailure, EnvLog, EnvState, EnvStep, InstallError};
 
 #[test]
 fn events_reduce_to_sheet_state() {
+    app::localize::select("en");
     let mut s = SetupSheetState::new();
     assert_eq!(s.state, EnvState::Unknown);
     s.apply(&EnvEvent::Progress {
         value: 0.1,
-        step: "Creating the virtual environment…".into(),
+        step: EnvStep::CreatingVenv,
     });
     assert_eq!(
         (s.progress, s.step.as_str()),
         (0.1, "Creating the virtual environment…")
     );
-    s.apply(&EnvEvent::Log("$ uv venv".into()));
-    s.apply(&EnvEvent::Log("resolving…".into()));
-    assert!(s.log.contains("$ uv venv\n"));
+    s.apply(&EnvEvent::Log(EnvLog::Text("$ uv venv".into())));
+    s.apply(&EnvEvent::Log(EnvLog::Step(EnvStep::UpgradingPip)));
+    assert!(s.log.contains("$ uv venv\nUpdating pip…\n"), "{}", s.log);
     s.apply(&EnvEvent::Finished(Ok(engine::python::env::EnvReady {
         build123d_version: "0.8.1".into(),
         versions: "Python 3.12.4, build123d 0.8.1".into(),
@@ -37,21 +38,17 @@ fn events_reduce_to_sheet_state() {
         engine::python::env::EnvFailure::Missing,
     )));
     assert_eq!(f.state, EnvState::Missing);
-    f.apply(&EnvEvent::Finished(Err(
-        engine::python::env::EnvFailure::InstallFailed(
-            "The command “uv” failed. Check the log for details.".into(),
-        ),
-    )));
+    f.apply(&EnvEvent::Finished(Err(EnvFailure::InstallFailed(
+        InstallError::CommandFailed {
+            command: "uv".into(),
+        },
+    ))));
     assert_eq!(
         f.state,
         EnvState::Failed("The command “uv” failed. Check the log for details.".into())
     );
-    // CheckFailed carries the same message shape into Failed
-    f.apply(&EnvEvent::Finished(Err(
-        engine::python::env::EnvFailure::CheckFailed(
-            "The Python environment exists, but build123d or matplotlib can’t be imported.".into(),
-        ),
-    )));
+    // CheckFailed localizes its catalog label into Failed
+    f.apply(&EnvEvent::Finished(Err(EnvFailure::CheckFailed)));
     assert_eq!(
         f.state,
         EnvState::Failed(
@@ -98,10 +95,12 @@ fn button_model_matches_upstream_states() {
 #[test]
 fn kicks_enter_checking_and_installing() {
     let mut sheet = SetupSheetState::new();
-    sheet.apply(&EnvEvent::Log("stale log from a failed run".into()));
+    sheet.apply(&EnvEvent::Log(EnvLog::Text(
+        "stale log from a failed run".into(),
+    )));
     sheet.apply(&EnvEvent::Progress {
         value: 0.4,
-        step: "Installation failed".into(),
+        step: EnvStep::InstallFailed,
     });
     sheet.begin_checking();
     assert_eq!(sheet.state, EnvState::Checking);

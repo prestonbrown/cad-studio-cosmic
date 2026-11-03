@@ -1252,7 +1252,7 @@ impl CadStudio {
             None,
         ));
         self.windows.insert(id, WindowKind::Welcome);
-        let title = self.set_window_title("Welcome to CAD Studio".to_string(), id);
+        let title = self.set_window_title(fl!("benvenuto-in-cad-studio"), id);
         Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
     }
 

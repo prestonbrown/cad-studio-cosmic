@@ -13,6 +13,7 @@ use engine::agent::claude::TurnRequest;
 use engine::agent::session::{
     EngineEvent, Session, TurnOutcome, is_authentication_error, is_busy_session, is_missing_session,
 };
+use engine::agent::tool_summary::{ToolAction, ToolTitle};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
@@ -257,8 +258,12 @@ async fn tool_turn_tracks_tool_rows() {
             assert_eq!(b, READ_ID);
             assert_eq!(na, "Write", "the tool_use block's name rides along");
             assert_eq!(nb, "Read");
-            assert_eq!(ta, "Writing a file", "live title at content_block_start");
-            assert_eq!(tb, "Reading a file");
+            assert_eq!(
+                ta,
+                &ToolTitle::from(ToolAction::WriteFile),
+                "live title at content_block_start"
+            );
+            assert_eq!(tb, &ToolTitle::from(ToolAction::ReadFile));
         }
         other => panic!("{other:?}"),
     }
@@ -919,4 +924,85 @@ fn auth_401_word_boundary_engine() {
     assert!(!is_authentication_error("failed with 4013"));
     assert!(is_authentication_error("api error status 401"));
     assert!(is_authentication_error("returned (401)"));
+}
+
+/// Runs `turns` sequential turns on ONE session against the fake at
+/// `fake`, calling `between(i)` before turn `i` — the mid-session seam:
+/// the executable is resolved per turn, so what `between` does to the
+/// file decides the next turn.
+async fn run_turns_on_one_session(
+    root: &Path,
+    fake: &Path,
+    turns: usize,
+    mut between: impl FnMut(usize),
+) -> Vec<Vec<EngineEvent>> {
+    let guard = ENV_LOCK.lock().await;
+    // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fake);
+        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/pong.jsonl"));
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        std::env::remove_var("CAD_FAKE_ARGV_OUT");
+        std::env::remove_var("CAD_FAKE_STDERR");
+    }
+    let mut session = Session::new(Settings::default()).with_system_template(system_template());
+    let mut all = Vec::new();
+    for i in 0..turns {
+        between(i);
+        let mut handle = session.run_turn(
+            root,
+            &TurnRequest {
+                prompt: "please respond".into(),
+                references: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+        all.push(collect_until_finished(&mut handle).await);
+    }
+    drop(guard);
+    all
+}
+
+/// An executable that vanishes between turns ends the next turn with the
+/// typed AgentMissing marker before anything spawns (upstream's per-turn
+/// `locator.resolve()` guard, AgentSession.swift:40-50) — no Started, no
+/// free-text failure for the app to show in English.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_vanishing_mid_session_ends_turn_agent_missing() {
+    let root = mk_project();
+    let fake = root.join("fake_claude.py");
+    std::fs::copy(fixture_fake("fake_claude.py"), &fake).unwrap();
+    let turns = run_turns_on_one_session(&root, &fake, 2, |i| {
+        if i == 1 {
+            std::fs::remove_file(&fake).unwrap();
+        }
+    })
+    .await;
+    assert!(
+        matches!(finished(&turns[0]), TurnOutcome::Success { .. }),
+        "{:?}",
+        turns[0]
+    );
+    assert_eq!(
+        turns[1],
+        vec![EngineEvent::TurnFinished(TurnOutcome::AgentMissing)],
+        "nothing but the marker: the turn never spawned"
+    );
+}
+
+/// An executable that resolves but cannot be exec'd ends StartFailed with
+/// the OS error as its detail (upstream's catch, AgentSession.swift:98-100),
+/// not a generic Failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn unspawnable_agent_ends_turn_start_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = mk_project();
+    let fake = root.join("broken-agent");
+    std::fs::write(&fake, "#!/nonexistent/interpreter\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let turns = run_turns_on_one_session(&root, &fake, 1, |_| {}).await;
+    match finished(&turns[0]) {
+        TurnOutcome::StartFailed { error } => assert!(!error.is_empty()),
+        other => panic!("expected StartFailed, got {other:?}"),
+    }
 }

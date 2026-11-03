@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use engine::python::env::{
-    self, CHECK_FAILED_MESSAGE, EnvEvent, EnvFailure, PACKAGES, VERIFY_SCRIPT, VERSIONS_FALLBACK,
-    is_supported_python, nudge_progress, parse_python_version, parse_verification,
-    set_shared_versions, uv_install_plan, venv_install_plan, versions_display,
+    self, EnvEvent, EnvFailure, EnvLog, EnvStep, InstallError, PACKAGES, VERIFY_SCRIPT,
+    VERSIONS_FALLBACK, is_supported_python, nudge_progress, parse_python_version,
+    parse_verification, set_shared_versions, uv_install_plan, venv_install_plan, versions_display,
 };
 
 /// The versions cell is process-global: every test that resets or asserts
@@ -26,7 +26,7 @@ fn uv_plan_matches_upstream_argv() {
     let steps = uv_install_plan(Path::new("/usr/local/bin/uv"), &dir);
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].progress, 0.1);
-    assert_eq!(steps[0].step, "Creating the virtual environment with uv…");
+    assert_eq!(steps[0].step, EnvStep::CreatingVenvWithUv);
     assert_eq!(
         steps[0].argv,
         vec![
@@ -38,7 +38,7 @@ fn uv_plan_matches_upstream_argv() {
         ]
     );
     assert_eq!(steps[1].progress, 0.25);
-    assert_eq!(steps[1].step, "Installing build123d, matplotlib and numpy…");
+    assert_eq!(steps[1].step, EnvStep::InstallingPackages);
     assert_eq!(
         steps[1].argv[1..5],
         [
@@ -58,20 +58,23 @@ fn venv_plan_matches_upstream_argv() {
     assert_eq!(steps.len(), 3);
     assert_eq!(
         (steps[0].progress, steps[0].step),
-        (0.1, "Creating the virtual environment…")
+        (0.1, EnvStep::CreatingVenv)
     );
     assert_eq!(
         steps[0].argv,
         vec!["/usr/bin/python3.12", "-m", "venv", dir.to_str().unwrap()]
     );
-    assert_eq!((steps[1].progress, steps[1].step), (0.2, "Updating pip…"));
+    assert_eq!(
+        (steps[1].progress, steps[1].step),
+        (0.2, EnvStep::UpgradingPip)
+    );
     assert_eq!(
         steps[1].argv[1..],
         ["-m", "pip", "install", "--upgrade", "pip"]
     );
     assert_eq!(
         (steps[2].progress, steps[2].step),
-        (0.25, "Installing build123d, matplotlib and numpy…")
+        (0.25, EnvStep::InstallingPackages)
     );
     assert_eq!(&steps[2].argv[4..7], &PACKAGES[..]);
 }
@@ -199,7 +202,6 @@ async fn check_missing_interpreter_reports_missing() {
         events.last(),
         Some(&EnvEvent::Finished(Err(EnvFailure::Missing)))
     );
-    assert_eq!(EnvFailure::Missing.message(), "");
 }
 
 #[tokio::test]
@@ -243,9 +245,7 @@ async fn check_failing_verification_reports_check_failed() {
     set_shared_versions(Some("stale versions line".into()));
     let events = drain(env::check(&dir, &spawn)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(f @ EnvFailure::CheckFailed(_)))) => {
-            assert_eq!(f.message(), CHECK_FAILED_MESSAGE);
-        }
+        Some(EnvEvent::Finished(Err(EnvFailure::CheckFailed))) => {}
         other => panic!("expected check failure, got {other:?}"),
     }
     // a failed check clears the stale cell, so display falls back
@@ -271,22 +271,19 @@ async fn install_uv_path_reaches_verified_ready() {
         Arc::new(|program, _| (program.file_name().unwrap() == "uv").then(|| (0, "uv 0.5".into())));
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     assert!(matches!(events.last(), Some(EnvEvent::Finished(Ok(_)))));
-    let milestones: Vec<(f64, String)> = events
+    let milestones: Vec<(f64, EnvStep)> = events
         .iter()
         .filter_map(|e| match e {
-            EnvEvent::Progress { value, step } => Some((*value, step.clone())),
+            EnvEvent::Progress { value, step } => Some((*value, *step)),
             _ => None,
         })
         .collect();
     assert_eq!(
         milestones.first().unwrap(),
-        &(0.1, "Creating the virtual environment with uv…".into())
+        &(0.1, EnvStep::CreatingVenvWithUv)
     );
-    assert!(milestones.contains(&(0.95, "Verifying the installation…".into())));
-    assert_eq!(
-        milestones.last().unwrap(),
-        &(1.0, "Components installed".into())
-    );
+    assert!(milestones.contains(&(0.95, EnvStep::Verifying)));
+    assert_eq!(milestones.last().unwrap(), &(1.0, EnvStep::Installed));
     assert!(
         seen.lock()
             .unwrap()
@@ -303,10 +300,12 @@ async fn install_failing_step_reports_command_name() {
     let probe: env::Probe = Arc::new(|_, _| Some((0, "uv 0.5".to_string())));
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
+        Some(EnvEvent::Finished(Err(EnvFailure::InstallFailed(error)))) => {
             assert_eq!(
-                f.message(),
-                "The command “uv” failed. Check the log for details."
+                error,
+                &InstallError::CommandFailed {
+                    command: "uv".into()
+                }
             );
         }
         other => panic!("expected command failure, got {other:?}"),
@@ -314,11 +313,19 @@ async fn install_failing_step_reports_command_name() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, EnvEvent::Log(l) if l.contains("oops")))
+            .any(|e| matches!(e, EnvEvent::Log(EnvLog::Text(l)) if l.contains("oops")))
     );
     // upstream's catch sets the step label with the bar holding its place
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EnvEvent::Progress {
+            value: 0.1,
+            step: EnvStep::InstallFailed
+        }
+    )));
+    // the error line closes the log as an id, after the step label
     assert!(events.iter().any(|e| matches!(e,
-        EnvEvent::Progress { value: 0.1, step } if step == "Installation failed")));
+        EnvEvent::Log(EnvLog::Failure(InstallError::CommandFailed { command })) if command == "uv")));
 }
 
 #[tokio::test]
@@ -328,15 +335,20 @@ async fn install_without_uv_or_python_reports_python_not_found() {
     let probe: env::Probe = Arc::new(|_, _| None); // uv absent, every python absent
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
-            assert!(f.message().starts_with("Neither uv nor Python 3.10–3.13"))
+        Some(EnvEvent::Finished(Err(EnvFailure::InstallFailed(error)))) => {
+            assert_eq!(error, &InstallError::PythonNotFound)
         }
         other => panic!("expected pythonNotFound, got {other:?}"),
     }
     // the search milestone (0.05) precedes the scan, so the failure label
     // carries that position
-    assert!(events.iter().any(|e| matches!(e,
-        EnvEvent::Progress { value: 0.05, step } if step == "Installation failed")));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EnvEvent::Progress {
+            value: 0.05,
+            step: EnvStep::InstallFailed
+        }
+    )));
 }
 
 #[tokio::test]
@@ -348,14 +360,14 @@ async fn install_rejects_candidates_whose_probe_fails() {
     let probe: env::Probe = Arc::new(|_, _| Some((1, "Python 3.12.4".to_string())));
     let events = drain(env::install(&dir, &spawn, &probe)).await;
     match events.last() {
-        Some(EnvEvent::Finished(Err(f @ EnvFailure::InstallFailed(_)))) => {
-            assert!(f.message().starts_with("Neither uv nor Python 3.10–3.13"))
+        Some(EnvEvent::Finished(Err(EnvFailure::InstallFailed(error)))) => {
+            assert_eq!(error, &InstallError::PythonNotFound)
         }
         other => panic!("expected pythonNotFound, got {other:?}"),
     }
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, EnvEvent::Log(l) if l.starts_with("Found ")))
+            .any(|e| matches!(e, EnvEvent::Log(EnvLog::FoundPython { .. })))
     );
 }

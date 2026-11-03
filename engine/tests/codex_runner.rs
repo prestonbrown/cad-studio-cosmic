@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use engine::agent::claude::TurnRequest;
 use engine::agent::session::{EngineEvent, Session, TurnOutcome};
+use engine::agent::tool_summary::{ToolAction, ToolTitle};
 use engine::project::store::load_metadata;
 use engine::settings::Settings;
 
@@ -208,7 +209,11 @@ async fn codex_turn_translates_full_sequence() {
             name, title, ..
         } => {
             assert_eq!(name, "Bash");
-            assert_eq!(title, "Building the model", "unwrapped `python model.py`");
+            assert_eq!(
+                title,
+                &ToolTitle::from(ToolAction::BuildModel),
+                "unwrapped `python model.py`"
+            );
         }
         other => panic!("{other:?}"),
     }

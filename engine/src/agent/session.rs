@@ -71,7 +71,7 @@ use crate::agent::stream_event::{
     ContentBlock, Delta, InnerEvent, ResultEvent, StreamEvent, SystemKind, ToolResultContent,
     parse_line,
 };
-use crate::agent::tool_summary::{live_title, summarize};
+use crate::agent::tool_summary::{ToolTitle, live_title, summarize};
 use crate::parsing::threemf::parse_3mf;
 use crate::processes::{Line, RunningProcess, spawn_streaming};
 use crate::project::manifest::Manifest;
@@ -82,7 +82,9 @@ use crate::settings::Settings;
 /// Names an executable to spawn instead of discovering one — the test and
 /// embedder seam (same pattern as the registry override in `processes`). The
 /// path is never `--version`-validated: a scripted fake reads its scenario
-/// from the environment and would treat a probe invocation as a turn.
+/// from the environment and would treat a probe invocation as a turn. It is
+/// still held to the locator's executable-file check, so an override whose
+/// file is gone resolves to nothing, as a vanished install does.
 const TEST_CLAUDE_ENV: &str = "CAD_TEST_CLAUDE";
 
 /// The log-name timestamp (AgentSession.swift:325-333). Upstream formats local
@@ -131,11 +133,11 @@ pub enum EngineEvent {
     TextConfirmed { text: String },
     /// A tool row opened at `content_block_start` (or by an assistant
     /// snapshot the stream never announced). `name` is the `tool_use`
-    /// block's tool name.
+    /// block's tool name; `title` is a [`ToolTitle`] id the app localizes.
     ToolStarted {
         id: String,
         name: String,
-        title: String,
+        title: ToolTitle,
     },
     /// One `input_json_delta` for the row's accumulating input JSON.
     ToolInput { id: String, partial: String },
@@ -168,6 +170,20 @@ pub enum TurnOutcome {
         error: String,
         auth: bool,
         exit_code: Option<i32>,
+    },
+    /// The agent executable did not resolve for this turn (upstream's
+    /// `locator.resolve()` guard, AgentSession.swift:40-50); nothing was
+    /// spawned. Re-checked every turn, so an executable that vanishes
+    /// mid-session ends the next turn here. Upstream answers with a
+    /// `.configureClaude` system row, presents the agent-missing sheet, and
+    /// reports the `non-trovato` activity.
+    AgentMissing,
+    /// The executable resolved but could not be spawned (upstream's
+    /// `catch`, AgentSession.swift:98-100: the `impossibile-avviare` row
+    /// with `error` as its detail, the `errore-di` activity). `error` is
+    /// the OS error text, verbatim.
+    StartFailed {
+        error: String,
     },
     /// A resume collided with an active writer twice. [`Session::send`]'s
     /// dance absorbs this itself (retry, then a fresh run), so the engine
@@ -361,12 +377,17 @@ struct Attempt {
 impl Attempt {
     /// A turn that never produced a stream to classify.
     fn failed(error: impl Into<String>) -> Self {
+        Self::ended(TurnOutcome::Failed {
+            error: error.into(),
+            auth: false,
+            exit_code: None,
+        })
+    }
+
+    /// A turn that ended with `outcome` before producing a stream.
+    fn ended(outcome: TurnOutcome) -> Self {
         Self {
-            outcome: TurnOutcome::Failed {
-                error: error.into(),
-                auth: false,
-                exit_code: None,
-            },
+            outcome,
             turn_result: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -502,10 +523,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     };
 
     let Some(executable) = resolve_executable(engine, &settings) else {
-        return Attempt::failed(format!(
-            "{} is not installed or was not found. Install it or set its path in settings.",
-            engine.display_name()
-        ));
+        return Attempt::ended(TurnOutcome::AgentMissing);
     };
 
     // the missing-output note needs the parts count from the parsed 3MF and
@@ -560,7 +578,9 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
         Err(error) => {
-            return Attempt::failed(format!("could not start {}: {error}", engine.display_name()))
+            return Attempt::ended(TurnOutcome::StartFailed {
+                error: error.to_string(),
+            });
         }
     };
     *ctx.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc.pid);
@@ -719,8 +739,9 @@ fn prompt_ctx(root: &Path, settings: &Settings) -> PromptCtx {
 /// (upstream `AgentLocator.current` picks the locator by engine).
 fn resolve_executable(engine: AgentKind, settings: &Settings) -> Option<AgentPath> {
     if let Some(path) = std::env::var_os(TEST_CLAUDE_ENV) {
-        return Some(AgentPath {
-            path: path.into(),
+        let path = PathBuf::from(path);
+        return locator::is_executable_file(&path).then_some(AgentPath {
+            path,
             version: String::new(),
         });
     }
@@ -853,7 +874,7 @@ impl TurnDriver {
                     // only gets a title/input refinement upstream, which no
                     // EngineEvent carries
                     if self.state.seen_tools.insert(id.clone()) {
-                        let title = summarize(&name, &input);
+                        let title = summarize(&name, &input).into();
                         let _ = self
                             .events
                             .send(EngineEvent::ToolStarted { id, name, title })
