@@ -1,8 +1,8 @@
-//! Session-lifecycle integration tests (task 8): the full upstream turn
-//! dance through `Session::send` — busy retry then fresh restart,
-//! missing-session fresh fallback, auth failure without retry, and
-//! cancellation during the busy-retry wait — plus the task-9
-//! `EngineCommand` surface driving the same dance. The fake agent runs in
+//! Session-lifecycle integration tests: the full upstream turn dance
+//! through `Session::send` — busy retry then fresh restart,
+//! missing-session fresh fallback, auth failure without retry,
+//! cancellation during the busy-retry wait, and the app's send / cancel /
+//! resend / reap sequence. The fake agent runs in
 //! directory mode (`CAD_FAKE_SCENARIO` points at a directory; the fake
 //! picks `<n>.jsonl` per its counter file), so one `send` walks a
 //! scripted sequence of attempts, and every invocation appends one
@@ -15,9 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use engine::agent::EngineCommand;
 use engine::agent::claude::TurnRequest;
-use engine::agent::session::{EngineEvent, Session, SystemRow, TurnHandle, TurnOutcome};
+use engine::agent::session::{EngineEvent, Session, SystemRow, TurnOutcome};
 use engine::project::store::{ProjectMetadata, load_metadata, save_metadata};
 use engine::settings::Settings;
 
@@ -462,17 +461,15 @@ async fn cancelled_turn_ends_cleanly() {
     );
 }
 
-// ─── the command surface (task 9) ────────────────────────────────────────────
+// ─── the app's sequence ──────────────────────────────────────────────────────
 
-/// The `EngineCommand` surface M4's app speaks, driving the same machinery
-/// the tests above drive through the raw handle: a `Send` installs the
-/// running turn, a command-routed `Cancel` ends the dance parked in the
-/// busy-retry wait with no further spawn, the next `Send` replaces the
-/// finished turn and replays the scenario's pong run to `Success` with the
-/// exact translation sequence, and `Shutdown` reaps with nothing left
-/// listed.
+/// The sequence the app drives: `send` launches the turn, the handle's
+/// `cancel` ends the dance parked in the busy-retry wait with no further
+/// spawn, the next `send` replays the scenario's pong run to `Success`
+/// with the exact translation sequence, and the quit-time reap finds
+/// nothing left listed.
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_command_drives_the_dance() {
+async fn send_cancel_resend_then_reap() {
     let root = mk_project();
     let scenario = scenario_dir(
         "cmd",
@@ -500,21 +497,16 @@ async fn engine_command_drives_the_dance() {
         // wide enough that the cancel below lands inside the retry wait,
         // not inside the busy attempt itself
         .with_retry_delay(Duration::from_secs(2));
-    let mut running: Option<TurnHandle> = None;
+    let request = TurnRequest {
+        prompt: "please respond".into(),
+        references: Vec::new(),
+        images: Vec::new(),
+    };
 
-    // Send: the busy attempt streams and errors out, parking the dance in
+    // send: the busy attempt streams and errors out, parking the dance in
     // the 2 s retry wait
-    EngineCommand::Send {
-        root: root.clone(),
-        request: TurnRequest {
-            prompt: "please respond".into(),
-            references: Vec::new(),
-            images: Vec::new(),
-        },
-    }
-    .apply(&mut session, &mut running);
+    let mut handle = session.send(&root, &request);
     {
-        let handle = running.as_mut().expect("Send installs the running turn");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match tokio::time::timeout_at(deadline, handle.events.recv()).await {
@@ -533,10 +525,10 @@ async fn engine_command_drives_the_dance() {
     }
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    // Cancel: routed to the running handle's interrupt, ending the dance
-    // cancelled with no respawn
-    EngineCommand::Cancel.apply(&mut session, &mut running);
-    let tail = collect_until_finished(running.as_mut().unwrap()).await;
+    // cancel: the handle's interrupt ends the dance cancelled with no
+    // respawn
+    handle.cancel();
+    let tail = collect_until_finished(&mut handle).await;
     assert_eq!(
         tail.last(),
         Some(&EngineEvent::TurnFinished(TurnOutcome::Cancelled))
@@ -547,18 +539,10 @@ async fn engine_command_drives_the_dance() {
         "no spawn after a cancelled retry wait"
     );
 
-    // Send again: replaces the finished turn; run 2 resumes the id run
-    // 1's init persisted and replays the pong scenario verbatim
-    EngineCommand::Send {
-        root: root.clone(),
-        request: TurnRequest {
-            prompt: "please respond".into(),
-            references: Vec::new(),
-            images: Vec::new(),
-        },
-    }
-    .apply(&mut session, &mut running);
-    let events = collect_until_finished(running.as_mut().unwrap()).await;
+    // send again: run 2 resumes the id run 1's init persisted and replays
+    // the pong scenario verbatim
+    let mut handle = session.send(&root, &request);
+    let events = collect_until_finished(&mut handle).await;
     assert_eq!(
         events,
         vec![
@@ -601,18 +585,16 @@ async fn engine_command_drives_the_dance() {
         Some(PONG_SID)
     );
 
-    // Shutdown: interrupts the (finished) running turn and reaps the
-    // registry — both of this test's spawns exited and unregistered, so
-    // nothing may remain listed
-    EngineCommand::Shutdown.apply(&mut session, &mut running);
+    // quit: both of this test's spawns exited and unregistered, so the
+    // reap finds nothing listed
     assert!(
         engine::processes::reap_orphans_at(&root.join("registry")).is_empty(),
-        "Shutdown leaves no live registry entry"
+        "no live registry entry after both turns"
     );
     drop(guard);
 }
 
-/// Attachments survive the command surface as pre-made COPY names: `Send`
+/// Attachments reach the turn as pre-made COPY names: `send`
 /// consumes the request's `references` list into the prompt verbatim
 /// (upstream Project.swift:203 threads `copyReferences`' return straight
 /// into `prompt(text:references:)`) and the engine itself writes nothing —
@@ -637,17 +619,15 @@ async fn send_consumes_request_references_without_copying() {
     std::fs::create_dir_all(root.join("references")).unwrap();
     std::fs::write(root.join("references").join(name), b"png").unwrap();
     let mut session = Session::new(Settings::default()).with_system_template(system_template());
-    let mut running: Option<TurnHandle> = None;
-    EngineCommand::Send {
-        root: root.clone(),
-        request: TurnRequest {
+    let mut handle = session.send(
+        &root,
+        &TurnRequest {
             prompt: String::new(),
             references: vec![format!("references/{name}")],
             images: Vec::new(),
         },
-    }
-    .apply(&mut session, &mut running);
-    let events = collect_until_finished(running.as_mut().unwrap()).await;
+    );
+    let events = collect_until_finished(&mut handle).await;
     assert!(
         matches!(finished(&events), TurnOutcome::Success { .. }),
         "{events:?}"
