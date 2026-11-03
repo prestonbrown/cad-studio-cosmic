@@ -20,8 +20,14 @@ case "$cmd" in
   sync)
     src=${1:-$PWD}
     ssh "$host" "mkdir -p ~/wt/$name ~/targets"
-    ssh "$host" "[ -d ~/targets/$name ] || cp -r ~/cad-studio-cosmic/target ~/targets/$name"
-    rsync -az --delete --exclude target --exclude .superpowers --exclude .git -e ssh "$src"/ "$host:wt/$name/"
+    # cp -a keeps the seed artifacts' build times, so any source that differs
+    # from the seed tree reads as newer than its artifact.
+    ssh "$host" "[ -d ~/targets/$name ] || cp -a ~/cad-studio-cosmic/target ~/targets/$name"
+    # No -t: a file whose content changed lands with the rig's current time
+    # (cargo's freshness check is mtime-based); --checksum skips files whose
+    # content already matches, so unchanged crates stay fresh.
+    rsync -rlpDz --checksum --delete --exclude target --exclude .superpowers --exclude .git \
+      -e ssh "$src"/ "$host:wt/$name/"
     ;;
   run)
     ssh "$host" "cd ~/wt/$name && . ~/.cargo/env && export CARGO_TARGET_DIR=~/targets/$name && $*"
