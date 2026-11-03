@@ -1157,13 +1157,15 @@ impl Drive {
                 let failure =
                     (!succeeded).then(|| turn_failure_activity(outcome, transcript.engine));
                 // the terminal saves BEFORE it forwards: a consumer that saw
-                // the TurnFinished message can read chat.json immediately
-                // (upstream's agentDidFinish saves before the UI hears)
+                // the TurnFinished message can read chat.json and a failed
+                // turn's activity immediately (upstream's agentDidFinish
+                // saves before the UI hears)
                 let _ = store::save_chat(&self.root, &transcript.messages);
-                let _ = self.out.unbounded_send(Message::Event(event));
                 if let Some(text) = failure {
                     self.pipeline().activity = Activity::Failed(text);
+                    let _ = self.out.unbounded_send(Message::Event(event));
                 } else {
+                    let _ = self.out.unbounded_send(Message::Event(event));
                     self.turn_success_tail(&transcript);
                 }
                 return TurnEnd::Finished { succeeded };
