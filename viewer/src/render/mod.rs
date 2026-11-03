@@ -33,11 +33,12 @@
 //! multisample color + depth attachment, resolves into an intermediate
 //! single-sample texture, and blits that over the target with premultiplied
 //! alpha — iced's content underneath survives, same Load-and-composite
-//! contract as the single-sample path. The app's `m`-key toggle flips
-//! [`Options::msaa`] between 1 and 4; `prepare_parts` then rebuilds the
-//! render pipelines and owned attachments in place (iced's Storage owns one
-//! pipeline per type and cannot hand out replacements), while the wireframe
-//! toggle stays a pure draw-path switch.
+//! contract as the single-sample path. The app pane sets [`Options::msaa`]
+//! to 4 (the example's `m` key flips it between 1 and 4); a count that
+//! differs from the resident one makes `prepare_parts` rebuild the render
+//! pipelines and owned attachments in place (iced builds the pipeline at 1
+//! through `Pipeline::new` and its Storage cannot hand out replacements),
+//! while the wireframe toggle stays a pure draw-path switch.
 //!
 //! Cross-sections: the mesh pass writes winding parity into the stencil
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
