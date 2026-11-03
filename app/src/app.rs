@@ -1170,7 +1170,7 @@ impl CadStudio {
             // "Impossibile aprire il progetto" view carrying the error; no
             // recent is added and the welcome window stays
             eprintln!("cad-studio: cannot open {}: {why}", root.display());
-            return self.open_load_error(why.to_string());
+            return self.open_load_error(crate::engine_text::project_store_error(&why));
         }
         let (window, bridge_task) = ProjectWindow::new(root.clone(), &self.settings);
         let name = window.name.clone();
@@ -2028,6 +2028,7 @@ mod shell_behavior {
     /// the welcome window stays.
     #[test]
     fn opening_an_unreadable_project_shows_the_load_error_window() {
+        let _lang = crate::localize::pin_en();
         let mut f = fixture();
         let missing = f.dir.join("non-esiste");
         let _ = f.app.open_project(missing.clone());
@@ -2041,8 +2042,11 @@ mod shell_behavior {
             })
             .collect();
         assert_eq!(errors.len(), 1, "one load-error window");
-        let expected = store::prepare(&missing).unwrap_err().to_string();
-        assert_eq!(errors[0], &expected);
+        // the catalog's notAFolder sentence, path kept (ProjectStore.swift:30)
+        assert_eq!(
+            errors[0],
+            &format!("“{}” isn’t a folder.", missing.display())
+        );
         assert!(
             f.app.recents.paths().is_empty(),
             "a failed open adds no recent"

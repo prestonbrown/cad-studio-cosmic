@@ -6,6 +6,7 @@
 //! time and a typo would render the raw key.
 
 use engine::agent::tool_summary::{ToolAction, ToolTitle};
+use engine::project::ProjectStoreError;
 use engine::python::env::{EnvFailure, EnvLog, EnvStep, InstallError};
 
 use crate::fl;
@@ -111,6 +112,20 @@ pub fn tool_title(title: &ToolTitle) -> String {
     text
 }
 
+/// Upstream `ProjectError.errorDescription` (ProjectStore.swift:25-31)
+/// for the variants it names; I/O and JSON failures carry the system's own
+/// text, as upstream's Foundation errors do.
+pub fn project_store_error(error: &ProjectStoreError) -> String {
+    match error {
+        ProjectStoreError::NotAFolder(path) => {
+            fl!("non-una-cartella", path = path.display().to_string())
+        }
+        ProjectStoreError::Io(error) => error.to_string(),
+        ProjectStoreError::Json(error) => error.to_string(),
+        ProjectStoreError::InvalidName(error) => error.to_string(),
+    }
+}
+
 fn lookup(key: &str) -> String {
     crate::localize::localize();
     crate::localize::lookup(key)
@@ -133,6 +148,7 @@ mod tests {
             "l-ambiente-python-esiste-ma-build123d-o-matplotlib-non-si-importano",
             "trovato-in",
             "lld-righe",
+            "non-una-cartella",
         ]);
         keys
     }
@@ -186,6 +202,29 @@ mod tests {
             "Found Python 3.12.4 at /usr/bin/python3.12"
         );
         assert_eq!(tool_title(&ToolAction::WriteFile.into()), "Writing a file");
+    }
+
+    /// The load-error window's text: upstream's `notAFolder` sentence with
+    /// the path kept, in every catalog language.
+    #[test]
+    fn a_store_error_names_its_path_in_each_language() {
+        let _lang = crate::localize::pin_en();
+        let error = ProjectStoreError::NotAFolder(PathBuf::from("/tmp/Staffa.txt"));
+        let mut rendered = Vec::new();
+        for lang in ["en", "it", "de", "fr"] {
+            crate::localize::select(lang);
+            rendered.push(project_store_error(&error));
+        }
+        crate::localize::select("en");
+        assert_eq!(
+            rendered,
+            [
+                "“/tmp/Staffa.txt” isn’t a folder.",
+                "“/tmp/Staffa.txt” non è una cartella.",
+                "„/tmp/Staffa.txt“ ist kein Ordner.",
+                "« /tmp/Staffa.txt » n’est pas un dossier.",
+            ]
+        );
     }
 
     /// The turn-level markers become upstream's system rows: AgentMissing
