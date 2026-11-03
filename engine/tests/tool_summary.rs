@@ -1,46 +1,51 @@
-use engine::agent::tool_summary::{live_preview, live_title, rel_path, short_command, summarize};
+use engine::agent::tool_summary::{
+    ToolAction, ToolTitle, live_preview, live_title, rel_path, short_command, summarize,
+};
 use serde_json::json;
 
 #[test]
 fn bash_first_word_classes_in_upstream_order() {
     let cases = [
-        ("pip install build123d", "Installing components"),
+        ("pip install build123d", ToolAction::InstallComponents),
         // "pip install" anywhere in the text, first word irrelevant
-        ("bash -c 'pip install build123d'", "Installing components"),
-        ("uv sync", "Installing components"),
-        ("python model.py", "Building the model"),
-        ("python3.11 model.py --json", "Building the model"),
+        (
+            "bash -c 'pip install build123d'",
+            ToolAction::InstallComponents,
+        ),
+        ("uv sync", ToolAction::InstallComponents),
+        ("python model.py", ToolAction::BuildModel),
+        ("python3.11 model.py --json", ToolAction::BuildModel),
         // tool is the basename of the first word
-        ("/root/.venv/bin/python model.py", "Building the model"),
+        ("/root/.venv/bin/python model.py", ToolAction::BuildModel),
         // a leading cd-hop is normalized away before classification
-        ("cd /root && python model.py", "Building the model"),
-        ("python analyze.py", "Analyzing the model"),
-        ("python -m build123d", "Analyzing the model"),
+        ("cd /root && python model.py", ToolAction::BuildModel),
+        ("python analyze.py", ToolAction::AnalyzeModel),
+        ("python -m build123d", ToolAction::AnalyzeModel),
         (
             "rsvg-convert -o out.png schematic.svg",
-            "Preparing a preview",
+            ToolAction::PreparePreview,
         ),
         (
             "/usr/bin/qlmanage -t -s 512 -o . render.png",
-            "Preparing a preview",
+            ToolAction::PreparePreview,
         ),
-        ("magick convert x.heic x.png", "Preparing a preview"),
-        ("ls -la output/", "Looking through files"),
-        ("/bin/cat output/manifest.json", "Looking through files"),
+        ("magick convert x.heic x.png", ToolAction::PreparePreview),
+        ("ls -la output/", ToolAction::ExamineFiles),
+        ("/bin/cat output/manifest.json", ToolAction::ExamineFiles),
         // read-only sed outranks the model.py-edit case (ToolSummary.swift:53)
-        ("sed -n 1,5p model.py", "Looking through files"),
-        ("sed s/a/b/ model.py", "Looking through files"),
-        ("sed -i s/a/b/ model.py", "Editing the model"),
-        ("perl -pi -e s/a/b/ model.py", "Editing the model"),
+        ("sed -n 1,5p model.py", ToolAction::ExamineFiles),
+        ("sed s/a/b/ model.py", ToolAction::ExamineFiles),
+        ("sed -i s/a/b/ model.py", ToolAction::EditModel),
+        ("perl -pi -e s/a/b/ model.py", ToolAction::EditModel),
         // in-place but not the model: tidy, not edit
-        ("sed -i s/x/y/ helper.txt", "Tidying up files"),
-        ("mv out.tmp out.json", "Tidying up files"),
-        ("rm -rf scratch/", "Tidying up files"),
-        ("mkdir -p output", "Tidying up files"),
-        ("touch notes.txt", "Tidying up files"),
-        ("echo hello", "Working on the project"),
-        ("cargo build --release", "Working on the project"),
-        ("", "Working on the project"),
+        ("sed -i s/x/y/ helper.txt", ToolAction::TidyFiles),
+        ("mv out.tmp out.json", ToolAction::TidyFiles),
+        ("rm -rf scratch/", ToolAction::TidyFiles),
+        ("mkdir -p output", ToolAction::TidyFiles),
+        ("touch notes.txt", ToolAction::TidyFiles),
+        ("echo hello", ToolAction::WorkProject),
+        ("cargo build --release", ToolAction::WorkProject),
+        ("", ToolAction::WorkProject),
     ];
     for (command, expected) in cases {
         assert_eq!(
@@ -58,101 +63,101 @@ fn write_titles_key_off_the_basename() {
             "Write",
             &json!({"file_path": "/w/model.py", "content": "x = 1"})
         ),
-        "Writing the model"
+        ToolAction::WriteModel
     );
     // basename match, not suffix: nested model.py counts
     assert_eq!(
         summarize("Write", &json!({"file_path": "/w/scratch/model.py"})),
-        "Writing the model"
+        ToolAction::WriteModel
     );
     // the path-key fallback upstream's file() reads second
     assert_eq!(
         summarize("Write", &json!({"path": "/w/model.py"})),
-        "Writing the model"
+        ToolAction::WriteModel
     );
     assert_eq!(
         summarize(
             "Write",
             &json!({"file_path": "/w/notes.txt", "content": "x"})
         ),
-        "Preparing a helper file"
+        ToolAction::WriteHelper
     );
     // no path at all
-    assert_eq!(summarize("Write", &json!({})), "Writing a file");
+    assert_eq!(summarize("Write", &json!({})), ToolAction::WriteFile);
 }
 
 #[test]
 fn edit_and_multiedit_share_the_model_case() {
     assert_eq!(
         summarize("Edit", &json!({"file_path": "/w/model.py"})),
-        "Editing the model"
+        ToolAction::EditModel
     );
     assert_eq!(
         summarize(
             "MultiEdit",
             &json!({"file_path": "/w/model.py", "edits": []})
         ),
-        "Editing the model"
+        ToolAction::EditModel
     );
     assert_eq!(
         summarize("Edit", &json!({"file_path": "/w/output/style.css"})),
-        "Editing a helper file"
+        ToolAction::EditHelper
     );
     assert_eq!(
         summarize("MultiEdit", &json!({"file_path": "/w/output/style.css"})),
-        "Editing a helper file"
+        ToolAction::EditHelper
     );
 }
 
 #[test]
 fn read_titles_follow_the_upstream_order() {
     // empty first
-    assert_eq!(summarize("Read", &json!({})), "Reading a file");
+    assert_eq!(summarize("Read", &json!({})), ToolAction::ReadFile);
     // references/ outranks model.py (ToolSummary.swift:35-36 checks the prefix first)
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/references/model.py"})),
-        "Studying the reference"
+        ToolAction::StudyReference
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "references/panel.png"})),
-        "Studying the reference"
+        ToolAction::StudyReference
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/model.py"})),
-        "Reviewing the model"
+        ToolAction::RereadModel
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/schematic-2.pdf"})),
-        "Checking the drawing"
+        ToolAction::CheckDrawing
     );
     // schematic* prefix and pdf extension both hit, case-insensitively
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/SchematicB.PDF"})),
-        "Checking the drawing"
+        ToolAction::CheckDrawing
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/Manifest.JSON"})),
-        "Checking the results"
+        ToolAction::CheckResults
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/render.png"})),
-        "Checking a preview"
+        ToolAction::CheckPreview
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/render.jpeg"})),
-        "Checking a preview"
+        ToolAction::CheckPreview
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/render.svg"})),
-        "Checking a preview"
+        ToolAction::CheckPreview
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/output/render.webp"})),
-        "Checking a preview"
+        ToolAction::CheckPreview
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/README.md"})),
-        "Reading a file"
+        ToolAction::ReadFile
     );
 }
 
@@ -160,37 +165,42 @@ fn read_titles_follow_the_upstream_order() {
 fn fixed_tool_names_need_no_input() {
     assert_eq!(
         summarize("Glob", &json!({"pattern": "*.py"})),
-        "Searching the project"
+        ToolAction::SearchProject
     );
     assert_eq!(
         summarize("Grep", &json!({"pattern": "build123d"})),
-        "Searching the project"
+        ToolAction::SearchProject
     );
     assert_eq!(
         summarize("TodoWrite", &json!({"todos": []})),
-        "Updates the task plan"
+        ToolAction::UpdatePlan
     );
     assert_eq!(
         summarize("WebSearch", &json!({"query": "build123d docs"})),
-        "Searching the web"
+        ToolAction::SearchWeb
     );
     assert_eq!(
         summarize("WebFetch", &json!({"url": "https://example.com"})),
-        "Searching the web"
+        ToolAction::SearchWeb
     );
     // unknown tools fall through to the generic title
     assert_eq!(
         summarize("NotebookEdit", &json!({})),
-        "Working on the project"
+        ToolAction::WorkProject
     );
 }
 
 #[test]
 fn live_title_marks_streaming_partials() {
+    let title = |action, lines, streaming| ToolTitle {
+        action,
+        lines,
+        streaming,
+    };
     // file_path classifies, the content key is still truncated: title plus ellipsis
     assert_eq!(
         live_title("Write", r#"{"file_path": "/tmp/p/model.py", "conte"#),
-        "Writing the model…"
+        title(ToolAction::WriteModel, None, true)
     );
     // complete content value: line count, no ellipsis
     assert_eq!(
@@ -198,7 +208,7 @@ fn live_title_marks_streaming_partials() {
             "Write",
             r#"{"file_path": "/tmp/p/model.py", "content": "a\nb\nc"}"#
         ),
-        "Writing the model · 3 lines"
+        title(ToolAction::WriteModel, Some(3), false)
     );
     // content still streaming: lines so far plus the ellipsis
     assert_eq!(
@@ -206,23 +216,26 @@ fn live_title_marks_streaming_partials() {
             "Write",
             r#"{"file_path": "/tmp/p/model.py", "content": "a\nb"#
         ),
-        "Writing the model · 2 lines…"
+        title(ToolAction::WriteModel, Some(2), true)
     );
     // bare prefix and garbage never panic: the tool's generic title comes back
-    assert_eq!(live_title("Write", "{"), "Writing a file");
-    assert_eq!(live_title("Bash", "not json"), "Working on the project");
+    assert_eq!(live_title("Write", "{"), ToolAction::WriteFile.into());
+    assert_eq!(
+        live_title("Bash", "not json"),
+        ToolAction::WorkProject.into()
+    );
     // the line suffix is Write-only; Edit keeps its plain title
     assert_eq!(
         live_title(
             "Edit",
             r#"{"file_path": "/tmp/p/model.py", "new_string": "x = 1"#
         ),
-        "Editing the model…"
+        title(ToolAction::EditModel, None, true)
     );
     // command partials classify too
     assert_eq!(
         live_title("Bash", r#"{"command": "python model.py"#),
-        "Building the model…"
+        title(ToolAction::BuildModel, None, true)
     );
 }
 
@@ -233,9 +246,9 @@ fn live_title_ignores_keys_quoted_inside_values() {
     // (the partial is complete JSON — escaped quotes don't count toward the
     // streaming marker — so no ellipsis)
     let partial = r#"{"command": "grep \"file_path\":\"x\" model.py"}"#;
-    assert_eq!(live_title("Bash", partial), "Looking through files");
+    assert_eq!(live_title("Bash", partial), ToolAction::ExamineFiles.into());
     // Read never reads the command key, so nothing is left to classify
-    assert_eq!(live_title("Read", partial), "Reading a file");
+    assert_eq!(live_title("Read", partial), ToolAction::ReadFile.into());
 }
 
 #[test]
@@ -327,7 +340,7 @@ fn short_command_empty_root_strips_any_cd() {
             "Bash",
             &json!({"command": "cd /elsewhere && python model.py"})
         ),
-        "Building the model" // upstream: "Working on the project"
+        ToolAction::BuildModel // upstream: WorkProject
     );
     // The other two preserved divergences, restated where they live:
     assert_eq!(
@@ -336,6 +349,6 @@ fn short_command_empty_root_strips_any_cd() {
     );
     assert_eq!(
         summarize("Read", &json!({"file_path": "/w/references/model.py"})),
-        "Studying the reference" // segment match, not just prefix
+        ToolAction::StudyReference // segment match, not just prefix
     );
 }

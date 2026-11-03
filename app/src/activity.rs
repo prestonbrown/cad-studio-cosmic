@@ -172,7 +172,10 @@ pub fn next(signal: Signal<'_>, missing_outputs_empty: bool, agent: &str) -> Act
             TurnOutcome::Failed { auth: true, .. } => {
                 Activity::Failed(fl!("accesso-a-richiesto", agent = agent))
             }
-            TurnOutcome::Failed { .. } => Activity::Failed(fl!("errore-di", agent = agent)),
+            TurnOutcome::Failed { .. } | TurnOutcome::StartFailed { .. } => {
+                Activity::Failed(fl!("errore-di", agent = agent))
+            }
+            TurnOutcome::AgentMissing => Activity::Failed(fl!("non-trovato", agent = agent)),
             TurnOutcome::Cancelled => Activity::Failed(crate::chat::interrupted()),
             // Busy/MissingSession never surface as events (the engine's
             // dance absorbs them); a caller driving raw turns still ends

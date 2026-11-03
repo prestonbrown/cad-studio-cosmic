@@ -137,7 +137,9 @@ impl ChatState {
             EngineEvent::ThinkingFinished => self.thinking_finished(now),
             EngineEvent::TextStreaming { text } => self.text_streaming(text),
             EngineEvent::TextConfirmed { text } => self.text_confirmed(text),
-            EngineEvent::ToolStarted { id, name, title } => self.tool_started(id, name, title),
+            EngineEvent::ToolStarted { id, name, title } => {
+                self.tool_started(id, name, &crate::engine_text::tool_title(title))
+            }
             EngineEvent::ToolInput { id, partial } => self.tool_input(id, partial, now),
             EngineEvent::ToolFinished {
                 id,
@@ -332,7 +334,7 @@ impl ChatState {
         self.tool_last_emit.insert(id.to_string(), now);
         let (title, preview) = match self.messages[at].tool.as_ref() {
             Some(tool) => (
-                live_title(&tool.name, &tool.input),
+                crate::engine_text::tool_title(&live_title(&tool.name, &tool.input)),
                 live_preview(&tool.input),
             ),
             None => return,
@@ -365,7 +367,7 @@ impl ChatState {
             .is_some_and(|tool| !tool.input.is_empty());
         if streamed {
             let title = match self.messages[at].tool.as_ref() {
-                Some(tool) => live_title(&tool.name, &tool.input),
+                Some(tool) => crate::engine_text::tool_title(&live_title(&tool.name, &tool.input)),
                 None => return,
             };
             self.messages[at].text = title;
@@ -442,6 +444,25 @@ impl ChatState {
             // reach the app (the engine's dance absorbs them)
             TurnOutcome::Cancelled => {
                 self.append_row(Role::Summary, interrupted());
+            }
+            // AgentSession.swift:42-46: the row offers Configure agent
+            TurnOutcome::AgentMissing => {
+                let text = fl!(
+                    "non-installato-oppure-non-stato-trovato-installalo-o-indica-il-percorso-dell-eseguibile",
+                    agent = self.engine.display_name()
+                );
+                self.append_row(Role::System, text);
+                if let Some(row) = self.messages.last_mut() {
+                    row.action = Some(Action::ConfigureClaude);
+                }
+            }
+            // AgentSession.swift:98-99
+            TurnOutcome::StartFailed { error } => {
+                let text = fl!("impossibile-avviare", agent = self.engine.display_name());
+                self.append_row(Role::System, text);
+                if let Some(row) = self.messages.last_mut() {
+                    row.detail = Some(error.clone());
+                }
             }
             TurnOutcome::Busy | TurnOutcome::MissingSession => {}
         }
@@ -908,6 +929,7 @@ mod tests {
     /// tools).
     #[test]
     fn tool_finished_keeps_engine_title_without_streamed_input() {
+        let _lang = crate::localize::pin_en();
         let t0 = Instant::now();
         let mut state = ChatState::new(Vec::new());
         state.apply_at(&started(), t0);
@@ -915,7 +937,7 @@ mod tests {
             &EngineEvent::ToolStarted {
                 id: "snap".into(),
                 name: "Bash".into(),
-                title: "Analyzing the model".into(),
+                title: engine::agent::tool_summary::ToolAction::AnalyzeModel.into(),
             },
             t0,
         );

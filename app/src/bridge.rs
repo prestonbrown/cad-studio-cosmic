@@ -1397,7 +1397,10 @@ fn turn_failure_activity(outcome: &TurnOutcome, engine: AgentKind) -> String {
         TurnOutcome::Failed { auth, .. } if *auth => {
             fl!("accesso-a-richiesto", agent = engine.display_name())
         }
-        TurnOutcome::Failed { .. } => fl!("errore-di", agent = engine.display_name()),
+        TurnOutcome::Failed { .. } | TurnOutcome::StartFailed { .. } => {
+            fl!("errore-di", agent = engine.display_name())
+        }
+        TurnOutcome::AgentMissing => fl!("non-trovato", agent = engine.display_name()),
         TurnOutcome::Cancelled => crate::chat::interrupted(),
         // the engine's dance absorbs Busy/MissingSession before the app
         // hears them; Success never reaches a failure activity
@@ -1794,7 +1797,7 @@ mod tests {
         ChatMessage {
             id: Uuid::new_v4(),
             role: Role::Tool,
-            text: live_title("Write", ""),
+            text: crate::engine_text::tool_title(&live_title("Write", "")),
             date: OffsetDateTime::now_utc(),
             tool: Some(ToolActivity {
                 tool_use_id: id.into(),

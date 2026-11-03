@@ -1,12 +1,10 @@
 //! Python venv lifecycle: the install planner, the verification contract,
 //! and the check/install drivers (PythonEnvironment.swift).
 //!
-//! GUI-free by the spec's engine rule: every user-visible string is an
-//! English const mirroring the en catalog value (the chat rows the session
-//! emits go one step further — stable
-//! [`SystemRow`][crate::agent::session::SystemRow] ids the app localizes on
-//! receipt), and process work flows through
-//! two injectable seams — [`Spawn`] for the streamed install steps and
+//! GUI-free by the spec's engine rule: the engine has no catalog, so every
+//! user-visible string travels as a stable id the app localizes on receipt
+//! ([`EnvStep`], [`InstallError`], [`EnvLog`]; process output stays
+//! verbatim), and process work flows through two injectable seams — [`Spawn`] for the streamed install steps and
 //! `check`'s verification, [`Probe`] for `--version` discovery — so tests
 //! script fakes and never run real uv/pip/build123d.
 //!
@@ -50,33 +48,74 @@ pub const VERSIONS_FALLBACK: &str = "build123d, matplotlib, numpy";
 /// shared cell carry.
 pub const VERIFY_SCRIPT: &str = "import sys, build123d, matplotlib, numpy\nprint(build123d.__version__)\nprint(f\"Python {sys.version.split()[0]}, build123d {build123d.__version__}, matplotlib {matplotlib.__version__}, numpy {numpy.__version__}\")";
 
-/// EN catalog `non-stato-trovato-n-uv-n-un-python-3-10-3-13-…`
-/// (PythonSetupError.pythonNotFound).
-pub const PYTHON_NOT_FOUND_MESSAGE: &str = "Neither uv nor Python 3.10–3.13 was found. Install uv (brew install uv) or Python 3.12 and try again.";
+/// A progress milestone's step label (upstream `advance(to:step:)`'s
+/// localized strings, PythonEnvironment.swift:68-97). The engine has no
+/// catalog, so it names the step and the app localizes it — the ids are the
+/// stable contract; each variant names the catalog key it maps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvStep {
+    /// `ricerca-di-python-3-10-3-13`
+    SearchingPython,
+    /// `creazione-dell-ambiente-virtuale-con-uv`
+    CreatingVenvWithUv,
+    /// `creazione-dell-ambiente-virtuale`
+    CreatingVenv,
+    /// `aggiornamento-di-pip`
+    UpgradingPip,
+    /// `installazione-di-build123d-matplotlib-e-numpy`
+    InstallingPackages,
+    /// `verifica-dell-installazione`
+    Verifying,
+    /// `componenti-installati`
+    Installed,
+    /// `installazione-non-riuscita`
+    InstallFailed,
+}
 
-/// EN catalog `build123d-e-matplotlib-non-si-importano-correttamente…`
-/// (PythonSetupError.verificationFailed).
-pub const VERIFICATION_FAILED_MESSAGE: &str =
-    "build123d and matplotlib can’t be imported in the new environment.";
+impl EnvStep {
+    /// Every step id, for exhaustive catalog checks.
+    pub const ALL: [EnvStep; 8] = [
+        EnvStep::SearchingPython,
+        EnvStep::CreatingVenvWithUv,
+        EnvStep::CreatingVenv,
+        EnvStep::UpgradingPip,
+        EnvStep::InstallingPackages,
+        EnvStep::Verifying,
+        EnvStep::Installed,
+        EnvStep::InstallFailed,
+    ];
+}
 
-/// EN catalog `l-ambiente-python-esiste-ma-build123d-o-matplotlib…` — the
-/// message `check` fails with when the venv exists but cannot be verified.
-pub const CHECK_FAILED_MESSAGE: &str =
-    "The Python environment exists, but build123d or matplotlib can’t be imported.";
+/// Why an install failed (upstream `PythonSetupError`, plus the spawn
+/// errors ProcessRunner throws). Named, not worded: the app localizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallError {
+    /// `non-stato-trovato-n-uv-n-un-python-3-10-3-13-…` (pythonNotFound).
+    PythonNotFound,
+    /// `il-comando-non-riuscito-controlla-il-log-per-i-dettagli`
+    /// (commandFailed) — `command` is the program's last path component.
+    CommandFailed { command: String },
+    /// `build123d-e-matplotlib-non-si-importano-correttamente-…`
+    /// (verificationFailed).
+    VerificationFailed,
+    /// The step's program could not be spawned; `error` is the OS error
+    /// text, shown verbatim like upstream's `localizedDescription`.
+    SpawnFailed { command: String, error: String },
+}
 
-// Progress-milestone step texts, EN catalog values
-// (ricerca-di-python-3-10-3-13, creazione-dell-ambiente-virtuale[-con-uv],
-// aggiornamento-di-pip, installazione-di-build123d-matplotlib-e-numpy,
-// verifica-dell-installazione, componenti-installati,
-// installazione-non-riuscita).
-const STEP_SEARCHING: &str = "Looking for Python 3.10–3.13…";
-const STEP_UV_CREATE: &str = "Creating the virtual environment with uv…";
-const STEP_VENV_CREATE: &str = "Creating the virtual environment…";
-const STEP_PIP_UPGRADE: &str = "Updating pip…";
-const STEP_INSTALL: &str = "Installing build123d, matplotlib and numpy…";
-const STEP_VERIFY: &str = "Verifying the installation…";
-const STEP_DONE: &str = "Components installed";
-const STEP_INSTALL_FAILED: &str = "Installation failed";
+/// One install-log line. Process output and command echoes are verbatim;
+/// the lines upstream writes with `String(localized:)` travel as ids.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnvLog {
+    /// A `$ argv…` echo or one line of a step's output.
+    Text(String),
+    /// A milestone's step label (upstream `advance` logs it too).
+    Step(EnvStep),
+    /// `trovato-in`: the venv fallback's chosen interpreter.
+    FoundPython { version: String, path: PathBuf },
+    /// The failed install's error line.
+    Failure(InstallError),
+}
 
 /// Upstream `State` (PythonEnvironment.swift:6-13), app-side: the drivers
 /// speak [`EnvEvent`]s and the app reduces them into this.
@@ -102,42 +141,31 @@ pub struct EnvReady {
 /// step text, and the argv to run (program first).
 pub struct InstallStep {
     pub progress: f64,
-    pub step: &'static str,
+    pub step: EnvStep,
     pub argv: Vec<String>,
 }
 
 /// Driver events: `install` streams log lines and progress (a failed
-/// install closes with the `Installation failed` step label at the bar's
+/// install closes with the [`EnvStep::InstallFailed`] label at the bar's
 /// last position, then the error line); `check` emits only its terminal
 /// event. The install-kickoff signal (`EnvState::Installing`) is app-side.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnvEvent {
-    Log(String),
-    Progress { value: f64, step: String },
+    Log(EnvLog),
+    Progress { value: f64, step: EnvStep },
     Finished(Result<EnvReady, EnvFailure>),
 }
 
 /// Why a driver finished in failure. `Missing` (no executable interpreter
 /// at `dir/bin/python`) gates the setup sheet's presentation apart from
-/// actual failures upstream (Swift:36-46); `CheckFailed` carries the
-/// check-failed catalog string, `InstallFailed` any install error
-/// (pythonNotFound, commandFailed, verificationFailed, spawn errors).
+/// actual failures upstream (Swift:36-46) and carries no label; `CheckFailed`
+/// is the `l-ambiente-python-esiste-ma-build123d-o-matplotlib-non-si-importano`
+/// state (Swift:43), `InstallFailed` any install error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnvFailure {
     Missing,
-    CheckFailed(String),
-    InstallFailed(String),
-}
-
-impl EnvFailure {
-    /// The EN display string. Upstream has none for a missing environment
-    /// — the sheet shows no failure label — so `Missing` maps to empty.
-    pub fn message(&self) -> String {
-        match self {
-            EnvFailure::Missing => String::new(),
-            EnvFailure::CheckFailed(text) | EnvFailure::InstallFailed(text) => text.clone(),
-        }
-    }
+    CheckFailed,
+    InstallFailed(InstallError),
 }
 
 /// A driver's event stream; bounded (256) with the same pacing contract as
@@ -175,7 +203,7 @@ pub fn uv_install_plan(uv: &Path, dir: &Path) -> Vec<InstallStep> {
     vec![
         InstallStep {
             progress: 0.1,
-            step: STEP_UV_CREATE,
+            step: EnvStep::CreatingVenvWithUv,
             argv: vec![
                 uv.clone(),
                 "venv".into(),
@@ -186,7 +214,7 @@ pub fn uv_install_plan(uv: &Path, dir: &Path) -> Vec<InstallStep> {
         },
         InstallStep {
             progress: 0.25,
-            step: STEP_INSTALL,
+            step: EnvStep::InstallingPackages,
             argv: install_argv(
                 &uv,
                 &[
@@ -208,7 +236,7 @@ pub fn venv_install_plan(python: &Path, dir: &Path) -> Vec<InstallStep> {
     vec![
         InstallStep {
             progress: 0.1,
-            step: STEP_VENV_CREATE,
+            step: EnvStep::CreatingVenv,
             argv: vec![
                 python.clone(),
                 "-m".into(),
@@ -218,7 +246,7 @@ pub fn venv_install_plan(python: &Path, dir: &Path) -> Vec<InstallStep> {
         },
         InstallStep {
             progress: 0.2,
-            step: STEP_PIP_UPGRADE,
+            step: EnvStep::UpgradingPip,
             argv: vec![
                 interpreter.clone(),
                 "-m".into(),
@@ -230,7 +258,7 @@ pub fn venv_install_plan(python: &Path, dir: &Path) -> Vec<InstallStep> {
         },
         InstallStep {
             progress: 0.25,
-            step: STEP_INSTALL,
+            step: EnvStep::InstallingPackages,
             argv: install_argv(&interpreter, &["-m", "pip", "install"]),
         },
     ]
@@ -429,7 +457,7 @@ async fn check_run(dir: &Path, spawn: &Spawn) -> Result<EnvReady, EnvFailure> {
         }
         None => {
             set_shared_versions(None);
-            Err(EnvFailure::CheckFailed(CHECK_FAILED_MESSAGE.to_string()))
+            Err(EnvFailure::CheckFailed)
         }
     }
 }
@@ -449,16 +477,11 @@ async fn install_run(
         None => {
             // the search milestone precedes the scan, so its failure label
             // carries 0.05, not 0
-            advance(events, 0.05, STEP_SEARCHING).await;
+            advance(events, 0.05, EnvStep::SearchingPython).await;
             match locate_python(&env, probe, events).await {
                 Some(python) => venv_install_plan(&python, dir),
                 None => {
-                    return Err(fail(
-                        events,
-                        0.05,
-                        EnvFailure::InstallFailed(PYTHON_NOT_FOUND_MESSAGE.to_string()),
-                    )
-                    .await);
+                    return Err(fail(events, 0.05, InstallError::PythonNotFound).await);
                 }
             }
         }
@@ -472,20 +495,15 @@ async fn install_run(
             return Err(fail(events, step.progress, failure).await);
         }
     }
-    advance(events, 0.95, STEP_VERIFY).await;
+    advance(events, 0.95, EnvStep::Verifying).await;
     let verified = verify_direct(dir, &env)
         .await
         .and_then(|(ok, output)| ok.then_some(output))
         .and_then(|output| parse_verification(&output));
     let Some((build123d_version, versions)) = verified else {
-        return Err(fail(
-            events,
-            0.95,
-            EnvFailure::InstallFailed(VERIFICATION_FAILED_MESSAGE.to_string()),
-        )
-        .await);
+        return Err(fail(events, 0.95, InstallError::VerificationFailed).await);
     };
-    advance(events, 1.0, STEP_DONE).await;
+    advance(events, 1.0, EnvStep::Installed).await;
     set_shared_versions(Some(versions.clone()));
     Ok(EnvReady {
         build123d_version,
@@ -494,19 +512,21 @@ async fn install_run(
 }
 
 /// Closes out a failed install (Swift:73-76): the step label flips to the
-/// catalog's Installation failed with the bar holding the milestone the
+/// [`EnvStep::InstallFailed`] with the bar holding the milestone the
 /// install died at (upstream's per-line nudges may have crept it slightly
 /// past), the error line lands in the log, and the failure travels on to
 /// the terminal event.
-async fn fail(events: &mpsc::Sender<EnvEvent>, progress: f64, failure: EnvFailure) -> EnvFailure {
+async fn fail(events: &mpsc::Sender<EnvEvent>, progress: f64, error: InstallError) -> EnvFailure {
     let _ = events
         .send(EnvEvent::Progress {
             value: progress,
-            step: STEP_INSTALL_FAILED.to_string(),
+            step: EnvStep::InstallFailed,
         })
         .await;
-    let _ = events.send(EnvEvent::Log(failure.message())).await;
-    failure
+    let _ = events
+        .send(EnvEvent::Log(EnvLog::Failure(error.clone())))
+        .await;
+    EnvFailure::InstallFailed(error)
 }
 
 /// uv wins over the venv fallback (PythonEnvironment.install:62-66).
@@ -548,11 +568,10 @@ async fn locate_python(
             continue;
         }
         let _ = events
-            .send(EnvEvent::Log(format!(
-                "Found {} at {}",
-                output.trim(),
-                candidate.display()
-            )))
+            .send(EnvEvent::Log(EnvLog::FoundPython {
+                version: output.trim().to_string(),
+                path: candidate.clone(),
+            }))
             .await;
         return Some(candidate);
     }
@@ -570,18 +589,20 @@ async fn run_step(
     spawn: &Spawn,
     events: &mpsc::Sender<EnvEvent>,
     progress: f64,
-    step: &'static str,
-) -> Result<(), EnvFailure> {
+    step: EnvStep,
+) -> Result<(), InstallError> {
     let _ = events
-        .send(EnvEvent::Log(format!("$ {}", argv.join(" "))))
+        .send(EnvEvent::Log(EnvLog::Text(format!("$ {}", argv.join(" ")))))
         .await;
     let name = argv
         .first()
         .and_then(|program| Path::new(program).file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let process =
-        spawn(argv, cwd).map_err(|e| EnvFailure::InstallFailed(format!("{name}: {e}")))?;
+    let process = spawn(argv, cwd).map_err(|e| InstallError::SpawnFailed {
+        command: name.clone(),
+        error: e.to_string(),
+    })?;
     let RunningProcess {
         mut lines,
         exit_status,
@@ -590,12 +611,12 @@ async fn run_step(
     let mut progress = progress;
     while let Some(line) = lines.recv().await {
         let (Line::Stdout(text) | Line::Stderr(text)) = line;
-        let _ = events.send(EnvEvent::Log(text)).await;
+        let _ = events.send(EnvEvent::Log(EnvLog::Text(text))).await;
         progress = nudge_progress(progress);
         let _ = events
             .send(EnvEvent::Progress {
                 value: progress,
-                step: step.to_string(),
+                step,
             })
             .await;
     }
@@ -606,14 +627,8 @@ async fn run_step(
     {
         Ok(())
     } else {
-        Err(EnvFailure::InstallFailed(command_failed_message(&name)))
+        Err(InstallError::CommandFailed { command: name })
     }
-}
-
-/// EN catalog `il-comando-non-riuscito-controlla-il-log-per-i-dettagli`
-/// (PythonSetupError.commandFailed).
-pub fn command_failed_message(name: &str) -> String {
-    format!("The command “{name}” failed. Check the log for details.")
 }
 
 /// Runs one command through the seam and returns `(exited 0, stdout)`,
@@ -664,14 +679,9 @@ async fn verify_direct(dir: &Path, env: &HashMap<String, String>) -> Option<(boo
 
 /// One upstream `advance(to:step:)`: the progress milestone, then the step
 /// text into the log.
-async fn advance(events: &mpsc::Sender<EnvEvent>, value: f64, step: &'static str) {
-    let _ = events
-        .send(EnvEvent::Progress {
-            value,
-            step: step.to_string(),
-        })
-        .await;
-    let _ = events.send(EnvEvent::Log(step.to_string())).await;
+async fn advance(events: &mpsc::Sender<EnvEvent>, value: f64, step: EnvStep) {
+    let _ = events.send(EnvEvent::Progress { value, step }).await;
+    let _ = events.send(EnvEvent::Log(EnvLog::Step(step))).await;
 }
 
 /// Where a driver's children run: the venv's parent (created by install) —

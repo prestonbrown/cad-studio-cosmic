@@ -1024,7 +1024,7 @@ impl ProjectWindow {
                 match &event {
                     EngineEvent::ToolStarted { title, .. } => {
                         self.set_activity(activity::next(
-                            activity::Signal::ToolOpened(title.as_str()),
+                            activity::Signal::ToolOpened(&crate::engine_text::tool_title(title)),
                             false,
                             self.engine_name(),
                         ));
