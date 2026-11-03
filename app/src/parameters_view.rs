@@ -16,7 +16,7 @@
 //! what is purely widget state (drags, drafts, collapse, close) and turns
 //! [`Message::Release`]/[`Message::Submit`] into commit values; the SHELL
 //! intercepts the rest — `Message::Collapse` (persist
-//! `Settings.parameters_collapsed` through the engine's `settings_path()`,
+//! `Settings.parameters_collapsed` through the window's settings store,
 //! then forward), `Message::Compare` (the bridge's compare wiring), and the
 //! mount's emitted `ParameterCommit` (`Bridge::set_parameter`). The pane
 //! mounts the overlay in [`crate::viewer_pane::ViewerPane::view_model_3d`].

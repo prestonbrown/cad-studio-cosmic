@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use app::activity::Activity;
 use app::bridge::{Bridge, Message as BridgeMessage};
+use app::settings_store::SettingsStore;
 use app::windows::project::{Message, ProjectWindow};
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::channel::mpsc::UnboundedReceiver;
@@ -114,7 +115,8 @@ async fn run_slice() -> SliceRun {
     // headless driver performs the same mapping by hand (a cosmic Task's
     // stream is private to the iced runtime), over the window's own bridge
     let (bridge, mut messages) = Bridge::launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    let mut window =
+        ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
     // the send gate refuses until python is verified (the m5 build
     // pipeline's guard); the app's startup check is the real transition and
     // is not this milestone's wiring — the seam m5 left "for T8's startup

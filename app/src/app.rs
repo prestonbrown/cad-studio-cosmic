@@ -29,10 +29,11 @@ use engine::project::store;
 use engine::python::env::{
     EnvEvent, EnvHandle, EnvState, check, command_probe, reinstall, streaming_spawn, venv_dir,
 };
-use engine::settings::{Settings as EngineSettings, settings_path};
+use engine::settings::Settings as EngineSettings;
 
 use crate::fl;
 use crate::recents::{self, Recents};
+use crate::settings_store::SettingsStore;
 use crate::sheets;
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
@@ -160,8 +161,9 @@ pub struct CadStudio {
     welcome: Welcome,
     recents: Recents,
     config: Config,
-    settings: EngineSettings,
-    settings_file: PathBuf,
+    /// The engine settings, read fresh at every use and written only
+    /// through [`SettingsStore::update`]; every project window shares it.
+    settings: SettingsStore,
     /// The agent-missing sheet, when presented (upstream
     /// `AgentLocator.isMissingSheetPresented`).
     agent_missing: Option<sheets::AgentMissing>,
@@ -200,10 +202,10 @@ impl Application for CadStudio {
         engine::processes::reap_orphans();
 
         let config = Config::new(Self::APP_ID, 1).expect("cosmic-config for app UI state");
-        let settings_file = settings_path();
-        let settings = EngineSettings::load(&settings_file).unwrap_or_default();
+        let settings = SettingsStore::global();
         let recents = Recents::load(config.clone());
-        let setup = recents::needs_setup(&config).then(|| sheets::Setup::from_settings(&settings));
+        let setup =
+            recents::needs_setup(&config).then(|| sheets::Setup::from_settings(&settings.load()));
         let mut python = sheets::PythonSetup::default();
         // the sheet state the check reduces from — the drivers emit only
         // their events, so Checking is the app's own preset
@@ -220,17 +222,17 @@ impl Application for CadStudio {
             recents,
             config,
             settings,
-            settings_file,
             agent_missing: None,
             setup,
             python,
         };
 
         // locate the agent off the UI thread; a miss presents the sheet
-        let engine = app.settings.agent_kind();
+        let settings = app.settings.load();
+        let engine = settings.agent_kind();
         let locate = Task::future(locate_agent(
             engine,
-            app.settings.agent_path(engine).map(str::to_string),
+            settings.agent_path(engine).map(str::to_string),
         ))
         .map(|found| Action::App(Message::AgentLocated(found)));
         let sigterm = Task::stream(sigterm_stream()).map(Action::App);
@@ -320,11 +322,11 @@ impl Application for CadStudio {
                 // rides an auth-failed row, whose engine by definition
                 // ran.
                 if self.agent_missing.is_none() {
-                    let kind = self.settings.agent_kind();
+                    let settings = self.settings.load();
+                    let kind = settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
                         kind,
-                        custom_path: self
-                            .settings
+                        custom_path: settings
                             .agent_path(kind)
                             .unwrap_or_default()
                             .to_string(),
@@ -346,14 +348,14 @@ impl Application for CadStudio {
                     // the missing line shows from first presentation
                     // (AgentMissingSheet.swift:42 gates on
                     // `locator.state == .missing`, not on a Verify)
-                    let kind = self.settings.agent_kind();
+                    let settings = self.settings.load();
+                    let kind = settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
                         kind,
                         // the field opens on the persisted custom path
                         // (upstream's @AppStorage binding), so an untouched
                         // Verify cannot clear a stored path
-                        custom_path: self
-                            .settings
+                        custom_path: settings
                             .agent_path(kind)
                             .unwrap_or_default()
                             .to_string(),
@@ -676,7 +678,7 @@ impl CadStudio {
     fn parent_folder_pick(&self, name: &str) -> FolderPick {
         FolderPick {
             title: fl!("scegli-dove-creare-la-cartella", name = name.to_string()),
-            start: Some(self.settings.default_project_location.clone()),
+            start: Some(self.settings.load().default_project_location),
         }
     }
 
@@ -777,14 +779,12 @@ impl CadStudio {
             }
             sheets::AgentMessage::Verify => {
                 // persist the custom path first — locate consults it
-                let mut settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
+                let mut settings = self.settings.load();
                 sheet.stage_custom_path(&mut settings);
-                self.settings = settings.clone();
-                let _ = settings.save(&self.settings_file);
+                let _ = self.settings.update(|stored| sheet.stage_custom_path(stored));
                 sheet.checking = true;
-                let engine = self.settings.agent_kind();
-                let future =
-                    locate_agent(engine, self.settings.agent_path(engine).map(str::to_string));
+                let engine = settings.agent_kind();
+                let future = locate_agent(engine, settings.agent_path(engine).map(str::to_string));
                 return Task::future(async move {
                     let found = future.await;
                     Message::AgentSheet(sheets::AgentMessage::Verified(found))
@@ -813,13 +813,7 @@ impl CadStudio {
         if matches!(msg, sheets::SetupMessage::Continue) {
             // the three preference keys into the engine settings, the flag
             // into cosmic-config (SetupSheet.swift:31-34)
-            let mut settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
-            setup.apply(&mut settings);
-            if let Err(why) = settings.save(&self.settings_file) {
-                eprintln!("cad-studio: setup save failed: {why}");
-            } else {
-                self.settings = settings;
-            }
+            let _ = self.settings.update(|settings| setup.apply(settings));
             let _ = recents::complete_setup(&self.config);
             self.setup = None;
             // the first-run sheet coming down presents the python sheet
@@ -943,7 +937,8 @@ impl CadStudio {
             let focus = *id;
             return window::gain_focus(focus).map(Action::App);
         }
-        let mut state = SettingsState::new(&self.settings);
+        let settings = self.settings.load();
+        let mut state = SettingsState::new(&settings);
         state.update(&settings::Message::Tab(tab));
         let (id, spawn) = window::open(Self::window_settings(
             cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
@@ -952,7 +947,7 @@ impl CadStudio {
         self.windows.insert(id, WindowKind::Settings(state));
         let title = self.set_window_title(fl!("settings"), id);
         let locates = settings::ENGINES.map(|kind| {
-            let custom = self.settings.agent_path(kind).map(str::to_string);
+            let custom = settings.agent_path(kind).map(str::to_string);
             Task::future(locate_agent_path(kind, custom))
                 .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
         });
@@ -1007,16 +1002,18 @@ impl CadStudio {
     /// settings window is open (there is at most one; the portal's answer
     /// arrives here when the window that asked has since closed).
     fn update_settings_any(&mut self, msg: settings::Message) -> Task<Action<Message>> {
-        // the write: load-modify-save, engine settings.json only
-        let mut persisted = EngineSettings::load(&self.settings_file).unwrap_or_default();
-        if settings::stage(&msg, &mut persisted) {
-            match persisted.save(&self.settings_file) {
-                Ok(()) => {
-                    self.settings = persisted;
-                    self.push_unit_to_viewers();
-                }
-                Err(why) => eprintln!("cad-studio: settings save failed: {why}"),
-            }
+        // the write: engine settings.json only, through the one store; a
+        // message that stages nothing (a tab switch, a locate) writes nothing
+        let stages = settings::stage(&msg, &mut EngineSettings::default());
+        if stages
+            && self
+                .settings
+                .update(|persisted| {
+                    settings::stage(&msg, persisted);
+                })
+                .is_ok()
+        {
+            self.push_unit_to_viewers();
         }
         match msg {
             settings::Message::ChooseLocation(starting) => {
@@ -1028,7 +1025,7 @@ impl CadStudio {
                 .map(Action::App)
             }
             settings::Message::Verify(kind) => {
-                let custom = self.settings.agent_path(kind).map(str::to_string);
+                let custom = self.settings.load().agent_path(kind).map(str::to_string);
                 Task::future(locate_agent_path(kind, custom))
                     .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
             }
@@ -1129,7 +1126,7 @@ impl CadStudio {
     /// change re-renders the size label and measure badge live,
     /// ModelPane.swift:7).
     fn push_unit_to_viewers(&mut self) {
-        let unit = self.settings.measurement_unit;
+        let unit = self.settings.load().measurement_unit;
         for window in self.windows.values_mut() {
             if let WindowKind::Project(project) = window {
                 project.viewer.unit = unit;
@@ -1860,8 +1857,7 @@ mod shell_behavior {
             welcome: Welcome::new(),
             recents: Recents::load(config.clone()),
             config,
-            settings: EngineSettings::default(),
-            settings_file: dir.join("settings.json"),
+            settings: SettingsStore::at(dir.join("settings.json")),
             agent_missing: None,
             setup: None,
             python: sheets::PythonSetup::default(),
@@ -1905,9 +1901,12 @@ mod shell_behavior {
     /// default project location (ProjectPanels.swift:20).
     #[test]
     fn the_parent_folder_panel_opens_at_the_default_project_location() {
-        let mut f = fixture();
+        let f = fixture();
         let location = f.dir.join("Progetti");
-        f.app.settings.default_project_location = location.clone();
+        f.app
+            .settings
+            .update(|settings| settings.default_project_location = location.clone())
+            .unwrap();
         let pick = f.app.parent_folder_pick("Staffa");
         assert_eq!(pick.start, Some(location));
         assert!(
@@ -1972,7 +1971,7 @@ mod shell_behavior {
     #[test]
     fn return_continues_the_first_run_sheet_and_esc_does_not_dismiss_it() {
         let mut f = fixture();
-        f.app.setup = Some(sheets::Setup::from_settings(&f.app.settings));
+        f.app.setup = Some(sheets::Setup::from_settings(&f.app.settings.load()));
         key(&mut f.app, f.welcome, Named::Escape);
         assert!(
             f.app.setup.is_some(),
@@ -1981,7 +1980,7 @@ mod shell_behavior {
         key(&mut f.app, f.welcome, Named::Enter);
         assert!(f.app.setup.is_none(), "Return runs Continua");
         assert!(
-            f.app.settings_file.exists(),
+            f.app.settings.path().exists(),
             "Continua persisted the preferences"
         );
     }
@@ -2055,6 +2054,46 @@ mod shell_behavior {
             panic!("the project window is gone");
         };
         assert_eq!(window.viewer.unit, MeasurementUnit::Inches);
+    }
+
+    /// Settings a project window writes (the parameters overlay's collapse
+    /// toggle, a layout preset's global default layout) reach the next
+    /// project window the app opens, without a restart.
+    #[tokio::test]
+    async fn a_project_window_settings_write_reaches_the_next_window_opened() {
+        let mut f = fixture();
+        let first = open_real_project(&mut f, "Uno");
+        let _ = f.app.update_project(
+            first,
+            project::Message::Viewer(crate::viewer_pane::Message::Parameters(
+                crate::parameters_view::Message::Collapse(true),
+            )),
+        );
+        let _ = f.app.update_project(
+            first,
+            project::Message::Command(project::Command::LayoutChatBottom),
+        );
+
+        store::create_project(&f.dir, "Due").unwrap();
+        let _ = f.app.open_project(f.dir.join("Due"));
+        let second = f
+            .app
+            .windows
+            .values()
+            .find_map(|kind| match kind {
+                WindowKind::Project(window) if window.name == "Due" => Some(window),
+                _ => None,
+            })
+            .expect("the second project window registered");
+        assert!(
+            second.viewer.parameters.collapsed,
+            "the new window seeds the last collapse toggle"
+        );
+        assert_eq!(
+            second.layout,
+            engine::project::layout::LayoutNode::chat_bottom(),
+            "the new project opens on the last default layout"
+        );
     }
 
     /// 2.10: an unreadable project opens the load-error window with the

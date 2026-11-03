@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use app::activity::Activity;
 use app::bridge::{Bridge, Message as BridgeMessage};
+use app::settings_store::SettingsStore;
 use app::windows::project::{Message, ProjectWindow};
 use cosmic::iced::futures::StreamExt;
 use engine::agent::session::EngineEvent;
@@ -42,14 +43,11 @@ async fn a_mid_turn_picker_flip_does_not_rename_the_running_turn() {
     // the turn starts under claude
     let settings = Settings::default();
     let (bridge, mut messages) = Bridge::launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
-    // the picker already says codex on disk by the time the turn's events
-    // land
-    let flipped = parent.join("settings.json");
-    let mut codex = Settings::default();
-    codex.agent_engine = "codex".into();
-    codex.save(&flipped).unwrap();
-    window.set_settings_path_for_test(flipped);
+    // the picker already says codex in the window's settings by the time
+    // the turn's events land
+    let store = SettingsStore::at(parent.join("settings.json"));
+    let mut window = ProjectWindow::with_bridge(root.clone(), &store, bridge);
+    store.update(|s| s.agent_engine = "codex".into()).unwrap();
     window.bridge.mark_python_ready_for_test();
     window
         .bridge

@@ -73,6 +73,7 @@ use uuid::Uuid;
 use crate::activity::{self, Activity, Signal};
 use crate::chat::ChatState;
 use crate::fl;
+use crate::settings_store::SettingsStore;
 
 /// Why a pipeline command refused (upstream's guard branches in
 /// `setParameter`/`build`/`send`, Project.swift:343-362 and 373-391).
@@ -316,15 +317,24 @@ impl BridgeBuilder {
         settings: Settings,
         root: impl Into<PathBuf>,
     ) -> (Bridge, UnboundedReceiver<Message>) {
-        Bridge::launch_with(self.interpreter, settings, root)
+        Bridge::launch_with(self.interpreter, settings, settings_path(), root)
     }
 }
 
 impl Bridge {
     /// The bridge plus the message stream to return from the app's `init` or
-    /// `update`. Must be called inside the tokio runtime cosmic runs on.
-    pub fn new(settings: Settings, root: impl Into<PathBuf>) -> (Self, cosmic::Task<Message>) {
-        let (bridge, messages) = Self::launch(settings, root);
+    /// `update`, its turns reading their settings fresh from `settings`.
+    /// Must be called inside the tokio runtime cosmic runs on.
+    pub fn new(
+        settings: &SettingsStore,
+        root: impl Into<PathBuf>,
+    ) -> (Self, cosmic::Task<Message>) {
+        let (bridge, messages) = Self::launch_with(
+            default_interpreter(),
+            settings.load(),
+            settings.path().to_path_buf(),
+            root,
+        );
         (bridge, cosmic::task::stream(messages))
     }
 
@@ -337,12 +347,16 @@ impl Bridge {
         settings: Settings,
         root: impl Into<PathBuf>,
     ) -> (Self, UnboundedReceiver<Message>) {
-        Self::launch_with(default_interpreter(), settings, root)
+        Self::launch_with(default_interpreter(), settings, settings_path(), root)
     }
 
+    /// `settings_file` is the file each turn re-reads its settings from;
+    /// a scripted agent under test (the engine's override seam) ignores it,
+    /// so the developer's own settings cannot decide a test turn.
     fn launch_with(
         interpreter: PathBuf,
         settings: Settings,
+        settings_file: PathBuf,
         root: impl Into<PathBuf>,
     ) -> (Self, UnboundedReceiver<Message>) {
         let root = root.into();
@@ -350,13 +364,10 @@ impl Bridge {
         let (msg_tx, msg_rx) = unbounded();
         let pipeline = Arc::new(Mutex::new(Pipeline::load(&root)));
         let mut session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
-        // The per-turn settings re-read (the engine picker flips the runner
-        // mid-conversation, Ruling 1) — attached only when a real agent
-        // runs: a scripted agent under test (the engine's override seam)
-        // suspends it so the developer's own settings file cannot decide a
-        // test turn.
+        // the per-turn settings re-read (the engine picker flips the runner
+        // mid-conversation, Ruling 1)
         if std::env::var_os(TEST_CLAUDE_ENV).is_none() {
-            session = session.with_settings_file(settings_path());
+            session = session.with_settings_file(settings_file);
         }
         tokio::spawn(
             Drive::new(

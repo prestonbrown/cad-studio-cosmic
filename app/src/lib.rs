@@ -40,6 +40,8 @@
 //! - [`recents`] — the recents store wrapping the engine's, via
 //!   cosmic-config.
 //! - [`schematic`] — the drawing-page model, raster cache, and pane.
+//! - [`settings_store`] — the one door onto the engine settings file:
+//!   load-fresh reads, one writer, one error policy.
 //! - [`sheets`] — the first-run setup, python setup (the PythonSetupSheet
 //!   port and its EnvEvent-to-state reduction), and agent-missing sheets.
 //! - [`viewer_pane`] — the embedded 3D viewer: scene reload from `output/`,
@@ -76,6 +78,7 @@ pub mod parameters_view;
 pub mod parts_overlay;
 pub mod recents;
 pub mod schematic;
+pub mod settings_store;
 pub mod sheets;
 pub mod typography;
 pub mod ui;
