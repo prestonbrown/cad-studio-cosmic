@@ -512,18 +512,6 @@ fn system_row_text(row: SystemRow) -> String {
     }
 }
 
-/// How many of a send's attachments are images — the queue list's image
-/// count (ChatInputView.swift:218-221). The engine's ONE image predicate
-/// decides, the same rule the codex `-i` filter and the thumbnail widget
-/// cite (engine::agent::attachments::is_image) — extension-based, the only
-/// signal a path carries.
-pub fn image_attachments(paths: &[String]) -> usize {
-    paths
-        .iter()
-        .filter(|p| engine::agent::attachments::is_image(std::path::Path::new(p.as_str())))
-        .count()
-}
-
 /// The version a summary row marks, if it is a version marker (upstream
 /// `VersionMarker.number(of:)`, ChatView.swift:185-192): the detail field
 /// when it parses as an integer, else a two-word text whose second word

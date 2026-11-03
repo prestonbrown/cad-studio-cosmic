@@ -336,7 +336,8 @@ impl From<&QueuedSend> for QueuedItem {
         Self {
             id: send.id,
             text: send.prompt.clone(),
-            images: crate::chat::image_attachments(&send.attachments),
+            // upstream counts every attachment (ChatInputView.swift:218-219)
+            images: send.attachments.len(),
         }
     }
 }
@@ -1940,7 +1941,7 @@ mod tests {
         drive.queue.push_back(QueuedSend {
             id: first,
             prompt: "first".into(),
-            attachments: vec!["shot.png".into()],
+            attachments: vec!["shot.png".into(), "notes.txt".into()],
         });
         drive.queue.push_back(QueuedSend {
             id: second,
@@ -1977,8 +1978,8 @@ mod tests {
         let before_removal = seen.first().and_then(|(queue, _)| queue.first().cloned());
         assert_eq!(
             before_removal.map(|item| (item.text, item.images)),
-            Some(("first".to_string(), 1)),
-            "queued items expose preview text and the image count"
+            Some(("first".to_string(), 2)),
+            "queued items expose preview text and the attachment count, non-images included"
         );
         drop(cmd_tx);
     }
