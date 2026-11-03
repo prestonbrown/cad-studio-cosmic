@@ -42,6 +42,8 @@ pub const FOOTNOTE: f32 = scaled(10.0);
 pub const CAPTION: f32 = scaled(10.0);
 /// `.caption2` (10 pt)
 pub const CAPTION2: f32 = scaled(10.0);
+/// The small control size's label (`.controlSize(.small)`: 11 pt).
+pub const SMALL_CONTROL: f32 = scaled(11.0);
 
 #[cfg(test)]
 mod tests {

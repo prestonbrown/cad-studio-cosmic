@@ -101,9 +101,7 @@
 //! the parts layout picker (:133-135; PartsOverlay.swift:23). With no
 //! model the WHOLE bar is disabled (:151 — `.disabled(output.mesh ==
 //! nil)`, the port's drawn-`parts.is_empty()`, which a parse failure
-//! also leaves): every pressable routes through [`bar_on_press`], the
-//! port-specific MSAA toggle included (upstream has no opinion there;
-//! disabled with the row for consistency).
+//! also leaves): every pressable routes through [`bar_on_press`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -120,7 +118,7 @@ use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
-use cosmic::widget::{Column, Row, Space, button, container, mouse_area, text, tooltip};
+use cosmic::widget::{Column, Row, Space, container, mouse_area, text, tooltip};
 use engine::parsing::Part;
 use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
@@ -132,7 +130,7 @@ use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::markers;
 use viewer::render::{
-    ModelScene, NEUTRAL, PartAppearance, PartPose, PartScene, camera, camera::Preset,
+    ModelScene, PartAppearance, PartPose, PartScene, camera, camera::Preset,
 };
 use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::picking;
@@ -144,6 +142,7 @@ use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
+use crate::ui::{self, Backdrop, Symbol, Tone, icon::icon, segmented::{Look, segmented}};
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
 /// Output watcher debounce (upstream FileWatcher's 0.3 s).
@@ -490,7 +489,7 @@ impl ViewerPane {
                     });
                 handle
             });
-        let empty = Arc::new(PartScene::from_parts(&[], NEUTRAL));
+        let empty = Arc::new(PartScene::from_parts(&[], neutral()));
         let settings = Settings::load(&settings_path).unwrap_or_default();
         let mut pane = ViewerPane {
             scene: ModelScene::new(empty.clone()),
@@ -993,10 +992,10 @@ impl ViewerPane {
             // error; otherwise the no-model invitation
             match &self.mesh_error {
                 Some(error) => {
-                    content_unavailable(ICON_WARNING, fl!("modello-non-leggibile"), error.clone())
+                    content_unavailable(Symbol::ExclamationmarkTriangle, fl!("modello-non-leggibile"), error.clone())
                 }
                 None => content_unavailable(
-                    ICON_CUBE,
+                    Symbol::CubeTransparent,
                     fl!("nessun-modello"),
                     fl!("descrivi-un-oggetto-nella-chat-per-iniziare"),
                 ),
@@ -1111,7 +1110,7 @@ impl ViewerPane {
             }
         };
         if let Some(parts) = loaded {
-            let next = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
+            let next = Arc::new(PartScene::from_parts(&parts, neutral()));
             if scenes_differ(&self.model_scene, &next) {
                 self.model_parts = parts;
                 self.input.mesh_changed(next.aabb_min, next.aabb_max);
@@ -1286,7 +1285,7 @@ impl ViewerPane {
             if self.plate_scene_cache.is_none() {
                 self.plate_scene_cache = Some(Arc::new(PartScene::from_parts(
                     &self.visible_plate_parts(),
-                    NEUTRAL,
+                    neutral(),
                 )));
             }
             let plate = self.plate_scene_cache.clone().expect("built above");
@@ -1672,38 +1671,34 @@ impl ViewerPane {
     /// ModelPane's controls, ModelPane.swift:47-49, 120-152): a top
     /// divider, then a 28 pt row on the pane's text background — preset
     /// picker, the icon toggles (misura/sezione disabled while animating,
-    /// :133-135), the animation slot (:136-147), the color legend, the
-    /// port-specific MSAA toggle, and the monospaced size label right. The
+    /// :133-135), the animation slot (:136-147), the color legend, and
+    /// the monospaced size label right. The
     /// row is disabled with no model (:151): every pressable routes its
     /// message through [`bar_on_press`].
     fn view_status_bar(&self, busy: bool) -> Element<'_, Message> {
         let parts_empty = self.scene.scene.parts.is_empty();
-        let enabled = !parts_empty;
         let mut bar = Row::new()
             .spacing(BAR_SPACING)
             .height(Length::Fill)
             .align_y(cosmic::iced::Alignment::Center)
             .push(self.preset_picker(parts_empty))
             .push(tool_toggle(
-                ICON_GRID,
+                Symbol::Grid,
                 self.tools.shows_grid,
-                enabled,
                 fl!("griglia"),
                 fl!("mostra-la-griglia"),
                 bar_on_press(parts_empty, Some(Message::ToggleGrid)),
             ))
             .push(tool_toggle(
-                ICON_CUBE,
+                Symbol::CubeTransparent,
                 self.tools.wireframe,
-                enabled,
                 fl!("wireframe"),
                 fl!("mostra-il-wireframe"),
                 bar_on_press(parts_empty, Some(Message::ToggleWireframe)),
             ))
             .push(tool_toggle(
-                ICON_RULER,
+                Symbol::Ruler,
                 self.tools.measuring,
-                enabled && !self.tools.animating,
                 fl!("misura"),
                 fl!("misura-la-distanza-tra-due-punti"),
                 bar_on_press(
@@ -1712,9 +1707,8 @@ impl ViewerPane {
                 ),
             ))
             .push(tool_toggle(
-                ICON_SECTION,
+                Symbol::SquareSplitDiagonal,
                 self.tools.sectioning,
-                enabled && !self.tools.animating,
                 fl!("sezione"),
                 fl!("mostra-una-sezione-del-modello"),
                 bar_on_press(
@@ -1730,18 +1724,16 @@ impl ViewerPane {
             .motion_available(self.model_parts.len(), self.study.is_some())
         {
             bar = bar.push(tool_toggle(
-                ICON_PLAY_CIRCLE,
+                Symbol::PlayCircle,
                 self.tools.animating,
-                enabled,
                 fl!("animazione"),
                 fl!("riproduci-l-animazione-con-la-simulazione-fisica"),
                 bar_on_press(parts_empty, Some(Message::ToggleAnimation)),
             ));
         } else if self.model_parts.len() > 1 {
             bar = bar.push(tool_toggle(
-                ICON_PLAY_CIRCLE,
+                Symbol::PlayCircle,
                 false,
-                enabled && !busy,
                 fl!("crea-animazione"),
                 fl!("chiedi-all-agente-di-simulare-e-animare-il-meccanismo"),
                 bar_on_press(parts_empty, (!busy).then_some(Message::RequestMotionStudy)),
@@ -1756,15 +1748,15 @@ impl ViewerPane {
                     .size(BAR_FONT_SIZE)
                     .font(cosmic::font::mono())
                     .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+                    .class(Tone::Secondary.text(BACKDROP)),
             );
         let row = container(bar)
             .padding([0.0, BAR_PADDING])
             .width(Length::Fill)
             .height(Length::Fixed(BAR_HEIGHT));
-        container(Column::new().push(divider()).push(row).width(Length::Fill))
+        container(Column::new().push(ui::surface::divider()).push(row).width(Length::Fill))
             .width(Length::Fill)
-            .class(text_background_class())
+            .class(ui::surface::text_background_class())
             .into()
     }
 
@@ -1784,11 +1776,17 @@ impl ViewerPane {
     /// 121-129). Inside the controls row, so the no-model disable gates it
     /// (:151).
     fn preset_picker(&self, parts_empty: bool) -> Element<'_, Message> {
-        let labels = PRESETS.iter().map(|preset| preset_label(*preset)).collect();
+        let items = PRESETS
+            .iter()
+            .map(|preset| {
+                (
+                    preset_label(*preset),
+                    bar_on_press(parts_empty, Some(Message::Preset(*preset))),
+                )
+            })
+            .collect();
         let selected = PRESETS.iter().position(|preset| *preset == self.preset);
-        segmented(labels, selected, !parts_empty, BAR_SEGMENTS, |index| {
-            bar_on_press(parts_empty, Some(Message::Preset(PRESETS[index])))
-        })
+        segmented(items, selected, Look::Raised, Length::Shrink)
     }
 }
 
@@ -2083,20 +2081,9 @@ fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
 //
 // Measured against shots/upstream/project-model.png (2x, halved): the bar
 // is a 1 pt divider over a 28 pt row, 8 pt side padding and spacing
-// (PaneStatusBar.swift:10-23); the small segmented control is 18 pt tall
-// with four 37.5 pt segments; the toggle glyphs sit in 14 pt cells; the
-// size label is 11 pt monospaced secondary text. Colors are macOS's
-// semantic label/separator alphas over the theme's own text background,
-// so dark mode follows the theme.
-
-/// SF Symbols stand-ins drawn to the symbols' shapes (the Cosmic theme has
-/// no grid, cube, ruler, split-square or play-circle glyph).
-const ICON_GRID: &[u8] = include_bytes!("../resources/icons/grid.svg");
-const ICON_CUBE: &[u8] = include_bytes!("../resources/icons/cube.transparent.svg");
-const ICON_RULER: &[u8] = include_bytes!("../resources/icons/ruler.svg");
-const ICON_SECTION: &[u8] = include_bytes!("../resources/icons/square.split.diagonal.svg");
-const ICON_PLAY_CIRCLE: &[u8] = include_bytes!("../resources/icons/play.circle.svg");
-const ICON_WARNING: &[u8] = include_bytes!("../resources/icons/exclamationmark.triangle.svg");
+// (PaneStatusBar.swift:10-23); the small segmented preset picker; the
+// toggle glyphs in 14 pt cells; the size label in 11 pt monospaced
+// secondary text, all on the text background.
 
 /// The mesh pass's sample count (docs/research/msaa-decision.md).
 const MSAA_SAMPLES: u32 = 4;
@@ -2106,332 +2093,53 @@ const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::R
 const BAR_HEIGHT: f32 = 28.0;
 const BAR_PADDING: f32 = 8.0;
 const BAR_SPACING: f32 = 8.0;
-/// PaneStatusBar's `.system(size: 11)` and the small control size's font.
+/// PaneStatusBar's `.system(size: 11)`.
 const BAR_FONT_SIZE: f32 = crate::typography::scaled(11.0);
-const SEGMENT_HEIGHT: f32 = 18.0;
-const SEGMENT_WIDTH: f32 = 37.5;
-/// The track's inset around the segments (the selected face sits 1 pt
-/// inside the track's edge).
-const SEGMENT_INSET: f32 = 1.0;
 const TOGGLE_CELL: f32 = 14.0;
+/// The bar and the empty states sit on the text background.
+const BACKDROP: Backdrop = Backdrop::Plain;
 
-/// macOS's semantic foreground alphas (labelColor, secondaryLabelColor,
-/// tertiaryLabelColor, separatorColor): black in light, white in dark.
-const LABEL_ALPHA: f32 = 0.85;
-const SECONDARY_ALPHA: f32 = 0.5;
-const TERTIARY_ALPHA: f32 = 0.25;
-const SEPARATOR_ALPHA: f32 = 0.1;
-
-pub(crate) fn ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
-    let base = if theme.cosmic().is_dark {
-        cosmic::iced::Color::WHITE
-    } else {
-        cosmic::iced::Color::BLACK
-    };
-    cosmic::iced::Color { a: alpha, ..base }
-}
-
-/// [`ink`] composited over the text background, opaque: an SVG tint's
-/// alpha is not applied (iced's svg color replaces the glyph's rgb and
-/// keeps only its coverage), so glyph colors must be pre-blended.
-fn solid_ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
-    let ink = ink(theme, 1.0);
-    let under = text_background(theme);
-    let mix = |a: f32, b: f32| a * alpha + b * (1.0 - alpha);
-    cosmic::iced::Color::from_rgb(
-        mix(ink.r, under.r),
-        mix(ink.g, under.g),
-        mix(ink.b, under.b),
-    )
-}
-
-/// The pane's text background (upstream `textBackgroundColor`): white in
-/// a light theme; in a dark one the theme's window background, which sits
-/// just below the viewport's dark gray as macOS's #1E1E1E sits below it.
-fn text_background(theme: &cosmic::Theme) -> cosmic::iced::Color {
-    let cosmic = theme.cosmic();
-    if cosmic.is_dark {
-        cosmic.background(false).base.into()
-    } else {
-        cosmic::iced::Color::WHITE
-    }
-}
-
-fn text_background_class() -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
-        background: Some(text_background(theme).into()),
-        ..Default::default()
-    })
-}
-
-fn label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    cosmic::iced::widget::text::Style {
-        color: Some(ink(theme, LABEL_ALPHA)),
-        ..Default::default()
-    }
-}
-
-fn secondary_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    cosmic::iced::widget::text::Style {
-        color: Some(ink(theme, SECONDARY_ALPHA)),
-        ..Default::default()
-    }
-}
-
-/// A filled selected segment's label (white in both appearances).
-fn white_label_style(_theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    cosmic::iced::widget::text::Style {
-        color: Some(cosmic::iced::Color::WHITE),
-        ..Default::default()
-    }
-}
-
-fn tertiary_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    cosmic::iced::widget::text::Style {
-        color: Some(ink(theme, TERTIARY_ALPHA)),
-        ..Default::default()
-    }
-}
-
-/// SwiftUI's `Divider()`: one point of separator color.
-fn divider<'a>() -> Element<'a, Message> {
-    container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-        .width(Length::Fill)
-        .class(cosmic::theme::Container::custom(|theme| {
-            cosmic::iced::widget::container::Style {
-                background: Some(ink(theme, SEPARATOR_ALPHA).into()),
-                ..Default::default()
-            }
-        }))
-        .into()
-}
-
-/// A button that draws nothing of its own (SwiftUI's `.borderless`
-/// style): the content carries every pixel.
-pub(crate) fn borderless_button() -> cosmic::theme::Button {
-    fn plain(_theme: &cosmic::Theme) -> button::Style {
-        button::Style::new()
-    }
-    cosmic::theme::Button::Custom {
-        active: Box::new(|_, theme| plain(theme)),
-        disabled: Box::new(plain),
-        hovered: Box::new(|_, theme| plain(theme)),
-        pressed: Box::new(|_, theme| plain(theme)),
-    }
-}
-
-/// A symbolic SVG glyph tinted per state: accent when on, secondary when
-/// off, tertiary when disabled (macOS's borderless toggle).
-fn glyph(bytes: &'static [u8], size: f32, on: bool, enabled: bool) -> Element<'static, Message> {
-    cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(bytes))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .class(cosmic::theme::Svg::custom(move |theme| {
-            let color = if !enabled {
-                solid_ink(theme, TERTIARY_ALPHA)
-            } else if on {
-                theme.cosmic().accent_color().into()
-            } else {
-                solid_ink(theme, SECONDARY_ALPHA)
-            };
-            cosmic::iced::widget::svg::Style { color: Some(color) }
-        }))
-        .into()
+/// The theme's neutral for uncolored parts (ModelViewer.swift:401-403).
+fn neutral() -> [f32; 3] {
+    viewer::render::neutral(cosmic::theme::active().cosmic().is_dark)
 }
 
 /// One bar toggle (upstream's `Toggle(...).toggleStyle(.button)` with an
 /// SF Symbol, borderless, ModelPane.swift:154-161): the glyph alone,
-/// accent-tinted while on; `title` is the accessibility label and `help`
-/// the tooltip. `message: None` is upstream's `.disabled` — a button
-/// without `on_press`.
+/// accent while on, secondary while off, tertiary while disabled;
+/// `title` is the accessibility label and `help` the tooltip.
+/// `message: None` is upstream's `.disabled`.
 fn tool_toggle(
-    icon: &'static [u8],
+    symbol: Symbol,
     on: bool,
-    enabled: bool,
     title: String,
     help: String,
     message: Option<Message>,
 ) -> Element<'static, Message> {
-    let cell = container(glyph(icon, TOGGLE_CELL, on, enabled))
+    let tone = ui::button::content_tone(
+        if on { Tone::Accent } else { Tone::Secondary },
+        &message,
+    );
+    let cell = container(icon(symbol, TOGGLE_CELL, tone, BACKDROP))
         .width(Length::Fixed(TOGGLE_CELL))
         .height(Length::Fixed(BAR_HEIGHT))
         .align_y(cosmic::iced::alignment::Vertical::Center);
-    let toggle = button::custom(cell)
-        .padding(0)
-        .class(borderless_button())
-        .on_press_maybe(message)
-        .description(title);
-    tooltip(
-        toggle,
-        text(help),
+    ui::button::with_help(
+        ui::button::borderless(cell, message).description(title),
+        help,
         cosmic::widget::tooltip::Position::FollowCursor,
     )
-    .into()
-}
-
-/// How a [`segmented`] control draws: its narrowest segment, and how the
-/// selected segment shows. AppKit raises the selected segment as a face
-/// on the text background in a plain bar, and fills it with a dark tint
-/// under white text when the control sits on a material (the section
-/// capsule, section.png).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SegmentLook {
-    pub min_width: f32,
-    pub on_material: bool,
-}
-
-/// The bar's preset picker: four 37.5 pt segments, raised selection.
-const BAR_SEGMENTS: SegmentLook = SegmentLook {
-    min_width: SEGMENT_WIDTH,
-    on_material: false,
-};
-
-/// The section capsule's axis picker: 18 pt segments, filled selection.
-pub(crate) const MATERIAL_SEGMENTS: SegmentLook = SegmentLook {
-    min_width: 18.0,
-    on_material: true,
-};
-
-/// A segment's width: the look's minimum, widened for a label that
-/// would not fit (11 pt text averages ~5 pt a glyph; 6 pt of padding a
-/// side). Every segment takes the widest label's width, as AppKit's
-/// segmented control does.
-fn segment_width(labels: &[String], min_width: f32) -> f32 {
-    let widest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    min_width.max(widest as f32 * 5.0 + 12.0)
-}
-
-/// A macOS segmented control at the small control size, drawn from
-/// containers (libcosmic's segmented button draws its own pill-and-accent
-/// look): a rounded track at 5 % ink, the selected segment a raised face
-/// on the text background with a hairline border and soft shadow, and
-/// 1 pt separators between neighbouring unselected segments. `on_select`
-/// answers each segment's press; `None` disables that segment.
-pub(crate) fn segmented<'a>(
-    labels: Vec<String>,
-    selected: Option<usize>,
-    enabled: bool,
-    look: SegmentLook,
-    on_select: impl Fn(usize) -> Option<Message>,
-) -> Element<'a, Message> {
-    let width = segment_width(&labels, look.min_width);
-    let face_height = SEGMENT_HEIGHT - 2.0 * SEGMENT_INSET;
-    let mut row = Row::new()
-        .height(Length::Fixed(face_height))
-        .align_y(cosmic::iced::Alignment::Center);
-    for (index, label) in labels.into_iter().enumerate() {
-        if index > 0 {
-            let shown = selected != Some(index - 1) && selected != Some(index);
-            row = row.push(
-                container(
-                    Space::new()
-                        .width(Length::Fixed(1.0))
-                        .height(Length::Fixed(9.0)),
-                )
-                .class(cosmic::theme::Container::custom(move |theme| {
-                    cosmic::iced::widget::container::Style {
-                        background: shown.then(|| ink(theme, SEPARATOR_ALPHA).into()),
-                        ..Default::default()
-                    }
-                })),
-            );
-        }
-        let is_selected = selected == Some(index);
-        let label_class = if !enabled {
-            tertiary_label_style
-        } else if is_selected && look.on_material {
-            white_label_style
-        } else {
-            label_style
-        };
-        let face = container(
-            text(label)
-                .size(BAR_FONT_SIZE)
-                .class(cosmic::theme::Text::Custom(label_class)),
-        )
-        .width(Length::Fixed(width))
-        .height(Length::Fill)
-        .align_x(cosmic::iced::alignment::Horizontal::Center)
-        .align_y(cosmic::iced::alignment::Vertical::Center)
-        .class(cosmic::theme::Container::custom(move |theme| {
-            if !is_selected {
-                return cosmic::iced::widget::container::Style::default();
-            }
-            if look.on_material {
-                return cosmic::iced::widget::container::Style {
-                    background: Some(ink(theme, 0.3).into()),
-                    border: cosmic::iced::Border {
-                        radius: theme.cosmic().corner_radii.radius_xs.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-            }
-            let face = if theme.cosmic().is_dark {
-                ink(theme, 0.28)
-            } else {
-                text_background(theme)
-            };
-            cosmic::iced::widget::container::Style {
-                background: Some(face.into()),
-                border: cosmic::iced::Border {
-                    color: ink(theme, 0.12),
-                    width: 0.5,
-                    radius: theme.cosmic().corner_radii.radius_xs.into(),
-                },
-                shadow: cosmic::iced::Shadow {
-                    color: ink(theme, 0.15),
-                    offset: cosmic::iced::Vector::new(0.0, 0.5),
-                    blur_radius: 1.0,
-                },
-                ..Default::default()
-            }
-        }));
-        let message = if enabled { on_select(index) } else { None };
-        row = row.push(
-            button::custom(face)
-                .padding(0)
-                .class(borderless_button())
-                .on_press_maybe(message),
-        );
-    }
-    container(row)
-        .padding(SEGMENT_INSET)
-        .class(cosmic::theme::Container::custom(move |theme| {
-            cosmic::iced::widget::container::Style {
-                background: Some(ink(theme, if look.on_material { 0.06 } else { 0.05 }).into()),
-                // the small-control radius, one inset wider than the face
-                border: cosmic::iced::Border {
-                    radius: theme
-                        .cosmic()
-                        .corner_radii
-                        .radius_xs
-                        .map(|r| r + SEGMENT_INSET)
-                        .into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }))
-        .into()
 }
 
 /// SwiftUI's `ContentUnavailableView` (ModelPane.swift:101-112): a
 /// tertiary glyph, the bold secondary title, the secondary description,
 /// centered in the pane.
 fn content_unavailable<'a>(
-    icon: &'static [u8],
+    symbol: Symbol,
     title: String,
     description: String,
 ) -> Element<'a, Message> {
-    let glyph = cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(icon))
-        .width(Length::Fixed(40.0))
-        .height(Length::Fixed(40.0))
-        .class(cosmic::theme::Svg::custom(|theme| {
-            cosmic::iced::widget::svg::Style {
-                color: Some(solid_ink(theme, TERTIARY_ALPHA)),
-            }
-        }));
+    let glyph = icon(symbol, 40.0, Tone::Tertiary, BACKDROP);
     container(
         Column::new()
             .push(glyph)
@@ -2440,14 +2148,14 @@ fn content_unavailable<'a>(
                 text(title)
                     .size(crate::typography::TITLE)
                     .font(cosmic::font::bold())
-                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+                    .class(Tone::Secondary.text(BACKDROP)),
             )
             .push(Space::new().height(Length::Fixed(6.0)))
             .push(
                 text(description)
                     .size(crate::typography::BODY)
                     .align_x(cosmic::iced::alignment::Horizontal::Center)
-                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+                    .class(Tone::Secondary.text(BACKDROP)),
             )
             .align_x(cosmic::iced::alignment::Alignment::Center),
     )
@@ -2456,7 +2164,7 @@ fn content_unavailable<'a>(
     .height(Length::Fill)
     .align_x(cosmic::iced::alignment::Horizontal::Center)
     .align_y(cosmic::iced::alignment::Vertical::Center)
-    .class(text_background_class())
+    .class(ui::surface::text_background_class())
     .into()
 }
 
@@ -2698,17 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn segments_share_the_widest_label_width() {
-        let short = ["Iso", "Front", "Top", "Right"].map(String::from);
-        assert_eq!(segment_width(&short, SEGMENT_WIDTH), SEGMENT_WIDTH);
-        let long = ["Iso", "Vorderseite"].map(String::from);
-        assert!(
-            segment_width(&long, SEGMENT_WIDTH) > SEGMENT_WIDTH,
-            "a long label widens every segment"
-        );
-    }
-
-    #[test]
     fn load_model_parts_prefers_3mf_over_stl() {
         let both = tmp_dir("both");
         std::fs::copy(fixture("golden/model.3mf"), both.join("model.3mf")).unwrap();
@@ -2743,17 +2440,17 @@ mod tests {
     fn scenes_differ_compares_staged_content() {
         let a = PartScene::from_parts(
             &[parse_stl(&std::fs::read(fixture("golden/model.stl")).unwrap()).unwrap()],
-            NEUTRAL,
+            viewer::render::neutral(false),
         );
         let a_again = PartScene::from_parts(
             &[parse_stl(&std::fs::read(fixture("golden/model.stl")).unwrap()).unwrap()],
-            NEUTRAL,
+            viewer::render::neutral(false),
         );
         assert!(!scenes_differ(&a, &a_again), "same bytes, same staging");
 
         let b = PartScene::from_parts(
             &parse_3mf(&std::fs::read(fixture("golden/model.3mf")).unwrap()).unwrap(),
-            NEUTRAL,
+            viewer::render::neutral(false),
         );
         assert!(scenes_differ(&a, &b));
     }

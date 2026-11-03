@@ -55,6 +55,8 @@ use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::typography;
+use crate::ui::surface::{self, Corner, Shadow};
+use crate::ui::{self, Backdrop, Symbol, Tone};
 use crate::version_menu;
 use crate::viewer_pane::ViewerPane;
 
@@ -90,12 +92,16 @@ const HAIRLINE_ALPHA: f32 = 0.21;
 /// The capsule's `.font(.system(size: 12))` (ActivityViewer.swift:34) on
 /// COSMIC's text scale.
 const CAPSULE_TEXT: f32 = typography::scaled(12.0);
+/// The header's labels and glyphs sit in the titlebar.
+const TITLEBAR: Backdrop = Backdrop::Titlebar;
 
-/// The version card's width: the visible span of upstream's menu inside
-/// the window (version-menu.png: x 968 to the 1320 edge, less an 8 px
-/// margin — an in-window popover is clamped to the window, libcosmic
-/// popover.rs:375).
-const VERSION_CARD_WIDTH: f32 = 344.0;
+/// The version card's width: upstream's menu runs ~500 px, past the
+/// window edge; an in-window popover is clamped to the window (libcosmic
+/// popover.rs:375), so the card takes every pixel up to an 8 px margin.
+/// The pill's left edge sits 354 px from the window's right edge (the
+/// header's end group is fixed-width) and the card opens 115 px left of
+/// it: 354 + 115 - 8.
+const VERSION_CARD_WIDTH: f32 = 461.0;
 
 /// The output watcher's debounce (upstream FileWatcher's 0.3 s — shared
 /// with the viewer pane's own watch).
@@ -448,7 +454,7 @@ impl ProjectWindow {
                 handle
             });
 
-        ProjectWindow {
+        let mut window = ProjectWindow {
             name,
             settings_path: engine::settings::settings_path(),
             metadata,
@@ -498,7 +504,18 @@ impl ProjectWindow {
                 events: Mutex::new(Some(receiver)),
             }),
             root,
-        }
+        };
+        window.sync_version_markers();
+        window
+    }
+
+    /// The chat's version markers read the history and the current
+    /// version from the chat state's mirror (VersionMarker's
+    /// `project.history` / `metadata.currentVersion`): refreshed at open,
+    /// after a build records a version, and after a restore.
+    fn sync_version_markers(&mut self) {
+        self.chat.versions = self.bridge.versions().iter().map(|v| v.number).collect();
+        self.chat.current_version = self.metadata.current_version;
     }
 
     /// Whether a turn is running (upstream `isBusy`).
@@ -850,6 +867,7 @@ impl ProjectWindow {
         let engine = self.chat.engine;
         self.chat = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
         self.chat.engine = engine;
+        self.sync_version_markers();
         self.missing_outputs.clear();
         let parameters = self.bridge.parameters();
         self.viewer.sync_parameters(&parameters);
@@ -889,6 +907,8 @@ impl ProjectWindow {
                 self.set_activity(self.bridge.activity().into());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
+            // a marker row's "Ripristina" (VersionMarker.swift)
+            chat_view::Message::RestoreVersion(number) => return self.restore(*number),
             chat_view::Message::RemoveQueued(id) => {
                 let id = *id;
                 self.bridge.remove_queued(id);
@@ -1094,6 +1114,7 @@ impl ProjectWindow {
                 let fresh = bridge::fresh_metadata(&self.root);
                 self.metadata.session_id = fresh.session_id;
                 self.metadata.current_version = fresh.current_version;
+                self.sync_version_markers();
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity().into());
@@ -1370,7 +1391,7 @@ impl ProjectWindow {
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(chrome::fill_class(DIVIDER_ALPHA, chrome::Corner::None))
+            .class(surface::fill(DIVIDER_ALPHA, Corner::None, false))
             .into()
     }
 
@@ -1383,8 +1404,8 @@ impl ProjectWindow {
             self.grip_hover == Some(kind) || self.pane_drag.is_some_and(|drag| drag.pane == kind);
         let opacity = if lit { 1.0 } else { 0.45 };
         let pill = container(
-            chrome::glyph_icon(chrome::GRIP_LINES, (10.0, 7.0), chrome::Tone::Secondary)
-                .opacity(opacity),
+            ui::icon::icon(Symbol::Line3Horizontal, 7.0, Tone::Secondary, Backdrop::Material)
+                .opacity(opacity * Tone::Secondary.alpha(Backdrop::Material)),
         )
         .width(Length::Fixed(28.0))
         .height(Length::Fixed(16.0))
@@ -1489,7 +1510,7 @@ impl ProjectWindow {
             })
             .push(Space::new().width(Length::Fixed(8.0)))
             .push(toolbar_button(
-                chrome::SIDEBAR_LEFT,
+                Symbol::SidebarLeft,
                 (19.5, 15.0),
                 40.0,
                 Some(Message::Command(Command::ShowChat)),
@@ -1498,7 +1519,7 @@ impl ProjectWindow {
             // "Compila modello" (ProjectWindow.swift:107-113), disabled
             // while busy
             .push(toolbar_button(
-                chrome::PLAY_FILL,
+                Symbol::PlayFill,
                 (12.5, 14.0),
                 36.0,
                 (!busy).then_some(Message::Command(Command::Build)),
@@ -1506,7 +1527,7 @@ impl ProjectWindow {
             ))
             // Stop (:115-121), disabled when idle
             .push(toolbar_button(
-                chrome::STOP_FILL,
+                Symbol::StopFill,
                 (13.5, 13.5),
                 32.0,
                 busy.then_some(Message::Command(Command::Stop)),
@@ -1544,7 +1565,7 @@ impl ProjectWindow {
             })
             .push(Space::new().width(Length::Fixed(5.0)))
             .push(toolbar_button(
-                chrome::FOLDER,
+                Symbol::Folder,
                 (18.5, 15.0),
                 38.0,
                 Some(Message::Command(Command::Reveal)),
@@ -1553,14 +1574,14 @@ impl ProjectWindow {
             // the toolbar's STRICTER export gate (!hasThreeMF || isBusy;
             // the menu entry stays clickable while busy — upstream's split)
             .push(toolbar_button(
-                chrome::SHARE,
+                Symbol::SquareAndArrowUp,
                 (14.5, 18.5),
                 38.0,
                 (has_3mf && !busy).then_some(Message::Command(Command::Export)),
                 fl!("esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"),
             ))
             .push(toolbar_button(
-                chrome::OPEN_EXTERNAL,
+                Symbol::ArrowUpForwardApp,
                 (15.0, 15.0),
                 38.0,
                 has_3mf.then_some(Message::Command(Command::OpenInSlicer)),
@@ -1568,7 +1589,7 @@ impl ProjectWindow {
             ))
             // "Parametri" (:154-159)
             .push(toolbar_button(
-                chrome::SLIDERS,
+                Symbol::SliderHorizontal3,
                 (17.0, 14.5),
                 38.0,
                 Some(Message::Command(Command::ToggleParameters)),
@@ -1603,7 +1624,7 @@ impl ProjectWindow {
             .push(band)
             .push(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(chrome::fill_class(HAIRLINE_ALPHA, chrome::Corner::None)),
+                    .class(surface::fill(HAIRLINE_ALPHA, Corner::None, false)),
             )
             .into()
     }
@@ -1614,7 +1635,6 @@ impl ProjectWindow {
     /// side padding, 24 tall, 480 wide shrinking toward the 320 minimum as
     /// the header narrows, a `.quaternary` 6-radius fill (:7-37).
     fn view_activity(&self) -> Element<'_, Message> {
-        use chrome::Tone;
         // `.fontWeight(.medium)` in SF; the interface font's Medium face is
         // not installed (it falls back to Regular), Semibold is the nearest
         // stroke weight it carries
@@ -1622,18 +1642,19 @@ impl ProjectWindow {
         let mut row = Row::new()
             .spacing(8)
             .align_y(cosmic::iced::Alignment::Center)
-            .push(chrome::glyph(chrome::CUBE, (13.0, 13.0), Tone::Secondary))
+            .push(ui::icon::icon(Symbol::Cube, 13.0, Tone::Secondary, TITLEBAR))
             .push(
                 text(self.name.clone())
                     .size(CAPSULE_TEXT)
                     .font(medium)
                     .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                    .class(chrome::text_class(Tone::Primary)),
+                    .class(Tone::Primary.text(TITLEBAR)),
             )
-            .push(chrome::glyph(
-                chrome::CHEVRON_COMPACT_RIGHT,
-                (4.0, 8.5),
+            .push(ui::icon::icon(
+                Symbol::ChevronCompactRight,
+                8.5,
                 Tone::Tertiary,
+                TITLEBAR,
             ));
         // statusIcon (:41-55): mini spinner / green check / red octagon
         row = match &self.activity {
@@ -1642,23 +1663,27 @@ impl ProjectWindow {
             Activity::Working(_) => {
                 row.push(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
             }
-            Activity::Succeeded(_) => {
-                row.push(chrome::colored(chrome::CHECK_CIRCLE_FILL, (13.0, 13.0)))
-            }
-            Activity::Failed(_) => row.push(chrome::colored(chrome::ERROR_FILL, (13.0, 13.0))),
+            Activity::Succeeded(_) => row.push(ui::icon::multicolor(
+                Symbol::CheckmarkCircleFillMulticolor,
+                13.0,
+            )),
+            Activity::Failed(_) => row.push(ui::icon::multicolor(
+                Symbol::XmarkOctagonFillMulticolor,
+                13.0,
+            )),
         };
         row = row.push(
             text(self.activity.text())
                 .size(CAPSULE_TEXT)
                 .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                .class(chrome::text_class(Tone::Secondary)),
+                .class(Tone::Secondary.text(TITLEBAR)),
         );
         if let Some(start) = self.work_started_at {
             row = row.push(
                 text(activity::elapsed_text(start.elapsed().as_secs()))
                     .size(CAPSULE_TEXT)
                     .font(cosmic::font::mono())
-                    .class(chrome::text_class(Tone::Tertiary)),
+                    .class(Tone::Tertiary.text(TITLEBAR)),
             );
         }
         row = row.push(Space::new().width(Length::Fill));
@@ -1682,17 +1707,22 @@ impl ProjectWindow {
                     .spacing(2)
                     .align_y(cosmic::iced::Alignment::Center)
                     .push(match kind {
-                        IssueKind::Error => chrome::colored(chrome::ERROR_FILL, (12.5, 12.5)),
-                        IssueKind::Warning => chrome::colored(chrome::WARNING_FILL, (13.0, 11.5)),
+                        IssueKind::Error => {
+                            ui::icon::multicolor(Symbol::XmarkOctagonFillMulticolor, 12.5)
+                        }
+                        IssueKind::Warning => ui::icon::multicolor(
+                            Symbol::ExclamationmarkTriangleFillMulticolor,
+                            11.5,
+                        ),
                     })
                     .push(
                         text(format!("{count}"))
                             .size(CAPSULE_TEXT)
-                            .class(chrome::text_class(Tone::Primary)),
+                            .class(Tone::Primary.text(TITLEBAR)),
                     ),
             )
             .padding(0)
-            .class(chrome::button_class(false, chrome::Corner::Xs))
+            .class(ui::button::hover_wash(false, Corner::Xs))
             .on_press(Message::ToggleIssues((!open).then_some(kind)));
             // the `.popover` on the issue button (:80-85)
             let mut anchored = popover(face)
@@ -1708,7 +1738,7 @@ impl ProjectWindow {
             .width(Length::Fixed(480.0))
             .height(Length::Fixed(24.0))
             .align_y(cosmic::iced::alignment::Vertical::Center)
-            .class(chrome::fill_class(CAPSULE_ALPHA, chrome::Corner::S))
+            .class(surface::fill(CAPSULE_ALPHA, Corner::S, false))
             .into()
     }
 
@@ -1733,13 +1763,20 @@ impl ProjectWindow {
                 Row::new()
                     .spacing(6)
                     .push(match kind {
-                        IssueKind::Error => chrome::colored(chrome::ERROR_FILL, (13.0, 13.0)),
-                        IssueKind::Warning => chrome::colored(chrome::WARNING_FILL, (14.0, 12.5)),
+                        IssueKind::Error => {
+                            ui::icon::multicolor(Symbol::XmarkOctagonFillMulticolor, 13.0)
+                        }
+                        IssueKind::Warning => ui::icon::multicolor(
+                            Symbol::ExclamationmarkTriangleFillMulticolor,
+                            12.5,
+                        ),
                     })
                     .push(text(issue.message.clone()).size(typography::CALLOUT)),
             );
         }
-        container(list).class(chrome::card_class()).into()
+        container(list)
+            .class(surface::card(Corner::M, Shadow::Popover))
+            .into()
     }
 
     /// The commands menu bar (the M4 subset of upstream AppCommands plus M5's
@@ -1949,7 +1986,7 @@ fn flash_border(flashing: bool) -> cosmic::theme::Container<'static> {
 fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| {
         let base = Color::from(theme.cosmic().background(false).base);
-        let mut stroke = chrome::wash(theme, 0.15);
+        let mut stroke = ui::tone::wash(theme, 0.15);
         stroke.a *= opacity;
         cosmic::iced::widget::container::Style {
             background: Some(cosmic::iced::Background::Color(Color {
@@ -1967,244 +2004,12 @@ fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
     })
 }
 
-/// The toolbar's drawing kit: SF-Symbol-shaped glyphs (the Cosmic theme has
-/// no matching shapes for `sidebar.left`, `clock.arrow.circlepath`,
-/// `square.and.arrow.up`, `arrow.up.forward.app`, `slider.horizontal.3`,
-/// `cube`, `chevron.compact.right`, `line.3.horizontal`), the label tones
-/// macOS draws them in, and the borderless toolbar-button look. Tones are
-/// the theme's on-background color at the alphas the upstream light
-/// capture measures over its own background, so dark mode follows.
-pub mod chrome {
-    use cosmic::Element;
-    use cosmic::iced::{Background, Border, Color, Length};
-    use cosmic::widget::icon;
-
-    macro_rules! glyph_file {
-        ($file:literal) => {
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/resources/icons/",
-                $file
-            ))
-        };
-    }
-
-    pub const SIDEBAR_LEFT: &[u8] = glyph_file!("sidebar-left.svg");
-    pub const PLAY_FILL: &[u8] = glyph_file!("play-fill.svg");
-    pub const STOP_FILL: &[u8] = glyph_file!("stop-fill.svg");
-    pub const FOLDER: &[u8] = glyph_file!("folder.svg");
-    pub const SHARE: &[u8] = glyph_file!("share.svg");
-    pub const OPEN_EXTERNAL: &[u8] = glyph_file!("open-external.svg");
-    pub const SLIDERS: &[u8] = glyph_file!("sliders.svg");
-    pub const CLOCK_ARROW: &[u8] = glyph_file!("clock-arrow.svg");
-    pub const CHEVRON_DOWN: &[u8] = glyph_file!("chevron-down.svg");
-    pub const CUBE: &[u8] = glyph_file!("cube.svg");
-    pub const CHEVRON_COMPACT_RIGHT: &[u8] = glyph_file!("chevron-compact-right.svg");
-    pub const GRIP_LINES: &[u8] = glyph_file!("grip-lines.svg");
-    pub const CHECKMARK: &[u8] = glyph_file!("checkmark.svg");
-    /// Full-color glyphs (drawn in their own fills, never tinted).
-    pub const WARNING_FILL: &[u8] = glyph_file!("warning-fill.svg");
-    pub const ERROR_FILL: &[u8] = glyph_file!("error-fill.svg");
-    pub const CHECK_CIRCLE_FILL: &[u8] = glyph_file!("check-circle-fill.svg");
-
-    /// The label hierarchy a glyph or text is drawn in.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Tone {
-        /// `.primary` text inside the capsule (project name, issue count).
-        Primary,
-        /// `.secondary` (status text, the capsule's cube).
-        Secondary,
-        /// `.tertiary` (the capsule's chevron, the elapsed timer).
-        Tertiary,
-        /// An enabled toolbar glyph.
-        Toolbar,
-        /// A disabled toolbar glyph.
-        Disabled,
-    }
-
-    impl Tone {
-        /// The on-background alpha: upstream light capture, label pixel vs
-        /// its own background (#434344 / #606062 / #9F9FA1 over the capsule
-        /// #DFDFE1; #6B6B6C / #B2B2B4 over the toolbar #EEEEF0).
-        fn alpha(self) -> f32 {
-            match self {
-                Tone::Primary => 0.75,
-                Tone::Secondary => 0.57,
-                Tone::Tertiary => 0.29,
-                Tone::Toolbar => 0.55,
-                Tone::Disabled => 0.20,
-            }
-        }
-
-        pub fn color(self, theme: &cosmic::Theme) -> Color {
-            let mut color = Color::from(theme.cosmic().background(false).on);
-            color.a *= self.alpha();
-            color
-        }
-
-        /// The tone pre-composited over the window background: the svg
-        /// tint keeps the glyph's own alpha and drops the color's.
-        pub fn opaque(self, theme: &cosmic::Theme) -> Color {
-            let base = Color::from(theme.cosmic().background(false).base);
-            let on = Color::from(theme.cosmic().background(false).on);
-            let a = self.alpha();
-            let mix = |b: f32, o: f32| b * (1.0 - a) + o * a;
-            Color::from_rgb(mix(base.r, on.r), mix(base.g, on.g), mix(base.b, on.b))
-        }
-    }
-
-    /// The text class for a tone.
-    pub fn text_class(tone: Tone) -> cosmic::theme::Text {
-        fn style(tone: Tone, theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-            cosmic::iced::widget::text::Style {
-                color: Some(tone.color(theme)),
-                ..Default::default()
-            }
-        }
-        match tone {
-            Tone::Primary => cosmic::theme::Text::Custom(|t| style(Tone::Primary, t)),
-            Tone::Secondary => cosmic::theme::Text::Custom(|t| style(Tone::Secondary, t)),
-            Tone::Tertiary => cosmic::theme::Text::Custom(|t| style(Tone::Tertiary, t)),
-            Tone::Toolbar => cosmic::theme::Text::Custom(|t| style(Tone::Toolbar, t)),
-            Tone::Disabled => cosmic::theme::Text::Custom(|t| style(Tone::Disabled, t)),
-        }
-    }
-
-    /// A tinted glyph at its measured 1x size.
-    pub fn glyph<'a, M: 'a>(svg: &'static [u8], size: (f32, f32), tone: Tone) -> Element<'a, M> {
-        glyph_icon(svg, size, tone).into()
-    }
-
-    /// [`glyph`] as an [`icon::Icon`], for callers that set its opacity.
-    pub fn glyph_icon(svg: &'static [u8], (width, height): (f32, f32), tone: Tone) -> icon::Icon {
-        icon::from_svg_bytes(svg)
-            .symbolic(true)
-            .icon()
-            .class(cosmic::theme::Svg::custom(move |theme| {
-                cosmic::iced::widget::svg::Style {
-                    color: Some(tone.opaque(theme)),
-                    ..Default::default()
-                }
-            }))
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(height))
-    }
-
-    /// A full-color glyph at its measured 1x size.
-    pub fn colored<'a, M: 'a>(svg: &'static [u8], (width, height): (f32, f32)) -> Element<'a, M> {
-        icon::from_svg_bytes(svg)
-            .icon()
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(height))
-            .into()
-    }
-
-    /// A translucent on-background fill (the capsule's `.quaternary`, the
-    /// hover wash, hairline borders).
-    pub fn wash(theme: &cosmic::Theme, alpha: f32) -> Color {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= alpha;
-        color
-    }
-
-    /// A corner radius by CLASS, resolved from the user's COSMIC roundness
-    /// setting (upstream's literal pt values only pick the class).
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    pub enum Corner {
-        /// Square.
-        None,
-        /// Tiny controls (an issue count, a menu row's highlight).
-        Xs,
-        /// Small controls (toolbar buttons, the capsule, the version pill).
-        S,
-        /// Cards and popovers.
-        M,
-    }
-
-    impl Corner {
-        pub fn radius(self, theme: &cosmic::Theme) -> cosmic::iced::border::Radius {
-            let radii = &theme.cosmic().corner_radii;
-            match self {
-                Corner::None => radii.radius_0.into(),
-                Corner::Xs => radii.radius_xs.into(),
-                Corner::S => radii.radius_s.into(),
-                Corner::M => radii.radius_m.into(),
-            }
-        }
-    }
-
-    /// The borderless toolbar button: no fill at rest, a rounded wash on
-    /// hover/press (macOS toolbar items), or — `bordered` — the hairline
-    /// pill the version menu's `Menu` label sits in.
-    pub fn button_class(bordered: bool, corner: Corner) -> cosmic::theme::Button {
-        let style = move |theme: &cosmic::Theme, fill: f32| {
-            let mut style = cosmic::widget::button::Style::new();
-            style.background = (fill > 0.0).then(|| Background::Color(wash(theme, fill)));
-            style.border_radius = corner.radius(theme);
-            if bordered {
-                style.border_width = 1.0;
-                style.border_color = wash(theme, 0.05);
-            }
-            style
-        };
-        cosmic::theme::Button::Custom {
-            active: Box::new(move |_, theme| style(theme, 0.0)),
-            disabled: Box::new(move |theme| style(theme, 0.0)),
-            hovered: Box::new(move |_, theme| style(theme, 0.06)),
-            pressed: Box::new(move |_, theme| style(theme, 0.12)),
-        }
-    }
-
-    /// A popover card's face (the menu/popover material): an opaque fill a
-    /// shade under the window background (#E2E2E3 measured over the
-    /// #EEEEF0 toolbar in version-menu.png), a hairline edge, 10 px
-    /// corners, a soft drop shadow.
-    pub fn card_class() -> cosmic::theme::Container<'static> {
-        cosmic::theme::Container::custom(|theme| {
-            let base = Color::from(theme.cosmic().background(false).base);
-            let on = Color::from(theme.cosmic().background(false).on);
-            let mix = |a: f32, b: f32| a * 0.95 + b * 0.05;
-            cosmic::iced::widget::container::Style {
-                background: Some(Background::Color(Color::from_rgb(
-                    mix(base.r, on.r),
-                    mix(base.g, on.g),
-                    mix(base.b, on.b),
-                ))),
-                border: Border {
-                    color: wash(theme, 0.12),
-                    width: 1.0,
-                    radius: Corner::M.radius(theme),
-                },
-                shadow: cosmic::iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
-                    offset: cosmic::iced::Vector::new(0.0, 6.0),
-                    blur_radius: 18.0,
-                },
-                ..Default::default()
-            }
-        })
-    }
-
-    /// A container class: a rounded fill of `alpha` on-background wash.
-    pub fn fill_class(alpha: f32, corner: Corner) -> cosmic::theme::Container<'static> {
-        cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
-            background: Some(Background::Color(wash(theme, alpha))),
-            border: Border {
-                radius: corner.radius(theme),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-    }
-}
-
 /// The "Apri recenti" card (Commands.swift:30-40 — a submenu upstream; a
 /// card here because the list changes between rebuilds, which a cosmic menu
 /// cannot survive: docs/research/libcosmic-menu-dynamic-items-bug.md): one
 /// row per recent project by folder name, a divider, then "Cancella menu",
 /// disabled when the list is empty.
 fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
-    use chrome::Tone;
     let row = |label: String, tone: Tone, on_press: Option<Message>| -> Element<'static, Message> {
         container(
             button::custom(
@@ -2212,7 +2017,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
                     text(label)
                         .size(typography::BODY)
                         .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                        .class(chrome::text_class(tone)),
+                        .class(tone.text(Backdrop::Material)),
                 )
                 .padding([0.0, 9.5])
                 .height(Length::Fixed(22.0))
@@ -2220,7 +2025,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
             )
             .padding(0)
             .width(Length::Fill)
-            .class(chrome::button_class(false, chrome::Corner::Xs))
+            .class(ui::button::hover_wash(false, Corner::Xs))
             .on_press_maybe(on_press),
         )
         .padding([0, 5])
@@ -2242,7 +2047,11 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         list = list.push(
             container(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(chrome::fill_class(0.1, chrome::Corner::None)),
+                    .class(surface::fill(
+                        Tone::Separator.alpha(Backdrop::Material),
+                        Corner::None,
+                        false,
+                    )),
             )
             .padding([5, 14]),
         );
@@ -2257,24 +2066,22 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         clear_tone,
         (!paths.is_empty()).then_some(Message::ClearRecents),
     ));
-    container(list).class(chrome::card_class()).into()
+    container(list)
+        .class(surface::card(Corner::M, Shadow::Popover))
+        .into()
 }
 
 /// One toolbar icon button: a tinted glyph centered in a `width`×28 hit
 /// area (disabled glyphs dim), with its upstream `.help` tooltip.
 fn toolbar_button(
-    svg: &'static [u8],
+    symbol: Symbol,
     glyph_size: (f32, f32),
     width: f32,
     on_press: Option<Message>,
     help: String,
 ) -> Element<'static, Message> {
-    let tone = if on_press.is_some() {
-        chrome::Tone::Toolbar
-    } else {
-        chrome::Tone::Disabled
-    };
-    let face = container(chrome::glyph(svg, glyph_size, tone))
+    let tone = ui::button::content_tone(Tone::Secondary, &on_press);
+    let face = container(ui::icon::icon(symbol, glyph_size.1, tone, TITLEBAR))
         .width(Length::Fixed(width))
         .height(Length::Fixed(28.0))
         .align_x(cosmic::iced::alignment::Horizontal::Center)
@@ -2282,7 +2089,7 @@ fn toolbar_button(
     cosmic::widget::tooltip(
         button::custom(face)
             .padding(0)
-            .class(chrome::button_class(false, chrome::Corner::S))
+            .class(ui::button::hover_wash(false, Corner::S))
             .on_press_maybe(on_press),
         text(help).size(typography::scaled(11.0)),
         cosmic::widget::tooltip::Position::Bottom,
@@ -2901,6 +2708,49 @@ mod tests {
         assert_eq!(
             window.activity,
             Activity::Failed(fl!("impossibile-ripristinare-la-versione-lld", version = 7))
+        );
+    }
+
+    /// The chat's version markers mirror the history and the current
+    /// version at open and after a restore, and a marker's restore
+    /// button restores through the shell.
+    #[tokio::test]
+    async fn chat_markers_follow_the_history_and_restore() {
+        use engine::project::versions;
+        let root = std::env::temp_dir().join(format!("cad-markers-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let mut history = Vec::new();
+        for (prompt, wall) in [("a cube", 3), ("thicker", 5)] {
+            std::fs::write(root.join("model.py"), format!("wall = {wall}\n")).unwrap();
+            versions::record(
+                &root,
+                &mut history,
+                prompt,
+                None,
+                ::time::OffsetDateTime::now_utc(),
+            )
+            .unwrap();
+        }
+        let mut metadata = store::load_metadata(&root).unwrap_or_else(|_| store::ProjectMetadata::new("test"));
+        metadata.current_version = Some(2);
+        store::save_metadata(&root, &metadata).unwrap();
+
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        window.bridge.mark_python_ready_for_test();
+        assert_eq!(window.chat.versions, vec![1, 2], "mirrored at open");
+        assert_eq!(window.chat.current_version, Some(2));
+
+        let _ = window.update(Message::Chat(chat_view::Message::RestoreVersion(1)));
+        assert_eq!(window.metadata.current_version, Some(1), "the shell restored");
+        assert_eq!(window.chat.current_version, Some(1), "the mirror followed");
+        assert_eq!(window.chat.versions, vec![1, 2]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("model.py")).unwrap(),
+            "wall = 3\n"
         );
     }
 

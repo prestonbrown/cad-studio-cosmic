@@ -37,6 +37,7 @@ use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
 use crate::fl;
+use crate::ui::{Backdrop, Tone};
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -160,7 +161,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         .push_maybe(
             sheet
                 .last_verified_missing
-                .then(|| body(fl!("nessun-eseguibile-funzionante-trovato")).class(error_text())),
+                .then(|| body(fl!("nessun-eseguibile-funzionante-trovato")).class(Tone::Danger.text(Backdrop::Plain))),
         );
     let actions = Row::new()
         .spacing(8)
@@ -338,7 +339,7 @@ pub fn view_print_preferences<'a>(
             body(fl!(
                 "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
             ))
-            .class(secondary_text()),
+            .class(Tone::Secondary.text(Backdrop::Plain)),
         )
         .into()
 }
@@ -388,7 +389,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
                     body(fl!(
                         "indica-come-stampi-potrai-cambiarlo-in-qualsiasi-momento-nelle-impostazioni"
                     ))
-                    .class(secondary_text()),
+                    .class(Tone::Secondary.text(Backdrop::Plain)),
                 ),
         );
 
@@ -581,7 +582,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
                     body(fl!(
                         "cad-studio-usa-un-ambiente-python-dedicato-con-build123d-matplotlib-e-numpy-per-generare-modelli-e-tavole-tecniche-l-installazione-scarica-circa-200-mb"
                     ))
-                    .class(secondary_text()),
+                    .class(Tone::Secondary.text(Backdrop::Plain)),
                 ),
         );
     let state = &sheet.state;
@@ -597,7 +598,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
                     0.0..=1.0,
                     state.progress as f32,
                 ))
-                .push(body(state.step.clone()).class(secondary_text())),
+                .push(body(state.step.clone()).class(Tone::Secondary.text(Backdrop::Plain))),
         );
     }
     if let EnvState::Failed(message) = &state.state {
@@ -605,7 +606,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             Row::new()
                 .spacing(8)
                 .push(icon("dialog-error", 18))
-                .push(body(message.clone()).class(error_text())),
+                .push(body(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
         );
     }
     // the disclosure (upstream DisclosureGroup): the label toggles the
@@ -720,21 +721,6 @@ fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
 /// A themed icon widget by freedesktop name; size in px (cosmetic layer).
 pub(crate) fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
     cosmic::widget::icon::from_name(name).size(size).icon()
-}
-
-fn secondary_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-fn error_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Color(Color::from_rgb(0.90, 0.32, 0.32))
 }
 
 /// The sheet's code block: mono text on a subtle rounded fill with a copy

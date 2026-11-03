@@ -41,10 +41,13 @@ use cosmic::iced::{Length, Padding, Point, Rectangle, Size, Subscription, Task};
 use cosmic::widget::{Column, Image, Row, Space, container, mouse_area, text, tooltip};
 use engine::project::manifest::Manifest;
 
-use crate::parts_overlay::{
-    Ink, SMALL_CONTROL_TEXT, Symbol, icon_button, mix, symbol, text_button,
-};
 use crate::typography;
+use crate::ui::tone::mix;
+use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
+
+/// The footer and empty state sit on the plain under-page backdrop.
+const BACKDROP: Backdrop = Backdrop::Plain;
+const SMALL_CONTROL_TEXT: f32 = typography::SMALL_CONTROL;
 
 use crate::fl;
 
@@ -257,19 +260,6 @@ fn clamp_axis(disp: f64, view: f64, offset: f64) -> f64 {
     } else {
         offset.clamp(view - disp - SHEET_MARGIN, SHEET_MARGIN)
     }
-}
-
-/// Secondary text at 65% of the ambient color — the empty-state hero's
-/// description (the welcome window's dim-text pattern).
-fn dim_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
 }
 
 /// iced scroll deltas are pixels; the JS multiplies `deltaMode === 1`
@@ -1010,7 +1000,7 @@ impl SchematicPane {
                     .push(text(fl!("nessun-modello")).size(typography::TITLE2))
                     .push(
                         text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
-                            .class(dim_text_class()),
+                            .class(Tone::Secondary.text(BACKDROP)),
                     )
                     .spacing(8)
                     .align_x(Alignment::Center),
@@ -1168,30 +1158,34 @@ impl SchematicPane {
         }
         let can_preview = !self.preview_files().is_empty();
         controls = controls
-            .push(icon_button(
-                Symbol::MinusMagnifyingGlass,
-                13,
-                Ink::Secondary,
+            .push(button::icon(
+                Symbol::MinusMagnifyingglass,
+                13.0,
+                Tone::Secondary,
+                BACKDROP,
                 fl!("riduci-2"),
                 has_sheet.then_some(Message::ZoomOut),
             ))
-            .push(icon_button(
-                Symbol::PlusMagnifyingGlass,
-                13,
-                Ink::Secondary,
+            .push(button::icon(
+                Symbol::PlusMagnifyingglass,
+                13.0,
+                Tone::Secondary,
+                BACKDROP,
                 fl!("ingrandisci-2"),
                 has_sheet.then_some(Message::ZoomIn),
             ))
-            .push(text_button(
+            .push(button::text(
                 fl!("adatta"),
                 SMALL_CONTROL_TEXT,
-                Ink::Secondary,
+                Tone::Secondary,
+                BACKDROP,
                 has_sheet.then_some(Message::Fit),
             ))
-            .push(text_button(
+            .push(button::text(
                 fl!("apri-in-anteprima"),
                 SMALL_CONTROL_TEXT,
-                Ink::Secondary,
+                Tone::Secondary,
+                BACKDROP,
                 can_preview.then_some(Message::OpenInPreview),
             ));
         let bar = Row::new()
@@ -1205,7 +1199,7 @@ impl SchematicPane {
                 text(info)
                     .size(typography::scaled(11.0))
                     .font(cosmic::font::mono())
-                    .class(Ink::Secondary.text_class()),
+                    .class(Tone::Secondary.text(BACKDROP)),
             );
         Column::new()
             .push(
@@ -1215,7 +1209,7 @@ impl SchematicPane {
                         cosmic::iced::widget::container::Style {
                             background: Some(cosmic::iced::Background::Color(mix(
                                 under_page(theme),
-                                cosmic::iced::Color::from(theme.cosmic().background(false).on),
+                                Tone::Primary.solid(theme),
                                 0.07,
                             ))),
                             ..Default::default()
@@ -1270,7 +1264,7 @@ impl SchematicPane {
         .handle(cosmic::iced::widget::pick_list::Handle::None);
         let menu = cosmic::iced::widget::stack![
             list,
-            container(symbol(Symbol::ChevronDown, CHEVRON as u16, Ink::Primary))
+            container(icon(Symbol::ChevronDown, CHEVRON, Tone::Primary, BACKDROP))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Alignment::End)
@@ -1284,18 +1278,20 @@ impl SchematicPane {
         Row::new()
             .spacing(2)
             .align_y(Alignment::Center)
-            .push(icon_button(
+            .push(button::icon(
                 Symbol::ChevronLeft,
-                13,
-                Ink::Secondary,
+                13.0,
+                Tone::Secondary,
+                BACKDROP,
                 fl!("pagina-precedente"),
                 (index > 0).then_some(Message::PrevPage),
             ))
             .push(menu)
-            .push(icon_button(
+            .push(button::icon(
                 Symbol::ChevronRight,
-                13,
-                Ink::Secondary,
+                13.0,
+                Tone::Secondary,
+                BACKDROP,
                 fl!("pagina-successiva"),
                 (index + 1 < pages).then_some(Message::NextPage),
             ))

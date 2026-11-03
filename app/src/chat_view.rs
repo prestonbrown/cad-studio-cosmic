@@ -19,8 +19,8 @@
 //!
 //! User-visible strings read through `fl!` at render time (the key names
 //! the en/main.ftl entry). Upstream's SF Symbols ship as SVGs drawn after
-//! the symbols (app/resources/icons/chat/), tinted with the macOS semantic
-//! colors resolved against the active theme; text uses the macOS text
+//! the symbols ([`crate::ui::icon`]), tinted with the macOS semantic
+//! colors resolved against the active theme ([`crate::ui::tone`]); text uses the macOS text
 //! styles' point sizes and line heights ([`TextStyle`]).
 //!
 //! Version markers (summary rows naming a version) resolve against the
@@ -50,6 +50,8 @@ use cosmic::iced::{Alignment, Color, Font, Length};
 use cosmic::widget::text_editor::{self, Binding, Content};
 use cosmic::widget::{Column, Row, Space, button, container};
 use engine::project::store::{Action, ChatMessage, Role, ToolState};
+
+use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
 use uuid::Uuid;
 
 use crate::attachments::{self, ClipboardContent};
@@ -362,12 +364,12 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     }
     if !message.text.is_empty() {
         // .textSelection(.enabled) (MessageView.swift:21)
-        stack = stack.push(styled_text(message.text.as_str(), BODY, Tint::Label).selectable());
+        stack = stack.push(styled_text(message.text.as_str(), BODY, Tone::Primary).selectable());
     }
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(fill_style(QUATERNARY * 0.5, 8.0, true))
+        .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, true))
         .into()
 }
 
@@ -410,8 +412,8 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
             .height(Length::Fixed(size))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(fill_style(QUATERNARY, 6.0, true)),
-        styled_text(file_name, CALLOUT, Tint::Label),
+            .class(ui::surface::fill(QUATERNARY, Corner::S, true)),
+        styled_text(file_name, CALLOUT, Tone::Primary),
         cosmic::widget::tooltip::Position::FollowCursor,
     );
     tile.into()
@@ -431,7 +433,7 @@ fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
                     size: (8.0f32).max(size * 0.15),
                     line_height: (8.0f32).max(size * 0.15) * 1.25,
                 },
-                Tint::Secondary,
+                Tone::Secondary,
             )
             .font(Font {
                 weight: FontWeight::Semibold,
@@ -479,15 +481,24 @@ fn decoded_thumbnail(path: &Path) -> Option<Handle> {
 fn attachment_strip<'a>(paths: &'a [String], root: &Path) -> Element<'a, Message> {
     let mut tiles = Row::new().spacing(8 - 5);
     for path in paths {
-        let remove = button::custom(sf_icon(XMARK_CIRCLE_FILL, 14, Tint::Scrim))
+        // `.black.opacity(0.6)` behind a white mark: the circle's
+        // knock-out shows the tile through
+        let scrim = ui::icon::icon(Symbol::XmarkCircleFill, 14.0, Tone::Primary, BACKDROP)
+            .opacity(0.6)
+            .class(cosmic::theme::Svg::custom(|_| {
+                cosmic::iced::widget::svg::Style {
+                    color: Some(Color::BLACK),
+                }
+            }));
+        let remove = button::custom(scrim)
             .padding(0)
-            .class(cosmic::theme::Button::Transparent)
+            .class(ui::button::plain())
             .on_press(Message::Detach(path.clone()));
         let cell = cosmic::iced::widget::stack![
             container(attachment_thumbnail(path, root, 52.0)).padding([5.0, 5.0, 0.0, 0.0]),
             container(cosmic::widget::tooltip(
                 remove,
-                styled_text(fl!("rimuovi"), CALLOUT, Tint::Label),
+                styled_text(fl!("rimuovi"), CALLOUT, Tone::Primary),
                 cosmic::widget::tooltip::Position::FollowCursor,
             ))
             .width(Length::Fill)
@@ -563,18 +574,18 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
         .spacing(6)
         .align_y(Alignment::Start)
         .push(if warns {
-            sf_icon(EXCLAMATION_TRIANGLE_FILL, 14, Tint::Orange)
+            sf_icon(Symbol::ExclamationmarkTriangleFill, 14, Tone::Warning)
         } else {
-            sf_icon(INFO_CIRCLE_FILL, 14, Tint::Secondary)
+            sf_icon(Symbol::InfoCircleFill, 14, Tone::Secondary)
         })
         // .textSelection(.enabled) (MessageView.swift:45)
-        .push(styled_text(message.text.as_str(), CALLOUT, Tint::Label).selectable());
+        .push(styled_text(message.text.as_str(), CALLOUT, Tone::Primary).selectable());
     stack = stack.push(head);
     if message.detail.is_some() {
         let open = pane.detail.contains(&message.id);
         stack = stack.push(disclosure_label(
             open,
-            styled_text(fl!("dettagli"), CALLOUT, Tint::Label).into(),
+            styled_text(fl!("dettagli"), CALLOUT, Tone::Primary).into(),
             Message::ToggleDetail(message.id),
         ));
         if open {
@@ -586,7 +597,7 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     if let Some(action) = message.action {
         // .controlSize(.small): the small push button's 11pt label
         stack = stack.push(
-            button::custom(styled_text(action_title(action), CAPTION_LINK, Tint::Label))
+            button::custom(styled_text(action_title(action), CAPTION_LINK, Tone::Primary))
                 .padding([3.0, 9.0])
                 .class(cosmic::theme::Button::Standard)
                 .on_press(Message::RowAction(message.id, action)),
@@ -616,8 +627,8 @@ fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a
     let mut line = Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(sf_icon(BRAIN, 14, Tint::Secondary))
-        .push(styled_text(message.text.as_str(), CALLOUT, Tint::Secondary));
+        .push(sf_icon(Symbol::Brain, 14, Tone::Secondary))
+        .push(styled_text(message.text.as_str(), CALLOUT, Tone::Secondary));
     if active {
         // .controlSize(.mini) (ChatView.swift:170) — cosmic's default is a
         // 48px ring; mini is the ~12px macOS size
@@ -633,7 +644,7 @@ fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a
 /// secondary text, 6pt bottom padding.
 fn summary_row<'a>(message: &'a ChatMessage) -> Element<'a, Message> {
     container(
-        styled_text(message.text.as_str(), CAPTION, Tint::Secondary).font(cosmic::font::mono()),
+        styled_text(message.text.as_str(), CAPTION, Tone::Secondary).font(cosmic::font::mono()),
     )
     .padding([0.0, 0.0, 6.0, 0.0])
     .width(Length::Fill)
@@ -653,15 +664,15 @@ fn version_marker<'a>(
     let mut line = Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(sf_icon(CLOCK_ARROW_CIRCLEPATH, 11, Tint::Secondary))
+        .push(sf_icon(Symbol::ClockArrowCirclepath, 11, Tone::Secondary))
         .push(
-            styled_text(message.text.as_str(), CAPTION, Tint::Secondary).font(cosmic::font::mono()),
+            styled_text(message.text.as_str(), CAPTION, Tone::Secondary).font(cosmic::font::mono()),
         )
         .push(Space::new().width(Length::Fill));
     match chat::marker_affordance(number, &chat.versions, chat.current_version, busy) {
         MarkerAffordance::None => {}
         MarkerAffordance::Current => {
-            line = line.push(styled_text(fl!("attuale"), CAPTION, Tint::Secondary));
+            line = line.push(styled_text(fl!("attuale"), CAPTION, Tone::Secondary));
         }
         MarkerAffordance::Restore { enabled } => {
             line = line.push(link_button(
@@ -685,7 +696,7 @@ fn version_marker<'a>(
 /// `.quaternary.opacity(0.35)` fill in a 6pt rounded rectangle, no stroke.
 fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Message> {
     let Some(tool) = &message.tool else {
-        return styled_text(message.text.as_str(), CALLOUT, Tint::Label).into();
+        return styled_text(message.text.as_str(), CALLOUT, Tone::Primary).into();
     };
     let expanded = pane.expanded.contains(&message.id);
 
@@ -693,12 +704,12 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
         .spacing(6)
         .align_y(Alignment::Center)
         .push(
-            container(sf_icon(tool_icon(&tool.name), 14, Tint::Secondary))
+            container(sf_icon(tool_icon(&tool.name), 14, Tone::Secondary))
                 .width(Length::Fixed(16.0))
                 .align_x(Horizontal::Center),
         )
         .push(
-            styled_text(message.text.as_str(), CALLOUT, Tint::Label)
+            styled_text(message.text.as_str(), CALLOUT, Tone::Primary)
                 .wrapping(Wrapping::None)
                 .ellipsize(Ellipsize::Middle(EllipsizeHeightLimit::Lines(1)))
                 .width(Length::Fill),
@@ -709,7 +720,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
         if !preview.is_empty() && tool.state == ToolState::Running {
             label = label.push(
                 container(
-                    styled_text(preview.to_string(), PREVIEW, Tint::Secondary)
+                    styled_text(preview.to_string(), PREVIEW, Tone::Secondary)
                         .font(cosmic::font::mono())
                         .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(4))),
                 )
@@ -745,7 +756,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
     container(stack)
         .padding([4.0, 8.0])
         .width(Length::Fill)
-        .class(fill_style(QUATERNARY * 0.35, 6.0, false))
+        .class(ui::surface::fill(QUATERNARY * 0.35, Corner::S, false))
         .into()
 }
 
@@ -759,9 +770,9 @@ fn disclosure_label<'a>(
     on_press: Message,
 ) -> Element<'a, Message> {
     let chevron = container(sf_icon(
-        if open { CHEVRON_DOWN } else { CHEVRON_RIGHT },
+        if open { Symbol::ChevronDown } else { Symbol::ChevronRight },
         9,
-        Tint::Secondary,
+        Tone::Secondary,
     ))
     .width(Length::Fixed(13.0))
     .height(Length::Fixed(DISCLOSURE_ROW))
@@ -783,8 +794,8 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
         ToolState::Running => {
             Element::from(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
         }
-        ToolState::Succeeded => sf_icon(CHECKMARK, 13, Tint::Green),
-        ToolState::Failed => sf_icon(XMARK, 12, Tint::Red),
+        ToolState::Succeeded => sf_icon(Symbol::Checkmark, 13, Tone::Success),
+        ToolState::Failed => sf_icon(Symbol::Xmark, 12, Tone::Danger),
     };
     let description = match state {
         ToolState::Running => fl!("in-corso"),
@@ -793,21 +804,21 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
     };
     cosmic::widget::tooltip(
         mark,
-        styled_text(description.to_string(), CALLOUT, Tint::Label),
+        styled_text(description.to_string(), CALLOUT, Tone::Primary),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
 }
 
 /// Upstream `icon` (ToolActivityRow.swift:74-83): the per-tool SF Symbol.
-fn tool_icon(name: &str) -> &'static [u8] {
+fn tool_icon(name: &str) -> Symbol {
     match name {
-        "Bash" => TERMINAL,
-        "Write" => DOC_BADGE_PLUS,
-        "Edit" | "MultiEdit" => PENCIL,
-        "Read" | "Grep" | "Glob" => DOC_TEXT_MAGNIFYINGGLASS,
-        "TodoWrite" => CHECKLIST,
-        _ => WRENCH_AND_SCREWDRIVER,
+        "Bash" => Symbol::Terminal,
+        "Write" => Symbol::DocBadgePlus,
+        "Edit" | "MultiEdit" => Symbol::Pencil,
+        "Read" | "Grep" | "Glob" => Symbol::DocTextMagnifyingglass,
+        "TodoWrite" => Symbol::Checklist,
+        _ => Symbol::WrenchAndScrewdriver,
     }
 }
 
@@ -821,7 +832,7 @@ fn code_block<'a>(code: &str, line_limit: Option<usize>) -> Element<'a, Message>
         Some(limit) => clip_lines(code, limit),
         None => code.to_string(),
     };
-    let text = styled_text(shown, CODE, Tint::Label)
+    let text = styled_text(shown, CODE, Tone::Primary)
         .font(cosmic::font::mono())
         .wrapping(Wrapping::None);
     let scroller = cosmic::widget::scrollable::horizontal(container(text).padding([
@@ -832,17 +843,17 @@ fn code_block<'a>(code: &str, line_limit: Option<usize>) -> Element<'a, Message>
     ]))
     .width(Length::Fill);
     let copy = cosmic::widget::tooltip(
-        button::custom(sf_icon(DOC_ON_DOC, 12, Tint::Secondary))
+        button::custom(sf_icon(Symbol::DocOnDoc, 12, Tone::Secondary))
             .padding(3)
             .class(cosmic::theme::Button::Icon)
             .on_press(Message::CopyCode(code.to_string())),
-        styled_text(fl!("copia"), CALLOUT, Tint::Label),
+        styled_text(fl!("copia"), CALLOUT, Tone::Primary),
         cosmic::widget::tooltip::Position::FollowCursor,
     );
     cosmic::iced::widget::stack![
         container(scroller)
             .width(Length::Fill)
-            .class(fill_style(QUATERNARY * 0.5, 6.0, false)),
+            .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, false)),
         container(copy)
             .width(Length::Fill)
             .padding(3)
@@ -894,21 +905,21 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
             .spacing(8)
             .align_y(Alignment::Start)
             .push(
-                container(sf_icon(SPARKLES, 14, Tint::Label))
+                container(sf_icon(Symbol::Sparkles, 14, Tone::Primary))
                     .height(Length::Fixed(CALLOUT.line_height))
                     .align_y(Vertical::Center),
             )
-            .push(styled_text(suggestion.to_string(), CALLOUT, Tint::Label).width(Length::Fill));
+            .push(styled_text(suggestion.to_string(), CALLOUT, Tone::Primary).width(Length::Fill));
         list = list.push(
             button::custom(
                 container(label)
                     .padding([6.0, 10.0])
                     .width(Length::Fill)
-                    .class(fill_style(QUATERNARY * 0.6, 6.0, false)),
+                    .class(ui::surface::fill(QUATERNARY * 0.6, Corner::S, false)),
             )
             .padding(0)
             .width(Length::Fill)
-            .class(cosmic::theme::Button::Transparent)
+            .class(ui::button::plain())
             .on_press(Message::SendSuggestion(suggestion.to_string())),
         );
     }
@@ -916,7 +927,7 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         .spacing(4)
         .align_x(Alignment::Center)
         .push(
-            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tint::Label).font(Font {
+            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary).font(Font {
                 weight: FontWeight::Semibold,
                 ..cosmic::font::default()
             }),
@@ -928,13 +939,13 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
                     agent = engine.display_name()
                 ),
                 CALLOUT,
-                Tint::Secondary,
+                Tone::Secondary,
             )
             .align_x(Horizontal::Center),
         );
     Column::new()
         .spacing(16)
-        .push(sf_icon(CUBE_TRANSPARENT, 40, Tint::Tertiary))
+        .push(sf_icon(Symbol::CubeTransparent, 40, Tone::Tertiary))
         .push(heading)
         .push(list)
         .width(Length::Fill)
@@ -960,7 +971,7 @@ fn input_bar<'a>(
     stack = stack.push(
         container(Space::new().height(Length::Fixed(1.0)))
             .width(Length::Fill)
-            .class(fill_style(SEPARATOR, 0.0, false)),
+            .class(ui::surface::fill(Tone::Separator.alpha(BACKDROP), Corner::None, false)),
     );
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
@@ -988,9 +999,9 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
         .spacing(6)
         .align_y(Alignment::Center)
         .push(sf_icon(
-            if paused { PAUSE_CIRCLE } else { CLOCK },
+            if paused { Symbol::PauseCircle } else { Symbol::Clock },
             13,
-            Tint::Secondary,
+            Tone::Secondary,
         ))
         .push(styled_text(
             if paused {
@@ -999,7 +1010,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
                 fl!("in-coda-partiranno-uno-alla-volta")
             },
             CAPTION,
-            Tint::Secondary,
+            Tone::Secondary,
         ))
         .push(Space::new().width(Length::Fill));
     if paused && !busy {
@@ -1018,7 +1029,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             item.text.clone()
         };
         body = body.push(
-            styled_text(preview, CALLOUT, Tint::Label)
+            styled_text(preview, CALLOUT, Tone::Primary)
                 .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(2))),
         );
         if item.images > 0 {
@@ -1026,20 +1037,20 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
                 Row::new()
                     .spacing(4)
                     .align_y(Alignment::Center)
-                    .push(sf_icon(PHOTO, 11, Tint::Secondary))
+                    .push(sf_icon(Symbol::Photo, 11, Tone::Secondary))
                     .push(styled_text(
                         fl!("lld-immagini", count = item.images),
                         CAPTION,
-                        Tint::Secondary,
+                        Tone::Secondary,
                     )),
             );
         }
         let remove = cosmic::widget::tooltip(
-            button::custom(sf_icon(XMARK_CIRCLE_FILL, 14, Tint::Tertiary))
+            button::custom(sf_icon(Symbol::XmarkCircleFill, 14, Tone::Tertiary))
                 .padding(0)
-                .class(cosmic::theme::Button::Transparent)
+                .class(ui::button::plain())
                 .on_press(Message::RemoveQueued(item.id)),
-            styled_text(fl!("rimuovi-dalla-coda"), CALLOUT, Tint::Label),
+            styled_text(fl!("rimuovi-dalla-coda"), CALLOUT, Tone::Primary),
             cosmic::widget::tooltip::Position::FollowCursor,
         );
         items = items.push(
@@ -1051,7 +1062,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
                         container(styled_text(
                             format!("{}", index + 1),
                             CAPTION,
-                            Tint::Secondary,
+                            Tone::Secondary,
                         ))
                         .width(Length::Fixed(14.0))
                         .height(Length::Fixed(CALLOUT.line_height))
@@ -1063,7 +1074,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             )
             .padding([7.0, 10.0])
             .width(Length::Fill)
-            .class(fill_style(QUATERNARY * 0.5, 7.0, false)),
+            .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, false)),
         );
     }
     let items = cosmic::widget::scrollable::vertical(items).height(Length::Shrink);
@@ -1091,14 +1102,14 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
 /// when the upper layer's interaction there is none).
 fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
     let attach = cosmic::widget::tooltip(
-        button::custom(sf_icon(PAPERCLIP, 14, Tint::Secondary))
+        button::custom(sf_icon(Symbol::Paperclip, 14, Tone::Secondary))
             .padding(0)
-            .class(cosmic::theme::Button::Transparent)
+            .class(ui::button::plain())
             .on_press(Message::Attach),
         styled_text(
             fl!("allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"),
             CALLOUT,
-            Tint::Label,
+            Tone::Primary,
         ),
         cosmic::widget::tooltip::Position::Top,
     );
@@ -1191,13 +1202,13 @@ fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Eleme
 /// area and its width (the editor's trailing inset).
 fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32) {
     let glyph_button =
-        |svg: &'static [u8], size: u16, tint: Tint, msg: Option<Message>, tip: String| {
+        |symbol: Symbol, size: u16, tone: Tone, msg: Option<Message>, tip: String| {
             Element::from(cosmic::widget::tooltip(
-                button::custom(sf_icon(svg, size, tint))
+                button::custom(sf_icon(symbol, size, tone))
                     .padding(0)
-                    .class(cosmic::theme::Button::Transparent)
+                    .class(ui::button::plain())
                     .on_press_maybe(msg),
-                styled_text(tip, CALLOUT, Tint::Label),
+                styled_text(tip, CALLOUT, Tone::Primary),
                 cosmic::widget::tooltip::Position::Top,
             ))
         };
@@ -1206,18 +1217,18 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32)
         let mut width = 18.0;
         if chat.can_send() {
             row = row.push(glyph_button(
-                TEXT_BADGE_PLUS,
+                Symbol::TextBadgePlus,
                 15,
-                Tint::Accent,
+                Tone::Accent,
                 Some(Message::Send),
                 fl!("aggiungi-alla-coda-partir-al-termine-invio"),
             ));
             width += 15.0 + 6.0;
         }
         row = row.push(glyph_button(
-            STOP_CIRCLE_FILL,
+            Symbol::StopCircleFill,
             18,
-            Tint::Label,
+            Tone::Primary,
             Some(Message::Stop),
             fl!("interrompi"),
         ));
@@ -1226,12 +1237,12 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32)
         let can_send = chat.can_send();
         (
             glyph_button(
-                ARROW_UP_CIRCLE_FILL,
+                Symbol::ArrowUpCircleFill,
                 18,
                 if can_send {
-                    Tint::Accent
+                    Tone::Accent
                 } else {
-                    Tint::Disabled
+                    Tone::Tertiary
                 },
                 can_send.then_some(Message::Send),
                 fl!("invia-invio"),
@@ -1302,88 +1313,23 @@ const FIELD_PAD_Y: f32 = 8.0;
 /// The send glyph's inset inside the field: centered on one body line.
 const SEND_PAD_Y: f32 = (BODY.line_height + 2.0 * FIELD_PAD_Y - 18.0) / 2.0;
 
-/// macOS label-color opacities over the text color (NSColor
-/// `quaternaryLabelColor` fills, `separatorColor` strokes).
+/// A `.quaternary` fill's opacity (`quaternaryLabelColor`); upstream's
+/// fills scale it by their own `.opacity(...)`.
 const QUATERNARY: f32 = 0.10;
-const SEPARATOR: f32 = 0.10;
 
-/// What a glyph or text is painted with — macOS semantic colors resolved
-/// against the active theme (the label hierarchy is the theme's text
-/// color at falling opacities, so dark mode follows on its own).
-#[derive(Clone, Copy)]
-enum Tint {
-    Label,
-    Secondary,
-    Tertiary,
-    /// A disabled control's glyph (`Color.secondary` under `.disabled`).
-    Disabled,
-    Accent,
-    Green,
-    Red,
-    Orange,
-    /// The draft tile's remove button: `.black.opacity(0.6)` behind a
-    /// white mark (the circle's knock-out shows the tile through).
-    Scrim,
-}
+/// The chat pane sits on the plain window background.
+const BACKDROP: Backdrop = Backdrop::Plain;
 
-fn label_color(theme: &cosmic::Theme) -> Color {
-    Color::from(theme.cosmic().background(false).on)
-}
-
-fn with_alpha(mut color: Color, alpha: f32) -> Color {
-    color.a *= alpha;
-    color
-}
-
-fn tint(theme: &cosmic::Theme, tint: Tint) -> Color {
-    let cosmic = theme.cosmic();
-    match tint {
-        Tint::Label | Tint::Secondary | Tint::Tertiary | Tint::Disabled => {
-            with_alpha(label_color(theme), tint_alpha(tint))
-        }
-        Tint::Accent => Color::from(cosmic.accent.base),
-        // upstream's .green / .red / .orange are the system status colors;
-        // the theme's success / destructive / warning tokens are COSMIC's
-        Tint::Green => Color::from(cosmic.success.base),
-        Tint::Red => Color::from(cosmic.destructive.base),
-        Tint::Orange => Color::from(cosmic.warning.base),
-        Tint::Scrim => Color::from_rgba(0.0, 0.0, 0.0, tint_alpha(tint)),
-    }
-}
-
-/// Text at a macOS text style in a semantic tint, wrapping at word
-/// boundaries. The owned binding keeps iced's invariant `Text<'a>` at
-/// `'static` — a borrowed `&str` would tie the widget to the row
-/// reference's lifetime.
-fn styled_text<'a>(body: impl Into<String>, style: TextStyle, color: Tint) -> Text<'a> {
+/// Text at a macOS text style in a tone, wrapping at word boundaries. The
+/// owned binding keeps iced's invariant `Text<'a>` at `'static` — a
+/// borrowed `&str` would tie the widget to the row reference's lifetime.
+fn styled_text<'a>(body: impl Into<String>, style: TextStyle, tone: Tone) -> Text<'a> {
     let owned: String = body.into();
     cosmic::widget::text(owned)
         .size(style.size)
         .line_height(style.line_height())
         .wrapping(Wrapping::Word)
-        .class(text_class(color))
-}
-
-fn text_class(color: Tint) -> cosmic::theme::Text {
-    // cosmic's Text::Custom takes a plain fn pointer: one per tint
-    fn style(theme: &cosmic::Theme, color: Tint) -> cosmic::iced::widget::text::Style {
-        cosmic::iced::widget::text::Style {
-            color: Some(tint(theme, color)),
-            selected_fill: with_alpha(Color::from(theme.cosmic().accent.base), 0.35),
-            selected_text_color: None,
-        }
-    }
-    cosmic::theme::Text::Custom(match color {
-        Tint::Label => |t| style(t, Tint::Label),
-        Tint::Secondary => |t| style(t, Tint::Secondary),
-        Tint::Tertiary => |t| style(t, Tint::Tertiary),
-        Tint::Disabled => |t| style(t, Tint::Disabled),
-        Tint::Accent => |t| style(t, Tint::Accent),
-        Tint::Green => |t| style(t, Tint::Green),
-        Tint::Red => |t| style(t, Tint::Red),
-        Tint::Orange => |t| style(t, Tint::Orange),
-        Tint::Scrim => |t| style(t, Tint::Scrim),
-    })
+        .class(tone.text(BACKDROP))
 }
 
 /// A `.buttonStyle(.link)` button: accent text, no chrome, dimmed and
@@ -1393,160 +1339,71 @@ fn link_button<'a>(
     style: TextStyle,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
-    let color = if on_press.is_some() {
-        Tint::Accent
-    } else {
-        Tint::Disabled
-    };
-    button::custom(styled_text(label, style, color))
-        .padding(0)
-        .class(cosmic::theme::Button::Transparent)
-        .on_press_maybe(on_press)
+    let tone = ui::button::content_tone(Tone::Accent, &on_press);
+    ui::button::borderless(styled_text(label, style, tone), on_press).into()
+}
+
+/// A symbol in a `size` px cell. The chat's glyphs are sized on a 16-unit
+/// grid; symbols the registry crops tighter draw at the grid glyph's
+/// height, centered in the cell.
+fn sf_icon<'a>(symbol: Symbol, size: u16, tone: Tone) -> Element<'a, Message> {
+    let cell = f32::from(size);
+    let height = cell
+        * match symbol {
+            // a 9-unit chevron on the grid; the registry's spans 11 of 16
+            Symbol::ChevronRight => 9.0 / 11.0,
+            // a 12-unit clock on the grid; the registry's spans 0.9 of its box
+            Symbol::ClockArrowCirclepath => 12.0 / 16.0 / 0.9,
+            // an 8-unit cross on the grid; the registry's spans 9
+            Symbol::Xmark => 8.0 / 9.0,
+            _ => 1.0,
+        };
+    container(ui::icon::icon(symbol, height, tone, BACKDROP))
+        .width(Length::Fixed(cell))
+        .height(Length::Fixed(cell))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
         .into()
 }
 
-/// An SF Symbol as a tinted SVG at `size` px. The symbolic recolor paints
-/// the tint's RGB opaquely, so the tint's alpha rides the icon's opacity.
-fn sf_icon<'a>(svg: &'static [u8], size: u16, color: Tint) -> Element<'a, Message> {
-    cosmic::widget::icon::from_svg_bytes(svg)
-        .symbolic(true)
-        .icon()
-        .size(size)
-        .opacity(tint_alpha(color))
-        .class(cosmic::theme::Svg::custom(move |theme| {
-            cosmic::iced::widget::svg::Style {
-                color: Some(Color {
-                    a: 1.0,
-                    ..tint(theme, color)
-                }),
-            }
-        }))
-        .into()
-}
-
-/// The alpha [`tint`] gives `color` — theme-independent (every tint's
-/// opacity is fixed; only its RGB follows the theme).
-fn tint_alpha(color: Tint) -> f32 {
-    match color {
-        Tint::Label => 0.85,
-        Tint::Secondary => 0.5,
-        Tint::Tertiary => 0.26,
-        Tint::Disabled => 0.25,
-        Tint::Scrim => 0.6,
-        Tint::Accent | Tint::Green | Tint::Red | Tint::Orange => 1.0,
-    }
-}
-
-/// A themed icon widget by freedesktop name; size in px (the file-type
-/// tile's icon, where the theme's own MIME art is the point).
+/// A themed icon widget by freedesktop name.
 fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
     cosmic::widget::icon::from_name(name).size(size).icon()
 }
 
-/// The SF Symbols the pane draws, as SVGs shaped after the symbols
-/// (app/resources/icons/chat/).
-const PAPERCLIP: &[u8] = include_bytes!("../resources/icons/chat/paperclip.svg");
-const ARROW_UP_CIRCLE_FILL: &[u8] =
-    include_bytes!("../resources/icons/chat/arrow-up-circle-fill.svg");
-const STOP_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/stop-circle-fill.svg");
-const TEXT_BADGE_PLUS: &[u8] = include_bytes!("../resources/icons/chat/text-badge-plus.svg");
-const CHEVRON_RIGHT: &[u8] = include_bytes!("../resources/icons/chat/chevron-right.svg");
-const CHEVRON_DOWN: &[u8] = include_bytes!("../resources/icons/chat/chevron-down.svg");
-const TERMINAL: &[u8] = include_bytes!("../resources/icons/chat/terminal.svg");
-const DOC_BADGE_PLUS: &[u8] = include_bytes!("../resources/icons/chat/doc-badge-plus.svg");
-const PENCIL: &[u8] = include_bytes!("../resources/icons/chat/pencil.svg");
-const DOC_TEXT_MAGNIFYINGGLASS: &[u8] =
-    include_bytes!("../resources/icons/chat/doc-text-magnifyingglass.svg");
-const CHECKLIST: &[u8] = include_bytes!("../resources/icons/chat/checklist.svg");
-const WRENCH_AND_SCREWDRIVER: &[u8] =
-    include_bytes!("../resources/icons/chat/wrench-and-screwdriver.svg");
-const CHECKMARK: &[u8] = include_bytes!("../resources/icons/chat/checkmark.svg");
-const XMARK: &[u8] = include_bytes!("../resources/icons/chat/xmark.svg");
-const XMARK_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/xmark-circle-fill.svg");
-const DOC_ON_DOC: &[u8] = include_bytes!("../resources/icons/chat/doc-on-doc.svg");
-const CLOCK_ARROW_CIRCLEPATH: &[u8] =
-    include_bytes!("../resources/icons/chat/clock-arrow-circlepath.svg");
-const CLOCK: &[u8] = include_bytes!("../resources/icons/chat/clock.svg");
-const PAUSE_CIRCLE: &[u8] = include_bytes!("../resources/icons/chat/pause-circle.svg");
-const PHOTO: &[u8] = include_bytes!("../resources/icons/chat/photo.svg");
-const SPARKLES: &[u8] = include_bytes!("../resources/icons/chat/sparkles.svg");
-const CUBE_TRANSPARENT: &[u8] = include_bytes!("../resources/icons/chat/cube-transparent.svg");
-const BRAIN: &[u8] = include_bytes!("../resources/icons/chat/brain.svg");
-const INFO_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/info-circle-fill.svg");
-const EXCLAMATION_TRIANGLE_FILL: &[u8] =
-    include_bytes!("../resources/icons/chat/exclamationmark-triangle-fill.svg");
-
-/// The theme corner radius for an upstream radius in points. Upstream's
-/// rounded rectangles (6-8pt) are all the small-control class; 8pt is the
-/// theme's `radius_s` and smaller ones keep their proportion to it, so the
-/// user's roundness setting (round / slightly round / square) applies.
-fn corner(theme: &cosmic::Theme, upstream_pt: f32) -> cosmic::iced::border::Radius {
-    let r = theme.cosmic().corner_radii.radius_s;
-    let k = upstream_pt / 8.0;
-    [r[0] * k, r[1] * k, r[2] * k, r[3] * k].into()
-}
-
-/// A rounded fill of the text color at `alpha` (macOS `.quaternary` and
-/// friends composite the label color over whatever is behind), with an
-/// optional separator stroke; `radius` is upstream's, in points (see
-/// [`corner`]).
-fn fill_style(alpha: f32, radius: f32, stroke: bool) -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(move |theme| {
-        let label = label_color(theme);
-        ContainerStyle {
-            background: Some(cosmic::iced::Background::Color(with_alpha(label, alpha))),
-            border: cosmic::iced::Border {
-                color: if stroke {
-                    with_alpha(label, SEPARATOR)
-                } else {
-                    Color::TRANSPARENT
-                },
-                width: if stroke { 1.0 } else { 0.0 },
-                radius: corner(theme, radius),
-            },
-            ..Default::default()
-        }
-    })
-}
-
-/// The input field (ChatInputView.swift:52-56): the text-background
-/// surface (upstream NSColor `textBackgroundColor`; here the theme's
-/// component surface, which lifts off the pane in light and dark alike),
-/// radius 8pt, a separator stroke that turns accent at 60% while focused;
-/// body text, placeholder in the placeholder-text color (label at 25%).
 fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_editor::Style {
-    let label = label_color(theme);
-    let background = Color::from(theme.cosmic().background(false).component.base);
     let stroke = match status {
-        text_editor::Status::Focused { .. } => {
-            with_alpha(Color::from(theme.cosmic().accent.base), 0.6)
-        }
-        _ => with_alpha(label, SEPARATOR),
+        text_editor::Status::Focused { .. } => Color {
+            a: 0.6,
+            ..Tone::Accent.solid(theme)
+        },
+        _ => Tone::Separator.color(theme, BACKDROP),
     };
     text_editor::Style {
-        background: background.into(),
+        background: ui::surface::text_background(theme).into(),
         border: cosmic::iced::Border {
             color: stroke,
             width: 1.0,
-            radius: corner(theme, 8.0),
+            radius: Corner::S.radius(theme),
         },
-        placeholder: with_alpha(label, 0.25),
-        value: tint(theme, Tint::Label),
-        selection: with_alpha(Color::from(theme.cosmic().accent.base), 0.35),
+        placeholder: Tone::Tertiary.color(theme, BACKDROP),
+        value: Tone::Primary.color(theme, BACKDROP),
+        selection: Color {
+            a: 0.35,
+            ..Tone::Accent.solid(theme)
+        },
     }
 }
 
-/// Upstream's orange system-row tint (MessageView.swift:67-68): orange at
-/// 8% over the background, a 25% orange stroke, radius 8.
 fn warn_style() -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(|theme| {
-        let orange = tint(theme, Tint::Orange);
+        let orange = Tone::Warning.solid(theme);
         ContainerStyle {
-            background: Some(cosmic::iced::Background::Color(with_alpha(orange, 0.08))),
+            background: Some(cosmic::iced::Background::Color(Color { a: 0.08, ..orange })),
             border: cosmic::iced::Border {
-                color: with_alpha(orange, 0.25),
+                color: Color { a: 0.25, ..orange },
                 width: 1.0,
-                radius: corner(theme, 8.0),
+                radius: Corner::S.radius(theme),
             },
             ..Default::default()
         }
@@ -1556,7 +1413,7 @@ fn warn_style() -> cosmic::theme::Container<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::{self, ChatState, MarkerAffordance};
+    use crate::chat::ChatState;
     use engine::agent::session::EngineEvent;
     use engine::project::store::{Action, Role};
     use std::time::Instant;

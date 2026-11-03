@@ -1,6 +1,13 @@
 //! The version history menu (upstream VersionMenu.swift): the toolbar's
-//! clock button whose dropdown lists every recorded version newest-first,
-//! checkmarks the current one, and restores on selection.
+//! clock button whose dropdown lists every recorded version newest-first
+//! and restores on selection.
+//!
+//! VersionMenu.swift:16-21 declares a checkmark `Label` on the current
+//! version and a second `Text` (relative · absolute date) under every row,
+//! but a macOS `Menu` renders neither: upstream's capture
+//! (shots/upstream/version-menu.png) shows single-line "Version N ·
+//! prompt" rows with no checkmark and a blank second line. The card draws
+//! what users see.
 //!
 //! Split like the other widget modules: the entry projection
 //! ([`menu_entries`], [`prompt_summary`]) and the subtitle's date
@@ -13,15 +20,20 @@
 //! User-visible strings read through `fl!` at render time (the key names
 //! the en/main.ftl entry); the relative/abbreviated date halves stay
 //! hand-formatted English — upstream gets them from SwiftUI's
-//! locale-aware formatters, which no catalog key backs. Icons are the
-//! project window's SF-Symbol-shaped glyphs (`clock.arrow.circlepath`,
-//! `chevron.down`, `checkmark`).
+//! locale-aware formatters, which no catalog key backs. They label each
+//! row's tooltip, where the date stays reachable.
 
 use time::OffsetDateTime;
 
 use engine::project::versions::ProjectVersion;
 
 use crate::fl;
+use crate::ui::surface::{self, Corner, Shadow};
+use crate::ui::{Backdrop, Symbol, Tone, button as ui_button, icon::icon};
+
+/// The pill sits in the titlebar; the card is a menu material.
+const TITLEBAR: Backdrop = Backdrop::Titlebar;
+const MENU: Backdrop = Backdrop::Material;
 
 // ─── the entry projection (pure) ────────────────────────────────────────────
 
@@ -123,13 +135,18 @@ fn subtitle(entry: &VersionEntry, now: OffsetDateTime) -> String {
 
 /// The menu card's measured geometry (version-menu.png, halved to the 1x
 /// basis): the card's top-left sits 115 px left of and 38 px below the
-/// pill's top-left; 5 px top inset, a 23 px section header, 34 px rows,
-/// 14.5 px text inset.
+/// pill's top-left; 5 px top inset, a 23 px section header, 34 px rows
+/// (the label on the first 20 px, the undrawn subtitle's line blank under
+/// it), 14.5 px text inset.
 pub const CARD_OFFSET: (f32, f32) = (-115.0, 38.0);
 const CARD_INSET_TOP: f32 = 5.0;
 const HEADER_HEIGHT: f32 = 23.0;
 const ROW_HEIGHT: f32 = 34.0;
 const TEXT_INSET: f32 = 14.5;
+/// The pill's `chevron.down` cell and the blank margin its grid leaves
+/// on each side of the glyph.
+const CHEVRON_CELL: f32 = 13.0;
+const CHEVRON_MARGIN: f32 = 2.2;
 
 /// The toolbar's version menu label (VersionMenu.swift:27-35) in its
 /// bordered toolbar pill: `clock.arrow.circlepath`, the current version's
@@ -144,33 +161,32 @@ pub fn version_button<Message: Clone + 'static>(
     open: bool,
     on_toggle: Message,
 ) -> cosmic::Element<'static, Message> {
-    use crate::windows::project::chrome::{self, Tone};
     use cosmic::iced::{Alignment, Length};
     use cosmic::widget::{Row, Space, button, text};
-    let mut label = Row::new().align_y(Alignment::Center).push(chrome::glyph(
-        chrome::CLOCK_ARROW,
-        (18.0, 18.0),
-        Tone::Toolbar,
+    let mut label = Row::new().align_y(Alignment::Center).push(icon(
+        Symbol::ClockArrowCirclepath,
+        18.0,
+        Tone::Secondary,
+        TITLEBAR,
     ));
     if let Some(current) = current {
         label = label.push(Space::new().width(Length::Fixed(6.0))).push(
             text(fl!("v-lld", version = current))
                 .size(crate::typography::BODY)
-                .class(chrome::text_class(Tone::Toolbar)),
+                .class(Tone::Secondary.text(TITLEBAR)),
         );
     }
+    // the menu indicator: `chevron.down` on its 16-unit grid at 13 px
+    // draws an 8.5 × 5 glyph 2.2 px inside the cell, so the gaps around it
+    // shrink by that margin
     let label = label
-        .push(Space::new().width(Length::Fixed(8.0)))
-        .push(chrome::glyph(
-            chrome::CHEVRON_DOWN,
-            (8.0, 5.0),
-            Tone::Toolbar,
-        ))
-        .padding([0, 8])
+        .push(Space::new().width(Length::Fixed(8.0 - CHEVRON_MARGIN)))
+        .push(icon(Symbol::ChevronDown, CHEVRON_CELL, Tone::Secondary, TITLEBAR))
+        .padding([0.0, 8.0 - CHEVRON_MARGIN, 0.0, 8.0])
         .height(Length::Fixed(27.0));
     let root = button::custom(label)
         .padding(0)
-        .class(chrome::button_class(true, chrome::Corner::S))
+        .class(ui_button::hover_wash(true, Corner::S))
         .selected(open)
         .on_press(on_toggle)
         .name(fl!("versioni"));
@@ -183,13 +199,13 @@ pub fn version_button<Message: Clone + 'static>(
 }
 
 /// The history card the version button opens, laid out like upstream's
-/// `Menu` (VersionMenu.swift:7-25): the section header (busy-titled while
-/// working), then one row per version newest-first — the label line
-/// ("Version N · summary", the current one checkmarked in the leading
-/// gutter) over the subtitle (relative · abbreviated date); pressing —
-/// unless busy — restores that version. `now` is the CALLER-supplied
-/// clock, frozen while the card is open: a live per-frame time-ago would
-/// rebuild every row's text every second.
+/// `Menu` as macOS draws it (VersionMenu.swift:7-25, version-menu.png):
+/// the section header (busy-titled while working), then one single-line
+/// row per version newest-first ("Version N · summary"); pressing —
+/// unless busy — restores that version. Each row's tooltip carries the
+/// relative · abbreviated date the menu declares but does not draw. `now`
+/// is the CALLER-supplied clock, frozen while the card is open: a live
+/// per-frame time-ago would rebuild every tooltip every second.
 pub fn view_versions<Message: Clone + 'static>(
     entries: &[VersionEntry],
     busy: bool,
@@ -197,7 +213,6 @@ pub fn view_versions<Message: Clone + 'static>(
     width: f32,
     on_restore: impl Fn(i64) -> Message + Clone + 'static,
 ) -> cosmic::Element<'static, Message> {
-    use crate::windows::project::chrome::{self, Tone};
     use cosmic::iced::alignment::Vertical;
     use cosmic::iced::{Alignment, Length};
     use cosmic::widget::{Column, Row, Space, button, container, scrollable, text};
@@ -206,7 +221,7 @@ pub fn view_versions<Message: Clone + 'static>(
         let mut t = text(label)
             .size(size)
             .wrapping(cosmic::iced::widget::text::Wrapping::None)
-            .class(chrome::text_class(tone));
+            .class(tone.text(MENU));
         if bold {
             t = t.font(cosmic::font::semibold());
         }
@@ -246,17 +261,10 @@ pub fn view_versions<Message: Clone + 'static>(
         for entry in entries {
             let restore = on_restore.clone();
             let on_press = (!busy).then(move || restore(entry.number));
-            let tone = if busy { Tone::Tertiary } else { Tone::Primary };
-            let gutter: cosmic::Element<'static, Message> = if entry.is_current {
-                chrome::glyph(chrome::CHECKMARK, (10.0, 9.0), tone)
-            } else {
-                Space::new().width(Length::Fixed(10.0)).into()
-            };
+            let tone = ui_button::content_tone(Tone::Primary, &on_press);
             let head = Row::new()
                 .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fixed(TEXT_INSET - 12.0)))
-                .push(gutter)
-                .push(Space::new().width(Length::Fixed(2.0)))
+                .push(Space::new().width(Length::Fixed(TEXT_INSET)))
                 .push(line(
                     fl!(
                         "versione-lld-2",
@@ -273,26 +281,19 @@ pub fn view_versions<Message: Clone + 'static>(
                         .height(Length::Fixed(20.0))
                         .align_y(Vertical::Center),
                 )
-                .push(
-                    container(line(
-                        subtitle(entry, now),
-                        crate::typography::scaled(11.0),
-                        Tone::Tertiary,
-                        false,
-                    ))
-                    .padding([0.0, TEXT_INSET])
-                    .height(Length::Fixed(14.0)),
-                )
                 .width(Length::Fill)
                 .height(Length::Fixed(ROW_HEIGHT));
+            let row = button::custom(body)
+                .padding(0)
+                .class(ui_button::hover_wash(false, Corner::Xs))
+                .on_press_maybe(on_press)
+                .width(Length::Fill);
             list = list.push(
-                container(
-                    button::custom(body)
-                        .padding(0)
-                        .class(chrome::button_class(false, chrome::Corner::Xs))
-                        .on_press_maybe(on_press)
-                        .width(Length::Fill),
-                )
+                container(ui_button::with_help(
+                    row,
+                    subtitle(entry, now),
+                    cosmic::widget::tooltip::Position::Bottom,
+                ))
                 .padding([0, 5]),
             );
         }
@@ -306,7 +307,7 @@ pub fn view_versions<Message: Clone + 'static>(
     )
     .padding([CARD_INSET_TOP, 0.0, 0.0, 0.0])
     .max_height(360.0)
-    .class(chrome::card_class())
+    .class(surface::card(Corner::M, Shadow::Popover))
     .into()
 }
 

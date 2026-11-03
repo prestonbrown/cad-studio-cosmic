@@ -20,6 +20,7 @@ use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
 
 use crate::fl;
+use crate::ui::{Backdrop, Tone};
 
 /// Upstream's welcome geometry (WelcomeWindow.swift:14-21): a 480 px
 /// actions pane beside a 300 px recents list, 460 px tall. The port runs
@@ -111,7 +112,7 @@ pub mod new_project {
                 text(fl!(
                     "nel-passaggio-successivo-sceglierai-dove-creare-la-cartella-del-progetto"
                 ))
-                .class(dim_text()),
+                .class(Tone::Secondary.text(Backdrop::Plain)),
             );
         if let Some(error) = &sheet.error {
             stack = stack.push(
@@ -149,16 +150,6 @@ pub mod new_project {
             .into()
     }
 
-    fn dim_text() -> cosmic::theme::Text {
-        cosmic::theme::Text::Custom(|theme| {
-            let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-            color.a *= 0.65;
-            cosmic::iced::widget::text::Style {
-                color: Some(color),
-                ..Default::default()
-            }
-        })
-    }
 }
 
 /// The welcome window's messages.
@@ -260,7 +251,7 @@ impl Welcome {
             )
             .push(
                 container(
-                    text(fl!("versione", version = env!("CARGO_PKG_VERSION"))).class(dim_text()),
+                    text(fl!("versione", version = env!("CARGO_PKG_VERSION"))).class(Tone::Secondary.text(Backdrop::Plain)),
                 )
                 .padding([2, 0, 0, 0]),
             )
@@ -300,7 +291,7 @@ impl Welcome {
         let list: Element<'_, Message> = if recents.is_empty() {
             container(
                 text(fl!("nessun-progetto-recente"))
-                    .class(dim_text())
+                    .class(Tone::Secondary.text(Backdrop::Plain))
                     .width(Length::Fill),
             )
             .align_x(cosmic::iced::alignment::Alignment::Center)
@@ -360,8 +351,8 @@ impl Welcome {
                     // the name needs the explicit class: it sits under a
                     // Transparent button, whose inherited text color is
                     // fully transparent
-                    .push(text(name.clone()).size(14).class(primary_text()))
-                    .push(text(parent).size(11).class(dim_text())),
+                    .push(text(name.clone()).size(14).class(Tone::Primary.text(Backdrop::Plain)))
+                    .push(text(parent).size(11).class(Tone::Secondary.text(Backdrop::Plain))),
             )
             .padding([3, 6])
             .width(Length::Fill);
@@ -475,28 +466,6 @@ fn action_button<'a>(icon_name: &str, label: &str, message: Message) -> Element<
     .on_press(message)
     .width(320)
     .into()
-}
-
-fn dim_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-/// The ambient text color at full strength. For text under a
-/// `Button::Transparent`: cosmic's transparent style carries a
-/// fully-transparent inherited text color, so un-colored text inside a
-/// Transparent button (the recents rows) renders invisible.
-fn primary_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
-        color: Some(theme.cosmic().background(false).on.into()),
-        ..Default::default()
-    })
 }
 
 #[cfg(test)]

@@ -49,33 +49,25 @@
 
 use cosmic::Element;
 use cosmic::iced::widget::slider;
-use cosmic::iced::{Color, Length};
+use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{Column, Row, button, container, dropdown, text, tooltip};
 use engine::parsing::animation::{Collision, MotionStudy, StudyState};
 use viewer::playback::{MotionPlayer, SCRUB_FLOOR, SPEEDS};
 
 use crate::fl;
+use crate::ui::surface::{self, Corner};
+use crate::ui::{Backdrop, Symbol, Tone, icon::icon};
 use crate::viewer_pane::Message;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the
 /// chat pane's invariance note).
 type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Renderer>;
 
-/// Upstream's warning triangle (`exclamationmark.triangle.fill`,
-/// MotionControls.swift:63) — freedesktop stand-in.
-/// SF Symbols stand-ins (play.fill, pause.fill,
-/// exclamationmark.triangle.fill), tinted at draw time.
-const PLAY_FILL: &[u8] = include_bytes!("../resources/icons/play.fill.svg");
-const PAUSE_FILL: &[u8] = include_bytes!("../resources/icons/pause.fill.svg");
-const WARNING_FILL: &[u8] =
-    include_bytes!("../resources/icons/exclamationmark.triangle.fill.svg");
-
 /// SwiftUI's `.caption`, the capsule's text style.
 const CAPTION: f32 = crate::typography::CAPTION;
 
-/// Upstream `.foregroundStyle(.red)` (:63) — systemRed, sRGB
-/// (255, 59, 48)/255.
-const RED: Color = Color::from_rgb(1.0, 59.0 / 255.0, 48.0 / 255.0);
+/// The capsule is a material (MotionControls.swift:77).
+const BACKDROP: Backdrop = Backdrop::Material;
 
 /// The readout beside the scrub slider: both times at exactly two fraction
 /// digits, joined by the `s` catalog key's separators
@@ -214,7 +206,7 @@ pub fn view_motion_controls<'a>(
         // capsule takes the full 560 wherever the pane allows it
         .width(Length::Fill)
         .max_width(560.0)
-        .class(panel_style(10.0)) // RoundedRectangle(cornerRadius: 10) (:77)
+        .class(surface::material_fill(Corner::S)) // RoundedRectangle(cornerRadius: 10) (:77)
         .into()
 }
 
@@ -224,18 +216,22 @@ pub fn view_motion_controls<'a>(
 /// dropdown, and the loop toggle.
 fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, Message> {
     // play.fill / pause.fill in a 16 pt frame, borderless (:14-20)
+    // pause.fill draws on a 16-unit grid; play.fill is cropped to its
+    // glyph, 12 px tall like the grid's triangle
     let (glyph, help) = if player.is_playing {
-        (PAUSE_FILL, fl!("pausa"))
+        (icon(Symbol::PauseFill, 16.0, Tone::Secondary, BACKDROP), fl!("pausa"))
     } else {
-        (PLAY_FILL, fl!("riproduci"))
+        (icon(Symbol::PlayFill, 12.2, Tone::Secondary, BACKDROP), fl!("riproduci"))
     };
-    let play = tooltip(
-        button::custom(svg_icon(glyph, 16.0, secondary_glyph))
-            .padding(0)
-            .class(crate::viewer_pane::borderless_button())
-            .on_press(Message::TogglePlayback)
+    let cell = container(glyph)
+        .width(16.0)
+        .height(16.0)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+    let play = crate::ui::button::with_help(
+        crate::ui::button::borderless(cell, Some(Message::TogglePlayback))
             .description(help.clone()),
-        text(help),
+        help,
         tooltip::Position::FollowCursor,
     );
     let scrub = tooltip(
@@ -289,7 +285,8 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
         row = row.push(
             text(label.clone())
                 .size(CAPTION)
-                .font(cosmic::font::semibold()),
+                .font(cosmic::font::semibold())
+                .class(Tone::Primary.text(BACKDROP)),
         );
     }
     for name in study.value_names() {
@@ -309,90 +306,23 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
             Row::new()
                 .spacing(4)
                 .align_y(cosmic::iced::Alignment::Center)
-                .push(svg_icon(WARNING_FILL, 11.0, |_| RED))
+                .push(icon(Symbol::ExclamationmarkTriangleFill, 11.0, Tone::Danger, BACKDROP))
                 .push(
                     text(collision_text(&state.collisions))
                         .size(CAPTION)
                         .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                        .class(red_class()),
+                        .class(Tone::Danger.text(BACKDROP)),
                 ),
         );
     }
     row.into()
 }
 
-// ─── shared bits (private twins; modules stay self-contained — the chat
-// pane's convention) ─────────────────────────────────────────────────────────
-
 /// The readout and the values row's dim monospace (upstream's caption
 /// `.monospacedDigit().foregroundStyle(.secondary)`).
 fn mono_dim(body: String) -> Text<'static> {
     text(body)
         .font(cosmic::font::mono())
-        .class(secondary_text_class())
+        .class(Tone::Secondary.text(BACKDROP))
 }
 
-fn secondary_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-fn red_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|_theme| cosmic::iced::widget::text::Style {
-        color: Some(RED),
-        ..Default::default()
-    })
-}
-
-/// A solid theme-base surface with a hairline border (the parts panel's
-/// style; upstream `.regularMaterial` + the corner radius — the drop
-/// shadow has no iced port).
-fn panel_style(radius: f32) -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(move |theme| {
-        let base = Color::from(theme.cosmic().background(false).base);
-        let mut border = Color::from(theme.cosmic().background(false).on);
-        border.a = 0.15;
-        cosmic::iced::widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(base)),
-            border: cosmic::iced::Border {
-                color: border,
-                width: 1.0,
-                radius: radius.into(),
-            },
-            ..Default::default()
-        }
-    })
-}
-
-/// An SVG glyph tinted by `tint` (opaque: iced's svg color keeps only the
-/// glyph's coverage, not the tint's alpha).
-fn svg_icon(
-    bytes: &'static [u8],
-    size: f32,
-    tint: fn(&cosmic::Theme) -> Color,
-) -> Element<'static, Message> {
-    cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(bytes))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .class(cosmic::theme::Svg::custom(move |theme| {
-            cosmic::iced::widget::svg::Style {
-                color: Some(tint(theme)),
-            }
-        }))
-        .into()
-}
-
-/// A borderless button's glyph color: secondary label ink, pre-blended
-/// over the capsule's background.
-fn secondary_glyph(theme: &cosmic::Theme) -> Color {
-    let on = Color::from(theme.cosmic().background(false).on);
-    let under = Color::from(theme.cosmic().background(false).base);
-    let mix = |a: f32, b: f32| a * 0.5 + b * 0.5;
-    Color::from_rgb(mix(on.r, under.r), mix(on.g, under.g), mix(on.b, under.b))
-}

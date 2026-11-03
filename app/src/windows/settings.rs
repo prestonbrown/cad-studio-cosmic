@@ -45,6 +45,7 @@ use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
 use crate::fl;
 use crate::sheets::PrintPrefMessage;
+use crate::ui::{Backdrop, Tone};
 
 /// Upstream's window geometry (SettingsView.swift:19 `.frame(width: 600)`).
 pub const WIDTH: f32 = 600.0;
@@ -648,7 +649,7 @@ fn engine_section(
         LocateState::Found { path, .. } => mono(abbreviate_with_tilde(path, &home)).into(),
         LocateState::Checking => cosmic::widget::progress_bar::indeterminate_circular().into(),
         LocateState::Unknown => body(fl!("settings-none")).into(),
-        LocateState::Missing => body(fl!("non-trovato-2")).class(error_text()).into(),
+        LocateState::Missing => body(fl!("non-trovato-2")).class(Tone::Danger.text(Backdrop::Plain)).into(),
     };
     let version: Element<'_, Message> = match &state.locate[slot] {
         LocateState::Found { version, .. } => mono(version.clone()).into(),
@@ -692,8 +693,8 @@ fn view_python(python: &EnvState) -> Element<'static, Message> {
         EnvState::Installing | EnvState::Checking | EnvState::Unknown => {
             cosmic::widget::progress_bar::indeterminate_circular().into()
         }
-        EnvState::Missing => body(fl!("non-installato")).class(secondary_text()).into(),
-        EnvState::Failed(_) => body(fl!("non-funzionante")).class(error_text()).into(),
+        EnvState::Missing => body(fl!("non-installato")).class(Tone::Secondary.text(Backdrop::Plain)).into(),
+        EnvState::Failed(_) => body(fl!("non-funzionante")).class(Tone::Danger.text(Backdrop::Plain)).into(),
     };
     let installing = matches!(python, EnvState::Installing);
     let actions = Row::new()
@@ -772,7 +773,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         .push(bold("CAD Studio".to_string(), 20.0))
         .push(body(env!("CARGO_PKG_VERSION").to_string()));
     for line in credits.lines() {
-        column = column.push(body(line.to_string()).class(secondary_text()));
+        column = column.push(body(line.to_string()).class(Tone::Secondary.text(Backdrop::Plain)));
     }
     container(column.push(Space::new().height(Length::Fill)))
         .width(Length::Fill)
@@ -795,7 +796,7 @@ fn space() -> Space {
 }
 
 fn footer<'a>(text: String) -> Text<'a> {
-    body(text).class(secondary_text())
+    body(text).class(Tone::Secondary.text(Backdrop::Plain))
 }
 
 /// A "Label: value" row (upstream LabeledContent).
@@ -822,21 +823,6 @@ fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
         weight: cosmic::iced::font::Weight::Bold,
         ..cosmic::font::default()
     })
-}
-
-fn secondary_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-fn error_text() -> cosmic::theme::Text {
-    cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.90, 0.32, 0.32))
 }
 
 /// `~/`-abbreviate `path` against `home` (upstream

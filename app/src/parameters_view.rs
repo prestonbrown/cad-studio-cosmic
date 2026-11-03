@@ -33,16 +33,18 @@ use cosmic::Element;
 use cosmic::iced::widget::pick_list;
 use cosmic::iced::widget::text::{Span, Wrapping};
 use cosmic::iced::{Alignment, Color, Length};
-use cosmic::widget::{Column, Row, Space, button, container, text, tooltip};
+use cosmic::widget::{Column, Row, Space, container, text, tooltip};
 use engine::project::versions::ProjectVersion;
 
 use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
-use crate::parts_overlay::{
-    CardShape, Ink, KNOB, SMALL_CONTROL_TEXT, Symbol, card_style, icon_button, small_slider,
-    symbol, with_rail_ends,
-};
+use crate::parts_overlay::{KNOB, small_slider, with_rail_ends};
 use crate::typography;
+use crate::ui::surface::{self, Corner, Shadow};
+use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
+
+/// The panel floats on a material.
+const BACKDROP: Backdrop = Backdrop::Material;
 
 /// The panel's fixed width (ParametersOverlay.swift:109).
 const PANEL_WIDTH: f32 = 280.0;
@@ -63,7 +65,7 @@ const ROW_SPACING: f32 = 10.0;
 /// between the longest option and the badge, and the option text size.
 const POPUP_BADGE: f32 = 13.0;
 const POPUP_GAP: f32 = 7.0;
-const POPUP_TEXT: f32 = SMALL_CONTROL_TEXT;
+const POPUP_TEXT: f32 = typography::SMALL_CONTROL;
 
 /// Upstream's orange previous-value tint (`foregroundStyle(.orange)`,
 /// ParametersOverlay.swift:151) — same explicit color family as the chat
@@ -156,7 +158,7 @@ pub fn view_parameters<'a>(
     }
     container(panel_view)
         .width(Length::Fixed(PANEL_WIDTH))
-        .class(card_style(CardShape::Panel, 8.0))
+        .class(surface::card(Corner::S, Shadow::Overlay { radius: 8.0 }))
         .into()
 }
 
@@ -167,6 +169,16 @@ fn scroll_height(rows: usize) -> f32 {
     (rows * ROW_HEIGHT + (rows - 1.0).max(0.0) * ROW_SPACING + 10.0).min(SCROLL_MAX_HEIGHT)
 }
 
+/// The panel's `slider.horizontal.3` glyph, centered in its 16 px cell.
+fn slider_glyph() -> Element<'static, Message> {
+    container(icon(Symbol::SliderHorizontal3, 13.6, Tone::Primary, BACKDROP))
+        .width(16.0)
+        .height(16.0)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .into()
+}
+
 /// The collapsed state: the material capsule button that expands the
 /// panel (ParametersOverlay.swift:13-25) — the slider glyph and
 /// "Parameters" at `.callout` medium, padded 10 × 6.
@@ -174,35 +186,32 @@ fn collapsed_capsule() -> Element<'static, Message> {
     let label = Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
-        .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
+        .push(slider_glyph())
         .push(
             text(fl!("parametri"))
                 .size(typography::CALLOUT)
                 .font(cosmic::font::semibold())
-                .class(Ink::Primary.text_class()),
+                .class(Tone::Primary.text(BACKDROP)),
         );
-    let capsule = button::custom(
+    let capsule = button::borderless(
         container(label)
             .padding([6.0, 10.0])
-            .class(card_style(CardShape::Capsule, 6.0)),
+            .class(surface::card(Corner::Xl, Shadow::Overlay { radius: 6.0 })),
+        Some(Message::Collapse(false)),
     )
-    .padding(0)
-    .class(cosmic::theme::Button::Transparent)
-    .on_press(Message::Collapse(false))
     .name(fl!("espandi-i-parametri"));
-    tooltip(
+    button::with_help(
         capsule,
-        text(fl!("espandi-i-parametri")),
+        fl!("espandi-i-parametri"),
         cosmic::widget::tooltip::Position::Bottom,
     )
-    .into()
 }
 
 /// The expanded panel's header: the collapse button (glyph, bold
 /// "Parameters" at `.headline`, the chevron) and the close ✕
 /// (ParametersOverlay.swift:33-59), padded 12 / 12 / 8.
 fn header() -> Element<'static, Message> {
-    let collapse = button::custom(
+    let collapse = button::borderless(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
@@ -210,29 +219,28 @@ fn header() -> Element<'static, Message> {
                 Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
-                    .push(symbol(Symbol::SliderHorizontal3, 16, Ink::Primary))
+                    .push(slider_glyph())
                     .push(
                         text(fl!("parametri"))
                             .size(typography::HEADLINE)
                             .font(cosmic::font::semibold())
-                            .class(Ink::Primary.text_class()),
+                            .class(Tone::Primary.text(BACKDROP)),
                     ),
             )
-            .push(symbol(Symbol::ChevronUp, 14, Ink::Secondary)),
+            .push(icon(Symbol::ChevronUp, 14.0, Tone::Secondary, BACKDROP)),
+        Some(Message::Collapse(true)),
     )
-    .padding(0)
-    .class(cosmic::theme::Button::Transparent)
-    .on_press(Message::Collapse(true))
     .name(fl!("comprimi-i-parametri"));
-    let collapse = tooltip(
+    let collapse = button::with_help(
         collapse,
-        text(fl!("comprimi-i-parametri")),
+        fl!("comprimi-i-parametri"),
         cosmic::widget::tooltip::Position::Bottom,
     );
-    let close = icon_button(
+    let close = button::icon(
         Symbol::Xmark,
-        11,
-        Ink::Secondary,
+        11.0,
+        Tone::Secondary,
+        BACKDROP,
         fl!("nascondi-parametri-i"),
         Some(Message::Close),
     );
@@ -270,9 +278,9 @@ fn parameter_row<'a>(
                     cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
                 ))
                 .class(if busy {
-                    Ink::Tertiary.text_class()
+                    Tone::Tertiary.text(BACKDROP)
                 } else {
-                    Ink::Primary.text_class()
+                    Tone::Primary.text(BACKDROP)
                 }),
         )
         .push(Space::new().width(6));
@@ -390,12 +398,12 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         container(
             text(selected_label(ctx.compare))
                 .size(POPUP_TEXT)
-                .class(Ink::Tertiary.text_class()),
+                .class(Tone::Tertiary.text(BACKDROP)),
         )
         .padding([0.0, POPUP_BADGE + POPUP_GAP, 0.0, 0.0])
         .into()
     };
-    let badge = container(symbol(Symbol::ChevronUpChevronDown, 12, Ink::OnAccent))
+    let badge = container(icon(Symbol::ChevronUpChevronDown, 12.0, Tone::OnAccent, BACKDROP))
         .width(POPUP_BADGE)
         .height(POPUP_BADGE)
         .align_x(Alignment::Center)
@@ -403,9 +411,9 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         .class(cosmic::theme::Container::custom(move |theme| {
             cosmic::iced::widget::container::Style {
                 background: Some(cosmic::iced::Background::Color(if enabled {
-                    Ink::Accent.color(theme)
+                    Tone::Accent.color(theme, BACKDROP)
                 } else {
-                    Ink::Tertiary.color(theme)
+                    Tone::Tertiary.color(theme, BACKDROP)
                 })),
                 border: cosmic::iced::Border {
                     radius: theme.cosmic().corner_radii.radius_xs.into(),
@@ -429,8 +437,8 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         .align_y(Alignment::Center)
         .push(
             text(fl!("confronta-con"))
-                .size(SMALL_CONTROL_TEXT)
-                .class(Ink::Secondary.text_class()),
+                .size(typography::SMALL_CONTROL)
+                .class(Tone::Secondary.text(BACKDROP)),
         )
         .push(Space::new().width(Length::Fill))
         .push(popup)
@@ -444,7 +452,7 @@ fn compare_caption() -> Element<'static, Message> {
     container(
         text(fl!("in-arancione-la-forma-della-versione-scelta-per-vederne-i-colori-ripristinala-dal-menu-versioni"))
             .size(typography::CAPTION)
-            .class(Ink::Secondary.text_class())
+            .class(Tone::Secondary.text(BACKDROP))
             .wrapping(Wrapping::Word)
             .width(Length::Fill),
     )

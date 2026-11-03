@@ -77,6 +77,7 @@ pub mod recents;
 pub mod schematic;
 pub mod sheets;
 pub mod typography;
+pub mod ui;
 pub mod version_menu;
 pub mod viewer_pane;
 pub mod viewer_tools;
