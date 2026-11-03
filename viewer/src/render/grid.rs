@@ -24,10 +24,12 @@
 //! is M6's to wire.
 //!
 //! Colors are LINEAR rgb + straight alpha in [`GridVertex`] — the same
-//! recorded assumption as [`crate::render::parts::NEUTRAL`]. The bed
-//! accent is the fixed surfaceless test stand-in for upstream's
-//! controlAccentColor (libcosmic themes are unavailable headless); grid
-//! lines are dark-mode white (light-mode black arrives with theming, M4+).
+//! recorded assumption as [`crate::render::parts::NEUTRAL`]. The line and
+//! bed colors come from a [`Palette`]: upstream draws black lines in light
+//! mode and white in dark (ModelViewer.swift:429-430) and the bed in the
+//! system accent (:198). [`geometry`] builds with [`Palette::DARK`], whose
+//! accent is the fixed surfaceless stand-in the headless tests use; the
+//! app passes the live theme's palette through [`geometry_with`].
 
 use std::hash::Hasher;
 
@@ -47,8 +49,42 @@ const MINOR_WIDTH: f32 = 0.25;
 /// Alphas: minors 0.10, majors 0.28 (facts #34).
 const MINOR_ALPHA: f32 = 0.10;
 const MAJOR_ALPHA: f32 = 0.28;
-/// Dark-mode grid color (facts #34; light-mode black comes with theming).
+/// Dark-mode grid line color (ModelViewer.swift:429-430: white).
 const LINE_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
+
+/// The theme-dependent overlay colors, linear rgb: grid lines (drawn at
+/// the minor/major alphas) and the bed outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub line: [f32; 3],
+    pub accent: [f32; 3],
+}
+
+impl Palette {
+    /// Dark appearance: white lines (ModelViewer.swift:429-430), the
+    /// surfaceless stand-in accent.
+    pub const DARK: Palette = Palette {
+        line: LINE_COLOR,
+        accent: ACCENT,
+    };
+
+    /// The palette for an appearance and a linear accent color: black
+    /// lines in light mode, white in dark (ModelViewer.swift:429-430).
+    pub fn new(dark: bool, accent: [f32; 3]) -> Palette {
+        Palette {
+            line: if dark { LINE_COLOR } else { [0.0; 3] },
+            accent,
+        }
+    }
+}
+
+/// The viewport's background behind the scene, sRGB bytes: upstream's
+/// `Color(white: 0.13)` dark / `Color(white: 0.94)` light
+/// (ModelViewer.swift:88).
+pub fn background_srgb(dark: bool) -> [u8; 3] {
+    let white: f32 = if dark { 0.13 } else { 0.94 };
+    [(white * 255.0).round() as u8; 3]
+}
 /// The tripod corner's height (facts #36, ModelViewer.swift:451: the corner
 /// SIMD3's y literal 0.05 — the axis boxes CENTER their thickness band here,
 /// so they legitimately dip to TRIPOD_Y − thickness/2 below the floor).
@@ -170,6 +206,15 @@ fn box_triangles(center: [f32; 3], size: [f32; 3], color: [f32; 4], out: &mut Ve
 /// `[x, y]` in mm (upstream's manifest SIMD2, facts #37). The footprint
 /// driving the extents is the MODEL x/y span — scene x/z after the remap.
 pub fn geometry(aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) -> GridMesh {
+    geometry_with(aabb, bed, Palette::DARK)
+}
+
+/// [`geometry`] with the line and bed colors from `palette`.
+pub fn geometry_with(
+    aabb: ([f32; 3], [f32; 3]),
+    bed: Option<[f64; 2]>,
+    palette: Palette,
+) -> GridMesh {
     let (min, max) = aabb;
     let mut size = [0.0f32; 3];
     for a in 0..3 {
@@ -196,7 +241,7 @@ pub fn geometry(aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) -> GridMesh {
         } else {
             (MINOR_WIDTH, MINOR_ALPHA)
         };
-        let color = [LINE_COLOR[0], LINE_COLOR[1], LINE_COLOR[2], alpha];
+        let color = [palette.line[0], palette.line[1], palette.line[2], alpha];
         let (o, h) = (offset as f32, half);
         line_quad([o, GRID_Y, -h], [o, GRID_Y, h], width, color, &mut vertices);
         line_quad([-h, GRID_Y, o], [h, GRID_Y, o], width, color, &mut vertices);
@@ -207,7 +252,7 @@ pub fn geometry(aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) -> GridMesh {
     if let Some([x, y]) = bed {
         let (hx, hy) = (x as f32 / 2.0, y as f32 / 2.0);
         let width = x.max(y) as f32 / 250.0;
-        let color = [ACCENT[0], ACCENT[1], ACCENT[2], 1.0];
+        let color = [palette.accent[0], palette.accent[1], palette.accent[2], 1.0];
         let corners = [
             [-hx, BED_Y, hy],
             [hx, BED_Y, hy],
@@ -280,6 +325,38 @@ fn content_hash(vertices: &[GridVertex], half_extent: f32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upstream's appearance colors (ModelViewer.swift:88, 429-430): the
+    /// viewport is white 0.94 light / 0.13 dark, grid lines black on light
+    /// and white on dark at the same minor/major alphas, and the bed takes
+    /// the palette's accent.
+    #[test]
+    fn palette_follows_the_appearance() {
+        assert_eq!(background_srgb(false), [240; 3]);
+        assert_eq!(background_srgb(true), [33; 3]);
+        let aabb = ([-30.0, 0.0, -30.0], [30.0, 26.0, 30.0]);
+        let accent = [0.0, 0.2, 1.0];
+        for (dark, line) in [(false, [0.0; 3]), (true, [1.0; 3])] {
+            let g = geometry_with(aabb, Some([80.0, 80.0]), Palette::new(dark, accent));
+            let lines = &g.vertices[..g.steps.len() * 12];
+            for (i, v) in lines.iter().enumerate() {
+                let major = g.steps[i / 12].major;
+                let alpha = if major { MAJOR_ALPHA } else { MINOR_ALPHA };
+                assert_eq!(v.color, [line[0], line[1], line[2], alpha], "dark={dark}");
+            }
+            let bed = &g.vertices[g.steps.len() * 12..g.steps.len() * 12 + 24];
+            assert!(bed.iter().all(|v| v.color == [0.0, 0.2, 1.0, 1.0]));
+        }
+        // the default palette is the dark one `geometry` builds with
+        assert_eq!(
+            geometry(aabb, None).content_hash,
+            geometry_with(aabb, None, Palette::DARK).content_hash
+        );
+        assert_ne!(
+            geometry(aabb, None).content_hash,
+            geometry_with(aabb, None, Palette::new(false, ACCENT)).content_hash
+        );
+    }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5)
