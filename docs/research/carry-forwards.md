@@ -331,9 +331,10 @@ M8 T4 attachments divergences (2026-10-28):
   taken here).
 - Thumbnail decode supports png+jpeg (the `image` crate features the app
   already pins); webp/gif/bmp/tiff attachments take the file-type tile
-  (upstream's NSImage decodes them). The strip's remove button rides
+  (upstream's NSImage decodes them). ~~The strip's remove button rides
   BESIDE the tile (top-aligned) — iced has no overlay for upstream's
-  corner `xmark.circle.fill` (ChatInputView.swift:88-98).
+  corner `xmark.circle.fill` (ChatInputView.swift:88-98).~~ (wave 2: an
+  iced `Stack` layer puts it on the tile's top-trailing corner, chat_view.rs)
 - `ChatState::image_attachments` (the queue's image count) now cites the
   engine's ONE image allowlist; `heic` drops out of the count (the
   engine-side ruling records the allowlist as the formats the attach
@@ -351,10 +352,11 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   text-only item flips are ruled out until M9 certifies them
   (docs/research/libcosmic-menu-dynamic-items-bug.md; the plan's struck
   Task 2 records why no probe can certify it today). Revisit only if M9
-  pins the boundary. The pre-existing mostra/nascondi-chat View-root
+  pins the boundary. ~~The pre-existing mostra/nascondi-chat View-root
   flip (M4 vintage) is the one remaining text-only flip against that
   ruling — untested hazard, same owner (M9 boundary pin or a fixwave
-  that statics its label the same way).
+  that statics its label the same way).~~ (wave 2: static "Mostra o
+  nascondi la chat", upstream's toolbar label, ProjectWindow.swift:103)
 
 - ~~APP_ID placeholder `net.brownhouse.CadStudio` needs Preston's sign-off.~~ SIGNED OFF 2026-10-29 — the ID stands.
 - Fluent: 5 placeholder-only keys sanitized to key/key-2..key-5 need mapping;
@@ -362,6 +364,92 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   per file carry literal \n; esc()'s `\"` branch would emit literal backslash
   if the xcstrings is ever re-vendored (fluent has no backslash escapes).
 - Install `just` on any machine expected to run recipes (present on thelio).
+
+M8 convergence wave 2 (2026-11-02) — accepted divergences. Parity here is
+structure, layout, proportions, icons and semantic colors; the user's COSMIC
+preferences win over upstream literals (Preston, 2026-11-02): accent color,
+font family, light/dark, corner roundness (radii come from
+`theme.cosmic().corner_radii` by upstream's radius CLASS) and the toolkit
+text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
+13). Deltas caused only by those tokens are not listed below.
+
+- Measurement basis: the upstream captures (shots/upstream/) carry the
+  "Color LCD" display ICC profile, so their raw bytes are not sRGB. Sample
+  after `magick up.png -profile ".../sRGB Profile.icc" -resize 50%`;
+  saturated colors move a lot (lid top raw 221,103,99 → sRGB 238,94,94),
+  neutral grays barely move. Code-specified grays match the literal.
+- SF Symbols ship as hand-drawn SVGs in app/resources/icons/: the Cosmic
+  icon theme has no shape match for any toolbar, viewer-bar, overlay or
+  chat symbol. They are drawn for 1x, so fine details (cube.transparent's
+  dashed hidden edges) blur the way the halved upstream capture does.
+- Model shading is a fitted model, not RealityKit
+  (ModelViewer.swift:344-353 lights, :415-423 material): RealityView's
+  default image-based light is not in the source. The fit (ambient + key/
+  fill at upstream's 2600:900 ratio + an anisotropic environment term +
+  white Blinn-Phong specular + a PBR-Neutral-style shoulder; `lights::shade`
+  pins it) matches the six iso faces within 7 sRGB units. It does not
+  reproduce upstream's in-face gradient (lid top 242,106,106 → 235,83,83
+  corner to corner, an IBL reflection); the port's faces are flat. Faces the
+  iso view never shows (−X, −Z, bottom) are extrapolated.
+- Model framing: the camera math is transcribed (fov 35, distance
+  r/sin(17.5°)·1.15, ModelViewer.swift:144,331-333) and scale matches to
+  0.5%, but the model sits ~7 px (1.7% of pane height) higher than
+  upstream. The offset is not derivable from the Swift.
+- The viewport background (`Color(white: 0.94/0.13)`, ModelViewer.swift:88)
+  and grid (black/white α .10/.28, :429-430) stay upstream's literal grays,
+  switched only by light/dark — upstream hard-codes them, so no other
+  appearance setting reaches them on macOS either. The Plate bed outline
+  takes the theme accent (controlAccentColor, :198).
+- Window toolbar positions (ProjectWindow.swift:99-161): the leading group
+  sits after the in-window File/View/Model menu bar and the trailing group
+  sits left of the window controls. COSMIC has no global menu bar, so
+  AppCommands live in the window; libcosmic's header_bar renders window
+  controls at the header end. Sizes, pitches and vertical centers match.
+- Welcome window (WelcomeWindow.swift:22 `.ignoresSafeArea()`): full-size
+  content with no title row, like upstream; the close control floats over
+  the top-right corner (COSMIC's side) where the macOS traffic lights sit
+  top-left. Settings and About keep one titled header row, as on macOS.
+- Version history (Shared/VersionMenu.swift:7-21) is an anchored card
+  (menu-bug entry above). Its width is clamped to the window (libcosmic
+  popover.rs:375) where upstream's NSMenu runs past the window edge. Rows
+  show what macOS renders, not what the source declares: a macOS menu
+  item draws neither the second `Text` (the timestamp subtitle) nor the
+  `Label` icon (the checkmark), so the upstream capture shows single-line
+  "Version N · prompt" rows with no checkmark, and the port matches that.
+- Open Recent (Commands.swift:30-40, a submenu) is a card under the menu
+  bar: its item set changes between rebuilds, the libcosmic menu-corruption
+  family (docs/research/libcosmic-menu-dynamic-items-bug.md).
+- `.regularMaterial` cards and capsules (PartsOverlay.swift:48,
+  ParametersOverlay.swift:20,110, ModelPane.swift:177,198,
+  MotionControls.swift:77, PaneContainer.swift:24) are opaque fills at the
+  material's measured average: iced containers have no backdrop blur. The
+  fills derive from the theme base at upstream's measured mix ratios, so
+  in light mode they sit as far below upstream's absolute grays as the
+  COSMIC window base does (215 vs 236-240).
+- The Divider under the parameter rows (ParametersOverlay.swift:79)
+  measures ≤2 RGB units on the material upstream; the port keeps its 1 px
+  of height and draws nothing.
+- Parameter value fields use iced's `text_input` (mono, right-aligned)
+  because cosmic's has no font or alignment setter (text_input/input.rs;
+  alignment only via RTL detection, :3551); iced's Search class keeps a
+  faint small_widget@25% fill (cosmic theme iced.rs:1425).
+- Schematic page menu (SchematicPane.swift:94): iced `pick_list` sizes to
+  max(option, placeholder) and reserves one text size for its handle
+  (pick_list.rs:417-437), where upstream's Menu label is fixed to the
+  label. With a longer option the chevron sits ~5 px further right.
+- Chat input field stroke (ChatInputView.swift:55 `.strokeBorder`) reads
+  ~#C3 against upstream's ~#E9: iced draws a 1 px border straddling the
+  bounds over the pane background, where the 1pt strokeBorder at 2x lands
+  inside the white field.
+- Assistant (markdown) text is not selectable (MessageView.swift:21,45,
+  90,124 `.textSelection(.enabled)`): iced `rich_text` at the pin has no
+  `selectable` (iced/widget/src/text/rich.rs). User and system rows use
+  plain `Text`, which has it.
+- The system row's action button (MessageView.swift:58-61, a small push
+  button) uses the COSMIC Standard button class, not the macOS white bezel.
+- Unreadable model with a broken 3MF and NO STL
+  (ProjectOutput.swift:139-187): the port shows the 3MF's parse error;
+  upstream shows the missing STL's file-not-found.
 
 ## M9 / general
 
@@ -377,12 +465,14 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   all attachments "N immagini"; port counts images only — pre-existing).
 
 
-- Spinner sizing (2026-10-28, Preston's play session): the header
+- ~~Spinner sizing (2026-10-28, Preston's play session): the header
   ActivityViewer spinner and the chat thinking-row spinner render at the
   widget default where upstream pins `.controlSize(.mini)`
   (ActivityViewer.swift:44-46; ChatView.swift:170 — a 12pt-font, 24pt-tall
   bar); both spinners are functionally parity (both show), only sized
-  large. M8: size to match if the pinned cosmic rev exposes a size handle.
+  large. M8: size to match if the pinned cosmic rev exposes a size handle.~~
+  (landed M8 T11 b2f1e57: `indeterminate_circular().size` 12 px mini rows
+  and header, 16 px small streaming indicator)
 - Busy-state cold-start (2026-10-28, RESOLVED same day): the observed
   silent swallow after the crash was NOT persisted busy state — a cold
   start is idle by construction (now pinned end-to-end by
@@ -404,10 +494,12 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   widget state when the item set changes between rebuilds — the crash
   Preston hit twice and the driven repro captured ("Downcast widget
   state", iced tree.rs:507 via menu_inner/RcWrapper; fact pack
-  docs/research/libcosmic-menu-dynamic-items-bug.md — internal engineering record; pop-os rejects AI-assisted bug reports so nothing is filed upstream, Preston's ruling 2026-10-28). Content is
+  docs/research/libcosmic-menu-dynamic-items-bug.md — internal engineering record; pop-os rejects AI-assisted bug reports so nothing is filed upstream, Preston's ruling 2026-10-28). ~~Content is
   faithful (same trigger/labels/two-line rows/checkmark/busy gating);
   the divergences: popover-vs-menu chrome, and relative timestamps
-  FROZEN at open (a live per-frame time-ago is rebuild churn). If
+  FROZEN at open (a live per-frame time-ago is rebuild churn).~~ (row
+  content follows what the macOS menu renders — see M8 convergence wave 2)
+  The divergence is the popover-vs-menu chrome. If
   libcosmic fixes the menu bug, restoring the menu root is a small
   revert; until then the menu bar keeps static roots only.
 
@@ -484,10 +576,11 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
 
-- Parameters overlay populates NOTHING at window open (upstream fills it
+- ~~Parameters overlay populates NOTHING at window open (upstream fills it
   from ProjectOutput.reload at open — M8 T11's finding); the landed syncs
   (ParameterCommitted/BuildFinished) are its only population paths today.
-  Owner: M9 or the next fixwave pass.
+  Owner: M9 or the next fixwave pass.~~ (wave 2: `ProjectWindow::with_bridge`
+  syncs at open, plus TurnSuccessBookkeeping and manifest reloads — matrix 7.21)
 - Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
   keyboard listener rides `keyboard::listen()`, which drops the window tag —
   with TWO project windows open, an editor-unfocused Space/Esc reaches BOTH

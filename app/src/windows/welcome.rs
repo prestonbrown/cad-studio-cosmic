@@ -79,7 +79,14 @@ pub mod new_project {
         match message {
             Message::Name(name) => sheet.name = name.clone(),
             Message::Cancel => {}
-            Message::Advance => sheet.awaiting_parent = true,
+            // upstream create()'s `guard isNameValid`
+            // (NewProjectSheet.swift:57): Return on an invalid name
+            // advances nothing
+            Message::Advance => {
+                if sheet.validation_error().is_none() {
+                    sheet.awaiting_parent = true;
+                }
+            }
             Message::Created(Ok(_)) => {}
             Message::Created(Err(why)) => {
                 sheet.awaiting_parent = false;

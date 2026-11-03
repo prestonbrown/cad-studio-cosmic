@@ -1697,7 +1697,7 @@ mod tests {
             &EngineEvent::ToolStarted {
                 id: "tool-1".into(),
                 name: "Bash".into(),
-                title: "Listing the output".into(),
+                title: engine::agent::tool_summary::ToolAction::ExamineFiles.into(),
             },
             now,
         );

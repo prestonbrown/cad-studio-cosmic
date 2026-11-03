@@ -66,6 +66,7 @@ pub mod chat;
 pub mod chat_view;
 pub mod compare_pane;
 pub mod drive;
+pub mod engine_text;
 pub mod localize;
 pub mod markdown;
 pub mod motion_controls;

@@ -477,12 +477,12 @@ impl SetupSheetState {
     pub fn apply(&mut self, event: &EnvEvent) {
         match event {
             EnvEvent::Log(line) => {
-                self.log.push_str(line);
+                self.log.push_str(&crate::engine_text::env_log(line));
                 self.log.push('\n');
             }
             EnvEvent::Progress { value, step } => {
                 self.progress = *value;
-                self.step = step.clone();
+                self.step = crate::engine_text::env_step(*step);
             }
             EnvEvent::Finished(Ok(ready)) => {
                 self.state = EnvState::Ready {
@@ -490,10 +490,8 @@ impl SetupSheetState {
                 };
             }
             EnvEvent::Finished(Err(EnvFailure::Missing)) => self.state = EnvState::Missing,
-            EnvEvent::Finished(Err(
-                EnvFailure::CheckFailed(message) | EnvFailure::InstallFailed(message),
-            )) => {
-                self.state = EnvState::Failed(message.clone());
+            EnvEvent::Finished(Err(failure)) => {
+                self.state = EnvState::Failed(crate::engine_text::env_failure(failure));
             }
         }
     }

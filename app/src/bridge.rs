@@ -1158,14 +1158,20 @@ impl Drive {
                 let failure =
                     (!succeeded).then(|| turn_failure_activity(outcome, transcript.engine));
                 // the terminal saves BEFORE it forwards: a consumer that saw
-                // the TurnFinished message can read chat.json immediately
-                // (upstream's agentDidFinish saves before the UI hears)
+                // the TurnFinished message can read chat.json and the turn's
+                // activity, outputs and parameters immediately (upstream's
+                // agentDidFinish saves before the UI hears)
                 let _ = store::save_chat(&self.root, &transcript.messages);
+                let record_prompt = match failure {
+                    Some(text) => {
+                        self.pipeline().activity = Activity::Failed(text);
+                        None
+                    }
+                    None => self.settle_turn_outputs(&transcript),
+                };
                 let _ = self.out.unbounded_send(Message::Event(event));
-                if let Some(text) = failure {
-                    self.pipeline().activity = Activity::Failed(text);
-                } else {
-                    self.turn_success_tail(&transcript);
+                if succeeded {
+                    self.turn_success_tail(record_prompt);
                 }
                 return TurnEnd::Finished { succeeded };
             }
@@ -1296,35 +1302,38 @@ impl Drive {
         self.continue_queue(succeeded)
     }
 
-    /// The successful turn's tail (upstream `agentDidFinish`,
-    /// Project.swift:262-278): refresh the observed outputs, record a
-    /// version only when ALL expected outputs exist, then announce — the
-    /// announcement lands after every write the tail made (upstream's
-    /// unconditional metadata `save()` has no dirty field to persist here —
-    /// `current_version` moves only inside [`Self::record_version`], which
-    /// loads and saves the metadata fresh).
-    fn turn_success_tail(&mut self, transcript: &ChatState) {
-        let record_prompt;
-        {
-            let mut pipeline = self.pipeline();
-            pipeline.parameters = refresh_parameters(&self.root);
-            pipeline.missing_outputs = missing_files(&self.root.join("output"));
-            if pipeline.missing_outputs.is_empty() {
-                pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
-                record_prompt = Some(
-                    transcript
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|row| row.role == Role::User)
-                        .map(|row| row.text.clone())
-                        .unwrap_or_default(),
-                );
-            } else {
-                pipeline.activity = Activity::Succeeded(fl!("risposta-completata"));
-                record_prompt = None;
-            }
+    /// A successful turn's observed state (upstream `agentDidFinish`,
+    /// Project.swift:262-276): parameters and missing outputs re-read and
+    /// the finished activity set. Returns the prompt to record a version
+    /// under, present only when ALL expected outputs exist.
+    fn settle_turn_outputs(&mut self, transcript: &ChatState) -> Option<String> {
+        let mut pipeline = self.pipeline();
+        pipeline.parameters = refresh_parameters(&self.root);
+        pipeline.missing_outputs = missing_files(&self.root.join("output"));
+        if pipeline.missing_outputs.is_empty() {
+            pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
+            Some(
+                transcript
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|row| row.role == Role::User)
+                    .map(|row| row.text.clone())
+                    .unwrap_or_default(),
+            )
+        } else {
+            pipeline.activity = Activity::Succeeded(fl!("risposta-completata"));
+            None
         }
+    }
+
+    /// The successful turn's tail, after TurnFinished is forwarded: record
+    /// the version, then announce — the announcement lands after every
+    /// write the tail made (upstream's unconditional metadata `save()` has
+    /// no dirty field to persist here — `current_version` moves only
+    /// inside [`Self::record_version`], which loads and saves the metadata
+    /// fresh).
+    fn turn_success_tail(&mut self, record_prompt: Option<String>) {
         if let Some(prompt) = record_prompt {
             self.record_version(&prompt);
         }
@@ -1398,7 +1407,10 @@ fn turn_failure_activity(outcome: &TurnOutcome, engine: AgentKind) -> String {
         TurnOutcome::Failed { auth, .. } if *auth => {
             fl!("accesso-a-richiesto", agent = engine.display_name())
         }
-        TurnOutcome::Failed { .. } => fl!("errore-di", agent = engine.display_name()),
+        TurnOutcome::Failed { .. } | TurnOutcome::StartFailed { .. } => {
+            fl!("errore-di", agent = engine.display_name())
+        }
+        TurnOutcome::AgentMissing => fl!("non-trovato", agent = engine.display_name()),
         TurnOutcome::Cancelled => crate::chat::interrupted(),
         // the engine's dance absorbs Busy/MissingSession before the app
         // hears them; Success never reaches a failure activity
@@ -1702,6 +1714,67 @@ mod tests {
         );
     }
 
+    /// A successful turn's activity is settled before TurnFinished is
+    /// forwarded: a consumer reading the bridge the moment it hears the
+    /// terminal sees the finished state, never the turn's Working line,
+    /// and the later TurnSuccessBookkeeping does not change it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_turn_settles_its_activity_before_turn_finished() {
+        let _lang = crate::localize::pin_en();
+        let _guard = ENV_LOCK.lock().await;
+        let root = std::env::temp_dir().join(format!("cad-settle-{}", Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        // SAFETY: agent-fake env holds this suite's ENV_LOCK.
+        unsafe {
+            std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
+            std::env::set_var(
+                "CAD_FAKE_SCENARIO",
+                fake_agent().parent().unwrap().join("scenarios/pong.jsonl"),
+            );
+            std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        }
+        let (bridge, mut messages) = Bridge::launch(Settings::default(), root.clone());
+        bridge.mark_python_ready_for_test();
+        bridge
+            .enqueue("ping".into(), Vec::new())
+            .expect("the send starts");
+        let mut at_finish = None;
+        run_until(&mut messages, |m| {
+            let finished = matches!(
+                m,
+                Message::Event(EngineEvent::TurnFinished(TurnOutcome::Success { .. }))
+            );
+            if finished {
+                at_finish = Some(bridge.activity());
+            }
+            finished
+        })
+        .await;
+        run_until(&mut messages, |m| {
+            matches!(m, Message::TurnSuccessBookkeeping)
+        })
+        .await;
+        unsafe {
+            std::env::remove_var("CAD_TEST_CLAUDE");
+            std::env::remove_var("CAD_FAKE_SCENARIO");
+            std::env::remove_var("CAD_STUDIO_RUNNING_PROCESSES");
+        }
+        let at_finish = at_finish.expect("the turn finished");
+        assert!(
+            matches!(at_finish, Activity::Succeeded(_)),
+            "the terminal's activity is the finished one: {at_finish:?}"
+        );
+        assert_eq!(
+            at_finish,
+            bridge.activity(),
+            "the tail changes nothing more"
+        );
+    }
+
     /// A codex turn announces its engine on TurnStarted and names itself in
     /// the working and failure activities — the Claude-only constants the
     /// T3 follow-up retired. The scripted-agent seam suspends the settings
@@ -1795,7 +1868,7 @@ mod tests {
         ChatMessage {
             id: Uuid::new_v4(),
             role: Role::Tool,
-            text: live_title("Write", ""),
+            text: crate::engine_text::tool_title(&live_title("Write", "")),
             date: OffsetDateTime::now_utc(),
             tool: Some(ToolActivity {
                 tool_use_id: id.into(),
