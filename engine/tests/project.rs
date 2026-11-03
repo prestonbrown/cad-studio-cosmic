@@ -34,8 +34,14 @@ fn metadata_roundtrips_upstream_shape() {
     ] {
         assert!(json.contains(k), "snake_case CodingKeys: missing {k}");
     }
-    assert!(json.contains("\"pane\":\"chat\""));
-    assert!(json.contains("\"pane\":\"model3D\""), "exact casing");
+    assert!(
+        json.contains("\"pane\":{\"_0\":\"chat\"}"),
+        "Swift _0 wrapper: {json}"
+    );
+    assert!(
+        json.contains("\"pane\":{\"_0\":\"model3D\"}"),
+        "exact casing"
+    );
     assert!(json.contains("\"axis\":\"row\""));
     assert!(json.contains("\"fraction\":0.34"));
     assert!(
