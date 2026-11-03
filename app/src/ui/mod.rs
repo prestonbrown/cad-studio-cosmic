@@ -8,13 +8,17 @@
 //!   corner radii by COSMIC roundness class.
 //! - [`segmented`]: the small segmented control.
 //! - [`button`]: borderless icon/text buttons and the toolbar look.
+//! - [`code_block`]: upstream's `CodeBlock`, mono text with a copy button.
+//! - [`slider`]: the small rail-and-knob slider of the overlay cards.
 //!
 //! The kit decides colors, radii and enablement; each caller lays out its
 //! own view with them. Only what at least two views share lives here.
 
 pub mod button;
+pub mod code_block;
 pub mod icon;
 pub mod segmented;
+pub mod slider;
 pub mod surface;
 pub mod tone;
 

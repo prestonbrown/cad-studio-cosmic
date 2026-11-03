@@ -10,15 +10,15 @@
 
 use cosmic::Element;
 use cosmic::iced::widget::container::Style;
-use cosmic::iced::{Alignment, Background, Border, Length, Shadow, Vector};
+use cosmic::iced::{Alignment, Background, Border, Length};
 use cosmic::widget::{Row, Space, button, container, text};
 
-use super::surface::{material, text_background};
+use super::surface::{Corner, Shadow as SurfaceShadow, material, text_background};
 use super::tone::{Backdrop, Tone, mix, wash};
 use crate::typography;
 
 /// The small control size's label: macOS's 11 pt small system font.
-pub const LABEL_SIZE: f32 = typography::scaled(11.0);
+pub const LABEL_SIZE: f32 = typography::SMALL_CONTROL;
 
 /// Upstream metrics in points, scaled by the label's ratio to 11 pt.
 const fn pt(points: f32) -> f32 {
@@ -72,18 +72,15 @@ pub fn segment_width<S: AsRef<str>>(labels: &[S]) -> f32 {
 fn track(theme: &cosmic::Theme, look: Look) -> cosmic::iced::Color {
     match look {
         Look::Raised => wash(theme, 0.05),
-        // a lighter inset on the material: 242 on the 228 card in light
-        // mode, a faint lift in dark mode
-        Look::Filled => {
-            let lift = if theme.cosmic().is_dark { 0.08 } else { 0.3 };
-            mix(material(theme), cosmic::iced::Color::WHITE, lift)
-        }
+        // an inset on the material, pulled toward the text background
+        // (lighter than the card in light mode, recessed in dark mode)
+        Look::Filled => mix(material(theme), text_background(theme), 0.3),
     }
 }
 
 /// The selected segment's face.
 fn face(theme: &cosmic::Theme, look: Look) -> Style {
-    let radius = theme.cosmic().corner_radii.radius_xs.into();
+    let radius = Corner::Xs.radius(theme);
     match look {
         Look::Raised => Style {
             background: Some(Background::Color(if theme.cosmic().is_dark {
@@ -96,11 +93,7 @@ fn face(theme: &cosmic::Theme, look: Look) -> Style {
                 width: 0.5,
                 radius,
             },
-            shadow: Shadow {
-                color: wash(theme, 0.15),
-                offset: Vector::new(0.0, 0.5),
-                blur_radius: 1.0,
-            },
+            shadow: SurfaceShadow::Control.iced(),
             ..Default::default()
         },
         // the track pressed toward `on`: 178 on 242 in light mode

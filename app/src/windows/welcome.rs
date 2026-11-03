@@ -20,7 +20,7 @@ use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
 
 use crate::fl;
-use crate::ui::{Backdrop, Tone};
+use crate::ui::{self, Backdrop, Symbol, Tone};
 
 /// Upstream's welcome geometry (WelcomeWindow.swift:14-21): a 480 px
 /// actions pane beside a 300 px recents list, 460 px tall. The port runs
@@ -127,9 +127,7 @@ pub mod new_project {
                     "{}: {error}",
                     fl!("impossibile-creare-il-progetto")
                 ))
-                .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(
-                    0.90, 0.32, 0.32,
-                ))),
+                .class(Tone::Danger.text(Backdrop::Plain)),
             );
         }
         stack = stack.push(
@@ -337,10 +335,7 @@ impl Welcome {
         let thumbnail: Element<'_, Message> = match self.thumbnail(path) {
             Some(handle) => cosmic::widget::image(handle).width(40).height(30).into(),
             None => container(
-                // `cube` upstream; the theme fallback is a package glyph
-                cosmic::widget::icon::from_name("package-x-generic")
-                    .size(18)
-                    .icon(),
+                ui::icon::icon(Symbol::Cube, 18.0, Tone::Secondary, Backdrop::Plain),
             )
             .width(40)
             .height(30)

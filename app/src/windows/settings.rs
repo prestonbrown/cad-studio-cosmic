@@ -773,7 +773,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         .push(
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(crate::sheets::icon(crate::sheets::APP_ICON, 64))
+                .push(crate::ui::icon::named(crate::sheets::APP_ICON, 64))
                 .push(Space::new().width(Length::Fill)),
         )
         .push(bold("CAD Studio".to_string(), 20.0))
@@ -871,7 +871,7 @@ mod tests {
         assert_eq!(state.custom_paths, [String::new(), String::new()]);
         assert_eq!(state.locate, [LocateState::Unknown, LocateState::Unknown]);
 
-        let mut codex = Settings {
+        let codex = Settings {
             agent_engine: "codex".into(),
             claude_path: Some("/opt/claude".into()),
             codex_path: Some("~/.cargo/bin/codex".into()),

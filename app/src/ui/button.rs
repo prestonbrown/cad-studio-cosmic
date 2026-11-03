@@ -10,7 +10,8 @@ use cosmic::widget::{button, tooltip};
 
 use super::icon::{self, Symbol};
 use super::surface::Corner;
-use super::tone::{Backdrop, Tone, wash};
+use super::tone::{Backdrop, HOVER, PRESS, Tone, wash};
+use crate::typography;
 
 /// The tone a button's content draws in: `tone` while it has a message,
 /// tertiary while disabled.
@@ -36,6 +37,9 @@ pub fn plain() -> cosmic::theme::Button {
     }
 }
 
+/// The hairline around a bordered toolbar pill.
+const BORDER: f32 = 0.05;
+
 /// The toolbar button: no fill at rest, a rounded wash on hover and press
 /// (macOS toolbar items), or, `bordered`, the hairline pill a toolbar
 /// `Menu` label sits in.
@@ -46,15 +50,15 @@ pub fn hover_wash(bordered: bool, corner: Corner) -> cosmic::theme::Button {
         style.border_radius = corner.radius(theme);
         if bordered {
             style.border_width = 1.0;
-            style.border_color = wash(theme, 0.05);
+            style.border_color = wash(theme, BORDER);
         }
         style
     };
     cosmic::theme::Button::Custom {
         active: Box::new(move |_, theme| style(theme, 0.0)),
         disabled: Box::new(move |theme| style(theme, 0.0)),
-        hovered: Box::new(move |_, theme| style(theme, 0.06)),
-        pressed: Box::new(move |_, theme| style(theme, 0.12)),
+        hovered: Box::new(move |_, theme| style(theme, HOVER)),
+        pressed: Box::new(move |_, theme| style(theme, PRESS)),
     }
 }
 
@@ -69,13 +73,18 @@ pub fn borderless<'a, M: Clone + 'a>(
         .on_press_maybe(on_press)
 }
 
-/// `element` with `help` as its tooltip.
+/// `element` with `help` as its tooltip, in macOS's 11 pt tooltip text.
 pub fn with_help<'a, M: 'a>(
     element: impl Into<Element<'a, M>>,
     help: String,
     position: tooltip::Position,
 ) -> Element<'a, M> {
-    tooltip(element, cosmic::widget::text(help), position).into()
+    tooltip(
+        element,
+        cosmic::widget::text(help).size(typography::SMALL_CONTROL),
+        position,
+    )
+    .into()
 }
 
 /// An icon button (`Button { Image(systemName:) }.buttonStyle(.borderless)`):

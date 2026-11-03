@@ -195,12 +195,11 @@ pub fn version_button<Message: Clone + 'static>(
         .selected(open)
         .on_press(on_toggle)
         .name(fl!("versioni"));
-    cosmic::widget::tooltip(
+    ui_button::with_help(
         root,
-        text(fl!("storico-delle-versioni")).size(crate::typography::scaled(11.0)),
+        fl!("storico-delle-versioni"),
         cosmic::widget::tooltip::Position::Bottom,
     )
-    .into()
 }
 
 /// The history card the version button opens, laid out like upstream's

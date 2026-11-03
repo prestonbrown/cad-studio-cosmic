@@ -118,7 +118,7 @@ use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
-use cosmic::widget::{Column, Row, Space, container, mouse_area, text, tooltip};
+use cosmic::widget::{Column, Row, Space, container, mouse_area, text};
 use engine::parsing::Part;
 use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
@@ -2078,12 +2078,11 @@ fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
     for color in legend_dots(colors) {
         dots = dots.push(parts_overlay::color_dot(Some(*color), 10.0));
     }
-    tooltip(
+    ui::button::with_help(
         dots,
-        text(legend_label(colors.len())),
+        legend_label(colors.len()),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
-    .into()
 }
 
 // ── the viewer bar's controls ────────────────────────────────────────────

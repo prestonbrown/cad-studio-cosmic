@@ -143,12 +143,37 @@ pub fn icon(symbol: Symbol, height: f32, tone: Tone, backdrop: Backdrop) -> Icon
         symbol,
         height,
     )
-    .opacity(tone.alpha(backdrop))
+    .opacity(tone.alpha(&cosmic::theme::active(), backdrop))
     .class(cosmic::theme::Svg::custom(move |theme| {
         cosmic::iced::widget::svg::Style {
             color: Some(tone.solid(theme)),
         }
     }))
+}
+
+/// `symbol` `height` px tall in `tone`, centered in a `cell` px square: a
+/// glyph that keeps its slot when the registry crops it tighter than the
+/// grid it is laid out on.
+pub fn in_cell<'a, M: 'a>(
+    symbol: Symbol,
+    height: f32,
+    cell: f32,
+    tone: Tone,
+    backdrop: Backdrop,
+) -> cosmic::Element<'a, M> {
+    cosmic::widget::container(icon(symbol, height, tone, backdrop))
+        .width(Length::Fixed(cell))
+        .height(Length::Fixed(cell))
+        .align_x(cosmic::iced::Alignment::Center)
+        .align_y(cosmic::iced::Alignment::Center)
+        .into()
+}
+
+/// A system icon by freedesktop name, `size` px: where upstream draws a
+/// system-provided image rather than an SF Symbol (a file's type icon from
+/// `NSWorkspace`, the app icon), the icon theme supplies it.
+pub fn named(name: &str, size: u16) -> Icon {
+    cosmic::widget::icon::from_name(name).size(size).icon()
 }
 
 /// A `.multicolor` symbol `height` px tall, in its own colors.

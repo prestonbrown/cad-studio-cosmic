@@ -19,6 +19,11 @@
 //! | plain | 0.85 | 0.50 | 0.25 | the "Front" segment, the size label, chat text, the field placeholder, the schematic footer |
 //! | material | 0.70 | 0.44 | 0.25 | the Parts card's names, count, chevron, link and eye glyphs |
 //! | titlebar | 0.70 | 0.56 | 0.27 | the activity capsule's name / status / chevron, the toolbar glyphs, "v3", the idle Stop glyph |
+//!
+//! A high-contrast COSMIC theme reads a second row, the analogue of macOS's
+//! Increase Contrast: every label role, hairline and fill is stronger
+//! (primary 1.0, secondary 0.75, tertiary 0.55, quaternary and separator
+//! 0.30), whatever the backdrop.
 
 use cosmic::iced::Color;
 use cosmic::iced::widget::text::Style;
@@ -35,6 +40,24 @@ pub enum Backdrop {
     Material,
     /// The window's titlebar and toolbar.
     Titlebar,
+}
+
+/// The theme's contrast setting: which row of the alpha table applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contrast {
+    Standard,
+    /// A high-contrast COSMIC palette.
+    High,
+}
+
+impl Contrast {
+    pub fn of(theme: &cosmic::Theme) -> Self {
+        if theme.cosmic().is_high_contrast {
+            Self::High
+        } else {
+            Self::Standard
+        }
+    }
 }
 
 /// A text or glyph role.
@@ -68,27 +91,29 @@ pub enum Tone {
 }
 
 impl Tone {
-    /// The role's opacity over its solid color on `backdrop` (1 for the
-    /// solid roles).
-    pub const fn alpha(self, backdrop: Backdrop) -> f32 {
-        match (self, backdrop) {
-            (Self::Primary, Backdrop::Plain) => 0.85,
-            (Self::Primary, Backdrop::Material | Backdrop::Titlebar) => 0.70,
-            (Self::Secondary, Backdrop::Plain) => 0.50,
-            (Self::Secondary, Backdrop::Material) => 0.44,
-            (Self::Secondary, Backdrop::Titlebar) => 0.56,
-            (Self::Tertiary, Backdrop::Plain | Backdrop::Material) => 0.25,
-            (Self::Tertiary, Backdrop::Titlebar) => 0.27,
-            (Self::Quaternary | Self::Separator, _) => 0.10,
-            (
-                Self::Accent
-                | Self::OnAccent
-                | Self::OnFill
-                | Self::Success
-                | Self::Warning
-                | Self::Danger,
-                _,
-            ) => 1.0,
+    /// The role's opacity over its solid color on `backdrop` under
+    /// `theme` (1 for the solid roles).
+    pub fn alpha(self, theme: &cosmic::Theme, backdrop: Backdrop) -> f32 {
+        self.alpha_in(Contrast::of(theme), backdrop)
+    }
+
+    /// The alpha table: one row per contrast setting.
+    pub const fn alpha_in(self, contrast: Contrast, backdrop: Backdrop) -> f32 {
+        match (contrast, self, backdrop) {
+            (_, Self::Accent | Self::OnAccent | Self::OnFill, _)
+            | (_, Self::Success | Self::Warning | Self::Danger, _) => 1.0,
+            (Contrast::High, Self::Primary, _) => 1.0,
+            (Contrast::High, Self::Secondary, _) => 0.75,
+            (Contrast::High, Self::Tertiary, _) => 0.55,
+            (Contrast::High, Self::Quaternary | Self::Separator, _) => 0.30,
+            (Contrast::Standard, Self::Primary, Backdrop::Plain) => 0.85,
+            (Contrast::Standard, Self::Primary, Backdrop::Material | Backdrop::Titlebar) => 0.70,
+            (Contrast::Standard, Self::Secondary, Backdrop::Plain) => 0.50,
+            (Contrast::Standard, Self::Secondary, Backdrop::Material) => 0.44,
+            (Contrast::Standard, Self::Secondary, Backdrop::Titlebar) => 0.56,
+            (Contrast::Standard, Self::Tertiary, Backdrop::Plain | Backdrop::Material) => 0.25,
+            (Contrast::Standard, Self::Tertiary, Backdrop::Titlebar) => 0.27,
+            (Contrast::Standard, Self::Quaternary | Self::Separator, _) => 0.10,
         }
     }
 
@@ -115,7 +140,7 @@ impl Tone {
     /// The role's color on `backdrop`, alpha applied.
     pub fn color(self, theme: &cosmic::Theme, backdrop: Backdrop) -> Color {
         Color {
-            a: self.alpha(backdrop),
+            a: self.alpha(theme, backdrop),
             ..self.solid(theme)
         }
     }
@@ -148,15 +173,26 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
+/// The hover wash of a borderless control.
+pub const HOVER: f32 = 0.06;
+/// The pressed wash of a borderless control.
+pub const PRESS: f32 = 0.12;
+
+/// The selected-text highlight: the accent at a third, so the selected
+/// glyphs stay readable through it.
+pub fn selection(theme: &cosmic::Theme) -> Color {
+    Color {
+        a: 0.35,
+        ..Tone::Accent.solid(theme)
+    }
+}
+
 /// The text style for a role: its color plus the selection highlight the
 /// selectable rows (chat) draw.
 pub fn text_style(theme: &cosmic::Theme, tone: Tone, backdrop: Backdrop) -> Style {
     Style {
         color: Some(tone.color(theme, backdrop)),
-        selected_fill: Color {
-            a: 0.35,
-            ..Tone::Accent.solid(theme)
-        },
+        selected_fill: selection(theme),
         selected_text_color: None,
     }
 }
@@ -259,7 +295,7 @@ mod tests {
             ] {
                 let color = tone.color(&theme, backdrop);
                 assert_eq!((color.r, color.g, color.b), (on.r, on.g, on.b), "{tone:?}");
-                assert_eq!(color.a, tone.alpha(backdrop));
+                assert_eq!(color.a, tone.alpha(&theme, backdrop));
             }
         }
         let accent = Color::from(theme.cosmic().accent_color());
@@ -289,13 +325,46 @@ mod tests {
 
     #[test]
     fn the_hierarchy_falls_on_every_backdrop() {
-        for backdrop in BACKDROPS {
-            let alpha = |tone: Tone| tone.alpha(backdrop);
-            assert!(alpha(Tone::Primary) > alpha(Tone::Secondary));
-            assert!(alpha(Tone::Secondary) > alpha(Tone::Tertiary));
-            assert!(alpha(Tone::Tertiary) > alpha(Tone::Quaternary));
+        for contrast in [Contrast::Standard, Contrast::High] {
+            for backdrop in BACKDROPS {
+                let alpha = |tone: Tone| tone.alpha_in(contrast, backdrop);
+                assert!(alpha(Tone::Primary) > alpha(Tone::Secondary));
+                assert!(alpha(Tone::Secondary) > alpha(Tone::Tertiary));
+                assert!(alpha(Tone::Tertiary) > alpha(Tone::Quaternary));
+            }
         }
         // vibrancy lightens labels inside materials
-        assert!(Tone::Primary.alpha(Backdrop::Material) < Tone::Primary.alpha(Backdrop::Plain));
+        let standard = |backdrop| Tone::Primary.alpha_in(Contrast::Standard, backdrop);
+        assert!(standard(Backdrop::Material) < standard(Backdrop::Plain));
+    }
+
+    /// A high-contrast palette strengthens the faint roles, not only their
+    /// hue: disabled glyphs and hairlines stay legible.
+    #[test]
+    fn a_high_contrast_theme_strengthens_the_faint_roles() {
+        for (builder, standard) in [
+            (
+                cosmic::cosmic_theme::ThemeBuilder::light_high_contrast(),
+                cosmic::cosmic_theme::ThemeBuilder::light(),
+            ),
+            (
+                cosmic::cosmic_theme::ThemeBuilder::dark_high_contrast(),
+                cosmic::cosmic_theme::ThemeBuilder::dark(),
+            ),
+        ] {
+            let high = cosmic::Theme::custom(std::sync::Arc::new(builder.build()));
+            let plain = cosmic::Theme::custom(std::sync::Arc::new(standard.build()));
+            assert_eq!(Contrast::of(&high), Contrast::High);
+            assert_eq!(Contrast::of(&plain), Contrast::Standard);
+            for backdrop in BACKDROPS {
+                for tone in [Tone::Secondary, Tone::Tertiary, Tone::Separator] {
+                    assert!(
+                        tone.color(&high, backdrop).a > tone.color(&plain, backdrop).a,
+                        "{tone:?} on {backdrop:?}"
+                    );
+                }
+                assert!(Tone::Tertiary.color(&high, backdrop).a > 0.25);
+            }
+        }
     }
 }

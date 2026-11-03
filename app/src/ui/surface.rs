@@ -7,7 +7,7 @@ use cosmic::iced::widget::container::Style;
 use cosmic::iced::{Background, Border, Color, Length, Shadow as IcedShadow, Vector};
 use cosmic::widget::{Space, container};
 
-use super::tone::{Tone, mix, wash};
+use super::tone::{Backdrop, Tone, mix, wash};
 
 /// A corner radius by CLASS, resolved from the user's COSMIC roundness
 /// setting: upstream's literal point values only pick the class.
@@ -75,10 +75,13 @@ pub enum Shadow {
     Overlay { radius: f32 },
     /// A popover or menu card.
     Popover,
+    /// A raised control face inside a track (the selected segment):
+    /// a tight contact shadow.
+    Control,
 }
 
 impl Shadow {
-    fn iced(self) -> IcedShadow {
+    pub fn iced(self) -> IcedShadow {
         match self {
             Self::Overlay { radius } => IcedShadow {
                 color: Color::from_rgba(0.0, 0.0, 0.0, 0.15),
@@ -90,6 +93,11 @@ impl Shadow {
                 offset: Vector::new(0.0, 6.0),
                 blur_radius: 18.0,
             },
+            Self::Control => IcedShadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.15),
+                offset: Vector::new(0.0, 0.5),
+                blur_radius: 1.0,
+            },
         }
     }
 }
@@ -99,7 +107,7 @@ pub fn card(corner: Corner, shadow: Shadow) -> cosmic::theme::Container<'static>
     cosmic::theme::Container::custom(move |theme| Style {
         background: Some(Background::Color(material(theme))),
         border: Border {
-            color: Tone::Separator.color(theme, super::tone::Backdrop::Plain),
+            color: Tone::Separator.color(theme, Backdrop::Plain),
             width: 1.0,
             radius: corner.radius(theme),
         },
@@ -121,14 +129,24 @@ pub fn material_fill(corner: Corner) -> cosmic::theme::Container<'static> {
     })
 }
 
-/// A translucent `on` wash at `alpha` (`.quaternary` fills, bubbles, the
-/// activity capsule), optionally stroked with the separator.
-pub fn fill(alpha: f32, corner: Corner, stroke: bool) -> cosmic::theme::Container<'static> {
+/// A translucent `on` wash: `tone`'s alpha scaled by `scale` (upstream's
+/// `.quaternary.opacity(0.5)` is `fill(Tone::Quaternary, 0.5, …)`; a
+/// measured wash names its scale against the role it reads as),
+/// optionally stroked with the separator.
+pub fn fill(
+    tone: Tone,
+    scale: f32,
+    corner: Corner,
+    stroke: bool,
+) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| Style {
-        background: Some(Background::Color(wash(theme, alpha))),
+        background: Some(Background::Color(wash(
+            theme,
+            tone.alpha(theme, Backdrop::Plain) * scale,
+        ))),
         border: Border {
             color: if stroke {
-                wash(theme, Tone::Separator.alpha(super::tone::Backdrop::Plain))
+                Tone::Separator.color(theme, Backdrop::Plain)
             } else {
                 Color::TRANSPARENT
             },
@@ -151,10 +169,6 @@ pub fn text_background_class() -> cosmic::theme::Container<'static> {
 pub fn divider<'a, M: 'a>() -> Element<'a, M> {
     container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
         .width(Length::Fill)
-        .class(fill(
-            Tone::Separator.alpha(super::tone::Backdrop::Plain),
-            Corner::None,
-            false,
-        ))
+        .class(fill(Tone::Separator, 1.0, Corner::None, false))
         .into()
 }

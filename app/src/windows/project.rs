@@ -70,9 +70,9 @@ pub const MIN_SIZE: (f32, f32) = (960.0, 600.0);
 /// hairline) — the spacing half of [`panes::clamp_resize`]'s contract.
 const GRID_SPACING: f32 = 1.0;
 
-/// The pane divider's on-background wash: #D4D4D5 between #EBEBEC panes
-/// (project-model.png).
-const DIVIDER_ALPHA: f32 = 0.117;
+/// The pane divider: a separator wash scaled to #D4D4D5 between #EBEBEC
+/// panes (project-model.png).
+const DIVIDER_SCALE: f32 = 1.17;
 
 /// The pane grid's minimum pane extent (iced's default, named so the drag
 /// hit-test computes the same regions the grid lays out).
@@ -82,12 +82,13 @@ const GRID_MIN_PANE: f32 = 50.0;
 /// (project-model.png: the divider at y=104 of the 2x capture).
 const HEADER_HEIGHT: f32 = 52.0;
 
-/// The ActivityViewer capsule's `.quaternary.opacity(0.6)` fill as an
-/// on-background wash: #DFDFE1 over the toolbar's #EEEEF0.
-const CAPSULE_ALPHA: f32 = 0.076;
+/// The ActivityViewer capsule's `.quaternary.opacity(0.6)` fill, scaled to
+/// the measured #DFDFE1 over the toolbar's #EEEEF0.
+const CAPSULE_SCALE: f32 = 0.76;
 
-/// The toolbar's bottom hairline: #C5C5C6 over #EEEEF0.
-const HAIRLINE_ALPHA: f32 = 0.21;
+/// The toolbar's bottom hairline: a separator scaled to the measured
+/// #C5C5C6 over #EEEEF0.
+const HAIRLINE_SCALE: f32 = 2.1;
 
 /// The capsule's `.font(.system(size: 12))` (ActivityViewer.swift:34) on
 /// COSMIC's text scale.
@@ -1391,7 +1392,7 @@ impl ProjectWindow {
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(surface::fill(DIVIDER_ALPHA, Corner::None, false))
+            .class(surface::fill(Tone::Separator, DIVIDER_SCALE, Corner::None, false))
             .into()
     }
 
@@ -1410,7 +1411,9 @@ impl ProjectWindow {
                 Tone::Secondary,
                 Backdrop::Material,
             )
-            .opacity(opacity * Tone::Secondary.alpha(Backdrop::Material)),
+            .opacity(
+                opacity * Tone::Secondary.alpha(&cosmic::theme::active(), Backdrop::Material),
+            ),
         )
         .width(Length::Fixed(28.0))
         .height(Length::Fixed(16.0))
@@ -1422,12 +1425,11 @@ impl ProjectWindow {
             .on_enter(Message::GripHovered(Some(kind)))
             .on_exit(Message::GripHovered(None))
             .interaction(cosmic::iced::mouse::Interaction::Grab);
-        cosmic::widget::tooltip(
+        ui::button::with_help(
             container(grip).padding(6),
-            text(fl!("trascina-per-spostare-il-pannello")).size(typography::scaled(11.0)),
+            fl!("trascina-per-spostare-il-pannello"),
             cosmic::widget::tooltip::Position::Bottom,
         )
-        .into()
     }
 
     /// The drop highlight over a pane while a drag is live
@@ -1447,11 +1449,7 @@ impl ProjectWindow {
                     border: cosmic::iced::Border {
                         color: accent,
                         width: if stroke { 2.0 } else { 0.0 },
-                        radius: if stroke {
-                            theme.cosmic().corner_radii.radius_s.into()
-                        } else {
-                            theme.cosmic().corner_radii.radius_0.into()
-                        },
+                        radius: if stroke { Corner::S } else { Corner::None }.radius(theme),
                     },
                     ..Default::default()
                 }
@@ -1516,7 +1514,7 @@ impl ProjectWindow {
             .push(Space::new().width(Length::Fixed(8.0)))
             .push(toolbar_button(
                 Symbol::SidebarLeft,
-                (19.5, 15.0),
+                15.0,
                 40.0,
                 Some(Message::Command(Command::ShowChat)),
                 fl!("mostra-o-nascondi-la-chat-0"),
@@ -1525,7 +1523,7 @@ impl ProjectWindow {
             // while busy
             .push(toolbar_button(
                 Symbol::PlayFill,
-                (12.5, 14.0),
+                14.0,
                 36.0,
                 (!busy).then_some(Message::Command(Command::Build)),
                 fl!("compila-modello-b"),
@@ -1533,7 +1531,7 @@ impl ProjectWindow {
             // Stop (:115-121), disabled when idle
             .push(toolbar_button(
                 Symbol::StopFill,
-                (13.5, 13.5),
+                13.5,
                 32.0,
                 busy.then_some(Message::Command(Command::Stop)),
                 fl!("interrompi"),
@@ -1571,7 +1569,7 @@ impl ProjectWindow {
             .push(Space::new().width(Length::Fixed(5.0)))
             .push(toolbar_button(
                 Symbol::Folder,
-                (18.5, 15.0),
+                15.0,
                 38.0,
                 Some(Message::Command(Command::Reveal)),
                 fl!("mostra-nel-finder"),
@@ -1580,14 +1578,14 @@ impl ProjectWindow {
             // the menu entry stays clickable while busy — upstream's split)
             .push(toolbar_button(
                 Symbol::SquareAndArrowUp,
-                (14.5, 18.5),
+                18.5,
                 38.0,
                 (has_3mf && !busy).then_some(Message::Command(Command::Export)),
                 fl!("esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"),
             ))
             .push(toolbar_button(
                 Symbol::ArrowUpForwardApp,
-                (15.0, 15.0),
+                15.0,
                 38.0,
                 has_3mf.then_some(Message::Command(Command::OpenInSlicer)),
                 fl!("apri-il-file-3mf-nello-slicer-predefinito"),
@@ -1595,7 +1593,7 @@ impl ProjectWindow {
             // "Parametri" (:154-159)
             .push(toolbar_button(
                 Symbol::SliderHorizontal3,
-                (17.0, 14.5),
+                14.5,
                 38.0,
                 Some(Message::Command(Command::ToggleParameters)),
                 fl!("mostra-o-nascondi-i-parametri-i"),
@@ -1629,7 +1627,7 @@ impl ProjectWindow {
             .push(band)
             .push(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(surface::fill(HAIRLINE_ALPHA, Corner::None, false)),
+                    .class(surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false)),
             )
             .into()
     }
@@ -1748,7 +1746,7 @@ impl ProjectWindow {
             .width(Length::Fixed(480.0))
             .height(Length::Fixed(24.0))
             .align_y(cosmic::iced::alignment::Vertical::Center)
-            .class(surface::fill(CAPSULE_ALPHA, Corner::S, false))
+            .class(surface::fill(Tone::Quaternary, CAPSULE_SCALE, Corner::S, false))
             .into()
     }
 
@@ -1984,7 +1982,7 @@ fn flash_border(flashing: bool) -> cosmic::theme::Container<'static> {
             style.border = cosmic::iced::Border {
                 color: Color::from(theme.cosmic().accent_color()),
                 width: 2.0,
-                radius: theme.cosmic().corner_radii.radius_s.into(),
+                radius: Corner::S.radius(theme),
             };
         }
         style
@@ -2006,8 +2004,7 @@ fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
             border: cosmic::iced::Border {
                 color: stroke,
                 width: 1.0,
-                // `Capsule()`: half the 16 px height, a shape not a token
-                radius: 8.0.into(),
+                radius: Corner::Capsule.radius(theme),
             },
             ..Default::default()
         }
@@ -2057,11 +2054,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         list = list.push(
             container(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
-                    surface::fill(
-                        Tone::Separator.alpha(Backdrop::Material),
-                        Corner::None,
-                        false,
-                    ),
+                    surface::fill(Tone::Separator, 1.0, Corner::None, false),
                 ),
             )
             .padding([5, 14]),
@@ -2082,30 +2075,32 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         .into()
 }
 
-/// One toolbar icon button: a tinted glyph centered in a `width`×28 hit
-/// area (disabled glyphs dim), with its upstream `.help` tooltip.
+/// One toolbar icon button: a tinted glyph `glyph_height` px tall (its
+/// width from the symbol's view box) centered in a `width`×28 hit area
+/// (disabled glyphs dim), with its upstream `.help` as tooltip and
+/// accessible name.
 fn toolbar_button(
     symbol: Symbol,
-    glyph_size: (f32, f32),
+    glyph_height: f32,
     width: f32,
     on_press: Option<Message>,
     help: String,
 ) -> Element<'static, Message> {
     let tone = ui::button::content_tone(Tone::Secondary, &on_press);
-    let face = container(ui::icon::icon(symbol, glyph_size.1, tone, TITLEBAR))
+    let face = container(ui::icon::icon(symbol, glyph_height, tone, TITLEBAR))
         .width(Length::Fixed(width))
         .height(Length::Fixed(28.0))
         .align_x(cosmic::iced::alignment::Horizontal::Center)
         .align_y(cosmic::iced::alignment::Vertical::Center);
-    cosmic::widget::tooltip(
+    ui::button::with_help(
         button::custom(face)
             .padding(0)
             .class(ui::button::hover_wash(false, Corner::S))
-            .on_press_maybe(on_press),
-        text(help).size(typography::scaled(11.0)),
+            .on_press_maybe(on_press)
+            .name(help.clone()),
+        help,
         cosmic::widget::tooltip::Position::Bottom,
     )
-    .into()
 }
 
 /// The output-watch relay stream (the panes' take-once pattern).

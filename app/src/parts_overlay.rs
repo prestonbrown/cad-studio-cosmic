@@ -6,18 +6,15 @@
 //! arrangement math; these views render state verbatim and route every
 //! interaction to a [`crate::viewer_pane::Message`].
 //!
-//! The module also holds the small slider the parameters panel shares
-//! ([`small_slider`]); icons, tones, the card surface and the segmented
-//! picker come from [`crate::ui`].
+//! Icons, tones, the card surface, the segmented picker and the small
+//! slider come from [`crate::ui`].
 //!
 //! The views copy every input into owned widget state and return
 //! `Element<'static>` — callers may pass short-lived data (the pane
 //! computes `groups` fresh per frame).
 
-use std::rc::Rc;
-
 use cosmic::Element;
-use cosmic::iced::widget::{slider, text::Wrapping};
+use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Background, Border, Color, Length};
 use cosmic::widget::{Column, Row, Space, container, mouse_area, text, tooltip};
 use engine::settings::{MeasurementUnit, PartsLayout};
@@ -28,7 +25,8 @@ use crate::fl;
 use crate::typography;
 use crate::ui::segmented::{Look, segmented};
 use crate::ui::surface::{self, Corner, Shadow};
-use crate::ui::tone::{mix, wash};
+use crate::ui::tone::wash;
+use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
 use crate::viewer_pane::{Message, format_length};
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools};
@@ -48,108 +46,6 @@ const ROW_HEIGHT: f32 = 20.0;
 const ROW_SPACING: f32 = 2.0;
 /// The overlays float on a material.
 const BACKDROP: Backdrop = Backdrop::Material;
-
-// ─── small slider ──────────────────────────────────────────────────────────
-
-/// The small macOS slider: a 4 px rounded rail (accent fill, faint `on`
-/// remainder) and a 16 px round knob — white with a hairline ring in
-/// light mode, a light neutral in dark mode.
-pub(crate) fn small_slider_class() -> cosmic::theme::iced::Slider {
-    let style = Rc::new(|theme: &cosmic::Theme| {
-        let on = Color::from(theme.cosmic().background(false).on);
-        let knob = if theme.cosmic().is_dark {
-            mix(on, Color::BLACK, 0.15)
-        } else {
-            Color::WHITE
-        };
-        slider::Style {
-            rail: slider::Rail {
-                backgrounds: (
-                    Background::Color(Tone::Accent.solid(theme)),
-                    Background::Color(wash(theme, 0.1)),
-                ),
-                width: 4.0,
-                // square ends: the rounded caps come from `with_rail_ends`
-                border: Border::default(),
-            },
-            handle: slider::Handle {
-                shape: slider::HandleShape::Circle { radius: 8.0 },
-                background: Background::Color(knob),
-                border_width: 1.0,
-                border_color: Color { a: 0.18, ..on },
-            },
-            breakpoint: slider::Breakpoint { color: on },
-        }
-    });
-    cosmic::theme::iced::Slider::Custom {
-        active: style.clone(),
-        hovered: style.clone(),
-        dragging: style,
-    }
-}
-
-/// The small slider's knob diameter (and row height).
-pub(crate) const KNOB: f32 = 16.0;
-
-/// A small slider over `range`: the [`small_slider_class`] look, a
-/// [`KNOB`]-sized knob, and the rail reaching the full width. iced insets
-/// its rail by half the knob at both ends (the knob's travel), where
-/// macOS runs the rail edge to edge; the two half-knob end caps are
-/// drawn underneath — the leading cap in the fill color (the value never
-/// sits left of the range start), the trailing one in the track color.
-pub(crate) fn small_slider<'a, T, M>(
-    range: std::ops::RangeInclusive<T>,
-    value: T,
-    on_change: impl Fn(T) -> M + 'a,
-    width: Length,
-) -> cosmic::iced::widget::Slider<'a, T, M, cosmic::Theme>
-where
-    T: Copy + From<u8> + PartialOrd,
-    M: Clone + 'a,
-{
-    cosmic::iced::widget::Slider::new(range, value, on_change)
-        .width(width)
-        .height(KNOB)
-        .handle_width(KNOB)
-        .handle_height(KNOB)
-        .class(small_slider_class())
-}
-
-/// Wrap a [`small_slider`] (or its tooltip) with the rail end caps.
-pub(crate) fn with_rail_ends<'a, M: 'a>(
-    track: impl Into<Element<'a, M>>,
-    width: Length,
-) -> Element<'a, M> {
-    let cap = |leading: bool| {
-        container(Space::new().width(KNOB / 2.0).height(4.0)).class(
-            cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
-                background: Some(Background::Color(if leading {
-                    Tone::Accent.solid(theme)
-                } else {
-                    wash(theme, 0.1)
-                })),
-                border: Border {
-                    radius: if leading {
-                        [2.0, 0.0, 0.0, 2.0].into()
-                    } else {
-                        [0.0, 2.0, 2.0, 0.0].into()
-                    },
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-        )
-    };
-    let ends = Row::new()
-        .height(KNOB)
-        .align_y(Alignment::Center)
-        .push(cap(true))
-        .push(Space::new().width(Length::Fill))
-        .push(cap(false));
-    cosmic::iced::widget::stack![ends, track.into()]
-        .width(width)
-        .into()
-}
 
 // ─── parts panel (PartsOverlay.swift:12-51) ────────────────────────────────
 

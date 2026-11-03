@@ -32,13 +32,13 @@ use std::collections::{BTreeMap, HashMap};
 use cosmic::Element;
 use cosmic::iced::widget::pick_list;
 use cosmic::iced::widget::text::{Span, Wrapping};
-use cosmic::iced::{Alignment, Color, Length};
-use cosmic::widget::{Column, Row, Space, container, text, tooltip};
+use cosmic::iced::{Alignment, Length};
+use cosmic::widget::{Column, Row, Space, container, text};
 use engine::project::versions::ProjectVersion;
 
 use crate::fl;
 use crate::parameters::{ParametersPanel, SliderState, format_display};
-use crate::parts_overlay::{KNOB, small_slider, with_rail_ends};
+use crate::ui::slider::{KNOB, small_slider, with_rail_ends};
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
@@ -66,11 +66,6 @@ const ROW_SPACING: f32 = 10.0;
 const POPUP_BADGE: f32 = 13.0;
 const POPUP_GAP: f32 = 7.0;
 const POPUP_TEXT: f32 = typography::SMALL_CONTROL;
-
-/// Upstream's orange previous-value tint (`foregroundStyle(.orange)`,
-/// ParametersOverlay.swift:151) — same explicit color family as the chat
-/// pane's warn tint, theme-independent like upstream's.
-const ORANGE: Color = Color::from_rgb(1.0, 0.58, 0.02);
 
 // ─── messages ──────────────────────────────────────────────────────────────
 
@@ -322,20 +317,21 @@ fn parameter_row<'a>(
         .into()
 }
 
-/// The struck-through orange previous value
-/// (ParametersOverlay.swift:148-153) — fraction digits 0…2 (NOTE 1: two,
-/// one fewer than the live field's three).
+/// The struck-through previous value in upstream's orange
+/// (`foregroundStyle(.orange)`, ParametersOverlay.swift:148-153), the
+/// theme's warning color — fraction digits 0…2 (NOTE 1: two, one fewer
+/// than the live field's three). A span takes a color, not a class, so
+/// the active theme resolves it.
 fn previous_value(value: f64) -> Element<'static, Message> {
     let struck: Span<'_, String> = Span::new(format_display(value, 2))
         .strikethrough(true)
-        .color(ORANGE);
+        .color(Tone::Warning.solid(&cosmic::theme::active()));
     let struck = rich_text_element(struck);
-    tooltip(
+    button::with_help(
         struck,
-        text(fl!("valore-nella-versione-a-confronto")),
+        fl!("valore-nella-versione-a-confronto"),
         cosmic::widget::tooltip::Position::Bottom,
     )
-    .into()
 }
 
 /// The live numeric field (ParametersOverlay.swift:154-159): upstream's
@@ -426,7 +422,7 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
                 Tone::Tertiary.color(theme, BACKDROP)
             })),
             border: cosmic::iced::Border {
-                radius: theme.cosmic().corner_radii.radius_xs.into(),
+                radius: Corner::Xs.radius(theme),
                 ..Default::default()
             },
             ..Default::default()

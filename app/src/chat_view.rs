@@ -369,7 +369,7 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, true))
+        .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true))
         .into()
 }
 
@@ -399,21 +399,21 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
                 .height(Length::Fixed(size))
                 // upstream aspectRatio(.fill) + clipShape
                 .content_fit(cosmic::iced::ContentFit::Cover)
-                .border_radius(6.0)
+                .border_radius(Corner::S.radius(&cosmic::theme::active()))
                 .into(),
             None => file_type_tile(&caption, size),
         }
     } else {
         file_type_tile(&caption, size)
     };
-    let tile = cosmic::widget::tooltip(
+    let tile = ui::button::with_help(
         container(body)
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(ui::surface::fill(QUATERNARY, Corner::S, true)),
-        styled_text(file_name, CALLOUT, Tone::Primary),
+            .class(ui::surface::fill(Tone::Quaternary, 1.0, Corner::S, true)),
+        file_name,
         cosmic::widget::tooltip::Position::FollowCursor,
     );
     tile.into()
@@ -425,7 +425,7 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
 fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
     Column::new()
         .spacing(3)
-        .push(icon("text-x-generic", (size * 0.5) as u16))
+        .push(ui::icon::named("text-x-generic", (size * 0.5) as u16))
         .push(
             styled_text(
                 caption.to_string(),
@@ -496,9 +496,9 @@ fn attachment_strip<'a>(paths: &'a [String], root: &Path) -> Element<'a, Message
             .on_press(Message::Detach(path.clone()));
         let cell = cosmic::iced::widget::stack![
             container(attachment_thumbnail(path, root, 52.0)).padding([5.0, 5.0, 0.0, 0.0]),
-            container(cosmic::widget::tooltip(
+            container(ui::button::with_help(
                 remove,
-                styled_text(fl!("rimuovi"), CALLOUT, Tone::Primary),
+                fl!("rimuovi"),
                 cosmic::widget::tooltip::Position::FollowCursor,
             ))
             .width(Length::Fill)
@@ -760,7 +760,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
     container(stack)
         .padding([4.0, 8.0])
         .width(Length::Fill)
-        .class(ui::surface::fill(QUATERNARY * 0.35, Corner::S, false))
+        .class(ui::surface::fill(Tone::Quaternary, 0.35, Corner::S, false))
         .into()
 }
 
@@ -810,9 +810,9 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
         ToolState::Succeeded => fl!("completato"),
         ToolState::Failed => fl!("non-riuscito"),
     };
-    cosmic::widget::tooltip(
+    ui::button::with_help(
         mark,
-        styled_text(description.to_string(), CALLOUT, Tone::Primary),
+        description.to_string(),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
@@ -830,56 +830,9 @@ fn tool_icon(name: &str) -> Symbol {
     }
 }
 
-/// Upstream `CodeBlock` (MessageView.swift:114-144): 11pt mono text with
-/// padding 8 (+24 trailing for the button), horizontally scrollable, on a
-/// quaternary system fill in a 6pt rounded rectangle, with a borderless
-/// copy button overlaid top-trailing (padding 6). `line_limit` is the
-/// tool input's `lineLimit(12)`.
+/// Upstream `CodeBlock`, copying through the chat's [`Message::CopyCode`].
 fn code_block<'a>(code: &str, line_limit: Option<usize>) -> Element<'a, Message> {
-    let shown = match line_limit {
-        Some(limit) => clip_lines(code, limit),
-        None => code.to_string(),
-    };
-    let text = styled_text(shown, CODE, Tone::Primary)
-        .font(cosmic::font::mono())
-        .wrapping(Wrapping::None);
-    let scroller = cosmic::widget::scrollable::horizontal(container(text).padding([
-        8.0,
-        8.0 + 24.0,
-        8.0,
-        8.0,
-    ]))
-    .width(Length::Fill);
-    let copy = cosmic::widget::tooltip(
-        button::custom(sf_icon(Symbol::DocOnDoc, 12, Tone::Secondary))
-            .padding(3)
-            .class(cosmic::theme::Button::Icon)
-            .on_press(Message::CopyCode(code.to_string())),
-        styled_text(fl!("copia"), CALLOUT, Tone::Primary),
-        cosmic::widget::tooltip::Position::FollowCursor,
-    );
-    cosmic::iced::widget::stack![
-        container(scroller)
-            .width(Length::Fill)
-            .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, false)),
-        container(copy)
-            .width(Length::Fill)
-            .padding(3)
-            .align_x(Horizontal::Right),
-    ]
-    .into()
-}
-
-/// SwiftUI `lineLimit(n)` over a code string: the first `n` lines, the
-/// last of them ending in "…" when more were cut.
-pub fn clip_lines(code: &str, limit: usize) -> String {
-    let lines: Vec<&str> = code.lines().collect();
-    if lines.len() <= limit {
-        return code.to_string();
-    }
-    let mut out = lines[..limit].join("\n");
-    out.push('…');
-    out
+    ui::code_block::code_block(code, line_limit, Message::CopyCode(code.to_string()))
 }
 
 /// Upstream ChatView.swift:50-54: a small busy marker while the agent works
@@ -923,7 +876,7 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
                 container(label)
                     .padding([6.0, 10.0])
                     .width(Length::Fill)
-                    .class(ui::surface::fill(QUATERNARY * 0.6, Corner::S, false)),
+                    .class(ui::surface::fill(Tone::Quaternary, 0.6, Corner::S, false)),
             )
             .padding(0)
             .width(Length::Fill)
@@ -979,11 +932,7 @@ fn input_bar<'a>(
     stack = stack.push(
         container(Space::new().height(Length::Fixed(1.0)))
             .width(Length::Fill)
-            .class(ui::surface::fill(
-                Tone::Separator.alpha(BACKDROP),
-                Corner::None,
-                false,
-            )),
+            .class(ui::surface::fill(Tone::Separator, 1.0, Corner::None, false)),
     );
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
@@ -1061,12 +1010,12 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
                     )),
             );
         }
-        let remove = cosmic::widget::tooltip(
+        let remove = ui::button::with_help(
             button::custom(sf_icon(Symbol::XmarkCircleFill, 14, Tone::Tertiary))
                 .padding(0)
                 .class(ui::button::plain())
                 .on_press(Message::RemoveQueued(item.id)),
-            styled_text(fl!("rimuovi-dalla-coda"), CALLOUT, Tone::Primary),
+            fl!("rimuovi-dalla-coda"),
             cosmic::widget::tooltip::Position::FollowCursor,
         );
         items = items.push(
@@ -1090,7 +1039,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             )
             .padding([7.0, 10.0])
             .width(Length::Fill)
-            .class(ui::surface::fill(QUATERNARY * 0.5, Corner::S, false)),
+            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, false)),
         );
     }
     let items = cosmic::widget::scrollable::vertical(items).height(Length::Shrink);
@@ -1117,16 +1066,12 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
 /// buttons fall through to the editor (iced's stack passes the cursor on
 /// when the upper layer's interaction there is none).
 fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
-    let attach = cosmic::widget::tooltip(
+    let attach = ui::button::with_help(
         button::custom(sf_icon(Symbol::Paperclip, 14, Tone::Secondary))
             .padding(0)
             .class(ui::button::plain())
             .on_press(Message::Attach),
-        styled_text(
-            fl!("allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"),
-            CALLOUT,
-            Tone::Primary,
-        ),
+        fl!("allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"),
         cosmic::widget::tooltip::Position::Top,
     );
     let (send, send_width) = send_area(chat, busy);
@@ -1219,12 +1164,12 @@ fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Eleme
 fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32) {
     let glyph_button =
         |symbol: Symbol, size: u16, tone: Tone, msg: Option<Message>, tip: String| {
-            Element::from(cosmic::widget::tooltip(
+            Element::from(ui::button::with_help(
                 button::custom(sf_icon(symbol, size, tone))
                     .padding(0)
                     .class(ui::button::plain())
                     .on_press_maybe(msg),
-                styled_text(tip, CALLOUT, Tone::Primary),
+                tip,
                 cosmic::widget::tooltip::Position::Top,
             ))
         };
@@ -1307,11 +1252,6 @@ const TITLE3: TextStyle = TextStyle {
     size: typography::TITLE3,
     line_height: typography::scaled(20.0),
 };
-/// CodeBlock's `.system(size: 11)` mono (MessageView.swift:122).
-const CODE: TextStyle = TextStyle {
-    size: typography::scaled(11.0),
-    line_height: typography::scaled(14.0),
-};
 /// The running tool's live preview (ToolActivityRow.swift:45, 10.5pt mono).
 const PREVIEW: TextStyle = TextStyle {
     size: typography::scaled(10.5),
@@ -1328,10 +1268,6 @@ const DISCLOSURE_ROW: f32 = 24.0;
 const FIELD_PAD_Y: f32 = 8.0;
 /// The send glyph's inset inside the field: centered on one body line.
 const SEND_PAD_Y: f32 = (BODY.line_height + 2.0 * FIELD_PAD_Y - 18.0) / 2.0;
-
-/// A `.quaternary` fill's opacity (`quaternaryLabelColor`); upstream's
-/// fills scale it by their own `.opacity(...)`.
-const QUATERNARY: f32 = 0.10;
 
 /// The chat pane sits on the plain window background.
 const BACKDROP: Backdrop = Backdrop::Plain;
@@ -1374,23 +1310,17 @@ fn sf_icon<'a>(symbol: Symbol, size: u16, tone: Tone) -> Element<'a, Message> {
             Symbol::Xmark => 8.0 / 9.0,
             _ => 1.0,
         };
-    container(ui::icon::icon(symbol, height, tone, BACKDROP))
-        .width(Length::Fixed(cell))
-        .height(Length::Fixed(cell))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .into()
+    ui::icon::in_cell(symbol, height, cell, tone, BACKDROP)
 }
 
-/// A themed icon widget by freedesktop name.
-fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
-    cosmic::widget::icon::from_name(name).size(size).icon()
-}
+/// The focused input field's accent stroke: the focus ring softened so it
+/// reads as an edge, not a fill.
+const FOCUS_RING_ALPHA: f32 = 0.6;
 
 fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_editor::Style {
     let stroke = match status {
         text_editor::Status::Focused { .. } => Color {
-            a: 0.6,
+            a: FOCUS_RING_ALPHA,
             ..Tone::Accent.solid(theme)
         },
         _ => Tone::Separator.color(theme, BACKDROP),
@@ -1404,10 +1334,7 @@ fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_edito
         },
         placeholder: Tone::Tertiary.color(theme, BACKDROP),
         value: Tone::Primary.color(theme, BACKDROP),
-        selection: Color {
-            a: 0.35,
-            ..Tone::Accent.solid(theme)
-        },
+        selection: ui::tone::selection(theme),
     }
 }
 
@@ -1705,24 +1632,6 @@ mod tests {
 
         let pane = ChatPane::new();
         let _ = view_chat(&pane, &chat, true, &[], false, &root);
-    }
-
-    /// lineLimit(12) parity for the tool input card: twelve lines pass
-    /// through untouched; past that the first twelve show and the last
-    /// visible one ends in an ellipsis.
-    #[test]
-    fn clip_lines_caps_at_limit() {
-        let twelve: String = (1..=12)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(clip_lines(&twelve, 12), twelve);
-        let thirteen = format!("{twelve}\n13");
-        let clipped = clip_lines(&thirteen, 12);
-        assert_eq!(clipped.lines().count(), 12);
-        assert!(clipped.ends_with("12…"), "{clipped}");
-        assert_eq!(clip_lines("one", 12), "one");
-        assert_eq!(clip_lines("", 12), "");
     }
 
     /// Version markers, fenced code cards and the plain summary caption

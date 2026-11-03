@@ -26,9 +26,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cosmic::iced::Color;
 use cosmic::iced::Length;
-use cosmic::iced::widget::container::Style as ContainerStyle;
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::widget::{Column, Row, Space, button, container, scrollable, text_input};
 use cosmic::{Element, Task};
@@ -37,7 +35,7 @@ use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
 use crate::fl;
-use crate::ui::{Backdrop, Tone};
+use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -136,7 +134,12 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
     let engine = sheet.kind.display_name();
     let head = Row::new()
         .spacing(8)
-        .push(icon("dialog-warning", 20))
+        .push(ui::icon::icon(
+            Symbol::ExclamationmarkTriangleFill,
+            20.0,
+            Tone::Warning,
+            Backdrop::Plain,
+        ))
         .push(bold(fl!("non-trovato", agent = engine), 18.0));
     let intro = body(fl!(
         "cad-studio-usa-installato-su-questo-mac-installalo-dal-terminale-con-uno-dei-comandi-seguenti-poi-esegui-per-effettuare-l-accesso",
@@ -146,7 +149,11 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
 
     let mut stack = Column::new().spacing(14).push(head).push(intro);
     for command in install_commands(sheet.kind) {
-        stack = stack.push(code_block(command));
+        stack = stack.push(ui::code_block::code_block(
+            command,
+            None,
+            AgentMessage::Copy(command.to_string()),
+        ));
     }
     stack = stack
         .push(body(fl!("percorso-dell-eseguibile")))
@@ -333,7 +340,7 @@ pub fn view_print_preferences<'a>(
         ));
     Column::new()
         .spacing(8)
-        .push(container(form).width(Length::Fill).class(subtle_block()))
+        .push(container(form).width(Length::Fill).class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true)))
         .push(
             body(fl!(
                 "l-agente-adatta-spessori-giochi-e-consigli-di-stampa-alla-tua-stampante-e-usa-l-unit-scelta-nelle-risposte-e-nella-tavola-i-file-stl-e-3mf-restano-sempre-in-millimetri"
@@ -379,7 +386,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     let head = Row::new()
         .spacing(14)
         .align_y(cosmic::iced::alignment::Alignment::Center)
-        .push(icon(APP_ICON, 64))
+        .push(ui::icon::named(APP_ICON, 64))
         .push(
             Column::new()
                 .spacing(4)
@@ -570,7 +577,7 @@ pub struct PythonSetup {
 pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
     let head = Row::new()
         .spacing(14)
-        .push(icon(PYTHON_SHEET_ICON, 64))
+        .push(ui::icon::named(PYTHON_SHEET_ICON, 64))
         .push(
             Column::new()
                 .spacing(4)
@@ -602,7 +609,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         stack = stack.push(
             Row::new()
                 .spacing(8)
-                .push(icon("dialog-error", 18))
+                .push(ui::icon::multicolor(Symbol::XmarkOctagonFillMulticolor, 18.0))
                 .push(body(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
         );
     }
@@ -629,7 +636,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             )
             .padding(8)
             .width(Length::Fill)
-            .class(subtle_block()),
+            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true)),
         );
     }
     let actions = Row::new()
@@ -712,57 +719,6 @@ fn bold<'a>(label: impl Into<String>, size: f32) -> Text<'a> {
     body(label).size(size).font(cosmic::iced::font::Font {
         weight: cosmic::iced::font::Weight::Bold,
         ..cosmic::font::default()
-    })
-}
-
-/// A themed icon widget by freedesktop name; size in px (cosmetic layer).
-pub(crate) fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
-    cosmic::widget::icon::from_name(name).size(size).icon()
-}
-
-/// The sheet's code block: mono text on a subtle rounded fill with a copy
-/// button (upstream `CodeBlock`, MessageView.swift:114-144's shape).
-fn code_block(code: &str) -> Element<'static, AgentMessage> {
-    container(
-        Row::new()
-            .spacing(8)
-            .push(
-                cosmic::widget::text(code.to_string())
-                    .font(cosmic::font::mono())
-                    .wrapping(Wrapping::Glyph)
-                    .width(Length::Fill),
-            )
-            .push(
-                button::icon(
-                    cosmic::widget::icon::from_name("edit-copy")
-                        .size(14)
-                        .handle(),
-                )
-                .on_press(AgentMessage::Copy(code.to_string()))
-                .name(fl!("copia")),
-            ),
-    )
-    .padding(8)
-    .width(Length::Fill)
-    .class(subtle_block())
-    .into()
-}
-
-fn subtle_block() -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(|theme| {
-        let mut base = Color::from(theme.cosmic().background(false).component.base);
-        base.a *= 0.5;
-        let mut border_color = Color::from(theme.cosmic().background(false).on);
-        border_color.a = 0.15;
-        ContainerStyle {
-            background: Some(cosmic::iced::Background::Color(base)),
-            border: cosmic::iced::Border {
-                color: border_color,
-                width: 1.0,
-                radius: theme.cosmic().corner_radii.radius_s.into(),
-            },
-            ..Default::default()
-        }
     })
 }
 
