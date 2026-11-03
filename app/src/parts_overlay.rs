@@ -316,7 +316,10 @@ pub fn badge_text(points: &[[f32; 3]], unit: MeasurementUnit) -> String {
 /// measurement in monospace (upstream `.fontDesign(.monospaced)`, on the
 /// measurement arm only) or the next-step prompt.
 pub fn view_measure_badge(points: &[[f32; 3]], unit: MeasurementUnit) -> Element<'static, Message> {
-    let body = text(badge_text(points, unit)).size(14);
+    // .font(.callout); the measurement in monospaced design (:167-169)
+    let body = text(badge_text(points, unit))
+        .size(crate::typography::CALLOUT)
+        .class(cosmic::theme::Text::Custom(material_label_style));
     let body = if points.len() == 2 {
         body.font(cosmic::font::mono())
     } else {
@@ -330,33 +333,43 @@ pub fn view_measure_badge(points: &[[f32; 3]], unit: MeasurementUnit) -> Element
 
 // ─── section controls (ModelPane.swift:181-200) ────────────────────────────
 
-/// The bottom-center section capsule: the X/Y/Z axis picker (one button
-/// per axis, selected = suggested — the preset picker's pattern) and the
-/// position slider over T3's `SLIDER_MIN..=SLIDER_MAX`, width 220.
+/// The bottom-center section capsule (ModelPane.swift:181-200): the
+/// segmented X/Y/Z axis picker and the position slider over T3's
+/// `SLIDER_MIN..=SLIDER_MAX`, width 220, spacing 10, padding 12/6 at the
+/// small control size, on a material capsule.
 pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
-    let mut axes = Row::new().spacing(4);
-    for axis in section::ALL {
-        axes = axes.push(
-            button::text(axis.title().to_string())
-                .class(if tools.section_axis == axis {
-                    cosmic::theme::Button::Suggested
-                } else {
-                    cosmic::theme::Button::Standard
-                })
-                .on_press(Message::SetSectionAxis(axis)),
-        );
-    }
+    let labels = section::ALL
+        .iter()
+        .map(|axis| axis.title().to_string())
+        .collect();
+    let selected = section::ALL
+        .iter()
+        .position(|axis| *axis == tools.section_axis);
+    let axes = crate::viewer_pane::segmented(
+        labels,
+        selected,
+        true,
+        crate::viewer_pane::MATERIAL_SEGMENTS,
+        |index| Some(Message::SetSectionAxis(section::ALL[index])),
+    );
     let position = slider(
         section::SLIDER_MIN..=section::SLIDER_MAX,
         tools.section_position,
         Message::SetSectionPosition,
     )
-    .width(Length::Fixed(220.0));
-    let row = Row::new().spacing(10).push(axes).push(tooltip(
-        position,
-        text(fl!("posizione-della-sezione")),
-        cosmic::widget::tooltip::Position::FollowCursor,
-    ));
+    .width(Length::Fixed(220.0))
+    // the small control size: the capsule's row is the segmented control's
+    // height, not the slider's default
+    .height(18.0);
+    let row = Row::new()
+        .spacing(10)
+        .align_y(cosmic::iced::Alignment::Center)
+        .push(axes)
+        .push(tooltip(
+            position,
+            text(fl!("posizione-della-sezione")),
+            cosmic::widget::tooltip::Position::FollowCursor,
+        ));
     container(row.padding([6.0, 12.0]))
         .class(capsule_style())
         .into()
@@ -423,8 +436,27 @@ fn panel_style(radius: f32) -> cosmic::theme::Container<'static> {
 }
 
 /// The badge/section capsule: the panel surface at a pill radius.
+/// SwiftUI's `.regularMaterial` in a `Capsule()`: a translucent ink wash
+/// over whatever the viewport draws (#E6E7E7 over the light viewport's
+/// #F0F0F0, measure.png), borderless.
 fn capsule_style() -> cosmic::theme::Container<'static> {
-    panel_style(999.0)
+    cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
+        background: Some(crate::viewer_pane::ink(theme, 0.045).into()),
+        border: cosmic::iced::Border {
+            radius: 999.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+/// A label on the material: vibrancy renders it lighter than `labelColor`
+/// (#454646 on the light material, measure.png).
+fn material_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(crate::viewer_pane::ink(theme, 0.72)),
+        ..Default::default()
+    }
 }
 
 /// A `size`-pixel color swatch with a hairline ring (upstream's stroked

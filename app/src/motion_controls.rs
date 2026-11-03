@@ -63,7 +63,15 @@ type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Ren
 
 /// Upstream's warning triangle (`exclamationmark.triangle.fill`,
 /// MotionControls.swift:63) — freedesktop stand-in.
-const WARNING_ICON: &str = "dialog-warning";
+/// SF Symbols stand-ins (play.fill, pause.fill,
+/// exclamationmark.triangle.fill), tinted at draw time.
+const PLAY_FILL: &[u8] = include_bytes!("../resources/icons/play.fill.svg");
+const PAUSE_FILL: &[u8] = include_bytes!("../resources/icons/pause.fill.svg");
+const WARNING_FILL: &[u8] =
+    include_bytes!("../resources/icons/exclamationmark.triangle.fill.svg");
+
+/// SwiftUI's `.caption`, the capsule's text style.
+const CAPTION: f32 = crate::typography::CAPTION;
 
 /// Upstream `.foregroundStyle(.red)` (:63) — systemRed, sRGB
 /// (255, 59, 48)/255.
@@ -202,7 +210,10 @@ pub fn view_motion_controls<'a>(
     }
     container(capsule)
         .padding([8.0, 12.0]) // vertical 8, horizontal 12 (:74-75)
-        .max_width(560.0) // .frame(maxWidth: 560) (:76)
+        // .frame(maxWidth: 560) (:76): the slider is flexible, so the
+        // capsule takes the full 560 wherever the pane allows it
+        .width(Length::Fill)
+        .max_width(560.0)
         .class(panel_style(10.0)) // RoundedRectangle(cornerRadius: 10) (:77)
         .into()
 }
@@ -212,14 +223,21 @@ pub fn view_motion_controls<'a>(
 /// `0..=max(duration, 0.001)` (:23), the mono readout, the speed
 /// dropdown, and the loop toggle.
 fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, Message> {
-    let (icon_name, help) = if player.is_playing {
-        ("media-playback-pause", fl!("pausa"))
+    // play.fill / pause.fill in a 16 pt frame, borderless (:14-20)
+    let (glyph, help) = if player.is_playing {
+        (PAUSE_FILL, fl!("pausa"))
     } else {
-        ("media-playback-start", fl!("riproduci"))
+        (PLAY_FILL, fl!("riproduci"))
     };
-    let play = button::icon(icon_handle(icon_name, 16))
-        .on_press(Message::TogglePlayback)
-        .description(help);
+    let play = tooltip(
+        button::custom(svg_icon(glyph, 16.0, secondary_glyph))
+            .padding(0)
+            .class(crate::viewer_pane::borderless_button())
+            .on_press(Message::TogglePlayback)
+            .description(help.clone()),
+        text(help),
+        tooltip::Position::FollowCursor,
+    );
     let scrub = tooltip(
         slider(
             0.0..=study.duration().max(SCRUB_FLOOR),
@@ -230,7 +248,7 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
         text(fl!("tempo-dell-animazione")),
         tooltip::Position::FollowCursor,
     );
-    let readout = mono_dim(time_readout(player.time, study.duration())).size(12);
+    let readout = mono_dim(time_readout(player.time, study.duration())).size(CAPTION);
     // The closed dropdown shows the selected entry's label, which is
     // exactly speed_label(player.speed) for every speed the menu can set.
     let speeds: Vec<String> = SPEEDS.iter().map(|speed| speed_label(*speed)).collect();
@@ -251,6 +269,7 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
         .on_press(Message::ToggleLoops);
     Row::new()
         .spacing(10)
+        .align_y(cosmic::iced::Alignment::Center)
         .push(play)
         .push(scrub)
         .push(readout)
@@ -267,7 +286,11 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
 fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message> {
     let mut row = Row::new().spacing(12);
     if let Some(label) = &state.label {
-        row = row.push(text(label.clone()).size(12).font(cosmic::font::semibold()));
+        row = row.push(
+            text(label.clone())
+                .size(CAPTION)
+                .font(cosmic::font::semibold()),
+        );
     }
     for name in study.value_names() {
         if let Some(value) = state.values.get(name) {
@@ -277,17 +300,22 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
                     name = name,
                     value = format_significant(*value, 1, 3)
                 ))
-                .size(12),
+                .size(CAPTION),
             );
         }
     }
     if !state.collisions.is_empty() {
         row = row.push(
-            Row::new().spacing(4).push(icon(WARNING_ICON, 14)).push(
-                text(collision_text(&state.collisions))
-                    .size(12)
-                    .class(red_class()),
-            ),
+            Row::new()
+                .spacing(4)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(svg_icon(WARNING_FILL, 11.0, |_| RED))
+                .push(
+                    text(collision_text(&state.collisions))
+                        .size(CAPTION)
+                        .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                        .class(red_class()),
+                ),
         );
     }
     row.into()
@@ -342,10 +370,29 @@ fn panel_style(radius: f32) -> cosmic::theme::Container<'static> {
     })
 }
 
-fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
-    cosmic::widget::icon::from_name(name).size(size).icon()
+/// An SVG glyph tinted by `tint` (opaque: iced's svg color keeps only the
+/// glyph's coverage, not the tint's alpha).
+fn svg_icon(
+    bytes: &'static [u8],
+    size: f32,
+    tint: fn(&cosmic::Theme) -> Color,
+) -> Element<'static, Message> {
+    cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(bytes))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .class(cosmic::theme::Svg::custom(move |theme| {
+            cosmic::iced::widget::svg::Style {
+                color: Some(tint(theme)),
+            }
+        }))
+        .into()
 }
 
-fn icon_handle(name: &str, size: u16) -> cosmic::widget::icon::Handle {
-    cosmic::widget::icon::from_name(name).size(size).handle()
+/// A borderless button's glyph color: secondary label ink, pre-blended
+/// over the capsule's background.
+fn secondary_glyph(theme: &cosmic::Theme) -> Color {
+    let on = Color::from(theme.cosmic().background(false).on);
+    let under = Color::from(theme.cosmic().background(false).base);
+    let mix = |a: f32, b: f32| a * 0.5 + b * 0.5;
+    Color::from_rgb(mix(on.r, under.r), mix(on.g, under.g), mix(on.b, under.b))
 }
