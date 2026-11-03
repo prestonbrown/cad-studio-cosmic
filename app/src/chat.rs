@@ -78,6 +78,14 @@ pub struct ChatState {
     pub draft: String,
     /// The draft's attachment references (upstream `draftAttachments`).
     pub draft_attachments: Vec<String>,
+    /// The recorded version numbers the transcript's version markers
+    /// resolve against (upstream `project.history.versions`). The window
+    /// mirrors them from the bridge; a marker whose number is not here
+    /// shows no Current/Restore affordance (ChatView.swift:205).
+    pub versions: Vec<i64>,
+    /// The version the project currently sits on (upstream
+    /// `project.metadata.currentVersion`).
+    pub current_version: Option<i64>,
     /// Per tool id, when its title/preview were last recomputed (upstream
     /// `LiveTool.updatedAt`); absent = never emitted.
     tool_last_emit: HashMap<String, Instant>,
@@ -99,6 +107,8 @@ impl ChatState {
             engine: AgentKind::Claude,
             draft: String::new(),
             draft_attachments: Vec::new(),
+            versions: Vec::new(),
+            current_version: None,
             tool_last_emit: HashMap::new(),
         }
     }
@@ -510,10 +520,64 @@ fn system_row_text(row: SystemRow) -> String {
 pub fn image_attachments(paths: &[String]) -> usize {
     paths
         .iter()
-        .filter(|p| {
-            engine::agent::attachments::is_image(std::path::Path::new(p.as_str()))
-        })
+        .filter(|p| engine::agent::attachments::is_image(std::path::Path::new(p.as_str())))
         .count()
+}
+
+/// The version a summary row marks, if it is a version marker (upstream
+/// `VersionMarker.number(of:)`, ChatView.swift:185-192): the detail field
+/// when it parses as an integer, else a two-word text whose second word
+/// does ("Versione 3"). Any other summary row (the interrupted marker) is
+/// plain caption text.
+pub fn version_number(message: &ChatMessage) -> Option<i64> {
+    if let Some(number) = message.detail.as_deref().and_then(swift_int) {
+        return Some(number);
+    }
+    // Swift's `split(separator: " ")` drops empty subsequences
+    let words: Vec<&str> = message.text.split(' ').filter(|w| !w.is_empty()).collect();
+    match words.as_slice() {
+        [_, number] => swift_int(number),
+        _ => None,
+    }
+}
+
+/// Swift's `Int(String)`: an optional sign then ASCII digits only — no
+/// surrounding whitespace, no leading `+` alone.
+fn swift_int(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// What a version marker row offers at its trailing edge
+/// (ChatView.swift:205-215).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerAffordance {
+    /// The version is not in the history: nothing shows.
+    None,
+    /// The project sits on this version: the "Attuale" caption.
+    Current,
+    /// Any other recorded version: the "Ripristina" link, disabled while
+    /// the project is busy.
+    Restore { enabled: bool },
+}
+
+/// The trailing affordance of the marker for version `number`.
+pub fn marker_affordance(
+    number: i64,
+    versions: &[i64],
+    current: Option<i64>,
+    busy: bool,
+) -> MarkerAffordance {
+    if !versions.contains(&number) {
+        MarkerAffordance::None
+    } else if current == Some(number) {
+        MarkerAffordance::Current
+    } else {
+        MarkerAffordance::Restore { enabled: !busy }
+    }
 }
 
 #[cfg(test)]
@@ -1159,10 +1223,7 @@ mod tests {
             ["/tmp/sketch.png".to_string(), "/tmp/notes.txt".to_string()]
         );
         // the already-staged path is not staged twice
-        state.attach(vec![
-            "/tmp/sketch.png".into(),
-            "/tmp/bracket.jpg".into(),
-        ]);
+        state.attach(vec!["/tmp/sketch.png".into(), "/tmp/bracket.jpg".into()]);
         assert_eq!(
             state.draft_attachments,
             [
@@ -1222,5 +1283,80 @@ mod tests {
         });
         assert_eq!(state.messages[0].id, id);
         assert_eq!(state.messages[0].role, Role::User);
+    }
+
+    fn summary(text: &str, detail: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            id: Uuid::new_v4(),
+            role: Role::Summary,
+            text: text.into(),
+            date: time::OffsetDateTime::now_utc(),
+            tool: None,
+            detail: detail.map(str::to_string),
+            action: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// VersionMarker.number(of:) parity: the detail wins when it is an
+    /// integer; otherwise exactly two words with an integer second word;
+    /// everything else (the interrupted marker, prose) is not a marker.
+    #[test]
+    fn version_number_parses_like_upstream() {
+        assert_eq!(version_number(&summary("Versione 3", Some("3"))), Some(3));
+        // detail beats text
+        assert_eq!(version_number(&summary("Versione 3", Some("7"))), Some(7));
+        // no detail: the two-word text form (pre-detail rows, any locale)
+        assert_eq!(version_number(&summary("Version 12", None)), Some(12));
+        assert_eq!(version_number(&summary("Version  12", None)), Some(12));
+        // a non-integer detail falls through to the text
+        assert_eq!(version_number(&summary("Versione 4", Some("x"))), Some(4));
+        assert_eq!(version_number(&summary("Versione 4", Some(" 4"))), Some(4));
+        // not markers
+        assert_eq!(version_number(&summary("Interrotto", None)), None);
+        assert_eq!(version_number(&summary("Versione tre", None)), None);
+        assert_eq!(version_number(&summary("La versione 3 pronta", None)), None);
+        assert_eq!(version_number(&summary("Versione 3.5", None)), None);
+        assert_eq!(version_number(&summary("Versione +", None)), None);
+    }
+
+    /// The trailing affordance: unknown versions show nothing, the current
+    /// one its caption, every other recorded one a Restore link that is
+    /// disabled while busy.
+    #[test]
+    fn marker_affordance_follows_history_and_busy() {
+        let versions = [1, 2, 3];
+        assert_eq!(
+            marker_affordance(9, &versions, Some(3), false),
+            MarkerAffordance::None
+        );
+        assert_eq!(
+            marker_affordance(3, &versions, Some(3), true),
+            MarkerAffordance::Current
+        );
+        assert_eq!(
+            marker_affordance(2, &versions, Some(3), false),
+            MarkerAffordance::Restore { enabled: true }
+        );
+        assert_eq!(
+            marker_affordance(2, &versions, Some(3), true),
+            MarkerAffordance::Restore { enabled: false }
+        );
+        assert_eq!(
+            marker_affordance(1, &versions, None, false),
+            MarkerAffordance::Restore { enabled: true }
+        );
+    }
+
+    /// A transcript reload keeps the version mirror (the window sets it
+    /// once per history change, not per reload).
+    #[test]
+    fn reload_rows_keeps_version_mirror() {
+        let mut state = ChatState::new(Vec::new());
+        state.versions = vec![1, 2];
+        state.current_version = Some(2);
+        state.reload_rows(vec![summary("Versione 2", Some("2"))]);
+        assert_eq!(state.versions, vec![1, 2]);
+        assert_eq!(state.current_version, Some(2));
     }
 }

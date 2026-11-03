@@ -1,8 +1,9 @@
 //! Inline markdown → neutral IR — the port of upstream `MarkdownText`
 //! (MessageView.swift:80-111). Two stages, exactly upstream's pipeline:
 //!
-//! 1. Split on `` ``` `` — odd parts are code segments (the info-string line
-//!    is dropped, surrounding newlines trimmed, empties dropped);
+//! 1. [`segments`] splits on `` ``` `` — odd parts are code segments (the
+//!    info-string line is dropped, surrounding newlines trimmed, empties
+//!    dropped) that render as code cards;
 //! 2. Everything else parses INLINE-ONLY, the way
 //!    `AttributedString(markdown:, .inlineOnlyPreservingWhitespace)` does:
 //!    no headings, lists, tables, block quotes or breaks are interpreted —
@@ -26,8 +27,8 @@
 //! label's emphasis (`[**b**](u)` is a bold-labeled link upstream) also
 //! collapses: the link style wins because its URL is semantic.
 //!
-//! Pure: no iced/cosmic types, no I/O — the chat view maps [`MdSpan`]s onto
-//! iced spans.
+//! Pure: no iced/cosmic types, no I/O — the chat view maps [`Segment`]s
+//! and [`MdSpan`]s onto iced widgets.
 
 /// How a span of message text is styled. Upstream is
 /// `Text.inlinePresentationIntent` (MessageView.swift:108-110): strongly
@@ -53,27 +54,50 @@ pub struct MdSpan {
     pub style: MdStyle,
 }
 
-/// Parse `md` into inline-styled spans (see the module docs for the
-/// inline-only contract).
-pub fn to_ir(md: &str) -> Vec<MdSpan> {
-    let mut spans = Vec::new();
-    // Upstream `segments` (MessageView.swift:98-106): components separated by
-    // ```; odd components are code, with the info-string line dropped via
-    // drop(while: != "\n").dropFirst() and newlines trimmed, empty → nil.
+/// One block of an assistant message, upstream `segments`
+/// (MessageView.swift:98-106): prose parsed inline-only, or a fenced code
+/// block that renders as a code card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Segment {
+    Text(Vec<MdSpan>),
+    Code(String),
+}
+
+/// Split `md` on `` ``` `` the way upstream does: odd components are code
+/// with the info-string line dropped (`drop(while: != "\n").dropFirst()`);
+/// every component is trimmed of surrounding newlines, and empty ones
+/// disappear.
+pub fn segments(md: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
     for (index, part) in md.split("```").enumerate() {
-        if index % 2 == 1 {
-            let content = match part.find('\n') {
+        let is_code = index % 2 == 1;
+        let content = if is_code {
+            match part.find('\n') {
                 Some(at) => &part[at + 1..],
                 None => "",
-            };
-            let trimmed = content.trim_matches(['\n', '\r']);
-            if !trimmed.is_empty() {
-                push_merged(&mut spans, trimmed.to_string(), MdStyle::Code);
             }
         } else {
-            parse_inline(part, &mut spans);
+            part
+        };
+        let trimmed = content.trim_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
         }
+        out.push(if is_code {
+            Segment::Code(trimmed.to_string())
+        } else {
+            Segment::Text(to_ir(trimmed))
+        });
     }
+    out
+}
+
+/// Parse one prose segment into inline-styled spans (see the module docs
+/// for the inline-only contract). Fences are not interpreted here —
+/// [`segments`] splits them out first.
+pub fn to_ir(md: &str) -> Vec<MdSpan> {
+    let mut spans = Vec::new();
+    parse_inline(md, &mut spans);
     spans
 }
 
@@ -382,38 +406,65 @@ mod tests {
         );
     }
 
-    /// A fence flattens to code-styled paragraph text: the info-string line
-    /// is dropped, surrounding newlines trimmed, the parts either side kept
-    /// with their whitespace (upstream segments, MessageView.swift:98-106).
+    fn seg(md: &str) -> Vec<Segment> {
+        segments(md)
+    }
+
+    fn text(t: &str) -> Segment {
+        Segment::Text(vec![MdSpan {
+            text: t.into(),
+            style: Plain,
+        }])
+    }
+
+    /// A fence becomes its own code segment between the prose segments: the
+    /// info-string line is dropped and every segment is trimmed of the
+    /// newlines around it (upstream segments, MessageView.swift:98-106).
     #[test]
-    fn fence_flattens_to_code_styled_text() {
+    fn fence_splits_into_code_segment() {
         assert_eq!(
-            spans("before\n```rust\nfn main() {}\n```\nafter"),
+            seg("before\n```rust\nfn main() {}\n```\nafter"),
             vec![
-                (Plain, "before\n".into()),
-                (Code, "fn main() {}".into()),
-                (Plain, "\nafter".into()),
+                text("before"),
+                Segment::Code("fn main() {}".into()),
+                text("after"),
             ]
         );
         // fence without an info string
         assert_eq!(
-            spans("```\nplain fence\n```"),
-            vec![(Code, "plain fence".into())]
+            seg("```\nplain fence\n```"),
+            vec![Segment::Code("plain fence".into())]
+        );
+        // multi-line code keeps its inner newlines and indentation
+        assert_eq!(
+            seg("```py\nif x:\n    y()\n```"),
+            vec![Segment::Code("if x:\n    y()".into())]
         );
         // inline fences with no info-string newline drop entirely (the
-        // drop-while rule), so the surrounding text joins — Swift's
-        // components+dropFirst behaves identically
-        assert_eq!(spans("a```x=1```b```y=2```"), vec![(Plain, "ab".into())]);
+        // drop-while rule): the prose either side stays two segments
+        assert_eq!(seg("a```x=1```b```y=2```"), vec![text("a"), text("b")]);
+        // markdown inside prose segments is still parsed inline
+        assert_eq!(
+            seg("**done**\n```\nx\n```"),
+            vec![
+                Segment::Text(vec![MdSpan {
+                    text: "done".into(),
+                    style: Strong,
+                }]),
+                Segment::Code("x".into()),
+            ]
+        );
     }
 
     /// Upstream's drop(while: != "\n").dropFirst(): a code part with no
     /// newline at all is empty after the info-string drop and disappears;
-    /// so does a part that is only newlines.
+    /// so does a part that is only newlines, and so does empty prose.
     #[test]
     fn empty_fence_parts_drop() {
-        assert_eq!(spans("a```oops"), vec![(Plain, "a".into())]);
-        assert_eq!(spans("```\n```"), vec![]);
-        assert_eq!(spans(""), vec![]);
+        assert_eq!(seg("a```oops"), vec![text("a")]);
+        assert_eq!(seg("```\n```"), vec![]);
+        assert_eq!(seg(""), vec![]);
+        assert_eq!(seg("\n\n```\nx\n```\n\n"), vec![Segment::Code("x".into())]);
     }
 
     /// Paragraph breaks and hard-break whitespace are preserved verbatim
