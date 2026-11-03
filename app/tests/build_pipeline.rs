@@ -3,7 +3,8 @@
 //! gates split by path (turn vs build). No network; the interpreter is
 //! the fake_python.py wrapper, the agent (one test) is fake_claude.py.
 
-use app::bridge::{Activity, Bridge, BuildRefusal, Message};
+use app::activity::Activity;
+use app::bridge::{Bridge, BuildRefusal, Message};
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::channel::mpsc::UnboundedReceiver;
 use engine::agent::session::EngineEvent;

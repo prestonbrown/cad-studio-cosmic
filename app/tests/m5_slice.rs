@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use app::activity::Activity;
 use app::bridge::{Bridge, Message as BridgeMessage};
+use app::settings_store::SettingsStore;
 use app::sheets::SetupSheetState;
 use app::windows::project::{Message, ProjectWindow};
 use cosmic::iced::futures::StreamExt;
@@ -223,7 +224,8 @@ async fn startup_check_through_slider_to_restore() {
     let settings = Settings::default();
     let (bridge, mut messages) =
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    let mut window =
+        ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
     let _ = window.view(); // the empty-project frame builds
     assert!(
         !window.bridge.python_ready(),
@@ -453,7 +455,8 @@ async fn failed_build_renders_row_activity_and_fix_action() {
     let settings = Settings::default();
     let (bridge, mut messages) =
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    let mut window =
+        ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
     window.bridge.set_python_state(EnvState::Ready {
         build123d_version: "0.8.1".into(),
     });
@@ -550,7 +553,8 @@ async fn refused_send_keeps_the_draft_in_the_input_bar() {
     let settings = Settings::default();
     let (bridge, mut messages) =
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    let mut window =
+        ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
     // python Unknown — the send gate refuses (the first-run canonical path)
 
     // the user types into the input bar, then attaches a reference
@@ -628,25 +632,22 @@ async fn refused_send_keeps_the_draft_in_the_input_bar() {
 /// The parameters overlay's collapse state persists through the engine
 /// settings (M5 branch review MINOR 1): the seed comes from
 /// `Settings.parameters_collapsed` at open, and the toggle writes back
-/// through the window's settings path (the single-writer law).
+/// through the window's settings store (the single-writer law).
 #[tokio::test(flavor = "multi_thread")]
 async fn parameters_collapse_persists_through_engine_settings() {
     let root = project_with_script();
-    let settings = Settings {
-        parameters_collapsed: true,
-        ..Settings::default()
-    };
+    // a disposable settings file — the real one is the user's
+    let store = SettingsStore::at(root.parent().unwrap().join("settings.json"));
+    store.update(|s| s.parameters_collapsed = true).unwrap();
+    let settings = store.load();
     let (bridge, _messages) =
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
-    let mut window = ProjectWindow::with_bridge(root.clone(), &settings, bridge);
+    let mut window = ProjectWindow::with_bridge(root.clone(), &store, bridge);
     assert!(
         window.viewer.parameters.collapsed,
         "the pane seeds from the persisted setting"
     );
 
-    // a disposable settings file — the real one is the user's
-    let settings_file = root.parent().unwrap().join("settings.json");
-    window.set_settings_path_for_test(settings_file.clone());
     let _ = window.update(Message::Viewer(app::viewer_pane::Message::Parameters(
         app::parameters_view::Message::Collapse(false),
     )));
@@ -654,16 +655,11 @@ async fn parameters_collapse_persists_through_engine_settings() {
         !window.viewer.parameters.collapsed,
         "the pane followed the toggle"
     );
-    let saved = Settings::load(&settings_file).unwrap();
-    assert!(!saved.parameters_collapsed, "the toggle persisted");
+    assert!(!store.load().parameters_collapsed, "the toggle persisted");
 
-    // and a fresh window over the same settings seeds the saved state
+    // and a fresh window over the same store seeds the saved state
     let (bridge2, _messages2) =
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
-    let window2 = ProjectWindow::with_bridge(
-        root.clone(),
-        &Settings::load(&settings_file).unwrap(),
-        bridge2,
-    );
+    let window2 = ProjectWindow::with_bridge(root.clone(), &store, bridge2);
     assert!(!window2.viewer.parameters.collapsed);
 }

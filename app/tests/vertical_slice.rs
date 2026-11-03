@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use app::activity::Activity;
 use app::bridge::{Bridge, Message as BridgeMessage};
+use app::settings_store::SettingsStore;
 use app::windows::project::{Message, ProjectWindow};
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::channel::mpsc::UnboundedReceiver;
@@ -110,22 +111,23 @@ async fn run_slice() -> SliceRun {
     let dump = root.join("argv-dump.jsonl");
     set_env(&root, &dump);
     let settings = Settings::default();
-    let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &settings);
     // the app layer maps the bridge's stream into window messages; the
     // headless driver performs the same mapping by hand (a cosmic Task's
-    // stream is private to the iced runtime)
-    let (bridge, mut messages) = Bridge::launch(settings, root.clone());
+    // stream is private to the iced runtime), over the window's own bridge
+    let (bridge, mut messages) = Bridge::launch(settings.clone(), root.clone());
+    let mut window =
+        ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
     // the send gate refuses until python is verified (the m5 build
     // pipeline's guard); the app's startup check is the real transition and
     // is not this milestone's wiring — the seam m5 left "for T8's startup
     // check" stands in for it
-    bridge.mark_python_ready_for_test();
+    window.bridge.mark_python_ready_for_test();
 
     // the empty-project frame builds (the viewer pane's pure-construction
     // pattern, over the whole window)
     let _ = window.view();
 
-    let _ = bridge.enqueue(PROMPT.to_string(), Vec::new());
+    let _ = window.bridge.enqueue(PROMPT.to_string(), Vec::new());
 
     // one turn, every message folded into the window as it arrives
     let mut events = Vec::new();
@@ -163,7 +165,6 @@ async fn run_slice() -> SliceRun {
         },
         "{events:?}"
     );
-    drop(bridge);
 
     // the watcher observed the fake's writes (bounded poll on the engine's
     // own channel): collect the whole burst — a quiet half-second after the

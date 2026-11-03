@@ -41,7 +41,6 @@ use engine::project::layout::{LayoutNode, PaneKind};
 use engine::project::manifest::Manifest;
 use engine::project::store::Action;
 use engine::project::store::{self, ProjectMetadata};
-use engine::settings::Settings;
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::camera::Preset;
 
@@ -54,6 +53,7 @@ use crate::fl;
 use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
+use crate::settings_store::SettingsStore;
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
@@ -256,9 +256,9 @@ pub enum AppRequest {
 pub struct ProjectWindow {
     pub root: PathBuf,
     pub name: String,
-    /// The settings path every settings write goes through (the
-    /// single-writer law; stored so layout persists can reach it).
-    settings_path: PathBuf,
+    /// The settings every window read and write goes through (the app's
+    /// store; its viewer pane shares it).
+    settings: SettingsStore,
     pub metadata: ProjectMetadata,
     /// The full layout tree (upstream `layout`); the grid shows
     /// [`panes::displayed`].
@@ -396,8 +396,8 @@ impl ProjectWindow {
     /// `output/`, and launch the bridge. Returns the window plus the
     /// bridge's message-stream task — the app maps it into this window's
     /// messages. Must run inside the tokio runtime cosmic runs on.
-    pub fn new(root: PathBuf, settings: &Settings) -> (Self, CosmicTask<bridge::Message>) {
-        let (bridge, bridge_task) = Bridge::new(settings.clone(), root.clone());
+    pub fn new(root: PathBuf, settings: &SettingsStore) -> (Self, CosmicTask<bridge::Message>) {
+        let (bridge, bridge_task) = Bridge::new(settings, root.clone());
         (Self::with_bridge(root, settings, bridge), bridge_task)
     }
 
@@ -407,7 +407,7 @@ impl ProjectWindow {
     /// receiver they can tap) and fold the messages by hand exactly as the
     /// app maps them; the window then reads the same bridge's pipeline the
     /// live app reads.
-    pub fn with_bridge(root: PathBuf, settings: &Settings, bridge: Bridge) -> Self {
+    pub fn with_bridge(root: PathBuf, settings: &SettingsStore, bridge: Bridge) -> Self {
         let mut window = Self::assemble(root, settings, bridge);
         // the overlay opens populated (upstream's reload at open reads the
         // manifest's parameters, ProjectOutput.swift:48-51)
@@ -416,7 +416,10 @@ impl ProjectWindow {
         window
     }
 
-    fn assemble(root: PathBuf, settings: &Settings, bridge: Bridge) -> Self {
+    /// Every setting the window seeds from is read fresh from `store` now,
+    /// so a write any window made before this one opened shows here.
+    fn assemble(root: PathBuf, store: &SettingsStore, bridge: Bridge) -> Self {
+        let settings = &store.load();
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let _ = store::prepare(&root);
         let name = root
@@ -457,7 +460,7 @@ impl ProjectWindow {
 
         let mut window = ProjectWindow {
             name,
-            settings_path: engine::settings::settings_path(),
+            settings: store.clone(),
             metadata,
             layout,
             chat_visible,
@@ -473,10 +476,11 @@ impl ProjectWindow {
             },
             chat_pane: ChatPane::new(),
             viewer: {
-                let mut pane = ViewerPane::new(
+                let mut pane = ViewerPane::new_with_settings(
                     &root,
                     settings.measurement_unit,
                     settings.printer_model.clone(),
+                    store.clone(),
                 );
                 // the overlay's collapse state survives launches
                 // (Settings.parameters_collapsed — the pane's field docs)
@@ -524,12 +528,6 @@ impl ProjectWindow {
         self.activity.is_working()
     }
 
-    /// Test seam: point the settings writer somewhere disposable — the
-    /// default is the user's real settings file.
-    pub fn set_settings_path_for_test(&mut self, path: PathBuf) {
-        self.settings_path = path;
-    }
-
     fn output_dir(&self) -> PathBuf {
         self.root.join("output")
     }
@@ -575,26 +573,6 @@ impl ProjectWindow {
         self.chat.reload_rows(rows);
     }
 
-    /// Apply `edit` to the engine settings file, load-fresh then save —
-    /// the ONE-writer law's one sanctioned window path (the app itself
-    /// saves the engine settings; the AgentMissingSheet custom-path
-    /// precedent).
-    fn persist_settings(&mut self, edit: impl FnOnce(&mut Settings)) {
-        let mut settings = Settings::load(&self.settings_path).unwrap_or_default();
-        edit(&mut settings);
-        if let Err(why) = settings.save(&self.settings_path) {
-            eprintln!("cad-studio: settings save failed: {why}");
-        }
-    }
-
-    /// The engine display name the activity rows interpolate
-    /// (activity::engine_name), resolved fresh from the settings file so a
-    /// mid-conversation engine flip (Ruling 1: the setting is re-read per
-    /// turn) renames the next transition too.
-    fn engine_name(&self) -> &'static str {
-        activity::engine_name(&Settings::load(&self.settings_path).unwrap_or_default())
-    }
-
     /// Apply a structure change (preset switch, pane move): the grid
     /// rebuilds and both the project manifest and the global default
     /// layout persist eagerly (upstream `setLayout` → `persistLayout`).
@@ -603,7 +581,7 @@ impl ProjectWindow {
         self.chat_visible = true;
         self.grid = panes::from_layout(&panes::displayed(&node, true));
         self.save_metadata();
-        let _ = panes::persist_layout(&self.root, &self.settings_path, &node);
+        let _ = panes::persist_layout(&self.root, &self.settings, &node);
     }
 
     /// Rebuild the grid over the current layout (a visibility flip).
@@ -639,7 +617,7 @@ impl ProjectWindow {
             // activity crosses to the window the moment it does
             Message::Viewer(crate::viewer_pane::Message::ParameterCommit(name, value)) => {
                 let _ = self.bridge.set_parameter(&name, value);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 Task::none()
             }
             // the ask-the-agent "Crea animazione" button
@@ -653,7 +631,7 @@ impl ProjectWindow {
                         fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
                         Vec::new(),
                     );
-                    self.set_activity(self.bridge.activity().into());
+                    self.set_activity(self.bridge.activity());
                 }
                 Task::none()
             }
@@ -664,7 +642,9 @@ impl ProjectWindow {
             Message::Viewer(crate::viewer_pane::Message::Parameters(
                 crate::parameters_view::Message::Collapse(collapsed),
             )) => {
-                self.persist_settings(|settings| settings.parameters_collapsed = collapsed);
+                let _ = self
+                    .settings
+                    .update(|settings| settings.parameters_collapsed = collapsed);
                 self.viewer
                     .update(crate::viewer_pane::Message::Parameters(
                         crate::parameters_view::Message::Collapse(collapsed),
@@ -856,7 +836,7 @@ impl ProjectWindow {
         }
         // "Versione N ripristinata" / "Impossibile ripristinare la versione
         // N" either way (Project.swift:319-321)
-        self.set_activity(self.bridge.activity().into());
+        self.set_activity(self.bridge.activity());
         if self.bridge.build_error().is_some() {
             return Task::none();
         }
@@ -900,12 +880,12 @@ impl ProjectWindow {
                     // the pipeline's activity crosses now — the working
                     // status of a send that started, or the refusal's
                     // reason for one that did not (the Build arm's fold)
-                    self.set_activity(self.bridge.activity().into());
+                    self.set_activity(self.bridge.activity());
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
                 let _ = self.bridge.enqueue(suggestion.clone(), Vec::new());
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
             // a marker row's "Ripristina" (VersionMarker.swift)
@@ -974,7 +954,7 @@ impl ProjectWindow {
                     .and_then(|row| row.detail.clone())
                     .unwrap_or_default();
                 let _ = self.bridge.ask_agent_to_fix(&traceback);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
             }
             // the "Configura l'agente…" row action presents the
             // AGENT-MISSING SHEET — upstream ChatView.swift:101-102 sets
@@ -1012,8 +992,8 @@ impl ProjectWindow {
                 attachments,
                 engine,
             } => {
-                // the turn's engine names its rows from here on (the
-                // per-turn re-read's answer, resolved at turn start)
+                // the turn's engine (the engine's own pick) names its rows
+                // from here on
                 self.chat.engine = engine;
                 // the user row joins the visible transcript when the send
                 // actually starts (upstream appends it in `send`, before
@@ -1028,38 +1008,19 @@ impl ProjectWindow {
                     action: None,
                     attachments,
                 });
-                self.set_activity(activity::next(
-                    activity::Signal::TurnStarted,
-                    false,
-                    // msg.engine — NOT a fresh file read: the turn's engine
-                    // is in hand beside us, and re-reading here could label
-                    // this turn's status line with the NEXT turn's engine
-                    // after a picker flip (capstone minor)
-                    engine.display_name(),
-                ));
+                // the bridge classifies every turn transition (it holds the
+                // turn's engine); the window mirrors it
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Event(event) => {
-                // the chat reducer owns the rows; the activity folds after
+                // the chat reducer owns the rows; the activity mirrors after
                 self.chat.apply(&event);
                 match &event {
-                    EngineEvent::ToolStarted { title, .. } => {
-                        self.set_activity(activity::next(
-                            activity::Signal::ToolOpened(&crate::engine_text::tool_title(title)),
-                            false,
-                            self.engine_name(),
-                        ));
-                    }
-                    EngineEvent::TurnFinished(outcome) => {
-                        // upstream agentDidFinish: outputs reload before the
-                        // classification reads them (Project.swift:262-276)
+                    EngineEvent::ToolStarted { .. } => self.set_activity(self.bridge.activity()),
+                    EngineEvent::TurnFinished(_) => {
                         self.refresh_missing_outputs();
-                        let empty = self.missing_outputs.is_empty();
-                        self.set_activity(activity::next(
-                            activity::Signal::TurnFinished(outcome),
-                            empty,
-                            self.engine_name(),
-                        ));
+                        self.set_activity(self.bridge.activity());
                         // a turn end is an established layout save point
                         self.save_metadata();
                     }
@@ -1068,11 +1029,7 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Closed => {
-                self.set_activity(activity::next(
-                    activity::Signal::Closed,
-                    false,
-                    self.engine_name(),
-                ));
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {
@@ -1118,7 +1075,7 @@ impl ProjectWindow {
                 self.sync_version_markers();
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
@@ -1130,7 +1087,7 @@ impl ProjectWindow {
                 // now, not at the next Compila
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
@@ -1214,7 +1171,7 @@ impl ProjectWindow {
                 // failed) activity crosses to the window immediately — the
                 // stop button and the elapsed timer ride it.
                 let _ = self.bridge.start_build(None);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 Task::none()
             }
             Command::Export => {
@@ -2326,7 +2283,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
 
         let before = describe(&window.view_entries());
         // the message a menu CLICK produces (MenuAction::message) — the
@@ -2478,7 +2435,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         // the bridge opens unverified: the app-level check has not landed
         assert!(!window.bridge.python_ready());
         assert!(!window.is_busy());
@@ -2519,7 +2476,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
         // the readiness the app's startup check owns in production —
         // without it the send refuses (the refusal sibling) and nothing
         // rises
@@ -2557,7 +2514,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
 
         // a cancelled save panel is upstream's `guard … else { return }`
         let _ = window.update(Message::ExportChosen(Err("cancelled".into())));
@@ -2595,7 +2552,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
         for activity in [
             Activity::Idle,
             Activity::Working("working".into()),
@@ -2627,7 +2584,7 @@ mod tests {
             r#"{"parameters": {"wall": 3}}"#,
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         // 7.21: the overlay opens populated from the manifest
         assert_eq!(
             window.viewer.parameters.sliders.len(),
@@ -2709,7 +2666,7 @@ mod tests {
             ::time::OffsetDateTime::now_utc(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
         window.bridge.mark_python_ready_for_test();
 
         let _ = window.update(Message::Restore(1));
@@ -2753,7 +2710,7 @@ mod tests {
         metadata.current_version = Some(2);
         store::save_metadata(&root, &metadata).unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         window.bridge.mark_python_ready_for_test();
         assert_eq!(window.chat.versions, vec![1, 2], "mirrored at open");
         assert_eq!(window.chat.current_version, Some(2));
@@ -2811,7 +2768,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         window.bridge.mark_python_ready_for_test();
 
         let model_bare = describe(&window.model_entries());
@@ -2871,10 +2828,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
-        window.set_settings_path_for_test(
-            std::env::temp_dir().join(format!("cad-grip-settings-{}.json", uuid::Uuid::new_v4())),
-        );
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
         window.layout = LayoutNode::chat_leading();
         window.rebuild_grid();
         let _ = window.update(Message::GridResized(Size::new(1320.0, 787.0)));
@@ -2917,7 +2871,7 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root, &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
         window.recent_card = Some(vec![PathBuf::from("/tmp/a")]);
         let _ = window.update(Message::ToggleVersionCard);
         assert!(window.version_card.is_some());
@@ -2962,7 +2916,7 @@ mod tests {
         metadata.current_version = Some(1);
         store::save_metadata(&root, &metadata).unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
 
         // the driver's second record + the engine's mid-turn session write,
         // landing straight on disk BEHIND the window's back: v2 current, a
@@ -3050,7 +3004,7 @@ mod tests {
         )
         .unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &Settings::default());
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         assert!(!window.viewer.comparing);
 
         let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Parameters(

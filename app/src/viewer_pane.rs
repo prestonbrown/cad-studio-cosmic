@@ -140,6 +140,7 @@ use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
+use crate::settings_store::SettingsStore;
 use crate::ui::{
     self, Backdrop, Symbol, Tone,
     icon::icon,
@@ -386,12 +387,12 @@ pub struct ViewerPane {
     /// Compare mode (the shell/T12 owns the comparison): comparing forces
     /// the Assembled layout (ModelViewerState.swift:78-86).
     pub comparing: bool,
-    /// The settings file this pane reads and writes its persisted keys
-    /// through (`parts_layout`, `parts_collapsed`) — the real global path
-    /// in production; tests inject a temp path
+    /// The settings this pane reads and writes its persisted keys through
+    /// (`parts_layout`, `parts_collapsed`) — the project window's store in
+    /// production; tests inject a temp one
     /// ([`ViewerPane::new_with_settings`]) so parallel pane tests never
     /// race the developer's config.
-    pub settings_path: PathBuf,
+    pub settings: SettingsStore,
     /// The effective MODEL aabb of the drawn arrangement (the section
     /// plane's domain; plate-derived in plate view, zero-offset at the
     /// all-hidden fallback).
@@ -453,20 +454,19 @@ impl ViewerPane {
             project_root,
             unit,
             printer_model,
-            engine::settings::settings_path(),
+            SettingsStore::global(),
         )
     }
 
-    /// [`ViewerPane::new`] with an explicit settings path — the pane's
+    /// [`ViewerPane::new`] over an explicit settings store — the pane's
     /// persisted keys (`parts_layout`, `parts_collapsed`) load from it at
-    /// construction and save back through it on change (the ONE-writer
-    /// rule's path half). Tests inject a per-project temp file; production
-    /// goes through [`ViewerPane::new`]'s global default.
+    /// construction and save back through it on change. The project window
+    /// hands in its own store; tests inject a per-project temp file.
     pub fn new_with_settings(
         project_root: &Path,
         unit: MeasurementUnit,
         printer_model: Option<String>,
-        settings_path: PathBuf,
+        settings: SettingsStore,
     ) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let output_dir = project_root.join("output");
@@ -492,7 +492,7 @@ impl ViewerPane {
                 handle
             });
         let empty = Arc::new(PartScene::from_parts(&[], neutral()));
-        let settings = Settings::load(&settings_path).unwrap_or_default();
+        let stored = settings.load();
         let mut pane = ViewerPane {
             scene: ModelScene::new(empty.clone()),
             input: CameraInput::new([0.0; 3], [0.0; 3]),
@@ -504,7 +504,7 @@ impl ViewerPane {
             parameter_drafts: HashMap::new(),
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
-            tools: ViewerTools::new(settings.parts_layout, settings.parts_collapsed),
+            tools: ViewerTools::new(stored.parts_layout, stored.parts_collapsed),
             last_cursor: Point::ORIGIN,
             last_press_primary: false,
             pick_pending: false,
@@ -515,7 +515,7 @@ impl ViewerPane {
             plate_parts: Vec::new(),
             plate_loaded: false,
             plate_scene_cache: None,
-            settings_path,
+            settings,
             effective_aabb: ([0.0; 3], [0.0; 3]),
             frame_aabb: ([0.0; 3], [0.0; 3]),
             grid_aabb: ([0.0; 3], [0.0; 3]),
@@ -1497,16 +1497,11 @@ impl ViewerPane {
         }
     }
 
-    /// Load-modify-save the pane's settings keys through
-    /// [`Self::settings_path`], preserving every other field (the
-    /// ONE-writer rule: this pane owns `parts_layout`/`parts_collapsed`
-    /// only) — the project window's established persist pattern.
+    /// Persist the pane's settings keys through its store (this pane owns
+    /// `parts_layout`/`parts_collapsed` only; the store keeps every other
+    /// field and reports a failed save).
     fn persist_setting(&self, edit: impl FnOnce(&mut Settings)) {
-        let mut settings = Settings::load(&self.settings_path).unwrap_or_default();
-        edit(&mut settings);
-        if let Err(why) = settings.save(&self.settings_path) {
-            eprintln!("cad-studio: settings save failed: {why}");
-        }
+        let _ = self.settings.update(edit);
     }
 
     /// Recompute the missing-output count from the outputs on disk.
@@ -2220,7 +2215,7 @@ mod tests {
             &root,
             MeasurementUnit::Millimeters,
             None,
-            root.join("settings.json"),
+            SettingsStore::at(root.join("settings.json")),
         );
         (root, pane)
     }
@@ -2314,7 +2309,7 @@ mod tests {
             &root,
             MeasurementUnit::Millimeters,
             None,
-            root.join("settings.json"),
+            SettingsStore::at(root.join("settings.json")),
         );
         assert!(
             pane.study.is_some(),
@@ -2805,7 +2800,7 @@ mod tests {
         assert_eq!(pane.tools.layout, PartsLayout::Plate);
         // persisted — through the pane's injected TEMP settings path, never the
         // developer's real global file (parallel pane tests would race it)
-        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        let s = pane.settings.load();
         assert_eq!(
             s.parts_layout,
             PartsLayout::Plate,
@@ -3044,7 +3039,7 @@ mod tests {
         );
         // the parts drawer's chevron persists through the pane's path
         let _ = pane.update(Message::TogglePartsCollapsed);
-        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        let s = pane.settings.load();
         assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
     }
 

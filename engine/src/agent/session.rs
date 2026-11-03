@@ -51,6 +51,13 @@
 //! fresh. Auth failures and everything else end the turn where it stands
 //! (no retry); a cancel during the retry wait ends the dance with no
 //! further spawn.
+//!
+//! A turn's settings, the engine among them, are decided once when the turn
+//! starts ([`Session::turn_settings`]) and every attempt of its dance runs
+//! under them: the busy retry resumes the same engine's session even when
+//! the picker flips during the wait. The decision rides the handle
+//! ([`TurnHandle::engine`]), so a caller names the turn by the engine that
+//! actually runs it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
@@ -85,7 +92,7 @@ use crate::settings::Settings;
 /// from the environment and would treat a probe invocation as a turn. It is
 /// still held to the locator's executable-file check, so an override whose
 /// file is gone resolves to nothing, as a vanished install does.
-const TEST_CLAUDE_ENV: &str = "CAD_TEST_CLAUDE";
+pub const TEST_CLAUDE_ENV: &str = "CAD_TEST_CLAUDE";
 
 /// The log-name timestamp (AgentSession.swift:325-333). Upstream formats local
 /// time; the port pins UTC because a process-local offset is unavailable once
@@ -204,9 +211,16 @@ pub struct TurnHandle {
     pub events: mpsc::Receiver<EngineEvent>,
     cancel: watch::Sender<bool>,
     pid: Arc<Mutex<Option<u32>>>,
+    engine: AgentKind,
 }
 
 impl TurnHandle {
+    /// The engine every attempt of this turn runs, decided when the turn
+    /// started.
+    pub fn engine(&self) -> AgentKind {
+        self.engine
+    }
+
     /// Request interruption: SIGINT now, SIGTERM after 3 s. Idempotent; a
     /// cancel that races the spawn still lands once the pid is known.
     pub fn cancel(&self) {
@@ -222,10 +236,11 @@ impl TurnHandle {
 /// One agent session: the settings and system-prompt template every turn of
 /// a project runs with. The turn itself is stateless across calls — resume
 /// state lives in the project's metadata, re-read per turn.
+#[derive(Clone)]
 pub struct Session {
     settings: Settings,
-    /// The settings file each attempt re-reads when attached (upstream
-    /// reads UserDefaults live); `None` = the startup snapshot decides, the
+    /// The settings file each turn re-reads when attached (upstream reads
+    /// UserDefaults live); `None` = the startup snapshot decides, the
     /// embedder/test seam.
     settings_file: Option<PathBuf>,
     system_template: String,
@@ -258,13 +273,27 @@ impl Session {
         self
     }
 
-    /// Attaches the settings file each attempt re-reads its settings from
-    /// (the production path — the bridge hands the engine settings path in).
+    /// Attaches the settings file each turn re-reads its settings from (the
+    /// production path — the bridge hands the engine settings path in).
     /// Without it the startup snapshot decides every turn, which is what
     /// embedders that own their settings want.
     pub fn with_settings_file(mut self, path: PathBuf) -> Self {
         self.settings_file = Some(path);
         self
+    }
+
+    /// The settings the next turn runs with (Ruling 1, M8 plan): upstream's
+    /// `run()` re-reads every setting live, so flipping the engine picker
+    /// mid-conversation changes the engine of the NEXT turn while the
+    /// stored session id stays engine-blind. With a settings file attached
+    /// ([`Session::with_settings_file`]) this re-reads it, falling back to
+    /// the startup snapshot when it cannot load; a missing file reads as a
+    /// fresh install (`Settings::load`'s rule).
+    pub fn turn_settings(&self) -> Settings {
+        match &self.settings_file {
+            Some(path) => Settings::load(path).unwrap_or_else(|_| self.settings.clone()),
+            None => self.settings.clone(),
+        }
     }
 
     /// Wire one turn's plumbing (event channel, cancel switch, pid cell) and
@@ -273,11 +302,12 @@ impl Session {
         let (events_tx, events) = mpsc::channel(256);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let pid = Arc::new(Mutex::new(None));
+        let settings = self.turn_settings();
+        let engine = settings.agent_kind();
         let ctx = TurnCtx {
             root: root.to_path_buf(),
             req: req.clone(),
-            settings: self.settings.clone(),
-            settings_file: self.settings_file.clone(),
+            settings,
             system_template: self.system_template.clone(),
             retry_delay: self.retry_delay,
             events: events_tx,
@@ -289,6 +319,7 @@ impl Session {
                 events,
                 cancel: cancel_tx,
                 pid,
+                engine,
             },
             ctx,
         )
@@ -317,12 +348,13 @@ impl Session {
 }
 
 /// Everything one driver task owns; each attempt of the dance reuses the
-/// plumbing while re-reading the project state it needs.
+/// plumbing and the turn's settings while re-reading the project state it
+/// needs.
 struct TurnCtx {
     root: PathBuf,
     req: TurnRequest,
+    /// The turn's settings, decided at its start ([`Session::turn_settings`]).
     settings: Settings,
-    settings_file: Option<PathBuf>,
     system_template: String,
     retry_delay: Duration,
     events: mpsc::Sender<EngineEvent>,
@@ -341,9 +373,7 @@ struct TurnDriver {
 
 /// Per-turn translation state (the mutable half of AgentSession).
 struct TurnState {
-    /// The engine this attempt runs, decided per attempt from the settings
-    /// (upstream resets `engine = AgentEngine.current` at the top of every
-    /// `run()`, AgentSession.swift:31).
+    /// The engine this attempt runs: the turn's ([`TurnHandle::engine`]).
     engine: AgentKind,
     /// The codex line translator, reset per attempt like upstream's
     /// (`translator = CodexTranslator()`); unused on claude attempts.
@@ -496,12 +526,10 @@ async fn full_dance(mut ctx: TurnCtx) {
 /// One spawned attempt: setup, spawn, translate, tee, persist, classify —
 /// everything a single upstream `run()` does short of emitting a terminal
 /// event. `resume_sid` is the id the argv resumes (None = fresh); the
-/// metadata the attempt persists into is re-read from disk here. The
-/// attempt's settings — engine included — are re-read from the attached
-/// settings file, falling back to the startup snapshot
-/// ([`Session::with_settings_file`]).
+/// metadata the attempt persists into is re-read from disk here; the
+/// settings, engine included, are the turn's.
 async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
-    let settings = attempt_settings(ctx);
+    let settings = ctx.settings.clone();
     let engine = settings.agent_kind();
     let mut driver = TurnDriver {
         root: ctx.root.clone(),
@@ -656,21 +684,6 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
 /// The project's stored metadata, or a fresh document when none loads.
 fn stored_metadata(root: &Path) -> ProjectMetadata {
     load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION")))
-}
-
-/// The settings this attempt runs with (Ruling 1, M8 plan): upstream's
-/// `run()` re-reads every setting live at the top of each turn — flipping
-/// the engine picker mid-conversation changes the engine of the NEXT turn
-/// while the stored session id stays engine-blind (upstream's settings
-/// FOOTER says existing projects keep their engine; the code disagrees, and
-/// the code is what ports). When a settings file is attached
-/// ([`Session::with_settings_file`]) each attempt re-reads it, falling back
-/// to the startup snapshot when it cannot load.
-fn attempt_settings(ctx: &TurnCtx) -> Settings {
-    match &ctx.settings_file {
-        Some(path) => Settings::load(path).unwrap_or_else(|_| ctx.settings.clone()),
-        None => ctx.settings.clone(),
-    }
 }
 
 /// Upstream's classification text: the result line's text joined with the

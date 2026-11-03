@@ -11,9 +11,7 @@ fn main() -> cosmic::iced::Result {
     // upstream's `AppleLanguages` next-launch semantics: select before any
     // fl! string resolves, never again (the settings window writes the
     // field; a restart picks it up).
-    let language = engine::settings::Settings::load(&engine::settings::settings_path())
-        .ok()
-        .and_then(|settings| settings.language);
+    let language = app::settings_store::SettingsStore::global().load().language;
     app::localize::localize_with_override(language.as_deref());
     let settings = cosmic_app::Settings::default().size(Size::new(
         app::windows::welcome::ACTIONS_WIDTH + app::windows::welcome::RECENTS_WIDTH,
