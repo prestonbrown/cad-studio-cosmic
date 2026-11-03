@@ -24,6 +24,7 @@ use cosmic::iced::{Length, Subscription, Task};
 use cosmic::widget::{Column, container, popover, text};
 use cosmic::{Action, Application, Element};
 use engine::agent::locator::{self, AgentKind};
+use engine::agent::session::{EngineEvent, TurnOutcome};
 use engine::project::store;
 use engine::python::env::{
     EnvEvent, EnvHandle, EnvState, check, command_probe, reinstall, streaming_spawn, venv_dir,
@@ -740,8 +741,23 @@ impl CadStudio {
             };
             return self.update_welcome(translated);
         }
-        let task = project.update(msg).map(move |m| Message::Project(id, m));
-        task.map(Action::App)
+        // a turn that found no agent executable presents the agent-missing
+        // sheet beside the window's own ConfigureClaude row
+        // (AgentSession.swift:41-50 `locator.isMissingSheetPresented = true`)
+        let agent_missing = matches!(
+            &msg,
+            project::Message::Bridge(crate::bridge::Message::Event(EngineEvent::TurnFinished(
+                TurnOutcome::AgentMissing
+            )))
+        );
+        let task = project
+            .update(msg)
+            .map(move |m| Message::Project(id, m))
+            .map(Action::App);
+        if agent_missing {
+            return Task::batch([task, self.update(Message::AgentLocated(false))]);
+        }
+        task
     }
 
     fn update_agent_sheet(&mut self, msg: sheets::AgentMessage) -> Task<Action<Message>> {
@@ -2055,6 +2071,38 @@ mod shell_behavior {
             f.app.windows.get(&f.welcome),
             Some(WindowKind::Welcome)
         ));
+    }
+
+    /// 3.9: a turn that finds no agent executable presents the
+    /// agent-missing sheet with its missing line (AgentSession.swift:41-50);
+    /// an ordinary failed turn does not.
+    #[tokio::test]
+    async fn an_agent_missing_turn_presents_the_agent_sheet() {
+        let mut f = fixture();
+        let project = open_real_project(&mut f, "Staffa");
+        let finished = |outcome| {
+            Message::Project(
+                project,
+                project::Message::Bridge(crate::bridge::Message::Event(EngineEvent::TurnFinished(
+                    outcome,
+                ))),
+            )
+        };
+        let _ = f.app.update(finished(TurnOutcome::StartFailed {
+            error: "exec".to_string(),
+        }));
+        assert!(
+            f.app.agent_missing.is_none(),
+            "a start failure is not a missing agent"
+        );
+        let _ = f.app.update(finished(TurnOutcome::AgentMissing));
+        assert!(
+            f.app
+                .agent_missing
+                .as_ref()
+                .is_some_and(|sheet| sheet.last_verified_missing),
+            "the sheet presents with its missing line"
+        );
     }
 
     /// Only bare Return / Esc are sheet keys.
