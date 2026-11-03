@@ -25,9 +25,9 @@
 
 use std::hash::Hasher;
 
-use engine::parsing::{Part, TriangleColor};
+use engine::parsing::{Box3, Part, TriangleColor};
 
-use super::Vertex;
+use super::{PartPose, Vertex};
 
 /// Upstream's neutral face color for uncolored triangles, dark appearance
 /// (ModelViewer.swift:401-403: `NSColor(red: 0.62, green: 0.70, blue:
@@ -242,40 +242,23 @@ impl PartScene {
                         .map(move |pos| Vertex { pos, normal, color })
                 })
                 .collect::<Vec<_>>();
-            let mut mn = [f32::MAX; 3];
-            let mut mx = [f32::MIN; 3];
-            for v in &vertices {
-                for a in 0..3 {
-                    mn[a] = mn[a].min(v.pos[a]);
-                    mx[a] = mx[a].max(v.pos[a]);
-                }
-            }
+            let bounds = Box3::from_points(vertices.iter().map(|v| v.pos)).unwrap_or(Box3::ZERO);
             staged.push(GpuPart {
                 name: part.name.clone(),
                 vertices,
                 edges: Vec::new(), // set after the pin below
-                aabb_min: mn,
-                aabb_max: mx,
+                aabb_min: bounds.min,
+                aabb_max: bounds.max,
                 content_hash: 0, // set after the pin below
             });
         }
-        let (mut scene_min, mut scene_max) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for part in &staged {
-            for a in 0..3 {
-                scene_min[a] = scene_min[a].min(part.aabb_min[a]);
-                scene_max[a] = scene_max[a].max(part.aabb_max[a]);
-            }
-        }
-        if staged.is_empty() {
-            // an empty scene renders nothing; keep the aabb finite for the
-            // camera math (the pin of a degenerate box is zero anyway)
-            return Self {
-                parts: staged,
-                aabb_min: [0.0; 3],
-                aabb_max: [0.0; 3],
-                pin,
-            };
-        }
+        // a part with no triangles stages a zero box but bounds nothing
+        let scene_box = Box3::union_all(
+            staged
+                .iter()
+                .filter(|p| !p.vertices.is_empty())
+                .map(|p| Box3::new(p.aabb_min, p.aabb_max)),
+        );
         // The pin is baked into the staged vertices — a later part growing
         // past the union aabb moves `from_parts`'s pin, and the content
         // hashes (computed after) pick that up so residency never serves a
@@ -291,20 +274,24 @@ impl PartScene {
                 part.aabb_max[a] += pin[a];
             }
         }
-        for a in 0..3 {
-            scene_min[a] += pin[a];
-            scene_max[a] += pin[a];
-        }
+        // an empty scene renders nothing; its box stays finite for the
+        // camera math
+        let scene_box = scene_box.map_or(Box3::ZERO, |b| b.translated(pin));
         for part in &mut staged {
             part.edges = undirected_edges(&part.vertices);
             part.content_hash = content_hash(&part.vertices);
         }
         Self {
             parts: staged,
-            aabb_min: scene_min,
-            aabb_max: scene_max,
+            aabb_min: scene_box.min,
+            aabb_max: scene_box.max,
             pin,
         }
+    }
+
+    /// The staged (pinned scene) bounds as a [`Box3`].
+    pub fn aabb(&self) -> Box3 {
+        Box3::new(self.aabb_min, self.aabb_max)
     }
 
     /// MODEL -> this scene's pinned SCENE: the remap plus the recorded
@@ -323,38 +310,79 @@ impl PartScene {
         ];
         [s[0], -s[2], s[1]]
     }
+
+    /// A MODEL box as this scene's pinned SCENE box: the corners cross
+    /// [`PartScene::to_scene`] and re-fold, since the remap negates an axis.
+    pub fn model_box_to_scene(&self, model: Box3) -> Box3 {
+        Box3::from_points([self.to_scene(model.min), self.to_scene(model.max)]).expect("two points")
+    }
+
+    /// A pinned SCENE box as a MODEL box: [`PartScene::model_box_to_scene`]
+    /// inverted.
+    pub fn scene_box_to_model(&self, scene: Box3) -> Box3 {
+        Box3::from_points([self.to_model(scene.min), self.to_model(scene.max)]).expect("two points")
+    }
+
+    /// The pose that moves a staged part by a MODEL-space `offset` (an
+    /// arrangement push): the offset is a direction, so it takes the remap
+    /// but not the pin.
+    pub fn model_offset_pose(offset: [f32; 3]) -> PartPose {
+        Some(glam::Mat4::from_translation(glam::Vec3::from_array(remap(offset))).to_cols_array_2d())
+    }
 }
 
 /// The floor pin (ModelViewer.swift:167-168) over the remapped union aabb:
 /// `(-center.x, -min.y, -center.z)` — the model floor at scene y=0, x/z
 /// centered on the origin. Zero for an empty scene.
 fn floor_pin(parts: &[Part]) -> [f32; 3] {
-    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut any = false;
-    for part in parts {
-        for &p in &part.positions {
-            let p = remap(p);
-            any = true;
-            for a in 0..3 {
-                mn[a] = mn[a].min(p[a]);
-                mx[a] = mx[a].max(p[a]);
-            }
-        }
-    }
-    if !any {
+    let remapped = parts
+        .iter()
+        .flat_map(|p| p.positions.iter().map(|&q| remap(q)));
+    let Some(b) = Box3::from_points(remapped) else {
         return [0.0; 3];
-    }
-    let mut pin = [0.0f32; 3];
-    for a in 0..3 {
-        pin[a] = -(mn[a] + mx[a]) / 2.0;
-    }
-    pin[1] = -mn[1];
-    pin
+    };
+    let c = b.center();
+    [-c[0], -b.min[1], -c[2]]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The box crossings agree with the point crossings, re-fold the
+    /// negated axis, and invert each other.
+    #[test]
+    fn box_crossings_match_to_scene_and_roundtrip() {
+        let part = Part {
+            name: "p".into(),
+            positions: vec![[-10.0, -6.0, 0.0], [10.0, 6.0, 20.0], [0.0, 0.0, 5.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(&[part], NEUTRAL);
+        let model = Box3::new([-10.0, -6.0, 0.0], [10.0, 6.0, 20.0]);
+        let s = scene.model_box_to_scene(model);
+        // scene x = model x, scene y = model z, scene z = -model y; pinned
+        // floor at y 0, x/z centered
+        assert_eq!(s, Box3::new([-10.0, 0.0, -6.0], [10.0, 20.0, 6.0]));
+        assert_eq!(s, scene.aabb(), "the staged box is the model box crossed");
+        assert_eq!(scene.scene_box_to_model(s), model);
+    }
+
+    /// An arrangement offset moves a part by the remapped direction alone.
+    #[test]
+    fn model_offset_pose_remaps_without_the_pin() {
+        let m =
+            glam::Mat4::from_cols_array_2d(&PartScene::model_offset_pose([1.0, 2.0, 3.0]).unwrap());
+        assert_eq!(
+            m.transform_point3(glam::Vec3::ZERO),
+            glam::vec3(1.0, 3.0, -2.0)
+        );
+        assert_eq!(
+            m.transform_vector3(glam::Vec3::X),
+            glam::Vec3::X,
+            "pure translation"
+        );
+    }
 
     /// The neutrals are upstream's NSColor literals decoded to linear —
     /// staging the raw literals as linear renders them visibly washed out.

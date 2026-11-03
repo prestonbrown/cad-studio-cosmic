@@ -12,7 +12,7 @@ use iced::{Rectangle, mouse};
 
 use super::{
     Camera, Frame, GridMesh, MarkerMesh, MeshPipeline, Options, PartAppearance, PartPose,
-    PartScene, camera, grid,
+    PartScene, SectionPlane, camera, grid,
 };
 
 /// Identity poses for every slot of an n-part scene — the assembled
@@ -90,12 +90,11 @@ pub struct ModelScene {
     /// (upstream's pane re-sends the bed every update; a mesh swap alone
     /// never clears it).
     pub bed: Option<[f64; 2]>,
-    /// The section plane the drawn camera carries: `Some((scene axis, scene
-    /// position))` turns the mesh shader's discard and the cap quad on;
-    /// `None` draws whole. The pane's arrangement wiring (M6 T10) computes
-    /// it from the effective aabb and the live scene pin; the adapter only
+    /// The section plane the frame carries: `Some` turns the mesh shader's
+    /// discard and the cap quad on; `None` draws whole. The pane builds it
+    /// with [`crate::tools::section::pinned_plane`]; the adapter only
     /// carries it.
-    section: Option<(u32, f32)>,
+    section: Option<SectionPlane>,
     /// The aabb [`ModelScene::grid`] was last built against — the change
     /// check [`ModelScene::set_overlay_frame`] compares against. Normally
     /// the staged scene's own; the pane's frozen stamp (T10) writes
@@ -187,7 +186,8 @@ impl ModelScene {
             grid: self.show_grid.then(grid),
             markers: self.markers.clone(),
             ghost: self.ghost.clone(),
-            camera: self.camera(aspect),
+            camera: Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect),
+            section: self.section,
             options: Options {
                 wireframe: self.wireframe,
                 msaa: self.msaa,
@@ -284,41 +284,22 @@ impl ModelScene {
         self.distance = distance;
     }
 
-    /// Store the section plane the camera uniform carries (the pane's M6
-    /// seam): `Some((axis, pos))` in THIS scene's pinned coordinates — the
-    /// caller adds the pin, `section::scene_plane`'s value is raw — enables
-    /// the mesh discard and the cap; `None` draws whole.
-    pub fn set_section(&mut self, section: Option<(u32, f32)>) {
+    /// Store the section plane the frame carries, in THIS scene's pinned
+    /// coordinates (build it with [`crate::tools::section::pinned_plane`]);
+    /// `None` draws whole.
+    pub fn set_section(&mut self, section: Option<SectionPlane>) {
         self.section = section;
     }
 
-    fn camera(&self, aspect: f32) -> Camera {
-        let mut camera = Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect);
-        if let Some((axis, pos)) = self.section {
-            camera.section_axis = axis;
-            camera.section_pos = pos;
-            camera.section_enable = 1.0;
-        }
-        camera
-    }
-
-    /// The last-set section tuple — the discard plane the camera uniform
-    /// carries. Production read: the app's measure pick honors the same
+    /// The last-set section plane. The app's measure pick honors the same
     /// plane so a click never answers through cut-away geometry.
-    pub fn section(&self) -> Option<(u32, f32)> {
+    pub fn section(&self) -> Option<SectionPlane> {
         self.section
-    }
-
-    /// The last-set section tuple (test observation — the app's pane tests
-    /// read the uniform input through this seam; kept `pub`, not
-    /// `#[cfg(test)]`, because those tests sit in the app crate).
-    pub fn section_for_tests(&self) -> Option<(u32, f32)> {
-        self.section()
     }
 
     /// The grid's content identity: its content hash and build half-extent
     /// (test observation — an explode/hidden sweep must leave both alone;
-    /// same cross-crate seam note as [`ModelScene::section_for_tests`]).
+    /// kept `pub` because those tests sit in the app crate).
     pub fn grid_identity_for_tests(&self) -> (u64, f32) {
         (self.grid.content_hash, self.grid.half_extent)
     }
@@ -362,6 +343,7 @@ pub struct ModelPrimitive {
     markers: Option<Arc<MarkerMesh>>,
     ghost: Option<Arc<PartScene>>,
     camera: Camera,
+    section: Option<SectionPlane>,
     options: Options,
 }
 
@@ -377,14 +359,12 @@ impl shader::Primitive for ModelPrimitive {
         viewport: &Viewport,
     ) {
         let size = viewport.physical_size();
-        // effective_aabb defaults to the staged scene's own — the
-        // arrangement wiring replaces it with the arranged/plate-aware box
         let frame = Frame {
             camera: &self.camera,
             scene: &self.scene,
             poses: &self.poses,
             appearances: &self.appearances,
-            effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
+            section: self.section,
             grid: self.grid.as_deref(),
             markers: self.markers.as_deref(),
             ghost: self.ghost.as_deref(),
@@ -522,11 +502,11 @@ mod tests {
         );
     }
 
-    /// `set_section` is the pane's seam onto the camera uniform: the tuple
-    /// lands on the drawn camera's section fields (enable included), and
-    /// `None` restores sectioning-off.
+    /// `set_section` is the pane's seam onto the frame: the plane lands on
+    /// the drawn primitive verbatim (cap box included), and `None` restores
+    /// sectioning-off.
     #[test]
-    fn set_section_drives_the_camera_uniform() {
+    fn set_section_drives_the_primitive() {
         let scene = tri_scene(1.0);
         let mut model = ModelScene::new(scene);
         let bounds = Rectangle {
@@ -535,18 +515,19 @@ mod tests {
             width: 800.0,
             height: 600.0,
         };
-        let camera = |m: &ModelScene| {
-            shader::Program::<()>::draw(m, &(), mouse::Cursor::Unavailable, bounds).camera
+        let drawn = |m: &ModelScene| {
+            shader::Program::<()>::draw(m, &(), mouse::Cursor::Unavailable, bounds).section
         };
-        assert_eq!(camera(&model).section_enable, 0.0, "off by default");
-        model.set_section(Some((1, 7.5)));
-        assert_eq!(model.section_for_tests(), Some((1, 7.5)));
-        let drawn = camera(&model);
-        assert_eq!(drawn.section_axis, 1);
-        assert!((drawn.section_pos - 7.5).abs() < 1e-6);
-        assert!(drawn.section_enable > 0.5);
+        assert_eq!(drawn(&model), None, "off by default");
+        let plane = SectionPlane {
+            axis: crate::render::SceneAxis::Y,
+            pos: 7.5,
+            cap: crate::render::Box3::new([-9.0, 0.0, -9.0], [9.0, 40.0, 9.0]),
+        };
+        model.set_section(Some(plane));
+        assert_eq!(model.section(), Some(plane));
+        assert_eq!(drawn(&model), Some(plane));
         model.set_section(None);
-        assert_eq!(model.section_for_tests(), None);
-        assert_eq!(camera(&model).section_enable, 0.0, "None disables");
+        assert_eq!(drawn(&model), None, "None disables");
     }
 }

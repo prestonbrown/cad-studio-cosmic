@@ -119,17 +119,19 @@ use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
 use cosmic::widget::{Column, Row, Space, container, mouse_area, text};
-use engine::parsing::Part;
 use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
+use engine::parsing::{Box3, Part};
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::markers;
-use viewer::render::{ModelScene, PartAppearance, PartPose, PartScene, camera, camera::Preset};
+use viewer::render::{
+    ModelScene, PartAppearance, PartPose, PartScene, SectionPlane, camera, camera::Preset,
+};
 use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::picking;
 use viewer::tools::section::{self, SectionAxis};
@@ -395,15 +397,15 @@ pub struct ViewerPane {
     /// The effective MODEL aabb of the drawn arrangement (the section
     /// plane's domain; plate-derived in plate view, zero-offset at the
     /// all-hidden fallback).
-    pub effective_aabb: ([f32; 3], [f32; 3]),
+    pub effective_aabb: Box3,
     /// The scene-space aabb of what is drawn — the re-frame input
     /// ([`ViewerPane::set_layout`] pushes it as the forced framing
     /// reference).
-    pub frame_aabb: ([f32; 3], [f32; 3]),
+    pub frame_aabb: Box3,
     /// The FROZEN grid box (MODEL): captured only when `grid_stamp` moves,
     /// re-fed verbatim afterwards — upstream rebuilds the grid on sceneID,
     /// never on explode/hidden (ModelViewer.swift:165-170).
-    pub grid_aabb: ([f32; 3], [f32; 3]),
+    pub grid_aabb: Box3,
     /// The bed the overlay was last stamped with (plate layout only).
     pub grid_bed: Option<[f64; 2]>,
     /// (scene Arc identity, effective layout, plate_loaded) — the
@@ -516,9 +518,9 @@ impl ViewerPane {
             plate_loaded: false,
             plate_scene_cache: None,
             settings_path,
-            effective_aabb: ([0.0; 3], [0.0; 3]),
-            frame_aabb: ([0.0; 3], [0.0; 3]),
-            grid_aabb: ([0.0; 3], [0.0; 3]),
+            effective_aabb: Box3::ZERO,
+            frame_aabb: Box3::ZERO,
+            grid_aabb: Box3::ZERO,
             grid_bed: None,
             grid_stamp: None,
             last_row_click: None,
@@ -622,7 +624,7 @@ impl ViewerPane {
                 // frame_aabb without touching the framing reference, so
                 // re-point it here rather than frame whatever a layout
                 // change or scene swap last pushed
-                self.input.set_framing_reference(self.frame_aabb);
+                self.input.set_framing_reference(self.frame_aabb.pair());
                 self.input.fit();
                 self.sync_pose();
             }
@@ -1303,9 +1305,8 @@ impl ViewerPane {
             swapped = true;
         }
 
-        // Poses: MODEL offsets through the staging remap (x, z, -y) —
-        // parts.rs' `remap`, restated at the app boundary (crate-private in
-        // the viewer) — as translations; hidden slots drop out of the draw.
+        // Poses: MODEL offsets as scene translations; hidden slots drop out
+        // of the draw.
         let identity = || Some(glam::Mat4::IDENTITY.to_cols_array_2d());
         let poses: Vec<PartPose> = if draw_plate {
             // the plate scene stages pre-arranged geometry
@@ -1319,12 +1320,12 @@ impl ViewerPane {
                 .offsets
                 .iter()
                 .zip(&arranged.visible)
-                .map(|(offset, visible)| {
-                    visible.then(|| {
-                        let scene_offset = [offset[0], offset[2], -offset[1]];
-                        glam::Mat4::from_translation(glam::Vec3::from_array(scene_offset))
-                            .to_cols_array_2d()
-                    })
+                .map(|(&offset, visible)| {
+                    if *visible {
+                        PartScene::model_offset_pose(offset)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -1337,7 +1338,8 @@ impl ViewerPane {
         // assembled model — the plane must not keep the exploded aabb);
         // the visible-only arrangement otherwise.
         let eff = if draw_plate {
-            self.plate_scene_aabb_as_model()
+            let scene = &self.scene.scene;
+            scene.scene_box_to_model(scene.aabb())
         } else if all_hidden {
             arrangement::effective_model_aabb(
                 &self.model_parts,
@@ -1361,16 +1363,16 @@ impl ViewerPane {
         };
         self.effective_aabb = eff;
         self.frame_aabb = if draw_plate {
-            (self.scene.scene.aabb_min, self.scene.scene.aabb_max)
+            self.scene.scene.aabb()
         } else {
-            self.scene_aabb_of(framing_eff)
+            self.scene.scene.model_box_to_scene(framing_eff)
         };
         if swapped {
             // replace_scene re-derived the framing fields against the new
             // scene; `input` owns the pose, so re-assert it — and adopt the
             // drawn box as the framing reference outright (the plate swap
             // is not a mesh reload; no >50 % gate applies).
-            self.input.set_framing_reference(self.frame_aabb);
+            self.input.set_framing_reference(self.frame_aabb.pair());
             self.sync_pose();
             self.restage_ghost();
         }
@@ -1393,26 +1395,20 @@ impl ViewerPane {
         self.grid_bed = (layout == PartsLayout::Plate)
             .then_some(self.manifest.as_ref().and_then(|m| m.bed))
             .flatten();
-        self.scene
-            .set_overlay_frame(self.scene_aabb_of(self.grid_aabb), self.grid_bed);
+        self.scene.set_overlay_frame(
+            self.scene.scene.model_box_to_scene(self.grid_aabb).pair(),
+            self.grid_bed,
+        );
 
-        // The section uniform: the raw plane over the effective MODEL aabb,
-        // then the LIVE scene pin added by mapping a plane point through
-        // to_scene (scene_plane's value is pre-pin — exact only for
-        // pin-symmetric scenes; the golden fixture is not).
+        // The section: the plane over the effective MODEL box in the live
+        // scene's pinned frame, its cap spanning that box.
         let section_plane = self.tools.sectioning.then(|| {
-            let (axis, raw) =
-                section::scene_plane(self.tools.section_axis, self.tools.section_position, eff);
-            // a MODEL point whose pinned scene coordinate along `axis` is
-            // exactly raw + the pin's component on that axis (scene x =
-            // model x, scene y = model z, scene z = -model y)
-            let model_point = match axis {
-                0 => [raw, 0.0, 0.0],
-                1 => [0.0, 0.0, raw],
-                _ => [0.0, -raw, 0.0],
-            };
-            let pinned = self.scene.scene.to_scene(model_point)[axis as usize];
-            (axis, pinned)
+            section::pinned_plane(
+                self.tools.section_axis,
+                self.tools.section_position,
+                eff,
+                &self.scene.scene,
+            )
         });
         self.scene.set_section(section_plane);
     }
@@ -1439,32 +1435,6 @@ impl ViewerPane {
             .collect()
     }
 
-    /// The plate scene's staged aabb mapped back to MODEL (`to_model`): the
-    /// effective box while the plate is the drawn geometry. The y axis
-    /// negates under the inverse remap, so min/max re-fold per axis.
-    fn plate_scene_aabb_as_model(&self) -> ([f32; 3], [f32; 3]) {
-        let scene = &self.scene.scene;
-        let a = scene.to_model(scene.aabb_min);
-        let b = scene.to_model(scene.aabb_max);
-        (
-            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
-            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
-        )
-    }
-
-    /// A MODEL-space box as this scene's pinned SCENE box — the
-    /// [`model_size`] inverse: the remap permutes extents (scene x = model
-    /// x span, scene y = model z span, scene z = model y span, y negated)
-    /// and the pin translates every axis.
-    fn scene_aabb_of(&self, model: ([f32; 3], [f32; 3])) -> ([f32; 3], [f32; 3]) {
-        let pin = self.scene.scene.pin;
-        let (mn, mx) = model;
-        (
-            [mn[0] + pin[0], mn[2] + pin[1], -mx[1] + pin[2]],
-            [mx[0] + pin[0], mx[2] + pin[1], -mn[1] + pin[2]],
-        )
-    }
-
     /// Layout change (ModelViewerState.swift:42, `layout` didSet): the
     /// tools state, persistence, the re-arrangement — then ALWAYS re-frame
     /// at the current preset against the CURRENT arranged aabb, pushed as a
@@ -1476,7 +1446,7 @@ impl ViewerPane {
         self.tools.set_layout(layout);
         self.persist_setting(|s| s.parts_layout = layout);
         self.apply_arrangement();
-        self.input.set_framing_reference(self.frame_aabb);
+        self.input.set_framing_reference(self.frame_aabb.pair());
         self.input.preset(self.preset);
         self.sync_pose();
     }
@@ -1568,7 +1538,7 @@ impl ViewerPane {
         let spawned = thread::Builder::new()
             .name("viewer-pick".into())
             .spawn(move || {
-                let hit = picking::first_hit(&scene, &poses, section, origin, dir);
+                let hit = picking::first_hit(&scene, &poses, section.as_ref(), origin, dir);
                 let _ = events.send(PaneEvent::Picked(hit));
             });
         if spawned.is_err() {
@@ -1577,11 +1547,11 @@ impl ViewerPane {
         }
     }
 
-    /// The section tuple a pick honors — the same discard plane the mesh
+    /// The section plane a pick honors — the same discard plane the mesh
     /// pass is running (what [`ModelScene::set_section`] last stored), so
     /// a click never answers through geometry the user cannot see; with
     /// sectioning off every pick runs the whole scene.
-    fn pick_section(&self) -> Option<(u32, f32)> {
+    fn pick_section(&self) -> Option<SectionPlane> {
         self.scene.section()
     }
 
@@ -1774,10 +1744,7 @@ impl ViewerPane {
     /// ModelPane.swift:215-219); empty with no model.
     fn status_text(&self) -> String {
         let shown = !self.scene.scene.parts.is_empty();
-        status_info(
-            shown.then(|| model_size(self.model_scene.aabb_min, self.model_scene.aabb_max)),
-            self.unit,
-        )
+        status_info(shown.then(|| model_size(&self.model_scene)), self.unit)
     }
 
     /// The iso/front/top/right preset picker (upstream's segmented
@@ -1828,16 +1795,9 @@ pub fn format_length(millimeters: f64, unit: MeasurementUnit, symbol: bool) -> S
     }
 }
 
-/// The MODEL-space size of a scene aabb: the viewer stages MODEL Z-up as
-/// SCENE Y-up via `(x, z, -y)`, so the scene extents permute back as
-/// `(sx, sz, sy)`.
-pub fn model_size(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> [f64; 3] {
-    let scene = [
-        (aabb_max[0] - aabb_min[0]) as f64,
-        (aabb_max[1] - aabb_min[1]) as f64,
-        (aabb_max[2] - aabb_min[2]) as f64,
-    ];
-    [scene[0], scene[2], scene[1]]
+/// The MODEL size (Z up) of a staged scene: its box crossed back to MODEL.
+pub fn model_size(scene: &PartScene) -> [f64; 3] {
+    scene.scene_box_to_model(scene.aabb()).size().map(f64::from)
 }
 
 /// The status bar's info label (upstream ModelPane.info,
@@ -2177,6 +2137,7 @@ fn content_unavailable<'a>(
 mod tests {
     use super::*;
     use engine::project::versions::ProjectVersion;
+    use viewer::render::SceneAxis;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d =
@@ -2263,8 +2224,21 @@ mod tests {
     fn model_size_permutes_scene_yup_back_to_model_zup() {
         // The (x, z, -y) remap stages MODEL (x, y, z) as SCENE (x, z, y):
         // the MODEL size is the staged extents permuted (sx, sz, sy).
-        let size = model_size([0.0; 3], [10.0, 20.0, 30.0]);
-        assert_eq!(size, [10.0, 30.0, 20.0]);
+        let part = Part {
+            name: "p".into(),
+            positions: vec![[0.0; 3], [10.0, 20.0, 30.0], [5.0, 5.0, 5.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(&[part], viewer::render::NEUTRAL);
+        assert_eq!(
+            [
+                scene.aabb_max[0],
+                scene.aabb_max[1],
+                scene.aabb_max[2] - scene.aabb_min[2]
+            ],
+            [5.0, 30.0, 20.0]
+        );
+        assert_eq!(model_size(&scene), [10.0, 20.0, 30.0]);
     }
 
     #[test]
@@ -2397,9 +2371,9 @@ mod tests {
     #[test]
     fn size_label_reports_the_assembled_model_in_every_layout() {
         let (_root, mut pane) = pane("info-plate", &[], &["golden/model.3mf", "golden/plate.3mf"]);
-        let assembled = model_size(pane.model_scene.aabb_min, pane.model_scene.aabb_max);
+        let assembled = model_size(&pane.model_scene);
         pane.set_layout(PartsLayout::Plate);
-        let drawn = model_size(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
+        let drawn = model_size(&pane.scene.scene);
         assert_ne!(
             drawn, assembled,
             "fixture truth: the plate lays the parts out wider"
@@ -2537,15 +2511,13 @@ mod tests {
         // spread model frames at its pre-explode size
         let _ = pane.update(Message::SetExplode(2.0));
         let _ = pane.update(Message::Fit);
-        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.0, pane.frame_aabb.1);
+        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.min, pane.frame_aabb.max);
         assert!(
             (pane.scene.distance - spread).abs() < 1e-4,
             "Fit frames the exploded arrangement, not the pre-explode reference"
         );
-        let (_, staged) = viewer::render::camera::frame(
-            pane.scene.scene.aabb_min,
-            pane.scene.scene.aabb_max,
-        );
+        let (_, staged) =
+            viewer::render::camera::frame(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
         assert!(
             (spread - staged).abs() > 1e-4,
             "this fixture's spread and staged boxes differ (else the pin is void)"
@@ -2942,16 +2914,11 @@ mod tests {
         // the effective box is the assembled MODEL's (the whole staged
         // scene mapped back), not the plate's
         let scene = &pane.scene.scene;
-        let a = scene.to_model(scene.aabb_min);
-        let b = scene.to_model(scene.aabb_max);
-        let want = (
-            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
-            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
-        );
+        let want = scene.scene_box_to_model(scene.aabb());
         for axis in 0..3 {
             assert!(
-                (pane.effective_aabb.0[axis] - want.0[axis]).abs() < 1e-3
-                    && (pane.effective_aabb.1[axis] - want.1[axis]).abs() < 1e-3,
+                (pane.effective_aabb.min[axis] - want.min[axis]).abs() < 1e-3
+                    && (pane.effective_aabb.max[axis] - want.max[axis]).abs() < 1e-3,
                 "axis {axis}: effective {:?} vs the assembled model {:?}",
                 pane.effective_aabb,
                 want
@@ -2968,12 +2935,13 @@ mod tests {
         let _ = pane.update(Message::ToggleSection);
         let _ = pane.update(Message::SetSectionAxis(SectionAxis::Z));
         let _ = pane.update(Message::SetSectionPosition(0.5));
-        let (axis, pos) = pane.scene.section_for_tests().expect("sectioning on");
-        assert_eq!(axis, 1, "MODEL Z -> scene y");
-        // golden: model z in [-4, 22]; assembled aabb mid = 9. The uniform
-        // carries the STAGED plane, so the live scene pin rides along
-        // (d944b65: scene_plane's value is pre-pin; the golden pin is +4
-        // along scene y — floor z=-4 pins to y=0) — 9 + 4, not the raw 9.
+        let plane = pane.scene.section().expect("sectioning on");
+        let (axis, pos) = (plane.axis, plane.pos);
+        assert_eq!(axis, SceneAxis::Y, "MODEL Z -> scene y");
+        // golden: model z in [-4, 22]; assembled aabb mid = 9. The frame
+        // carries the STAGED plane, so the live scene pin rides along (the
+        // golden pin is +4 along scene y — floor z=-4 pins to y=0) — 9 + 4,
+        // not the raw 9.
         let pin_y = pane.scene.scene.pin[1];
         assert!((pin_y - 4.0).abs() < 1e-4, "golden's scene pin: {pin_y}");
         assert!(
@@ -2984,8 +2952,22 @@ mod tests {
         // quirk): the lid pushes +z while the lift holds min z at -4, so the
         // mid rises
         let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
-        let (_, pos2) = pane.scene.section_for_tests().expect("still sectioning");
-        assert!(pos2 > pos, "same t, moved plane: {pos} -> {pos2}");
+        let exploded = pane.scene.section().expect("still sectioning");
+        assert!(
+            exploded.pos > pos,
+            "same t, moved plane: {pos} -> {}",
+            exploded.pos
+        );
+        // and the cap spans the exploded box, not the assembled one
+        assert_eq!(
+            exploded.cap,
+            pane.scene.scene.model_box_to_scene(pane.effective_aabb)
+        );
+        assert!(
+            exploded.cap.max[1] > pane.scene.scene.aabb_max[1] + 1.0,
+            "the pushed lid rises past the assembled box: {:?}",
+            exploded.cap
+        );
     }
 
     #[test]
@@ -2995,8 +2977,8 @@ mod tests {
         let _ = pane.update(Message::ToggleSection);
         let _ = pane.update(Message::SetSectionAxis(SectionAxis::Y));
         let _ = pane.update(Message::SetSectionPosition(0.5));
-        let (axis, _) = pane.scene.section_for_tests().expect("sectioning on");
-        assert_eq!(axis, 2, "MODEL Y -> scene z");
+        let plane = pane.scene.section().expect("sectioning on");
+        assert_eq!(plane.axis, SceneAxis::Z, "MODEL Y -> scene z");
     }
 
     #[test]
@@ -3638,9 +3620,7 @@ mod tests {
         // focused: an insert binding — the editor captures the press and
         // listen() drops it; Space in the chat draft cannot toggle playback
         assert!(matches!(
-            Binding::<Message>::from_key_press(space_press(Status::Focused {
-                is_hovered: false
-            })),
+            Binding::<Message>::from_key_press(space_press(Status::Focused { is_hovered: false })),
             Some(Binding::Insert(' '))
         ));
         // unfocused: no binding — the press stays ignored and reaches the

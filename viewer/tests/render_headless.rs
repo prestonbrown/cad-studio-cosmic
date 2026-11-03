@@ -16,7 +16,7 @@ use viewer::render::lights;
 use viewer::render::markers;
 use viewer::render::{
     Camera, Frame, GHOST_ALPHA, MeshPipeline, NEUTRAL, Options, PartAppearance, PartPose,
-    PartScene, default_camera, preset_camera, srgb_to_linear,
+    PartScene, SceneAxis, SectionPlane, default_camera, preset_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -186,7 +186,7 @@ fn render_frame_with_poses_format(
         scene,
         poses,
         appearances,
-        effective_aabb: (scene.aabb_min, scene.aabb_max),
+        section: None,
         grid,
         markers,
         ghost,
@@ -210,6 +210,51 @@ fn render_frame_struct(
     draw_and_read(device, queue, w, h, format, |encoder, view| {
         pipeline.render(encoder, view, [0.0, 0.0, w as f32, h as f32]);
     })
+}
+
+/// A section plane on scene `axis` at `pos`, capped over `scene`'s own box.
+fn plane(scene: &PartScene, axis: SceneAxis, pos: f32) -> SectionPlane {
+    SectionPlane {
+        axis,
+        pos,
+        cap: scene.aabb(),
+    }
+}
+
+/// [`render_frame`] with a section plane: identity poses, default options.
+fn render_sectioned(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    camera: &Camera,
+    section: SectionPlane,
+    options: Options,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let poses = identity_poses(scene);
+    let appearances = default_appearances(scene);
+    let frame = Frame {
+        camera,
+        scene,
+        poses: &poses,
+        appearances: &appearances,
+        section: Some(section),
+        grid: None,
+        markers: None,
+        ghost: None,
+        options,
+    };
+    render_frame_struct(
+        device,
+        queue,
+        pipeline,
+        &frame,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    )
 }
 
 /// A `w` x `h` target in `format`, cleared to the app background, `draw`
@@ -643,18 +688,19 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     // one pipeline across every cut (iced Storage lifetime): stencil state
     // must not leak between frames
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1; // SCENE y — the MODEL z stack after the remap
+    let cam = default_camera(&scene, 800.0 / 600.0);
     let span = scene.aabb_max[1] - scene.aabb_min[1];
     let mut cap_at = |frac: f32| {
-        cam.section_pos = scene.aabb_min[1] + span * frac;
-        cap_red_pixels(&render_frame(
+        // SCENE y — the MODEL z stack after the remap
+        let cut = plane(&scene, SceneAxis::Y, scene.aabb_min[1] + span * frac);
+        cap_red_pixels(&render_sectioned(
             device,
             queue,
             &mut pipeline,
             &scene,
             &cam,
+            cut,
+            Options::default(),
             800,
             600,
         ))
@@ -747,26 +793,6 @@ fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     PartScene::from_parts_with_pin(std::slice::from_ref(&part), NEUTRAL, [0.0; 3])
 }
 
-/// The MODEL-space aabb of `scene`: the scene aabb's corners through
-/// `to_model` (the inverse remap+pin), re-extremized — the aabb
-/// `tools::section::plane_value` interpolates.
-fn scene_model_aabb(scene: &PartScene) -> ([f32; 3], [f32; 3]) {
-    let mut mn = [f32::MAX; 3];
-    let mut mx = [f32::MIN; 3];
-    for a in [scene.aabb_min[0], scene.aabb_max[0]] {
-        for b in [scene.aabb_min[1], scene.aabb_max[1]] {
-            for c in [scene.aabb_min[2], scene.aabb_max[2]] {
-                let m = scene.to_model([a, b, c]);
-                for i in 0..3 {
-                    mn[i] = mn[i].min(m[i]);
-                    mx[i] = mx[i].max(m[i]);
-                }
-            }
-        }
-    }
-    (mn, mx)
-}
-
 /// The ink's row extent (min, max texture row, row 0 at the top), or None
 /// when nothing is inked. The top-preset section test compares this against
 /// projected geometry: from that camera screen rows order monotonically in
@@ -804,16 +830,23 @@ fn y_axis_section_keeps_the_model_above_side() {
     let (axis, pos) = viewer::tools::section::scene_plane(
         viewer::tools::section::SectionAxis::Y,
         0.5,
-        scene_model_aabb(&scene),
+        scene.scene_box_to_model(scene.aabb()),
     );
-    assert_eq!((axis, pos), (2, 12.0));
-    let mut cam = preset_camera(&scene, camera::Preset::Top, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = axis;
-    cam.section_pos = pos;
+    assert_eq!((axis, pos), (SceneAxis::Z, 12.0));
+    let cam = preset_camera(&scene, camera::Preset::Top, 800.0 / 600.0);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        plane(&scene, axis, pos),
+        Options::default(),
+        800,
+        600,
+    );
     assert!(
         ink_pixels(&px, bg) > 1_000,
         "the kept half renders: {}",
@@ -865,7 +898,6 @@ fn y_axis_section_keeps_the_model_above_side() {
     );
     // control: unsectioned, the box's far side reaches the z=20 band — the
     // clipped extent above is the discard's doing, not the helper's blindness
-    cam.section_enable = 0.0;
     let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
     let (_, full_hi) = ink_row_extent(&px, bg, 800).expect("unsectioned ink rows");
     assert!(
@@ -890,13 +922,21 @@ fn section_discard_is_winding_independent() {
         t.swap(1, 2); // rewind the base
     }
     let scene = PartScene::from_parts(&parts, NEUTRAL);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = scene.aabb_min[1] - 0.5;
+    let cam = default_camera(&scene, 800.0 / 600.0);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let below = plane(&scene, SceneAxis::Y, scene.aabb_min[1] - 0.5);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        below,
+        Options::default(),
+        800,
+        600,
+    );
     assert_eq!(
         ink_pixels(&px, bg),
         0,
@@ -904,7 +944,6 @@ fn section_discard_is_winding_independent() {
     );
     // control: unsectioned, the rewound geometry itself renders — the zero
     // above is the discard, not a broken scene
-    cam.section_enable = 0.0;
     let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
     assert!(
         ink_pixels(&px, bg) > 5_000,
@@ -921,11 +960,20 @@ fn cap_color_matches_blended_system_red() {
     let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = 4.0; // mid-base cut (the established `base` plane)
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let cam = default_camera(&scene, 800.0 / 600.0);
+    // mid-base cut (the established `base` plane)
+    let mid_base = plane(&scene, SceneAxis::Y, 4.0);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        mid_base,
+        Options::default(),
+        800,
+        600,
+    );
     // the cut face's center: the fixture's staged x/z are pin-centered and
     // symmetric, and the cut sits at pinned scene y = 4 — the exact middle
     // of the 60mm base cross-section
@@ -1005,29 +1053,24 @@ fn exploded_section_cap_covers_every_pushed_part() {
         &none,
     );
     let lid_push = arranged.offsets.iter().map(|o| o[2]).fold(0.0f32, f32::max);
-    assert!(lid_push > 2.0, "the lid explodes up: offsets {:?}", arranged.offsets);
+    assert!(
+        lid_push > 2.0,
+        "the lid explodes up: offsets {:?}",
+        arranged.offsets
+    );
     let eff = arrangement::effective_model_aabb(&parts, &arranged);
 
     let mut model = viewer::render::ModelScene::new(scene.clone());
     model.poses = arranged
         .offsets
         .iter()
-        .map(|o| {
-            Some(glam::Mat4::from_translation(glam::vec3(o[0], o[2], -o[1])).to_cols_array_2d())
-        })
+        .map(|&o| PartScene::model_offset_pose(o))
         .collect::<Vec<_>>()
         .into();
-    // the pane's plane: the raw X plane over the effective MODEL box, plus
-    // the scene pin along scene x
-    let (axis, raw) = section::scene_plane(SectionAxis::X, 0.5, eff);
-    let pinned = scene.to_scene([raw, 0.0, 0.0])[axis as usize];
-    model.set_section(Some((axis, pinned)));
+    let cut = section::pinned_plane(SectionAxis::X, 0.5, eff, &scene);
+    model.set_section(Some(cut));
     // look down -x at the cap, framed on the exploded scene box
-    let scene_eff = (
-        scene.to_scene([eff.0[0], eff.1[1], eff.0[2]]),
-        scene.to_scene([eff.1[0], eff.0[1], eff.1[2]]),
-    );
-    let (target, distance) = camera::frame(scene_eff.0, scene_eff.1);
+    let (target, distance) = camera::frame(cut.cap.min, cut.cap.max);
     let (yaw, pitch) = camera::Preset::Right.yaw_pitch();
     model.set_pose(yaw, pitch, distance, target);
 
@@ -1035,17 +1078,17 @@ fn exploded_section_cap_covers_every_pushed_part() {
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let drawn = cap_red_pixels(&render_adapter(device, queue, &mut pipeline, &model, w, h));
 
-    let mut cam = Camera::orbiting(distance, yaw, pitch, target, w as f32 / h as f32);
-    cam.section_enable = 1.0;
-    cam.section_axis = axis;
-    cam.section_pos = pinned;
+    let cam = Camera::orbiting(distance, yaw, pitch, target, w as f32 / h as f32);
     let appearances = default_appearances(&scene);
     let oracle = Frame {
         camera: &cam,
         scene: &scene,
         poses: &model.poses,
         appearances: &appearances,
-        effective_aabb: ([-1e4; 3], [1e4; 3]),
+        section: Some(SectionPlane {
+            cap: viewer::render::Box3::new([-1e4; 3], [1e4; 3]),
+            ..cut
+        }),
         grid: None,
         markers: None,
         ghost: None,
@@ -1208,11 +1251,17 @@ fn msaa_smooths_a_diagonal_edge() {
     // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
     // [-4,4]; the pin lifts the floor to y=0, so the base spans pinned
     // y in [0,8] and its middle is y=4)
-    let mut cam = camera;
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = 4.0;
-    let cut = render_frame_msaa(device, queue, &scene, &cam, 800, 600, 4);
+    let cut = render_sectioned(
+        device,
+        queue,
+        &mut p4,
+        &scene,
+        &camera,
+        plane(&scene, SceneAxis::Y, 4.0),
+        *at4,
+        800,
+        600,
+    );
     assert!(
         cap_red_pixels(&cut) > 2_000,
         "section cap must render through the 4x path: {} red px",
@@ -1675,7 +1724,6 @@ fn plain_target_shader_carries_the_srgb_encode() {
     // — assert the mean absolute delta over the frame is within 2/255
     // (piecewise-vs-hardware rounding; anything structural shows up >>).
     // (assertion folded into the same test's tolerance above)
-
 }
 
 /// Wireframe mode draws hairlines, not faces (facts #44): the same scene,

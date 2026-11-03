@@ -42,7 +42,7 @@
 //! Cross-sections: the mesh pass writes winding parity into the stencil
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
 //! fragments excluded), and a red cap quad drawn right after fills exactly
-//! the cut face (stencil != 0) when `Camera::section_enable` is set.
+//! the cut face (stencil != 0) when the frame carries a [`SectionPlane`].
 //!
 //! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
 //! part pass to the 1px hairline edge list — same material, LineList
@@ -77,18 +77,70 @@ pub use scene::{ModelPrimitive, ModelScene, Themed};
 
 use std::hash::Hasher;
 
+pub use engine::parsing::Box3;
 use wgpu::util::DeviceExt;
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+/// The frame's view-projection (column-major, glam `to_cols_array_2d`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub view_proj: [[f32; 4]; 4],
-    pub section_axis: u32,
-    pub section_pos: f32,
-    pub section_enable: f32,
+}
+
+/// A scene-space axis (render coords, Y up).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl SceneAxis {
+    pub fn index(self) -> usize {
+        match self {
+            SceneAxis::X => 0,
+            SceneAxis::Y => 1,
+            SceneAxis::Z => 2,
+        }
+    }
+}
+
+/// A section plane in a scene's PINNED frame: fragments with
+/// `position[axis] > pos` are discarded, and the red cap fills the cut.
+/// `cap` is the scene-space box of what is drawn (arranged offsets
+/// included), which the cap quad must span — it travels with the plane so
+/// the discard and the cap cannot be built from two different boxes.
+/// [`crate::tools::section::pinned_plane`] builds one from the tool state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SectionPlane {
+    pub axis: SceneAxis,
+    pub pos: f32,
+    pub cap: Box3,
+}
+
+/// The camera uniform (group 0) as the shaders read it: the frame's
+/// view-projection plus its section plane, if any.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+    section_axis: u32,
+    section_pos: f32,
+    section_enable: f32,
     /// WGSL uniform structs round their size up to 16 bytes: 64 + 4 + 4 + 4 = 76
     /// must be padded to 80 or bind-group validation fails on min_binding_size.
-    pub _pad: f32,
+    _pad: f32,
+}
+
+impl CameraUniform {
+    fn new(camera: &Camera, section: Option<&SectionPlane>) -> Self {
+        CameraUniform {
+            view_proj: camera.view_proj,
+            section_axis: section.map_or(1, |s| s.axis.index() as u32),
+            section_pos: section.map_or(f32::MAX, |s| s.pos),
+            section_enable: if section.is_some() { 1.0 } else { 0.0 },
+            _pad: 0.0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -152,19 +204,15 @@ pub struct PartAppearance {
 
 /// Everything one frame's prepare needs, bundled: the camera, the staged
 /// scene, one [`PartPose`] and one [`PartAppearance`] per part (both same
-/// length — asserted), the aabb the section cap and framing should use
-/// (defaults to the scene's own; the arrangement wiring replaces it with
-/// the effective box), the overlay, and the render mode. The struct is the
-/// renderer's whole per-frame input contract — later tasks extend it
-/// rather than grow the parameter list again.
+/// length — asserted), the section plane, the overlays, and the render
+/// mode. The struct is the renderer's whole per-frame input contract.
 pub struct Frame<'a> {
     pub camera: &'a Camera,
     pub scene: &'a PartScene,
     pub poses: &'a [PartPose],
     pub appearances: &'a [PartAppearance],
-    /// The aabb of what is effectively drawn (hidden parts excluded,
-    /// arranged offsets included) in pinned scene space.
-    pub effective_aabb: ([f32; 3], [f32; 3]),
+    /// The section plane, when sectioning: the mesh discard and the cap.
+    pub section: Option<SectionPlane>,
     pub grid: Option<&'a GridMesh>,
     /// The staged measure markers, when a measurement is active — drawn
     /// after the grid on the same unlit overlay pass.
@@ -235,29 +283,24 @@ pub const TRANSLUCENT_ALPHA: f32 = 0.22;
 /// into ghost.wgsl and the blend test reads pixels back against.
 pub const GHOST_ALPHA: f32 = 0.6;
 
-/// World-space quad on the section plane: the effective scene aabb
-/// cross-section at `frame.camera.section_pos`, grown 10% on the two
-/// off-axis directions so the cap always covers the cut face (the stencil
-/// test clips it back to the solid). A 4-vertex triangle strip.
-fn cap_quad(frame: &Frame<'_>) -> [CapVertex; 4] {
-    let camera = frame.camera;
-    // match the mesh shader: axis 0 -> x, 2 -> z, anything else -> y
-    let axis = match camera.section_axis {
-        0 | 1 | 2 => camera.section_axis as usize,
-        _ => 1,
-    };
+/// World-space quad on the section plane: the cross-section of the
+/// plane's cap box at `plane.pos`, grown 10% on the two off-axis
+/// directions so the cap always covers the cut face (the stencil test
+/// clips it back to the solid). A 4-vertex triangle strip.
+fn cap_quad(plane: &SectionPlane) -> [CapVertex; 4] {
+    let axis = plane.axis.index();
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
     let at = |pu: f32, pv: f32| {
         let mut p = [0.0f32; 3];
-        p[axis] = camera.section_pos;
+        p[axis] = plane.pos;
         p[u] = pu;
         p[v] = pv;
         CapVertex { pos: p }
     };
+    let (center, size) = (plane.cap.center(), plane.cap.size());
     let edge = |a: usize| {
-        let center = (frame.effective_aabb.0[a] + frame.effective_aabb.1[a]) / 2.0;
-        let half = (frame.effective_aabb.1[a] - frame.effective_aabb.0[a]) / 2.0 * 1.1;
-        (center - half, center + half)
+        let half = size[a] / 2.0 * 1.1;
+        (center[a] - half, center[a] + half)
     };
     let (u0, u1) = edge(u);
     let (v0, v1) = edge(v);
@@ -266,15 +309,10 @@ fn cap_quad(frame: &Frame<'_>) -> [CapVertex; 4] {
 
 impl Camera {
     /// The orbit camera at `(distance, yaw, pitch)` around `target` for a
-    /// `aspect`-wide viewport, sectioning off — the uniform form of
-    /// [`camera::orbit`].
+    /// `aspect`-wide viewport — the uniform form of [`camera::orbit`].
     pub fn orbiting(distance: f32, yaw: f32, pitch: f32, target: [f32; 3], aspect: f32) -> Camera {
         Camera {
             view_proj: camera::orbit(distance, yaw, pitch, target, aspect),
-            section_axis: 1,
-            section_pos: f32::MAX,
-            section_enable: 0.0,
-            _pad: 0.0,
         }
     }
 }
@@ -927,13 +965,12 @@ impl MeshPipeline {
     ) -> Self {
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
-            contents: bytemuck::bytes_of(&Camera {
-                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                section_axis: 1,
-                section_pos: f32::MAX,
-                section_enable: 0.0,
-                _pad: 0.0,
-            }),
+            contents: bytemuck::bytes_of(&CameraUniform::new(
+                &Camera {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                },
+                None,
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1739,7 +1776,11 @@ impl MeshPipeline {
             }
             self.size = size;
         }
-        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(camera));
+        queue.write_buffer(
+            &self.uniform_buf,
+            0,
+            bytemuck::bytes_of(&CameraUniform::new(camera, frame.section.as_ref())),
+        );
         // upload-once: slot-keyed by part index. A resident part whose
         // content identity still matches is skipped whole; a changed or new
         // part gets a fresh exact-size vertex buffer (its allocation and
@@ -1846,9 +1887,10 @@ impl MeshPipeline {
         // The cap is this port's cut-face stand-in, and upstream disables
         // the interior shell in wireframe (facts #45); line rasterization
         // breaks winding parity anyway
-        self.draw_cap = camera.section_enable > 0.5 && !options.wireframe;
-        if self.draw_cap {
-            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(frame)));
+        let cap = frame.section.filter(|_| !options.wireframe);
+        self.draw_cap = cap.is_some();
+        if let Some(plane) = &cap {
+            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(plane)));
         }
         self.wireframe = options.wireframe;
         // Overlay residency — the same content-identity contract as the
@@ -1910,8 +1952,8 @@ impl MeshPipeline {
     /// Vertex uploads since pipeline creation (test visibility): counts
     /// vertex uploads only — the camera, cap, and per-part model uniforms
     /// legitimately write every frame and never count.
-    
-#[cfg(test)]
+
+    #[cfg(test)]
     pub(crate) fn upload_count_for_tests(&self) -> u32 {
         self.upload_count
     }
@@ -2442,9 +2484,6 @@ mod tests {
         }
     }
 
-    /// The Frame every upload-once test shares: default options, no overlay
-    /// or markers, effective_aabb at the staged scene's own (T10 replaces
-    /// that input).
     /// The pick ray aims where the clicked pixel looks: center exactly along
     /// the view axis at the target, the screen edges tilting with the
     /// camera's own right/up axes. The y-flip (facts #29) is the load-bearing
@@ -2496,8 +2535,8 @@ mod tests {
         );
     }
 
-    /// The Frame every upload-once test shares: default options, no overlay,
-    /// effective_aabb at the staged scene's own (T10 replaces that input).
+    /// The Frame every upload-once test shares: default options, no
+    /// overlay, no section.
     fn frame<'a>(
         camera: &'a Camera,
         scene: &'a PartScene,
@@ -2520,7 +2559,7 @@ mod tests {
             scene,
             poses,
             appearances,
-            effective_aabb: (scene.aabb_min, scene.aabb_max),
+            section: None,
             grid: None,
             markers: None,
             ghost,
@@ -2971,9 +3010,61 @@ mod tests {
         );
     }
 
-    /// The WGSL uniform struct rounds to 16-byte boundaries: 64 + 4 + 4 is 72,
-    /// which must be padded to 80 in BOTH the Rust repr and the WGSL struct —
-    /// a mismatch fails bind-group validation at min_binding_size, loudly.
+    /// WGSL uniform structs round to 16-byte boundaries, so the camera's 76
+    /// and the model's 72 bytes pad to 80 in BOTH the Rust repr and the WGSL
+    /// struct — a mismatch fails bind-group validation at
+    /// min_binding_size, loudly.
+    #[test]
+    fn camera_uniform_is_80_bytes_and_carries_the_plane() {
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
+        let cam = Camera {
+            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        };
+        let off = CameraUniform::new(&cam, None);
+        assert_eq!(off.section_enable, 0.0);
+        let plane = SectionPlane {
+            axis: SceneAxis::Z,
+            pos: 2.5,
+            cap: Box3::ZERO,
+        };
+        let on = CameraUniform::new(&cam, Some(&plane));
+        assert_eq!(
+            (on.section_axis, on.section_pos, on.section_enable),
+            (2, 2.5, 1.0)
+        );
+    }
+
+    /// The cap quad spans the plane's cap box, grown 10% on the two
+    /// off-axis directions, at the plane position.
+    #[test]
+    fn cap_quad_spans_the_planes_box() {
+        let plane = SectionPlane {
+            axis: SceneAxis::X,
+            pos: 1.0,
+            cap: Box3::new([-5.0, 0.0, -2.0], [5.0, 20.0, 2.0]),
+        };
+        let q = cap_quad(&plane);
+        assert!(q.iter().all(|v| v.pos[0] == 1.0));
+        let ys: Vec<f32> = q.iter().map(|v| v.pos[1]).collect();
+        let zs: Vec<f32> = q.iter().map(|v| v.pos[2]).collect();
+        let span = |v: &[f32]| {
+            (
+                v.iter().copied().fold(f32::MAX, f32::min),
+                v.iter().copied().fold(f32::MIN, f32::max),
+            )
+        };
+        let (y0, y1) = span(&ys);
+        let (z0, z1) = span(&zs);
+        assert!(
+            (y0 - -1.0).abs() < 1e-5 && (y1 - 21.0).abs() < 1e-5,
+            "{y0} {y1}"
+        );
+        assert!(
+            (z0 - -2.2).abs() < 1e-5 && (z1 - 2.2).abs() < 1e-5,
+            "{z0} {z1}"
+        );
+    }
+
     #[test]
     fn model_uniform_is_80_bytes() {
         assert_eq!(
@@ -3447,7 +3538,10 @@ mod target_space_tests {
     fn wgsl_encode_constants_match_the_rust_twin() {
         let src = target_space_wgsl(wgpu::TextureFormat::Bgra8Unorm);
         for constant in ["0.0031308", "12.92", "1.055", "2.4", "0.055"] {
-            assert!(src.contains(constant), "the WGSL curve lost {constant}: {src}");
+            assert!(
+                src.contains(constant),
+                "the WGSL curve lost {constant}: {src}"
+            );
         }
         // and the sRGB path is the identity (no curve at all)
         let identity = target_space_wgsl(wgpu::TextureFormat::Bgra8UnormSrgb);
