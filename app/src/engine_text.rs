@@ -136,20 +136,12 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Keys every arg-less id resolves through [`lookup`], plus the
-    /// literal keys the `fl!` arms above use.
+    /// Keys every arg-less id resolves through [`lookup`]; the literal
+    /// keys of the macro arms above are covered by the localize module's
+    /// source scan.
     fn all_keys() -> Vec<&'static str> {
         let mut keys: Vec<&'static str> = EnvStep::ALL.iter().map(|s| env_step_key(*s)).collect();
         keys.extend(ToolAction::ALL.iter().map(|a| tool_action_key(*a)));
-        keys.extend([
-            "non-stato-trovato-n-uv-n-un-python-3-10-3-13-installa-uv-brew-install-uv-oppure-python-3-12-e-riprova",
-            "il-comando-non-riuscito-controlla-il-log-per-i-dettagli",
-            "build123d-e-matplotlib-non-si-importano-correttamente-nell-ambiente-creato",
-            "l-ambiente-python-esiste-ma-build123d-o-matplotlib-non-si-importano",
-            "trovato-in",
-            "lld-righe",
-            "non-una-cartella",
-        ]);
         keys
     }
 

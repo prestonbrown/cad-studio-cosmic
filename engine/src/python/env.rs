@@ -48,6 +48,7 @@ pub const VERSIONS_FALLBACK: &str = "build123d, matplotlib, numpy";
 /// shared cell carry.
 pub const VERIFY_SCRIPT: &str = "import sys, build123d, matplotlib, numpy\nprint(build123d.__version__)\nprint(f\"Python {sys.version.split()[0]}, build123d {build123d.__version__}, matplotlib {matplotlib.__version__}, numpy {numpy.__version__}\")";
 
+enum_with_all! {
 /// A progress milestone's step label (upstream `advance(to:step:)`'s
 /// localized strings, PythonEnvironment.swift:68-97). The engine has no
 /// catalog, so it names the step and the app localizes it — the ids are the
@@ -71,19 +72,6 @@ pub enum EnvStep {
     /// `installazione-non-riuscita`
     InstallFailed,
 }
-
-impl EnvStep {
-    /// Every step id, for exhaustive catalog checks.
-    pub const ALL: [EnvStep; 8] = [
-        EnvStep::SearchingPython,
-        EnvStep::CreatingVenvWithUv,
-        EnvStep::CreatingVenv,
-        EnvStep::UpgradingPip,
-        EnvStep::InstallingPackages,
-        EnvStep::Verifying,
-        EnvStep::Installed,
-        EnvStep::InstallFailed,
-    ];
 }
 
 /// Why an install failed (upstream `PythonSetupError`, plus the spawn

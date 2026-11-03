@@ -354,6 +354,50 @@ mod tests {
         }
     }
 
+    /// Every literal key the app's sources hand the lookup macro exists in
+    /// en (the parity test above carries it to it/de/fr): keys resolve at
+    /// run time, so a typo would render the raw id.
+    #[test]
+    fn every_macro_key_in_the_sources_exists_in_the_catalog() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let en: BTreeSet<String> = parse_ftl(&i18n_dir().join("en/main.ftl").to_string_lossy())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        let mut files = Vec::new();
+        rust_files(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let opener = concat!("fl", "!(");
+        let mut seen = 0;
+        let mut missing = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (at, _) in text.match_indices(opener) {
+                let Some(rest) = text[at + opener.len()..].trim_start().strip_prefix('"') else {
+                    continue;
+                };
+                let key = &rest[..rest.find('"').unwrap()];
+                seen += 1;
+                if !en.contains(key) {
+                    missing.push(format!("{}: {key}", file.display()));
+                }
+            }
+        }
+        assert!(seen > 200, "the scan found the call sites: {seen}");
+        assert!(missing.is_empty(), "keys missing from en: {missing:#?}");
+    }
+
     /// The selection override: a valid persisted tag selects exactly that
     /// language; None (or garbage a hand-edited settings.json might carry)
     /// falls back to the desktop request without panicking.

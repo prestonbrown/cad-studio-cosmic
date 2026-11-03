@@ -214,7 +214,7 @@ async fn error_result_confirms_text_and_fails() {
     assert_eq!(row.text, "Claude Code ended with an error (code 0).");
     let detail = row.detail.as_deref().unwrap();
     assert!(detail.contains("no-such-model"), "{detail}");
-    assert!(detail.contains("api error status 404"), "{detail}");
+    assert!(detail.contains("HTTP 404"), "{detail}");
 }
 
 /// A redacted-thinking block that never stops: the placeholder row survives

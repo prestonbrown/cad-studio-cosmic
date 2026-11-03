@@ -635,8 +635,9 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     } = proc;
     let stderr = stderr_text.await.unwrap_or_default();
     let Ok(status) = exit_status.await else {
-        // only reachable when the spawner's reader task itself died
-        return Attempt::failed("the agent process exited without reporting a status");
+        // only reachable when the spawner's reader task itself died: no
+        // detail to show, the app's code-less failure row says it all
+        return Attempt::failed("");
     };
     let interrupted = *ctx.cancel.borrow();
     let outcome = if interrupted {
@@ -948,10 +949,11 @@ fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutco
                 .map(|piece| piece.trim().to_string())
                 .filter(|piece| !piece.is_empty())
                 .collect();
-            // the engine surfaces the API error status alongside the text;
-            // upstream leaves it implicit in the result line it never shows
+            // the engine surfaces the API error status alongside the text,
+            // as the language-neutral protocol code; upstream leaves it
+            // implicit in the result line it never shows
             if let Some(status) = result.as_ref().and_then(|result| result.api_error_status) {
-                details.push(format!("api error status {status}"));
+                details.push(format!("HTTP {status}"));
             }
             let details = details.join("\n");
             TurnOutcome::Failed {

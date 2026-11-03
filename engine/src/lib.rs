@@ -19,6 +19,28 @@
 //! on a cancel only between event translations, so a reader that stops
 //! draining stalls the turn rather than cancelling it.
 
+/// A fieldless enum plus its `ALL` slice, every variant in declaration
+/// order, derived from the one declaration so a new variant cannot be
+/// left out of exhaustive checks.
+macro_rules! enum_with_all {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$variant_meta])* $variant ),*
+        }
+
+        impl $name {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [$name] = &[$($name::$variant),*];
+        }
+    };
+}
+
 pub mod agent;
 pub mod parsing;
 pub mod processes;

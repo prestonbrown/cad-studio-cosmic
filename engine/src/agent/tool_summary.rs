@@ -9,81 +9,56 @@
 //! [`rel_path`] and [`short_command`] carry the root/venv display
 //! normalization for callers that know the project folder.
 
+enum_with_all! {
 /// What a tool row's title says the agent is doing (upstream
 /// `ToolSummary`'s localized titles). The engine has no catalog, so it
 /// names the action and the app localizes it — the ids are the stable
-/// contract; each variant names its catalog key and en value.
+/// contract; each variant names its catalog key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolAction {
-    /// `installa-i-componenti`: "Installing components"
+    /// `installa-i-componenti`
     InstallComponents,
-    /// `compila-il-modello`: "Building the model"
+    /// `compila-il-modello`
     BuildModel,
-    /// `analizza-il-modello`: "Analyzing the model"
+    /// `analizza-il-modello`
     AnalyzeModel,
-    /// `prepara-un-anteprima`: "Preparing a preview"
+    /// `prepara-un-anteprima`
     PreparePreview,
-    /// `esamina-i-file`: "Looking through files"
+    /// `esamina-i-file`
     ExamineFiles,
-    /// `modifica-il-modello`: "Editing the model"
+    /// `modifica-il-modello`
     EditModel,
-    /// `sistema-i-file`: "Tidying up files"
+    /// `sistema-i-file`
     TidyFiles,
-    /// `lavora-sul-progetto`: "Working on the project"
+    /// `lavora-sul-progetto`
     WorkProject,
-    /// `scrive-un-file`: "Writing a file"
+    /// `scrive-un-file`
     WriteFile,
-    /// `scrive-il-modello`: "Writing the model"
+    /// `scrive-il-modello`
     WriteModel,
-    /// `prepara-un-file-di-supporto`: "Preparing a helper file"
+    /// `prepara-un-file-di-supporto`
     WriteHelper,
-    /// `modifica-un-file-di-supporto`: "Editing a helper file"
+    /// `modifica-un-file-di-supporto`
     EditHelper,
-    /// `legge-un-file`: "Reading a file"
+    /// `legge-un-file`
     ReadFile,
-    /// `studia-il-riferimento`: "Studying the reference"
+    /// `studia-il-riferimento`
     StudyReference,
-    /// `rilegge-il-modello`: "Reviewing the model"
+    /// `rilegge-il-modello`
     RereadModel,
-    /// `controlla-il-disegno`: "Checking the drawing"
+    /// `controlla-il-disegno`
     CheckDrawing,
-    /// `controlla-i-risultati`: "Checking the results"
+    /// `controlla-i-risultati`
     CheckResults,
-    /// `controlla-un-anteprima`: "Checking a preview"
+    /// `controlla-un-anteprima`
     CheckPreview,
-    /// `cerca-nel-progetto`: "Searching the project"
+    /// `cerca-nel-progetto`
     SearchProject,
-    /// `aggiorna-il-piano-di-lavoro`: "Updates the task plan"
+    /// `aggiorna-il-piano-di-lavoro`
     UpdatePlan,
-    /// `cerca-sul-web`: "Searching the web"
+    /// `cerca-sul-web`
     SearchWeb,
 }
-
-impl ToolAction {
-    /// Every action id, for exhaustive catalog checks.
-    pub const ALL: [ToolAction; 21] = [
-        ToolAction::InstallComponents,
-        ToolAction::BuildModel,
-        ToolAction::AnalyzeModel,
-        ToolAction::PreparePreview,
-        ToolAction::ExamineFiles,
-        ToolAction::EditModel,
-        ToolAction::TidyFiles,
-        ToolAction::WorkProject,
-        ToolAction::WriteFile,
-        ToolAction::WriteModel,
-        ToolAction::WriteHelper,
-        ToolAction::EditHelper,
-        ToolAction::ReadFile,
-        ToolAction::StudyReference,
-        ToolAction::RereadModel,
-        ToolAction::CheckDrawing,
-        ToolAction::CheckResults,
-        ToolAction::CheckPreview,
-        ToolAction::SearchProject,
-        ToolAction::UpdatePlan,
-        ToolAction::SearchWeb,
-    ];
 }
 
 /// A tool row's title: the action, plus — while a Write's content streams —
