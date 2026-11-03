@@ -315,6 +315,19 @@ pub mod camera {
         }
     }
 
+    /// placeCamera's eye offset (ModelViewer.swift:339-342): the unit
+    /// direction from the look-at target toward an orbit camera at
+    /// `(yaw, pitch)` — yaw about scene +Y from +Z toward +X, pitch up
+    /// from the floor plane. The one definition every pose derivation
+    /// ([`orbit`], [`panned`], [`pick_ray`], `lights::to_eye`) builds on.
+    pub fn eye_dir(yaw: f32, pitch: f32) -> glam::Vec3 {
+        glam::Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        )
+    }
+
     /// placeCamera (ModelViewer.swift:339-342): look at `target` from
     /// `target + dir(yaw, pitch)·distance` with Y up, projected at
     /// `aspect` — the viewport's width/height, required, so the projection
@@ -327,12 +340,11 @@ pub mod camera {
         aspect: f32,
     ) -> [[f32; 4]; 4] {
         let at = glam::Vec3::from_array(target);
-        let dir = glam::Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
+        let view = glam::camera::rh::view::look_at_mat4(
+            at + eye_dir(yaw, pitch) * distance,
+            at,
+            glam::Vec3::Y,
         );
-        let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
         // directx = WebGPU NDC (Z in [0,1], Y-up)
         let proj = glam::camera::rh::proj::directx::perspective(FOV, aspect, NEAR, FAR);
         (proj * view).to_cols_array_2d()
@@ -390,11 +402,7 @@ pub mod camera {
         if view_height <= 0.0 {
             return target;
         }
-        let back = glam::Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        );
+        let back = eye_dir(yaw, pitch);
         // the look-at basis: camera +X/+Y in scene space, Y-up world
         let right = glam::Vec3::Y.cross(back).normalize_or_zero();
         let up = back.cross(right);
@@ -436,12 +444,7 @@ pub mod camera {
         view: (f32, f32),
     ) -> ([f32; 3], [f32; 3]) {
         let at = glam::Vec3::from_array(target);
-        // placeCamera's eye offset, a unit vector by construction
-        let back = glam::Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        );
+        let back = eye_dir(yaw, pitch);
         let eye = at + back * distance;
         // the look-at basis: f = normalize(target − eye) = −back; r and u as
         // `panned` derives them (r degenerate only at ±90° pitch, which
@@ -561,11 +564,7 @@ pub mod lights {
     /// placeCamera's eye offset (ModelViewer.swift:339-342), which is the
     /// view axis mesh.wgsl reads back out of the view-projection matrix.
     pub fn to_eye(yaw: f32, pitch: f32) -> [f32; 3] {
-        [
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        ]
+        super::camera::eye_dir(yaw, pitch).to_array()
     }
 }
 
@@ -2351,11 +2350,7 @@ mod tests {
         let (dx, dy, view_height) = (25.0f32, -10.0f32, 500.0f32);
         let panned = camera::panned(target, yaw, pitch, distance, view_height, dx, dy);
         let at = glam::Vec3::from_array(target);
-        let back = glam::Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        );
+        let back = camera::eye_dir(yaw, pitch);
         let view = glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
         // col-major glam: matrix rows 0/1 are the camera right/up axes
         let right = glam::Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
@@ -2378,6 +2373,29 @@ mod tests {
         );
     }
 
+    /// placeCamera's eye offset on its defining poses: yaw 0 looks from
+    /// +Z, yaw π/2 from +X, pitch π/2 from straight above; and every pose
+    /// is a unit vector, so `distance` scales it to the true eye distance.
+    #[test]
+    fn eye_dir_is_place_cameras_offset() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+        let near = |a: glam::Vec3, b: [f32; 3]| (a - glam::Vec3::from_array(b)).length() < 1e-6;
+        assert!(near(camera::eye_dir(0.0, 0.0), [0.0, 0.0, 1.0]));
+        assert!(near(camera::eye_dir(FRAC_PI_2, 0.0), [1.0, 0.0, 0.0]));
+        assert!(near(camera::eye_dir(0.0, FRAC_PI_2), [0.0, 1.0, 0.0]));
+        let (c, s) = (0.6f32.cos(), 0.6f32.sin());
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(near(camera::eye_dir(FRAC_PI_4, 0.6), [c * h, s, c * h]));
+        for &(yaw, pitch) in &[(0.7f32, 0.3f32), (-2.5, camera::MAX_PITCH), (3.0, -1.2)] {
+            assert!((camera::eye_dir(yaw, pitch).length() - 1.0).abs() < 1e-6);
+        }
+        assert_eq!(
+            lights::to_eye(0.7, 0.3),
+            camera::eye_dir(0.7, 0.3).to_array(),
+            "the shading's view axis is the camera's eye offset"
+        );
+    }
+
     /// The ported orbit test: the view_proj is exactly the Swift
     /// placeCamera formula (facts #1: ModelViewer.swift:339-342), the
     /// orbit target sits at clip-space (0, 0) for every pose, the aspect
@@ -2394,11 +2412,7 @@ mod tests {
             (std::f32::consts::PI, -camera::MAX_PITCH, 250.0),
         ] {
             let vp = camera::orbit(distance, yaw, pitch, target, aspect);
-            let dir = glam::Vec3::new(
-                pitch.cos() * yaw.sin(),
-                pitch.sin(),
-                pitch.cos() * yaw.cos(),
-            );
+            let dir = camera::eye_dir(yaw, pitch);
             let at = glam::Vec3::from_array(target);
             let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
             let proj = glam::camera::rh::proj::directx::perspective(
@@ -2683,31 +2697,47 @@ mod tests {
 
     /// The shading model reproduces upstream's box: every visible face of
     /// both golden parts (3MF colors #D62629 lid, #1F78B5 base) at the iso
-    /// preset, against shots/upstream/project-model.png sampled mid-face
-    /// after converting the capture from its display profile to sRGB —
-    /// within 7 units per channel.
+    /// preset, against shots/upstream/project-model.png converted from its
+    /// display profile to sRGB. Each reference is the value the face
+    /// presents as a whole: the polygon mean for the tops, and the flat
+    /// plateau that covers most of each side (a side's mean is pulled up
+    /// by a reflection band along the base's front edge). Five faces must
+    /// land within 7 units per channel. The base top is an in-face IBL
+    /// gradient a flat-shaded face cannot follow — left corner 86,158,212,
+    /// right corner 64,147,205, mean 74,152,208 — and must land inside
+    /// that measured span, within 3.
     #[test]
     fn shade_matches_the_upstream_iso_faces() {
         let lin = |c: [u8; 3]| c.map(parts::srgb_to_linear);
         let (lid, base) = (lin([214, 38, 41]), lin([31, 120, 181]));
         let to_eye = lights::to_eye(std::f32::consts::FRAC_PI_4, 0.6);
         let (top, left, right) = ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+        let srgb = |color: [f32; 3], normal: [f32; 3]| {
+            lights::shade(color, normal, to_eye)
+                .map(|c| (parts::linear_to_srgb_f(c) * 255.0).round() as i32)
+        };
         for (color, normal, upstream) in [
             (lid, top, [238, 94, 94]),
             (lid, left, [217, 53, 54]),
-            (lid, right, [162, 33, 35]),
-            (base, top, [84, 158, 211]),
-            (base, left, [48, 130, 188]),
+            (lid, right, [161, 32, 34]),
+            (base, left, [48, 130, 187]),
             (base, right, [33, 93, 138]),
         ] {
-            let shaded = lights::shade(color, normal, to_eye)
-                .map(|c| (parts::linear_to_srgb_f(c) * 255.0).round() as i32);
+            let shaded = srgb(color, normal);
             for i in 0..3 {
                 assert!(
-                    (shaded[i] - upstream[i] as i32).abs() <= 7,
+                    (shaded[i] - upstream[i]).abs() <= 7,
                     "normal {normal:?}: {shaded:?} vs upstream {upstream:?}"
                 );
             }
+        }
+        let (lo, hi) = ([64, 147, 205], [86, 158, 212]);
+        let shaded = srgb(base, top);
+        for i in 0..3 {
+            assert!(
+                shaded[i] >= lo[i] - 3 && shaded[i] <= hi[i] + 3,
+                "base top {shaded:?} outside upstream's gradient {lo:?}..{hi:?}"
+            );
         }
     }
 

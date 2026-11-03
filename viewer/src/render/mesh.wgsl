@@ -92,6 +92,11 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
         if (camera.section_axis == 2u) { v = in.world.z; }
         if (v > camera.section_pos) { discard; }
     }
+    if (model.collision > 0.5) {
+        // upstream's collision material: emissive systemRed — flat from
+        // every normal, opaque even on a would-be-translucent part
+        return vec4<f32>(to_target(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B)), 1.0);
+    }
     // staged normals are unit and `model` is identity today; normalize is
     // insurance for scaled future transforms
     let n = normalize(in.normal);
@@ -101,13 +106,12 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
             + KEY_COEFF * n_key
             + FILL_COEFF * max(dot(n, normalize(FILL_POS)), 0.0)
             + ENV_COEFF * max(dot(n, normalize(ENV_DIR)), 0.0);
-    let h = normalize(key + to_eye());
+    // the half-vector degrades to zero (no highlight) when the eye looks
+    // straight down the key's opposite, as lights::specular's
+    // normalize_or_zero does — normalize() of a zero vector is NaN
+    let hv = key + to_eye();
+    let h = hv * inverseSqrt(max(dot(hv, hv), 1e-12));
     let spec = SPECULAR * pow(max(dot(n, h), 1e-6), SHININESS) * n_key;
-    if (model.collision > 0.5) {
-        // upstream's collision material: emissive systemRed — flat from
-        // every normal, opaque even on a would-be-translucent part
-        return vec4<f32>(to_target(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B)), 1.0);
-    }
     let lit = in.color * diffuse + vec3<f32>(spec);
     return vec4<f32>(to_target(vec3<f32>(shoulder(lit.r), shoulder(lit.g), shoulder(lit.b))), model.alpha);
 }
