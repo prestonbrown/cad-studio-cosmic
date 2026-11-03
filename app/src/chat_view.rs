@@ -56,6 +56,7 @@ use crate::attachments::{self, ClipboardContent};
 use crate::chat::{self, ChatState, MarkerAffordance};
 use crate::fl;
 use crate::markdown::{self, MdStyle};
+use crate::typography;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -1242,9 +1243,10 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32)
 
 // ─── shared bits ───────────────────────────────────────────────────────────
 
-/// A macOS text style: point size and line height in logical px (the
-/// SF Pro metrics the upstream captures show — 13/16 body, 12/15 callout,
-/// 10/13 caption, 15/20 title3, 11/14 for the code blocks' 11pt mono).
+/// An upstream text style on COSMIC's scale: the size from
+/// [`crate::typography`] and the line height upstream's SF metrics give
+/// that style (16/13 body, 15/12 callout, 13/10 caption, 20/15 title3,
+/// 14/11 for 11pt), scaled the same way. The family is the user's.
 #[derive(Clone, Copy)]
 struct TextStyle {
     size: f32,
@@ -1258,45 +1260,47 @@ impl TextStyle {
 }
 
 const BODY: TextStyle = TextStyle {
-    size: 13.0,
-    line_height: 16.0,
+    size: typography::BODY,
+    line_height: typography::scaled(16.0),
 };
 const CALLOUT: TextStyle = TextStyle {
-    size: 12.0,
-    line_height: 15.0,
+    size: typography::CALLOUT,
+    line_height: typography::scaled(15.0),
 };
 const CAPTION: TextStyle = TextStyle {
-    size: 10.0,
-    line_height: 13.0,
+    size: typography::CAPTION,
+    line_height: typography::scaled(13.0),
 };
 /// `.buttonStyle(.link).controlSize(.small)` — the small control font.
 const CAPTION_LINK: TextStyle = TextStyle {
-    size: 11.0,
-    line_height: 14.0,
+    size: typography::scaled(11.0),
+    line_height: typography::scaled(14.0),
 };
 const TITLE3: TextStyle = TextStyle {
-    size: 15.0,
-    line_height: 20.0,
+    size: typography::TITLE3,
+    line_height: typography::scaled(20.0),
 };
+/// CodeBlock's `.system(size: 11)` mono (MessageView.swift:122).
 const CODE: TextStyle = TextStyle {
-    size: 11.0,
-    line_height: 14.0,
+    size: typography::scaled(11.0),
+    line_height: typography::scaled(14.0),
 };
 /// The running tool's live preview (ToolActivityRow.swift:45, 10.5pt mono).
 const PREVIEW: TextStyle = TextStyle {
-    size: 10.5,
-    line_height: 13.0,
+    size: typography::scaled(10.5),
+    line_height: typography::scaled(13.0),
 };
 
 /// The tool input card's `lineLimit(12)` (ToolActivityRow.swift:16).
 const TOOL_INPUT_LINES: usize = 12;
 /// An AppKit disclosure row's height.
 const DISCLOSURE_ROW: f32 = 24.0;
-/// The input field's vertical text inset: one body line plus this on each
-/// side is the field's 32px single-line height (the stroke inside it).
+/// The input field's vertical text inset (upstream: 6pt around the field's
+/// text line, ChatInputView.swift:51, which lands the field at 32pt with
+/// macOS metrics).
 const FIELD_PAD_Y: f32 = 8.0;
-/// The send glyph's inset inside the field: (32 - 18) / 2.
-const SEND_PAD_Y: f32 = 7.0;
+/// The send glyph's inset inside the field: centered on one body line.
+const SEND_PAD_Y: f32 = (BODY.line_height + 2.0 * FIELD_PAD_Y - 18.0) / 2.0;
 
 /// macOS label-color opacities over the text color (NSColor
 /// `quaternaryLabelColor` fills, `separatorColor` strokes).
@@ -1332,20 +1336,17 @@ fn with_alpha(mut color: Color, alpha: f32) -> Color {
 }
 
 fn tint(theme: &cosmic::Theme, tint: Tint) -> Color {
-    let dark = theme.cosmic().is_dark;
-    // the macOS system colors' light/dark pairs
-    let system = |light: u32, night: u32| {
-        let rgb = if dark { night } else { light };
-        Color::from_rgb8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
-    };
+    let cosmic = theme.cosmic();
     match tint {
         Tint::Label | Tint::Secondary | Tint::Tertiary | Tint::Disabled => {
             with_alpha(label_color(theme), tint_alpha(tint))
         }
-        Tint::Accent => Color::from(theme.cosmic().accent.base),
-        Tint::Green => system(0x34C759, 0x30D158),
-        Tint::Red => system(0xFF3B30, 0xFF453A),
-        Tint::Orange => system(0xFF9500, 0xFF9F0A),
+        Tint::Accent => Color::from(cosmic.accent.base),
+        // upstream's .green / .red / .orange are the system status colors;
+        // the theme's success / destructive / warning tokens are COSMIC's
+        Tint::Green => Color::from(cosmic.success.base),
+        Tint::Red => Color::from(cosmic.destructive.base),
+        Tint::Orange => Color::from(cosmic.warning.base),
         Tint::Scrim => Color::from_rgba(0.0, 0.0, 0.0, tint_alpha(tint)),
     }
 }
@@ -1475,9 +1476,20 @@ const INFO_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/info-cir
 const EXCLAMATION_TRIANGLE_FILL: &[u8] =
     include_bytes!("../resources/icons/chat/exclamationmark-triangle-fill.svg");
 
+/// The theme corner radius for an upstream radius in points. Upstream's
+/// rounded rectangles (6-8pt) are all the small-control class; 8pt is the
+/// theme's `radius_s` and smaller ones keep their proportion to it, so the
+/// user's roundness setting (round / slightly round / square) applies.
+fn corner(theme: &cosmic::Theme, upstream_pt: f32) -> cosmic::iced::border::Radius {
+    let r = theme.cosmic().corner_radii.radius_s;
+    let k = upstream_pt / 8.0;
+    [r[0] * k, r[1] * k, r[2] * k, r[3] * k].into()
+}
+
 /// A rounded fill of the text color at `alpha` (macOS `.quaternary` and
 /// friends composite the label color over whatever is behind), with an
-/// optional separator stroke.
+/// optional separator stroke; `radius` is upstream's, in points (see
+/// [`corner`]).
 fn fill_style(alpha: f32, radius: f32, stroke: bool) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| {
         let label = label_color(theme);
@@ -1490,24 +1502,21 @@ fn fill_style(alpha: f32, radius: f32, stroke: bool) -> cosmic::theme::Container
                     Color::TRANSPARENT
                 },
                 width: if stroke { 1.0 } else { 0.0 },
-                radius: radius.into(),
+                radius: corner(theme, radius),
             },
             ..Default::default()
         }
     })
 }
 
-/// The input field (ChatInputView.swift:52-56): NSColor
-/// `textBackgroundColor` (white in light, #1E1E1E in dark), radius 8, a
-/// separator stroke that turns accent at 60% while focused; body text,
-/// placeholder in the placeholder-text color (label at 25%).
+/// The input field (ChatInputView.swift:52-56): the text-background
+/// surface (upstream NSColor `textBackgroundColor`; here the theme's
+/// component surface, which lifts off the pane in light and dark alike),
+/// radius 8pt, a separator stroke that turns accent at 60% while focused;
+/// body text, placeholder in the placeholder-text color (label at 25%).
 fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_editor::Style {
     let label = label_color(theme);
-    let background = if theme.cosmic().is_dark {
-        Color::from_rgb8(0x1E, 0x1E, 0x1E)
-    } else {
-        Color::WHITE
-    };
+    let background = Color::from(theme.cosmic().background(false).component.base);
     let stroke = match status {
         text_editor::Status::Focused { .. } => {
             with_alpha(Color::from(theme.cosmic().accent.base), 0.6)
@@ -1519,7 +1528,7 @@ fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_edito
         border: cosmic::iced::Border {
             color: stroke,
             width: 1.0,
-            radius: 8.0.into(),
+            radius: corner(theme, 8.0),
         },
         placeholder: with_alpha(label, 0.25),
         value: tint(theme, Tint::Label),
@@ -1537,7 +1546,7 @@ fn warn_style() -> cosmic::theme::Container<'static> {
             border: cosmic::iced::Border {
                 color: with_alpha(orange, 0.25),
                 width: 1.0,
-                radius: 8.0.into(),
+                radius: corner(theme, 8.0),
             },
             ..Default::default()
         }
