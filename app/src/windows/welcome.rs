@@ -299,8 +299,12 @@ impl Welcome {
             )
             // `Divider()`: the separator hairline between the panes
             .push(
-                container(Space::new().width(1).height(Length::Fill))
-                    .class(ui::surface::fill(Tone::Separator, 1.0, Corner::None, false)),
+                container(Space::new().width(1).height(Length::Fill)).class(ui::surface::fill(
+                    Tone::Separator,
+                    1.0,
+                    Corner::None,
+                    false,
+                )),
             )
             .push(recents_list)
             .height(Length::Fill)
@@ -313,8 +317,7 @@ impl Welcome {
     fn view_recents(&self, recents: &[PathBuf]) -> Element<'_, Message> {
         let list: Element<'_, Message> = if recents.is_empty() {
             container(
-                text(fl!("nessun-progetto-recente"))
-                    .class(Tone::Secondary.text(Backdrop::Plain)),
+                text(fl!("nessun-progetto-recente")).class(Tone::Secondary.text(Backdrop::Plain)),
             )
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
@@ -369,9 +372,7 @@ impl Welcome {
             )
             .class(cosmic::theme::Container::custom(|theme| {
                 cosmic::iced::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        cosmic::iced::Color::WHITE,
-                    )),
+                    background: Some(cosmic::iced::Background::Color(cosmic::iced::Color::WHITE)),
                     border: cosmic::iced::Border {
                         radius: Corner::Xs.radius(theme),
                         ..Default::default()

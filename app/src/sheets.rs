@@ -165,16 +165,13 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .align_y(cosmic::iced::Alignment::Center)
                 .push(callout(fl!("percorso-dell-eseguibile")))
                 .push(
-                    text_input::text_input(
-                        custom_path_placeholder(sheet.kind),
-                        &sheet.custom_path,
-                    )
-                    .on_input(AgentMessage::CustomPath)
-                    // Return runs Verify (upstream's default action)
-                    .on_submit(|_| AgentMessage::Verify)
-                    .font(cosmic::font::mono())
-                    .size(typography::CALLOUT)
-                    .width(Length::Fill),
+                    text_input::text_input(custom_path_placeholder(sheet.kind), &sheet.custom_path)
+                        .on_input(AgentMessage::CustomPath)
+                        // Return runs Verify (upstream's default action)
+                        .on_submit(|_| AgentMessage::Verify)
+                        .font(cosmic::font::mono())
+                        .size(typography::CALLOUT)
+                        .width(Length::Fill),
                 ),
         )
         .push_maybe(sheet.last_verified_missing.then(|| {
@@ -432,9 +429,7 @@ pub fn present<'a, M: Clone + 'a>(
             .align_y(cosmic::iced::Alignment::Center)
             .class(cosmic::theme::Container::custom(|theme| {
                 cosmic::iced::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        theme.cosmic().shade.into(),
-                    )),
+                    background: Some(cosmic::iced::Background::Color(theme.cosmic().shade.into())),
                     ..Default::default()
                 }
             })),

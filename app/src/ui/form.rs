@@ -61,7 +61,10 @@ pub fn section<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
                 Tone::Quaternary.alpha(theme, Backdrop::Plain) * FILL,
             ))),
             border: Border {
-                color: wash(theme, Tone::Separator.alpha(theme, Backdrop::Plain) * HAIRLINE),
+                color: wash(
+                    theme,
+                    Tone::Separator.alpha(theme, Backdrop::Plain) * HAIRLINE,
+                ),
                 width: 1.0,
                 radius: Corner::S.radius(theme),
             },

@@ -35,10 +35,10 @@
 use std::path::{Path, PathBuf};
 
 use cosmic::Element;
-use cosmic::iced::Length;
-use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::Alignment;
+use cosmic::iced::Length;
 use cosmic::iced::font::Weight;
+use cosmic::iced::widget::text::Wrapping;
 use cosmic::widget::{Column, Row, Space, button, container, scrollable};
 use engine::agent::locator::{AgentKind, AgentPath};
 use engine::python::env::EnvState;
@@ -512,11 +512,20 @@ const FOOTER_TAIL: f32 = 16.0;
 /// symbol over the label; the selected item in the accent on a rounded
 /// wash, the others secondary.
 fn tab_item(tab: Tab, selected: bool) -> Element<'static, Message> {
-    let tone = if selected { Tone::Accent } else { Tone::Secondary };
+    let tone = if selected {
+        Tone::Accent
+    } else {
+        Tone::Secondary
+    };
     let face = Column::new()
         .spacing(3)
         .align_x(Alignment::Center)
-        .push(ui::icon::icon(tab.symbol(), TAB_SYMBOL, tone, Backdrop::Titlebar))
+        .push(ui::icon::icon(
+            tab.symbol(),
+            TAB_SYMBOL,
+            tone,
+            Backdrop::Titlebar,
+        ))
         .push(
             cosmic::widget::text(tab.title())
                 .size(typography::SUBHEADLINE)
@@ -562,7 +571,10 @@ fn view_general(state: &SettingsState) -> Vec<Element<'_, Message>> {
         .position(|choice| *choice == state.language)
         .unwrap_or(0);
     let mut parts = vec![
-        form::section(vec![form::row(fl!("posizione-dei-nuovi-progetti"), location)]),
+        form::section(vec![form::row(
+            fl!("posizione-dei-nuovi-progetti"),
+            location,
+        )]),
         form::section(vec![form::row(
             fl!("lingua"),
             cosmic::widget::dropdown(language_titles, Some(language_row), |index| {
@@ -592,7 +604,12 @@ const ENGINE_PICKER_WIDTH: f32 = 300.0;
 fn view_agent(state: &SettingsState) -> Vec<Element<'_, Message>> {
     let engines = ENGINES
         .iter()
-        .map(|kind| (kind.display_name().to_string(), Some(Message::Engine(*kind))))
+        .map(|kind| {
+            (
+                kind.display_name().to_string(),
+                Some(Message::Engine(*kind)),
+            )
+        })
         .collect();
     let picker = container(ui::segmented::segmented(
         engines,
