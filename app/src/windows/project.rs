@@ -54,6 +54,7 @@ use crate::fl;
 use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
+use crate::typography;
 use crate::version_menu;
 use crate::viewer_pane::ViewerPane;
 
@@ -85,6 +86,10 @@ const CAPSULE_ALPHA: f32 = 0.076;
 
 /// The toolbar's bottom hairline: #C5C5C6 over #EEEEF0.
 const HAIRLINE_ALPHA: f32 = 0.21;
+
+/// The capsule's `.font(.system(size: 12))` (ActivityViewer.swift:34) on
+/// COSMIC's text scale.
+const CAPSULE_TEXT: f32 = typography::scaled(12.0);
 
 /// The version card's width: the visible span of upstream's menu inside
 /// the window (version-menu.png: x 968 to the 1320 edge, less an 8 px
@@ -1365,7 +1370,7 @@ impl ProjectWindow {
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(chrome::fill_class(DIVIDER_ALPHA, 0.0))
+            .class(chrome::fill_class(DIVIDER_ALPHA, chrome::Corner::None))
             .into()
     }
 
@@ -1393,7 +1398,7 @@ impl ProjectWindow {
             .interaction(cosmic::iced::mouse::Interaction::Grab);
         cosmic::widget::tooltip(
             container(grip).padding(6),
-            text(fl!("trascina-per-spostare-il-pannello")).size(12),
+            text(fl!("trascina-per-spostare-il-pannello")).size(typography::scaled(11.0)),
             cosmic::widget::tooltip::Position::Bottom,
         )
         .into()
@@ -1416,7 +1421,11 @@ impl ProjectWindow {
                     border: cosmic::iced::Border {
                         color: accent,
                         width: if stroke { 2.0 } else { 0.0 },
-                        radius: if stroke { 8.0.into() } else { 0.0.into() },
+                        radius: if stroke {
+                            theme.cosmic().corner_radii.radius_s.into()
+                        } else {
+                            theme.cosmic().corner_radii.radius_0.into()
+                        },
                     },
                     ..Default::default()
                 }
@@ -1594,7 +1603,7 @@ impl ProjectWindow {
             .push(band)
             .push(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(chrome::fill_class(HAIRLINE_ALPHA, 0.0)),
+                    .class(chrome::fill_class(HAIRLINE_ALPHA, chrome::Corner::None)),
             )
             .into()
     }
@@ -1616,7 +1625,7 @@ impl ProjectWindow {
             .push(chrome::glyph(chrome::CUBE, (13.0, 13.0), Tone::Secondary))
             .push(
                 text(self.name.clone())
-                    .size(12)
+                    .size(CAPSULE_TEXT)
                     .font(medium)
                     .wrapping(cosmic::iced::widget::text::Wrapping::None)
                     .class(chrome::text_class(Tone::Primary)),
@@ -1640,14 +1649,14 @@ impl ProjectWindow {
         };
         row = row.push(
             text(self.activity.text())
-                .size(12)
+                .size(CAPSULE_TEXT)
                 .wrapping(cosmic::iced::widget::text::Wrapping::None)
                 .class(chrome::text_class(Tone::Secondary)),
         );
         if let Some(start) = self.work_started_at {
             row = row.push(
                 text(activity::elapsed_text(start.elapsed().as_secs()))
-                    .size(12)
+                    .size(CAPSULE_TEXT)
                     .font(cosmic::font::mono())
                     .class(chrome::text_class(Tone::Tertiary)),
             );
@@ -1678,12 +1687,12 @@ impl ProjectWindow {
                     })
                     .push(
                         text(format!("{count}"))
-                            .size(12)
+                            .size(CAPSULE_TEXT)
                             .class(chrome::text_class(Tone::Primary)),
                     ),
             )
             .padding(0)
-            .class(chrome::button_class(false, 4.0))
+            .class(chrome::button_class(false, chrome::Corner::Xs))
             .on_press(Message::ToggleIssues((!open).then_some(kind)));
             // the `.popover` on the issue button (:80-85)
             let mut anchored = popover(face)
@@ -1699,7 +1708,7 @@ impl ProjectWindow {
             .width(Length::Fixed(480.0))
             .height(Length::Fixed(24.0))
             .align_y(cosmic::iced::alignment::Vertical::Center)
-            .class(chrome::fill_class(CAPSULE_ALPHA, 6.0))
+            .class(chrome::fill_class(CAPSULE_ALPHA, chrome::Corner::S))
             .into()
     }
 
@@ -1727,7 +1736,7 @@ impl ProjectWindow {
                         IssueKind::Error => chrome::colored(chrome::ERROR_FILL, (13.0, 13.0)),
                         IssueKind::Warning => chrome::colored(chrome::WARNING_FILL, (14.0, 12.5)),
                     })
-                    .push(text(issue.message.clone()).size(12)),
+                    .push(text(issue.message.clone()).size(typography::CALLOUT)),
             );
         }
         container(list).class(chrome::card_class()).into()
@@ -1950,6 +1959,7 @@ fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
             border: cosmic::iced::Border {
                 color: stroke,
                 width: 1.0,
+                // `Capsule()`: half the 16 px height, a shape not a token
                 radius: 8.0.into(),
             },
             ..Default::default()
@@ -2097,14 +2107,40 @@ pub mod chrome {
         color
     }
 
+    /// A corner radius by CLASS, resolved from the user's COSMIC roundness
+    /// setting (upstream's literal pt values only pick the class).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Corner {
+        /// Square.
+        None,
+        /// Tiny controls (an issue count, a menu row's highlight).
+        Xs,
+        /// Small controls (toolbar buttons, the capsule, the version pill).
+        S,
+        /// Cards and popovers.
+        M,
+    }
+
+    impl Corner {
+        pub fn radius(self, theme: &cosmic::Theme) -> cosmic::iced::border::Radius {
+            let radii = &theme.cosmic().corner_radii;
+            match self {
+                Corner::None => radii.radius_0.into(),
+                Corner::Xs => radii.radius_xs.into(),
+                Corner::S => radii.radius_s.into(),
+                Corner::M => radii.radius_m.into(),
+            }
+        }
+    }
+
     /// The borderless toolbar button: no fill at rest, a rounded wash on
     /// hover/press (macOS toolbar items), or — `bordered` — the hairline
     /// pill the version menu's `Menu` label sits in.
-    pub fn button_class(bordered: bool, radius: f32) -> cosmic::theme::Button {
+    pub fn button_class(bordered: bool, corner: Corner) -> cosmic::theme::Button {
         let style = move |theme: &cosmic::Theme, fill: f32| {
             let mut style = cosmic::widget::button::Style::new();
             style.background = (fill > 0.0).then(|| Background::Color(wash(theme, fill)));
-            style.border_radius = radius.into();
+            style.border_radius = corner.radius(theme);
             if bordered {
                 style.border_width = 1.0;
                 style.border_color = wash(theme, 0.05);
@@ -2137,7 +2173,7 @@ pub mod chrome {
                 border: Border {
                     color: wash(theme, 0.12),
                     width: 1.0,
-                    radius: 10.0.into(),
+                    radius: Corner::M.radius(theme),
                 },
                 shadow: cosmic::iced::Shadow {
                     color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
@@ -2150,11 +2186,11 @@ pub mod chrome {
     }
 
     /// A container class: a rounded fill of `alpha` on-background wash.
-    pub fn fill_class(alpha: f32, radius: f32) -> cosmic::theme::Container<'static> {
+    pub fn fill_class(alpha: f32, corner: Corner) -> cosmic::theme::Container<'static> {
         cosmic::theme::Container::custom(move |theme| cosmic::iced::widget::container::Style {
             background: Some(Background::Color(wash(theme, alpha))),
             border: Border {
-                radius: radius.into(),
+                radius: corner.radius(theme),
                 ..Default::default()
             },
             ..Default::default()
@@ -2174,7 +2210,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
             button::custom(
                 container(
                     text(label)
-                        .size(13)
+                        .size(typography::BODY)
                         .wrapping(cosmic::iced::widget::text::Wrapping::None)
                         .class(chrome::text_class(tone)),
                 )
@@ -2184,7 +2220,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
             )
             .padding(0)
             .width(Length::Fill)
-            .class(chrome::button_class(false, 5.0))
+            .class(chrome::button_class(false, chrome::Corner::Xs))
             .on_press_maybe(on_press),
         )
         .padding([0, 5])
@@ -2206,7 +2242,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         list = list.push(
             container(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(chrome::fill_class(0.1, 0.0)),
+                    .class(chrome::fill_class(0.1, chrome::Corner::None)),
             )
             .padding([5, 14]),
         );
@@ -2246,9 +2282,9 @@ fn toolbar_button(
     cosmic::widget::tooltip(
         button::custom(face)
             .padding(0)
-            .class(chrome::button_class(false, 6.0))
+            .class(chrome::button_class(false, chrome::Corner::S))
             .on_press_maybe(on_press),
-        text(help).size(12),
+        text(help).size(typography::scaled(11.0)),
         cosmic::widget::tooltip::Position::Bottom,
     )
     .into()

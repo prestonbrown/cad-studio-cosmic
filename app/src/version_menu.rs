@@ -155,7 +155,7 @@ pub fn version_button<Message: Clone + 'static>(
     if let Some(current) = current {
         label = label.push(Space::new().width(Length::Fixed(6.0))).push(
             text(fl!("v-lld", version = current))
-                .size(13)
+                .size(crate::typography::BODY)
                 .class(chrome::text_class(Tone::Toolbar)),
         );
     }
@@ -170,13 +170,13 @@ pub fn version_button<Message: Clone + 'static>(
         .height(Length::Fixed(27.0));
     let root = button::custom(label)
         .padding(0)
-        .class(chrome::button_class(true, 8.0))
+        .class(chrome::button_class(true, chrome::Corner::S))
         .selected(open)
         .on_press(on_toggle)
         .name(fl!("versioni"));
     cosmic::widget::tooltip(
         root,
-        text(fl!("storico-delle-versioni")).size(12),
+        text(fl!("storico-delle-versioni")).size(crate::typography::scaled(11.0)),
         cosmic::widget::tooltip::Position::Bottom,
     )
     .into()
@@ -202,7 +202,7 @@ pub fn view_versions<Message: Clone + 'static>(
     use cosmic::iced::{Alignment, Length};
     use cosmic::widget::{Column, Row, Space, button, container, scrollable, text};
 
-    let line = |label: String, size: u16, tone: Tone, bold: bool| {
+    let line = |label: String, size: f32, tone: Tone, bold: bool| {
         let mut t = text(label)
             .size(size)
             .wrapping(cosmic::iced::widget::text::Wrapping::None)
@@ -219,7 +219,7 @@ pub fn view_versions<Message: Clone + 'static>(
         list = list.push(
             container(line(
                 fl!("nessuna-versione-salvata"),
-                13,
+                crate::typography::BODY,
                 Tone::Tertiary,
                 false,
             ))
@@ -235,7 +235,7 @@ pub fn view_versions<Message: Clone + 'static>(
                 } else {
                     fl!("torna-a-una-versione")
                 },
-                11,
+                crate::typography::scaled(11.0),
                 Tone::Tertiary,
                 true,
             ))
@@ -263,7 +263,7 @@ pub fn view_versions<Message: Clone + 'static>(
                         version = entry.number,
                         summary = entry.prompt_summary
                     ),
-                    13,
+                    crate::typography::BODY,
                     tone,
                     false,
                 ));
@@ -274,9 +274,14 @@ pub fn view_versions<Message: Clone + 'static>(
                         .align_y(Vertical::Center),
                 )
                 .push(
-                    container(line(subtitle(entry, now), 11, Tone::Tertiary, false))
-                        .padding([0.0, TEXT_INSET])
-                        .height(Length::Fixed(14.0)),
+                    container(line(
+                        subtitle(entry, now),
+                        crate::typography::scaled(11.0),
+                        Tone::Tertiary,
+                        false,
+                    ))
+                    .padding([0.0, TEXT_INSET])
+                    .height(Length::Fixed(14.0)),
                 )
                 .width(Length::Fill)
                 .height(Length::Fixed(ROW_HEIGHT));
@@ -284,7 +289,7 @@ pub fn view_versions<Message: Clone + 'static>(
                 container(
                     button::custom(body)
                         .padding(0)
-                        .class(chrome::button_class(false, 5.0))
+                        .class(chrome::button_class(false, chrome::Corner::Xs))
                         .on_press_maybe(on_press)
                         .width(Length::Fill),
                 )

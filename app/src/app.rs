@@ -430,7 +430,7 @@ impl Application for CadStudio {
                         .align_x(cosmic::iced::alignment::Horizontal::Center)
                         .align_y(cosmic::iced::alignment::Vertical::Center)
                         .into();
-                    return self.decorate(id, focused, centered, "Welcome to CAD Studio");
+                    return self.decorate_borderless(id, focused, centered);
                 }
                 let body = self
                     .welcome
@@ -454,7 +454,7 @@ impl Application for CadStudio {
                     None => body,
                 };
                 let with_sheet = self.apply_sheets(body);
-                self.decorate(id, focused, with_sheet, "Welcome to CAD Studio")
+                self.decorate_borderless(id, focused, with_sheet)
             }
             Some(WindowKind::Project(project)) => {
                 // ONE header: the window's own view_header is the ProjectToolbar
@@ -1141,6 +1141,45 @@ impl CadStudio {
             pop = pop.modal(true);
         }
         pop.into()
+    }
+
+    /// The welcome window's chrome (WelcomeWindow.swift: a full-size
+    /// content view with no title row): the body fills the window, the
+    /// close control floats over its top corner, and any press on the body
+    /// that no control captures drags the window (right-click: the window
+    /// menu).
+    fn decorate_borderless<'a>(
+        &self,
+        id: window::Id,
+        focused: bool,
+        body: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let close = cosmic::widget::button::icon(
+            cosmic::widget::icon::from_name("window-close-symbolic").size(16),
+        )
+        .padding(8)
+        .class(cosmic::theme::Button::HeaderBar)
+        .selected(focused)
+        .on_press(Message::CloseWindow(id));
+        let controls = container(close)
+            .width(Length::Fill)
+            .align_x(cosmic::iced::alignment::Horizontal::Right)
+            .padding([7, 7]);
+        let draggable =
+            cosmic::widget::mouse_area(container(body).width(Length::Fill).height(Length::Fill))
+                .on_drag(Message::DragWindow(id))
+                .on_right_press(Message::WindowMenu(id));
+        container(
+            cosmic::iced::widget::Stack::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .push(draggable)
+                .push(controls),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::WindowBackground)
+        .into()
     }
 
     /// Give a window its CSD header bar and background.
