@@ -46,7 +46,17 @@ pub enum WindowKind {
     Settings(SettingsState),
     /// The About window (upstream `orderFrontStandardAboutPanel`).
     About,
+    /// A project window whose load failed, holding the error text
+    /// (ProjectWindow.swift:16-22).
+    LoadError(String),
 }
+
+/// The load-error window's minimum frame (ProjectWindow.swift:22
+/// `.frame(minWidth: 480, minHeight: 320)`).
+const LOAD_ERROR_SIZE: (f32, f32) = (480.0, 320.0);
+
+/// The load-error view's glyph (upstream `exclamationmark.triangle`).
+const ICON_WARNING: &[u8] = include_bytes!("../resources/icons/exclamationmark.triangle.svg");
 
 /// App-level commands reachable from any window (upstream's global
 /// CommandGroups; ⌘→Ctrl, ⇧⌘1 keeps upstream's Welcome binding, ⌘, the
@@ -134,6 +144,13 @@ pub enum Message {
     SigTerm,
     /// A no-op ack for futures that must return a message.
     Noop,
+}
+
+/// One folder-portal request: its title and the directory it opens at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderPick {
+    title: String,
+    start: Option<PathBuf>,
 }
 
 pub struct CadStudio {
@@ -228,7 +245,8 @@ impl Application for CadStudio {
     }
 
     fn update(&mut self, message: Message) -> Task<Action<Message>> {
-        match message {
+        let sheet_was_up = self.modal_sheet_up();
+        let task = match message {
             Message::Welcome(msg) => self.update_welcome(msg),
             Message::Project(id, msg) => self.update_project(id, msg),
             Message::DriveChat(text) => self
@@ -251,14 +269,17 @@ impl Application for CadStudio {
                 .unwrap_or_else(Task::none),
             Message::DriveSaveAs(path) => self
                 .project_window()
-                .map(|id| Task::done(Message::Project(id, project::Message::ExportChosen(Ok(path)))))
+                .map(|id| {
+                    Task::done(Message::Project(
+                        id,
+                        project::Message::ExportChosen(Ok(path)),
+                    ))
+                })
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
             Message::DriveVersionCard => self
                 .project_window()
-                .map(|id| {
-                    Task::done(Message::Project(id, project::Message::ToggleVersionCard))
-                })
+                .map(|id| Task::done(Message::Project(id, project::Message::ToggleVersionCard)))
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
@@ -402,6 +423,14 @@ impl Application for CadStudio {
                 cosmic::iced::exit()
             }
             Message::Noop => Task::none(),
+        };
+        // a sheet coming up over a project releases the focused text
+        // widget: a modal popover blocks only the pointer, and a focused
+        // chat editor would otherwise eat the sheet's Return/Esc
+        if !sheet_was_up && self.modal_sheet_up() {
+            Task::batch([task, release_focus()])
+        } else {
+            task
         }
     }
 
@@ -486,6 +515,9 @@ impl Application for CadStudio {
             Some(WindowKind::About) => {
                 let body: cosmic::Element<'_, Message> = settings::view_about();
                 self.decorate(id, focused, body, &fl!("informazioni-su-cad-studio"))
+            }
+            Some(WindowKind::LoadError(error)) => {
+                self.decorate(id, focused, view_load_error(error), &fl!("cad-studio"))
             }
             None => self.decorate(
                 id,
@@ -596,18 +628,31 @@ impl CadStudio {
                     self.welcome.creating = None;
                 }
                 welcome::new_project::Message::Advance => {
-                    // fold the sheet state (awaiting_parent), then ask
-                    // where to create — the name already validated
-                    let _ = self.welcome.update(msg.clone());
-                    let name = self
+                    // fold the sheet state: the fold sets awaiting_parent
+                    // only for a valid name (upstream create()'s
+                    // `guard isNameValid`, NewProjectSheet.swift:57) — an
+                    // invalid Return asks nothing, and a pick already in
+                    // flight is not asked twice (upstream's panel is modal)
+                    if self
                         .welcome
                         .creating
                         .as_ref()
-                        .map(|sheet| sheet.trimmed_name().to_string())
-                        .unwrap_or_default();
-                    let title = fl!("scegli-dove-creare-la-cartella", name = name);
+                        .is_some_and(|s| s.awaiting_parent)
+                    {
+                        return Task::none();
+                    }
+                    let _ = self.welcome.update(msg.clone());
+                    let Some(sheet) = self
+                        .welcome
+                        .creating
+                        .as_ref()
+                        .filter(|sheet| sheet.awaiting_parent)
+                    else {
+                        return Task::none();
+                    };
+                    let pick = self.parent_folder_pick(sheet.trimmed_name());
                     return Task::future(async move {
-                        let future = choose_folder(&title);
+                        let future = choose_folder_at(&pick.title, pick.start.as_deref());
                         Message::ParentFolderChosen(future.await)
                     })
                     .map(Action::App);
@@ -618,6 +663,17 @@ impl CadStudio {
         }
         let task = self.welcome.update(msg).map(Message::Welcome);
         task.map(Action::App)
+    }
+
+    /// The new-project parent-folder panel: titled for the name, opening
+    /// at the Settings default project location
+    /// (ProjectPanels.swift:15-24 `panel.directoryURL =
+    /// AppSettings.defaultProjectLocation`).
+    fn parent_folder_pick(&self, name: &str) -> FolderPick {
+        FolderPick {
+            title: fl!("scegli-dove-creare-la-cartella", name = name.to_string()),
+            start: Some(self.settings.default_project_location.clone()),
+        }
     }
 
     fn update_project(&mut self, id: window::Id, msg: project::Message) -> Task<Action<Message>> {
@@ -936,7 +992,10 @@ impl CadStudio {
         let mut persisted = EngineSettings::load(&self.settings_file).unwrap_or_default();
         if settings::stage(&msg, &mut persisted) {
             match persisted.save(&self.settings_file) {
-                Ok(()) => self.settings = persisted,
+                Ok(()) => {
+                    self.settings = persisted;
+                    self.push_unit_to_viewers();
+                }
                 Err(why) => eprintln!("cad-studio: settings save failed: {why}"),
             }
         }
@@ -975,6 +1034,90 @@ impl CadStudio {
         }
     }
 
+    /// A python or agent-missing sheet is up (both present as modal
+    /// popovers over the project and welcome bodies).
+    fn modal_sheet_up(&self) -> bool {
+        self.python.presented || self.agent_missing.is_some()
+    }
+
+    /// What Return / Esc does on the sheet topmost over window `id` — the
+    /// `.keyboardShortcut(.defaultAction / .cancelAction)` buttons, which
+    /// do nothing while disabled. `None`: no sheet there, or the sheet has
+    /// no enabled button for that role.
+    fn sheet_key_message(&self, id: window::Id, role: SheetKey) -> Option<Message> {
+        match self.windows.get(&id)? {
+            WindowKind::Welcome => {
+                // the first-run sheet replaces the whole body: Continua is
+                // its only, default, button (SetupSheet.swift:31-35)
+                if self.setup.is_some() {
+                    return (role == SheetKey::Default)
+                        .then_some(Message::SetupSheet(sheets::SetupMessage::Continue));
+                }
+                if self.modal_sheet_up() {
+                    return self.modal_sheet_key(role);
+                }
+                // NewProjectSheet.swift:34-39: Annulla cancels, Avanti is
+                // the default and is disabled for an invalid name
+                let sheet = self.welcome.creating.as_ref()?;
+                let msg = match role {
+                    SheetKey::Cancel => welcome::new_project::Message::Cancel,
+                    SheetKey::Default
+                        if sheet.validation_error().is_none() && !sheet.awaiting_parent =>
+                    {
+                        welcome::new_project::Message::Advance
+                    }
+                    SheetKey::Default => return None,
+                };
+                Some(Message::Welcome(welcome::Message::NewSheet(msg)))
+            }
+            WindowKind::Project(_) => self.modal_sheet_key(role),
+            WindowKind::Settings(_) | WindowKind::About | WindowKind::LoadError(_) => None,
+        }
+    }
+
+    /// Return / Esc on the python sheet (over the agent sheet, as
+    /// `apply_sheets` stacks them).
+    fn modal_sheet_key(&self, role: SheetKey) -> Option<Message> {
+        if self.python.presented {
+            // PythonSetupSheet.swift:62-82: Fine (default) when ready;
+            // Più tardi (cancel) + Installa (default) otherwise; nothing
+            // while installing or checking
+            let msg = match (sheets::buttons(&self.python.state.state), role) {
+                (sheets::SetupButtons::Done, SheetKey::Default) => sheets::PythonMessage::Close,
+                (sheets::SetupButtons::LaterAndInstall, SheetKey::Default) => {
+                    sheets::PythonMessage::Install
+                }
+                (sheets::SetupButtons::LaterAndInstall, SheetKey::Cancel) => {
+                    sheets::PythonMessage::Close
+                }
+                _ => return None,
+            };
+            return Some(Message::PythonSheet(msg));
+        }
+        // AgentMissingSheet.swift:56-69: Chiudi (cancel), Verifica
+        // (default, disabled while checking)
+        let sheet = self.agent_missing.as_ref()?;
+        let msg = match role {
+            SheetKey::Cancel => sheets::AgentMessage::Close,
+            SheetKey::Default if !sheet.checking => sheets::AgentMessage::Verify,
+            SheetKey::Default => return None,
+        };
+        Some(Message::AgentSheet(msg))
+    }
+
+    /// The measurement unit reaches every open project's viewer (upstream
+    /// ModelPane reads `@AppStorage(measurementUnitKey)`, so a Settings
+    /// change re-renders the size label and measure badge live,
+    /// ModelPane.swift:7).
+    fn push_unit_to_viewers(&mut self) {
+        let unit = self.settings.measurement_unit;
+        for window in self.windows.values_mut() {
+            if let WindowKind::Project(project) = window {
+                project.viewer.unit = unit;
+            }
+        }
+    }
+
     /// Route an unconsumed key press: app-level shortcuts act globally,
     /// project commands go to the window the key landed in.
     fn update_key_press(
@@ -983,6 +1126,11 @@ impl CadStudio {
         key: Key,
         modifiers: Modifiers,
     ) -> Task<Action<Message>> {
+        if let Some(role) = sheet_key_role(&key, &modifiers) {
+            if let Some(msg) = self.sheet_key_message(id, role) {
+                return self.update(msg);
+            }
+        }
         match app_shortcut(&key, &modifiers) {
             Some(AppShortcut::NewProject) => {
                 return self.update_welcome(welcome::Message::NewProject);
@@ -1018,10 +1166,11 @@ impl CadStudio {
             }
         }
         if let Err(why) = store::prepare(&root) {
-            // upstream throws and ProjectWindow shows the load-error view;
-            // the M4 port declines to open (the surface is noted for M6)
+            // ProjectWindow.swift:16-22, 42-44: the window opens on the
+            // "Impossibile aprire il progetto" view carrying the error; no
+            // recent is added and the welcome window stays
             eprintln!("cad-studio: cannot open {}: {why}", root.display());
-            return Task::none();
+            return self.open_load_error(why.to_string());
         }
         let (window, bridge_task) = ProjectWindow::new(root.clone(), &self.settings);
         let name = window.name.clone();
@@ -1052,6 +1201,21 @@ impl CadStudio {
                 .map(move |m| Message::Project(id, project::Message::Bridge(m)))
                 .map(Action::App),
         ])
+    }
+
+    /// A project window whose load failed (ProjectWindow.swift:16-22): a
+    /// 480x320 window showing the failure and the error text.
+    fn open_load_error(&mut self, error: String) -> Task<Action<Message>> {
+        let (id, spawn) = window::open(Self::window_settings(
+            cosmic::iced::Size::new(LOAD_ERROR_SIZE.0, LOAD_ERROR_SIZE.1),
+            Some(cosmic::iced::Size::new(
+                LOAD_ERROR_SIZE.0,
+                LOAD_ERROR_SIZE.1,
+            )),
+        ));
+        self.windows.insert(id, WindowKind::LoadError(error));
+        let title = self.set_window_title(fl!("cad-studio"), id);
+        Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
     }
 
     /// Close the welcome window if it is open, moving the main-window
@@ -1213,6 +1377,76 @@ impl CadStudio {
         .class(cosmic::theme::Container::WindowBackground)
         .into()
     }
+}
+
+/// The load-error window body (ProjectWindow.swift:16-22's
+/// ContentUnavailableView): the warning glyph, "Impossibile aprire il
+/// progetto", and the error text, centered.
+fn view_load_error(error: &str) -> Element<'_, Message> {
+    let glyph =
+        cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(ICON_WARNING))
+            .width(Length::Fixed(40.0))
+            .height(Length::Fixed(40.0))
+            // the glyph inks in the theme's on-background color (an
+            // uncolored svg draws black in dark mode)
+            .class(cosmic::theme::Svg::custom(|theme| {
+                cosmic::iced::widget::svg::Style {
+                    color: Some(theme.cosmic().background(false).on.into()),
+                }
+            }));
+    container(
+        Column::new()
+            .spacing(8)
+            .push(glyph)
+            .push(
+                text(fl!("impossibile-aprire-il-progetto"))
+                    .size(crate::typography::TITLE)
+                    .font(cosmic::font::bold()),
+            )
+            .push(
+                text(error)
+                    .size(crate::typography::BODY)
+                    .align_x(cosmic::iced::alignment::Horizontal::Center),
+            )
+            .align_x(cosmic::iced::alignment::Alignment::Center),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(cosmic::iced::alignment::Horizontal::Center)
+    .align_y(cosmic::iced::alignment::Vertical::Center)
+    .into()
+}
+
+/// A sheet button's keyboard role (SwiftUI `.keyboardShortcut`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetKey {
+    /// `.defaultAction`: Return.
+    Default,
+    /// `.cancelAction`: Esc.
+    Cancel,
+}
+
+/// Bare Return / Esc as a sheet role; any command modifier makes it a
+/// different shortcut.
+pub fn sheet_key_role(key: &Key, modifiers: &Modifiers) -> Option<SheetKey> {
+    use cosmic::iced::keyboard::key::Named;
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key {
+        Key::Named(Named::Enter) => Some(SheetKey::Default),
+        Key::Named(Named::Escape) => Some(SheetKey::Cancel),
+        _ => None,
+    }
+}
+
+/// Drop keyboard focus from every focusable widget.
+fn release_focus() -> Task<Action<Message>> {
+    cosmic::iced::advanced::widget::operate(
+        cosmic::iced::advanced::widget::operation::focusable::unfocus::<()>(),
+    )
+    .discard()
 }
 
 /// The app-level shortcut table (upstream's global commands; ⌘→Ctrl, ⌘,
@@ -1563,7 +1797,6 @@ mod tests {
     }
 }
 
-
 /// The grouping identity law: the app id, the icon lookups (sheets'
 /// APP_ICON), and the desktop file's StartupWMClass/Icon must all be the
 /// same string or COSMIC window grouping breaks silently. tests/ cannot
@@ -1579,5 +1812,263 @@ mod packaging_identity {
             crate::sheets::APP_ICON,
             "APP_ID and the sheets' icon-lookup name drifted — grouping and icon resolution both break"
         );
+    }
+}
+
+/// The shell's behaviors driven through `update` on a headless app: a
+/// default `Core`, a temp settings file and cosmic-config dir, and the
+/// welcome window registered under a fresh id.
+#[cfg(test)]
+mod shell_behavior {
+    use super::*;
+    use cosmic::iced::keyboard::key::Named;
+    use engine::settings::MeasurementUnit;
+
+    struct Fixture {
+        app: CadStudio,
+        welcome: window::Id,
+        dir: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = std::env::temp_dir().join(format!("cad-shell-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config::with_custom_path("cad-studio-tests", 1, dir.join("config")).unwrap();
+        let welcome = window::Id::unique();
+        let app = CadStudio {
+            core: Core::default(),
+            windows: HashMap::from([(welcome, WindowKind::Welcome)]),
+            welcome: Welcome::new(),
+            recents: Recents::load(config.clone()),
+            config,
+            settings: EngineSettings::default(),
+            settings_file: dir.join("settings.json"),
+            agent_missing: None,
+            setup: None,
+            python: sheets::PythonSetup::default(),
+        };
+        Fixture { app, welcome, dir }
+    }
+
+    fn key(app: &mut CadStudio, id: window::Id, named: Named) {
+        let _ = app.update(Message::KeyPressed(
+            id,
+            Key::Named(named),
+            Modifiers::empty(),
+        ));
+    }
+
+    fn new_project_sheet(app: &mut CadStudio, name: &str) {
+        let _ = app.update(Message::Welcome(welcome::Message::NewProject));
+        let _ = app.update(Message::Welcome(welcome::Message::NewSheet(
+            welcome::new_project::Message::Name(name.to_string()),
+        )));
+    }
+
+    fn awaiting_parent(app: &CadStudio) -> bool {
+        app.welcome
+            .creating
+            .as_ref()
+            .expect("the sheet is up")
+            .awaiting_parent
+    }
+
+    /// A real project on disk, opened through the app's own path.
+    fn open_real_project(f: &mut Fixture, name: &str) -> window::Id {
+        store::create_project(&f.dir, name).unwrap();
+        let _ = f.app.open_project(f.dir.join(name));
+        f.app
+            .project_window()
+            .expect("the project window registered")
+    }
+
+    /// 2.17 / 11.2: the new-project parent panel opens at Settings'
+    /// default project location (ProjectPanels.swift:20).
+    #[test]
+    fn the_parent_folder_panel_opens_at_the_default_project_location() {
+        let mut f = fixture();
+        let location = f.dir.join("Progetti");
+        f.app.settings.default_project_location = location.clone();
+        let pick = f.app.parent_folder_pick("Staffa");
+        assert_eq!(pick.start, Some(location));
+        assert!(
+            pick.title.contains("Staffa"),
+            "titled for the name: {}",
+            pick.title
+        );
+    }
+
+    /// 2.15: Return (the field's on_submit and the window-level key) on
+    /// an empty or invalid name asks for no folder (NewProjectSheet.swift:57
+    /// `guard isNameValid`); a valid one does.
+    #[test]
+    fn return_on_an_invalid_project_name_does_not_advance() {
+        let mut f = fixture();
+        for bad in ["", "   ", ".hidden", "a/b", "a:b"] {
+            new_project_sheet(&mut f.app, bad);
+            let _ = f.app.update(Message::Welcome(welcome::Message::NewSheet(
+                welcome::new_project::Message::Advance,
+            )));
+            assert!(!awaiting_parent(&f.app), "on_submit advanced on {bad:?}");
+            key(&mut f.app, f.welcome, Named::Enter);
+            assert!(!awaiting_parent(&f.app), "Return advanced on {bad:?}");
+            let _ = f.app.update(Message::Welcome(welcome::Message::NewSheet(
+                welcome::new_project::Message::Cancel,
+            )));
+        }
+        new_project_sheet(&mut f.app, "Staffa a L");
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(
+            awaiting_parent(&f.app),
+            "Return runs Avanti on a valid name"
+        );
+    }
+
+    /// 2.16 / 3.10: Esc is the new-project sheet's Annulla.
+    #[test]
+    fn esc_cancels_the_new_project_sheet() {
+        let mut f = fixture();
+        new_project_sheet(&mut f.app, "Staffa");
+        key(&mut f.app, f.welcome, Named::Escape);
+        assert!(f.app.welcome.creating.is_none());
+    }
+
+    /// 3.10: the first-run sheet's Continua is the default action; it has
+    /// no cancel (SetupSheet.swift:31-35, interactiveDismissDisabled).
+    #[test]
+    fn return_continues_the_first_run_sheet_and_esc_does_not_dismiss_it() {
+        let mut f = fixture();
+        f.app.setup = Some(sheets::Setup::from_settings(&f.app.settings));
+        key(&mut f.app, f.welcome, Named::Escape);
+        assert!(
+            f.app.setup.is_some(),
+            "Esc must not dismiss the first-run sheet"
+        );
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(f.app.setup.is_none(), "Return runs Continua");
+        assert!(
+            f.app.settings_file.exists(),
+            "Continua persisted the preferences"
+        );
+    }
+
+    /// 3.10: the python sheet — Più tardi on Esc, Fine on Return once
+    /// ready, and nothing at all while an install runs
+    /// (PythonSetupSheet.swift:62-82).
+    #[test]
+    fn python_sheet_keys_follow_its_button_roles() {
+        let mut f = fixture();
+        f.app.python.presented = true;
+        f.app.python.state.state = EnvState::Missing;
+        key(&mut f.app, f.welcome, Named::Escape);
+        assert!(!f.app.python.presented, "Esc is Più tardi");
+
+        f.app.python.presented = true;
+        f.app.python.state.state = EnvState::Ready {
+            build123d_version: "0.9".to_string(),
+        };
+        key(&mut f.app, f.welcome, Named::Escape);
+        assert!(f.app.python.presented, "Fine has no cancel role");
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(!f.app.python.presented, "Return is Fine");
+
+        f.app.python.presented = true;
+        f.app.python.state.state = EnvState::Installing;
+        key(&mut f.app, f.welcome, Named::Escape);
+        key(&mut f.app, f.welcome, Named::Enter);
+        assert!(f.app.python.presented, "an install blocks both keys");
+        assert!(matches!(f.app.python.state.state, EnvState::Installing));
+    }
+
+    /// 3.10: the agent-missing sheet over a project window — Chiudi on
+    /// Esc, Verifica on Return unless a check runs
+    /// (AgentMissingSheet.swift:56-69).
+    #[tokio::test]
+    async fn agent_sheet_keys_follow_its_button_roles_over_a_project_window() {
+        let mut f = fixture();
+        let project = open_real_project(&mut f, "Staffa");
+        f.app.agent_missing = Some(sheets::AgentMissing {
+            checking: true,
+            ..sheets::AgentMissing::default()
+        });
+        key(&mut f.app, project, Named::Enter);
+        assert!(
+            f.app.agent_missing.is_some(),
+            "Verifica is disabled while checking"
+        );
+
+        f.app.agent_missing.as_mut().unwrap().checking = false;
+        key(&mut f.app, project, Named::Enter);
+        assert!(
+            f.app.agent_missing.as_ref().is_some_and(|s| s.checking),
+            "Return runs Verifica"
+        );
+
+        key(&mut f.app, project, Named::Escape);
+        assert!(f.app.agent_missing.is_none(), "Esc is Chiudi");
+    }
+
+    /// 7.12: a unit change in Settings reaches an already-open project's
+    /// viewer (ModelPane.swift:7 reads the @AppStorage key live).
+    #[tokio::test]
+    async fn a_settings_unit_change_reaches_open_viewers() {
+        let mut f = fixture();
+        let project = open_real_project(&mut f, "Staffa");
+        let _ = f.app.update_settings_any(settings::Message::PrintPref(
+            sheets::PrintPrefMessage::Unit(MeasurementUnit::Inches),
+        ));
+        let Some(WindowKind::Project(window)) = f.app.windows.get(&project) else {
+            panic!("the project window is gone");
+        };
+        assert_eq!(window.viewer.unit, MeasurementUnit::Inches);
+    }
+
+    /// 2.10: an unreadable project opens the load-error window with the
+    /// error (ProjectWindow.swift:16-22, 42-44); no recent is added and
+    /// the welcome window stays.
+    #[test]
+    fn opening_an_unreadable_project_shows_the_load_error_window() {
+        let mut f = fixture();
+        let missing = f.dir.join("non-esiste");
+        let _ = f.app.open_project(missing.clone());
+        let errors: Vec<&String> = f
+            .app
+            .windows
+            .values()
+            .filter_map(|kind| match kind {
+                WindowKind::LoadError(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "one load-error window");
+        let expected = store::prepare(&missing).unwrap_err().to_string();
+        assert_eq!(errors[0], &expected);
+        assert!(
+            f.app.recents.paths().is_empty(),
+            "a failed open adds no recent"
+        );
+        assert!(matches!(
+            f.app.windows.get(&f.welcome),
+            Some(WindowKind::Welcome)
+        ));
+    }
+
+    /// Only bare Return / Esc are sheet keys.
+    #[test]
+    fn sheet_key_roles_are_bare_return_and_esc() {
+        let none = Modifiers::empty();
+        assert_eq!(
+            sheet_key_role(&Key::Named(Named::Enter), &none),
+            Some(SheetKey::Default)
+        );
+        assert_eq!(
+            sheet_key_role(&Key::Named(Named::Escape), &none),
+            Some(SheetKey::Cancel)
+        );
+        assert_eq!(
+            sheet_key_role(&Key::Named(Named::Enter), &Modifiers::CTRL),
+            None
+        );
+        assert_eq!(sheet_key_role(&Key::Named(Named::Tab), &none), None);
     }
 }
