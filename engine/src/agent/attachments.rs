@@ -4,7 +4,7 @@
 //! `copyReferences`). UTType conformance is a macOS registry lookup; the
 //! port rules it to an explicit extension allowlist — the formats the
 //! picker and the paste path produce — so the codex argv's `-i` filter and
-//! the app's thumbnail widget (M8) cite ONE predicate. The copy is
+//! the app's thumbnail widget cite ONE predicate. The copy is
 //! engine-owned but BRIDGE-CALLED: it runs at turn start, before the user
 //! row is appended (upstream `copyReferences` inside `send`,
 //! Project.swift:199-201), and the engine's session consumes the returned

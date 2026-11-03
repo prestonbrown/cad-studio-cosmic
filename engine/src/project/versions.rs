@@ -114,14 +114,7 @@ pub fn restore(project_root: &Path, version: &ProjectVersion) -> Result<(), Vers
     }
     // the version's output dir is read best-effort (upstream `try? ?? []`)
     if let Ok(entries) = std::fs::read_dir(dir.join(OUTPUT_DIR)) {
-        for entry in entries.flatten() {
-            let target = output.join(entry.file_name());
-            if entry.file_type()?.is_dir() {
-                copy_tree(&entry.path(), &target)?;
-            } else {
-                std::fs::copy(entry.path(), &target)?;
-            }
-        }
+        copy_entries(entries.flatten(), &output)?;
     }
     Ok(())
 }
@@ -149,8 +142,19 @@ fn copy_if_present(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// Recursive directory copy (upstream `copyItem` on a directory).
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
+    copy_entries(
+        std::fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?,
+        destination,
+    )
+}
+
+/// Copy each entry into `destination` under its own name, recursing into
+/// directories.
+fn copy_entries(
+    entries: impl IntoIterator<Item = std::fs::DirEntry>,
+    destination: &Path,
+) -> std::io::Result<()> {
+    for entry in entries {
         let target = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
@@ -171,11 +175,7 @@ fn copy_tree_if_present(source: &Path, destination: &Path) -> std::io::Result<()
 /// Remove `destination`, then copy `source` in when it exists (upstream
 /// `replace`).
 fn replace_with(destination: &Path, source: &Path) -> std::io::Result<()> {
-    if destination.is_dir() {
-        std::fs::remove_dir_all(destination)?;
-    } else if destination.exists() {
-        std::fs::remove_file(destination)?;
-    }
+    remove_path(destination)?;
     copy_if_present(source, destination)
 }
 

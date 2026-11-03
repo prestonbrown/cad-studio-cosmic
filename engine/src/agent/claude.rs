@@ -31,7 +31,7 @@ pub struct TurnRequest {
     /// `ClaudeRequest.images`, Project.swift:206: the `references/` copies,
     /// root-resolved; the argv filters them to images). Claude's argv
     /// consumes none — upstream ClaudeRunner.swift:28-51 never reads the
-    /// field (Ruling 2, M8 plan).
+    /// field.
     pub images: Vec<PathBuf>,
 }
 

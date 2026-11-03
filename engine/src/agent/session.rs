@@ -13,8 +13,8 @@
 //!   with the unconfirmed streaming row (replace the FIRST unconfirmed row,
 //!   FIFO — upstream `unconfirmedTextIDs.removeFirst()`) is chat state, so it
 //!   belongs to the app. A synthetic API-error assistant block is a text block
-//!   like any other and confirms the same way; whether to display it is M4's
-//!   call, not the engine's.
+//!   like any other and confirms the same way; whether to display it is the
+//!   app's call, not the engine's.
 //! - Tool rows are keyed by the `tool_use` id present at
 //!   `content_block_start`; the assistant snapshot that repeats the block
 //!   carries the full input, which upstream uses only to refine the row's
@@ -686,12 +686,11 @@ fn clear_session_id(root: &Path) {
     }
 }
 
-/// The app-wide venv interpreter, routed through python::env's canonical
-/// data-dir helper so the session can never name a different venv than the
-/// one M5 installs: `~/.local/share/cad-studio/venv/bin/python` on Linux
-/// (spec §2/§6). `{{PYTHON}}` and the restricted-bash entry name it from
-/// day one; its existence is M5's to establish, so nothing here requires
-/// it to be present.
+/// The app-wide venv interpreter, routed through [`crate::python::env::venv_dir`]
+/// so the session can never name a different venv than the one the
+/// installer builds: `~/.local/share/cad-studio/venv/bin/python` on Linux
+/// (spec §2/§6). `{{PYTHON}}` and the restricted-bash entry name it whether
+/// or not the venv exists yet; installing it is the installer's job.
 fn app_venv_python() -> PathBuf {
     crate::python::env::interpreter_path(&crate::python::env::venv_dir())
 }
@@ -958,38 +957,39 @@ fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutco
 
 /// Upstream `isBusySession`'s needle over the combined turn text.
 pub fn is_busy_session(text: &str) -> bool {
-    contains_ci(text, "already has an active writer")
+    contains_any_ci(text, &["already has an active writer"])
 }
 
 /// Upstream `isMissingSession`'s needles.
 pub fn is_missing_session(text: &str) -> bool {
-    [
-        "no conversation found",
-        "no rollout found",
-        "session not found",
-        "thread not found",
-    ]
-    .iter()
-    .any(|needle| contains_ci(text, needle))
+    contains_any_ci(
+        text,
+        &[
+            "no conversation found",
+            "no rollout found",
+            "session not found",
+            "thread not found",
+        ],
+    )
 }
 
-/// Upstream `isAuthenticationError`'s needles, with one M4 amendment: the
-/// bare `401` must stand as a whole word — "1401 tokens used" and "duration
+/// Upstream `isAuthenticationError`'s needles, with one deliberate
+/// difference: the bare `401` must stand as a whole word — "1401 tokens used" and "duration
 /// 4.401s" are counts and latencies, not an auth status (upstream's plain
 /// substring match mis-fires on both).
 pub fn is_authentication_error(text: &str) -> bool {
-    [
-        "invalid api key",
-        "/login",
-        "not logged in",
-        "authentication",
-        "oauth token",
-        "unauthorized",
-        "codex login",
-    ]
-    .iter()
-    .any(|needle| contains_ci(text, needle))
-        || contains_word(text, "401")
+    contains_any_ci(
+        text,
+        &[
+            "invalid api key",
+            "/login",
+            "not logged in",
+            "authentication",
+            "oauth token",
+            "unauthorized",
+            "codex login",
+        ],
+    ) || contains_word(text, "401")
 }
 
 /// `\b<needle>\b` for an ASCII needle: some occurrence whose neighboring
@@ -1005,9 +1005,9 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     })
 }
 
-/// `localizedCaseInsensitiveContains` for ASCII needles.
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
+/// `localizedCaseInsensitiveContains` for lowercase ASCII needles, any of
+/// them. The haystack (a whole turn's stdout + stderr) is lowercased once.
+fn contains_any_ci(haystack: &str, needles: &[&str]) -> bool {
+    let haystack = haystack.to_ascii_lowercase();
+    needles.iter().any(|needle| haystack.contains(needle))
 }

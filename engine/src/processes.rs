@@ -2,7 +2,7 @@
 //! and a pid registry for reaping crash orphans (ProcessRunner.swift).
 //!
 //! - stdin is ALWAYS [`Stdio::null`]: `claude -p` reads inherited stdin and
-//!   merges it into the prompt (M2 probe finding), so a piped or inherited
+//!   merges it into the prompt, so a piped or inherited
 //!   stdin corrupts every run.
 //! - [`RunningProcess::interrupt`] signals the child's pid only, never its
 //!   process group, then escalates to SIGTERM after 3 s
@@ -163,12 +163,6 @@ pub fn registry_path() -> PathBuf {
         return PathBuf::from(path);
     }
     crate::storage::data_dir().join("running-processes")
-}
-
-/// Register a live child in the default registry.
-pub fn register(pid: u32) {
-    let path = registry_path();
-    register_at(&path, pid);
 }
 
 /// Kill processes the registry still lists whose parent is now init and
