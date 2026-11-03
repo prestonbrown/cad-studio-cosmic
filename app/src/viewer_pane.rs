@@ -325,8 +325,16 @@ pub struct ViewerPane {
     /// flips `Options::msaa` to 4 — `MeshPipeline::with_msaa`'s pipeline
     /// set, rebuilt in place.
     pub msaa: bool,
-    /// Display unit for the status-bar size label.
+    /// Display unit for the status-bar size label and the measure badge
+    /// (upstream reads `@AppStorage` live; [`ViewerPane::set_unit`] is the
+    /// settings window's path in).
     pub unit: MeasurementUnit,
+    /// The last model parse failure's text (upstream `meshError`,
+    /// ProjectOutput.swift:150-160): set by a failed parse, cleared by a
+    /// successful one or by the model files disappearing. The pane shows
+    /// it only while no model has ever loaded — a later failure keeps the
+    /// last good model on screen (ModelPane.swift:76-106).
+    pub mesh_error: Option<String>,
     /// Missing-output notes count for the status bar (from
     /// [`outputs::missing_requirements`], refreshed on every reload).
     pub warnings: usize,
@@ -496,6 +504,7 @@ impl ViewerPane {
             preset: Preset::Iso,
             msaa: false,
             unit,
+            mesh_error: None,
             warnings: 0,
             parameters: ParametersPanel::from_parameters(&[], false),
             parameter_drafts: HashMap::new(),
@@ -537,7 +546,12 @@ impl ViewerPane {
             }),
             last_size: Mutex::new(Size::default()),
         };
+        // everything already on disk loads at open, as upstream's first
+        // `reload()` sees every output as changed (ProjectOutput.swift:
+        // 38-64): the model, then the plate and the motion study over it
         pane.reload_outputs();
+        pane.reload_plate();
+        pane.reload_motion();
         pane
     }
 
@@ -984,28 +998,19 @@ impl ViewerPane {
         // button on isBusy, ModelPane.swift:144).
         let busy = overlay.as_ref().map_or(false, |ctx| ctx.busy);
         let content: Element<'_, Message> = if self.scene.scene.parts.is_empty() {
-            // upstream ContentUnavailableView (ModelPane.swift:108-112):
-            // icon + title + secondary description, centered mid-pane
-            container(
-                Column::new()
-                    .push(
-                        cosmic::widget::icon::from_name("package-x-generic")
-                            .size(40)
-                            .icon(),
-                    )
-                    .push(text(fl!("nessun-modello")).size(18))
-                    .push(
-                        text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
-                            .class(dim_text_class()),
-                    )
-                    .spacing(8)
-                    .align_x(cosmic::iced::alignment::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(cosmic::iced::alignment::Horizontal::Center)
-            .align_y(cosmic::iced::alignment::Vertical::Center)
-            .into()
+            // upstream's two ContentUnavailableViews (ModelPane.swift:
+            // 101-112): a parse failure with nothing ever loaded names the
+            // error; otherwise the no-model invitation
+            match &self.mesh_error {
+                Some(error) => {
+                    content_unavailable(ICON_WARNING, fl!("modello-non-leggibile"), error.clone())
+                }
+                None => content_unavailable(
+                    ICON_CUBE,
+                    fl!("nessun-modello"),
+                    fl!("descrivi-un-oggetto-nella-chat-per-iniziare"),
+                ),
+            }
         } else {
             self.view_canvas()
         };
@@ -1066,7 +1071,11 @@ impl ViewerPane {
             .flatten()
             .map(|study| view_motion_controls(&self.tools.player, study));
         if let Some(controls) = motion {
-            stack = stack.push(bottom_center(container(controls).padding(10)));
+            stack = stack.push(bottom_center(
+                container(controls)
+                    .padding(10)
+                    .align_x(cosmic::iced::alignment::Horizontal::Center),
+            ));
         } else if self.shows_section_controls() {
             let controls = parts_overlay::view_section_controls(&self.tools);
             stack = stack.push(bottom_center(container(controls).padding(10)));
@@ -1097,7 +1106,21 @@ impl ViewerPane {
     /// points collected against the old geometry.
     fn reload_outputs(&mut self) {
         self.manifest = Manifest::load(&self.output_dir.join("manifest.json")).ok();
-        if let Some(parts) = load_model_parts(&self.output_dir) {
+        let loaded = match load_model(&self.output_dir) {
+            ModelLoad::Loaded(parts) => {
+                self.mesh_error = None;
+                Some(parts)
+            }
+            ModelLoad::Absent => {
+                self.mesh_error = None;
+                None
+            }
+            ModelLoad::Unreadable(why) => {
+                self.mesh_error = Some(why);
+                None
+            }
+        };
+        if let Some(parts) = loaded {
             let next = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
             if scenes_differ(&self.model_scene, &next) {
                 self.model_parts = parts;
@@ -1635,31 +1658,42 @@ impl ViewerPane {
         }
     }
 
+    /// The bar under the viewport (upstream PaneStatusBar.swift around
+    /// ModelPane's controls, ModelPane.swift:47-49, 120-152): a top
+    /// divider, then a 28 pt row on the pane's text background — preset
+    /// picker, the icon toggles (misura/sezione disabled while animating,
+    /// :133-135), the animation slot (:136-147), the color legend, the
+    /// port-specific MSAA toggle, and the monospaced size label right. The
+    /// row is disabled with no model (:151): every pressable routes its
+    /// message through [`bar_on_press`].
     fn view_status_bar(&self, busy: bool) -> Element<'_, Message> {
-        // Upstream's controls row (ModelPane.swift:120-152): preset picker,
-        // the four toggles (misura/sezione disabled while animating,
-        // :133-135), the animation slot (:136-147), the color legend — then
-        // the port-specific MSAA toggle at the row's end, the info label
-        // right. The row itself is disabled with no model (:151): every
-        // pressable routes its message through bar_on_press.
         let parts_empty = self.scene.scene.parts.is_empty();
+        let enabled = !parts_empty;
         let mut bar = Row::new()
-            .spacing(8)
+            .spacing(BAR_SPACING)
+            .height(Length::Fill)
+            .align_y(cosmic::iced::Alignment::Center)
             .push(self.preset_picker(parts_empty))
             .push(tool_toggle(
+                ICON_GRID,
                 self.tools.shows_grid,
+                enabled,
                 fl!("griglia"),
                 fl!("mostra-la-griglia"),
                 bar_on_press(parts_empty, Some(Message::ToggleGrid)),
             ))
             .push(tool_toggle(
+                ICON_CUBE,
                 self.tools.wireframe,
+                enabled,
                 fl!("wireframe"),
                 fl!("mostra-il-wireframe"),
                 bar_on_press(parts_empty, Some(Message::ToggleWireframe)),
             ))
             .push(tool_toggle(
+                ICON_RULER,
                 self.tools.measuring,
+                enabled && !self.tools.animating,
                 fl!("misura"),
                 fl!("misura-la-distanza-tra-due-punti"),
                 bar_on_press(
@@ -1668,7 +1702,9 @@ impl ViewerPane {
                 ),
             ))
             .push(tool_toggle(
+                ICON_SECTION,
                 self.tools.sectioning,
+                enabled && !self.tools.animating,
                 fl!("sezione"),
                 fl!("mostra-una-sezione-del-modello"),
                 bar_on_press(
@@ -1678,104 +1714,93 @@ impl ViewerPane {
             ));
         // The animation slot (ModelPane.swift:136-147): the Animazione
         // toggle when motion is available, else the ask-the-agent button
-        // for a multi-part model.
+        // for a multi-part model — both the play.circle glyph.
         if self
             .tools
             .motion_available(self.model_parts.len(), self.study.is_some())
         {
-            bar = bar.push(self.animation_toggle(parts_empty));
+            bar = bar.push(tool_toggle(
+                ICON_PLAY_CIRCLE,
+                self.tools.animating,
+                enabled,
+                fl!("animazione"),
+                fl!("riproduci-l-animazione-con-la-simulazione-fisica"),
+                bar_on_press(parts_empty, Some(Message::ToggleAnimation)),
+            ));
         } else if self.model_parts.len() > 1 {
-            bar = bar.push(self.ask_animation_button(busy, parts_empty));
+            bar = bar.push(tool_toggle(
+                ICON_PLAY_CIRCLE,
+                false,
+                enabled && !busy,
+                fl!("crea-animazione"),
+                fl!("chiedi-all-agente-di-simulare-e-animare-il-meccanismo"),
+                bar_on_press(parts_empty, (!busy).then_some(Message::RequestMotionStudy)),
+            ));
         }
+        let info = self.status_text();
         bar = bar
             .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
             .push(self.msaa_toggle(parts_empty))
             .push(Space::new().width(Length::Fill))
-            .push(text(status_info(
-                (!parts_empty)
-                    .then(|| model_size(self.scene.scene.aabb_min, self.scene.scene.aabb_max)),
-                self.unit,
-            )));
-        container(bar.padding([4.0, 12.0]))
+            .push(
+                text(info)
+                    .size(BAR_FONT_SIZE)
+                    .font(cosmic::font::mono())
+                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+            );
+        let row = container(bar)
+            .padding([0.0, BAR_PADDING])
             .width(Length::Fill)
+            .height(Length::Fixed(BAR_HEIGHT));
+        container(Column::new().push(divider()).push(row).width(Length::Fill))
+            .width(Length::Fill)
+            .class(text_background_class())
             .into()
     }
 
-    /// The iso/front/top/right preset bar (upstream's segmented
-    /// `Picker("Vista")`, ModelPane.swift:121-131): one button per preset,
-    /// the selected one in the suggested style. The segmented-control
-    /// widget's model borrows its owner, which a per-view rebuild cannot
-    /// satisfy — four stateless buttons carry the same selection. Inside
-    /// the controls row, so the no-model disable gates it (:151).
+    /// The bar's size label: the ASSEMBLED model's size whatever the
+    /// layout draws (upstream `info` reads `output.mesh.size`,
+    /// ModelPane.swift:215-219); empty with no model.
+    fn status_text(&self) -> String {
+        let shown = !self.scene.scene.parts.is_empty();
+        status_info(
+            shown.then(|| model_size(self.model_scene.aabb_min, self.model_scene.aabb_max)),
+            self.unit,
+        )
+    }
+
+    /// The iso/front/top/right preset picker (upstream's segmented
+    /// `Picker("Vista")` at the bar's small control size, ModelPane.swift:
+    /// 121-129). Inside the controls row, so the no-model disable gates it
+    /// (:151).
     fn preset_picker(&self, parts_empty: bool) -> Element<'_, Message> {
-        const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
-        let mut bar = Row::new().spacing(4);
-        for preset in PRESETS {
-            bar = bar.push(
-                button::text(preset_label(preset))
-                    .class(if preset == self.preset {
-                        cosmic::theme::Button::Suggested
-                    } else {
-                        cosmic::theme::Button::Standard
-                    })
-                    .on_press_maybe(bar_on_press(parts_empty, Some(Message::Preset(preset)))),
-            );
-        }
-        bar.into()
+        let labels = PRESETS.iter().map(|preset| preset_label(*preset)).collect();
+        let selected = PRESETS.iter().position(|preset| *preset == self.preset);
+        segmented(labels, selected, !parts_empty, |index| {
+            bar_on_press(parts_empty, Some(Message::Preset(PRESETS[index])))
+        })
     }
 
     /// The MSAA opt-in: shows the active sample count, clicks flip 1× ↔ 4×
-    /// (the `with_msaa` pipeline set, rebuilt in place). Upstream has no
-    /// opinion on this port-specific control; it rides the controls row's
-    /// no-model disable (:151) for consistency — a live button over an
-    /// empty canvas would be the row's one exception.
+    /// (the `with_msaa` pipeline set, rebuilt in place). Port-specific —
+    /// upstream has no counterpart — so it takes the bar's quietest form,
+    /// the size label's secondary monospaced text, and rides the row's
+    /// no-model disable (:151).
     fn msaa_toggle(&self, parts_empty: bool) -> Element<'_, Message> {
-        button::text(format!("{}×", self.scene.msaa))
+        let label = text(format!("{}×", self.scene.msaa))
+            .size(BAR_FONT_SIZE)
+            .font(cosmic::font::mono())
+            .class(cosmic::theme::Text::Custom(if parts_empty {
+                tertiary_label_style
+            } else {
+                secondary_label_style
+            }));
+        button::custom(label)
+            .padding(0)
+            .class(borderless_button())
             .on_press_maybe(bar_on_press(parts_empty, Some(Message::ToggleMsaa)))
             .into()
-    }
-
-    /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
-    /// stops the study — the preset picker's pattern for a selected-state
-    /// text button (suggested class while on), the help text as the
-    /// description. No own gate (upstream leaves this toggle ungated
-    /// inside the row); the row disable reaches it through
-    /// [`bar_on_press`].
-    fn animation_toggle(&self, parts_empty: bool) -> Element<'static, Message> {
-        button::text(fl!("animazione"))
-            .class(if self.tools.animating {
-                cosmic::theme::Button::Suggested
-            } else {
-                cosmic::theme::Button::Standard
-            })
-            .on_press_maybe(bar_on_press(parts_empty, Some(Message::ToggleAnimation)))
-            .description(fl!("riproduci-l-animazione-con-la-simulazione-fisica"))
-            .into()
-    }
-
-    /// The create-animation ask (ModelPane.swift:138-146): no study, more
-    /// than one part — an icon button that asks the agent (the SHELL
-    /// intercepts [`Message::RequestMotionStudy`]). Busy is upstream's
-    /// `.disabled(project.isBusy)`: a button built without `on_press` is
-    /// iced's disabled state — composed with the row's no-model disable
-    /// through [`bar_on_press`].
-    fn ask_animation_button(&self, busy: bool, parts_empty: bool) -> Element<'static, Message> {
-        let ask = button::icon(
-            cosmic::widget::icon::from_name("media-playback-start")
-                .size(16)
-                .handle(),
-        )
-        .on_press_maybe(bar_on_press(
-            parts_empty,
-            (!busy).then_some(Message::RequestMotionStudy),
-        ))
-        .description(fl!("crea-animazione"));
-        tooltip(
-            ask,
-            text(fl!("chiedi-all-agente-di-simulare-e-animare-il-meccanismo")),
-            cosmic::widget::tooltip::Position::FollowCursor,
-        )
-        .into()
     }
 }
 
@@ -1851,23 +1876,57 @@ fn bar_on_press(parts_empty: bool, own: Option<Message>) -> Option<Message> {
     if parts_empty { None } else { own }
 }
 
-/// Parse the output directory's model: `model.3mf` preferred (one part per
-/// build item), `model.stl` the fallback (a single part) — including when
-/// the 3MF parses but yields ZERO parts (upstream parseMesh's fallback; a
-/// well-formed-but-empty file is not a model). Neither readable → `None`
-/// (upstream keeps its last good mesh; so does the pane).
-pub fn load_model_parts(output_dir: &Path) -> Option<Vec<Part>> {
-    if let Ok(bytes) = std::fs::read(output_dir.join("model.3mf")) {
-        if let Ok(parts) = parse_3mf(&bytes) {
-            if !parts.is_empty() {
-                return Some(parts);
-            }
-        }
+/// What the output directory's model files hold (upstream `loadMesh` +
+/// `parseMesh`, ProjectOutput.swift:139-187).
+#[derive(Debug)]
+pub enum ModelLoad {
+    /// Neither `model.3mf` nor `model.stl` exists.
+    Absent,
+    /// `model.3mf` (one part per build item) or the `model.stl` fallback.
+    Loaded(Vec<Part>),
+    /// A model file exists but nothing parses. The text is the STL
+    /// fallback's error when an STL exists (upstream's `Result { try
+    /// STLParser.parse(stl) }`); with no STL it names the 3MF's own failure
+    /// rather than the missing STL's file-not-found.
+    Unreadable(String),
+}
+
+/// Parse the output directory's model: `model.3mf` preferred, `model.stl`
+/// the fallback — including when the 3MF parses but yields ZERO parts (a
+/// well-formed-but-empty file is not a model).
+pub fn load_model(output_dir: &Path) -> ModelLoad {
+    let three_mf = output_dir.join("model.3mf");
+    let stl = output_dir.join("model.stl");
+    if !three_mf.exists() && !stl.exists() {
+        return ModelLoad::Absent;
     }
-    std::fs::read(output_dir.join("model.stl"))
-        .ok()
-        .and_then(|bytes| parse_stl(&bytes).ok())
-        .map(|part| vec![part])
+    let three_mf_error = match std::fs::read(&three_mf) {
+        Ok(bytes) => match parse_3mf(&bytes) {
+            Ok(parts) if !parts.is_empty() => return ModelLoad::Loaded(parts),
+            Ok(_) => "model.3mf: no parts".to_string(),
+            Err(why) => format!("model.3mf: {why}"),
+        },
+        Err(why) => format!("model.3mf: {why}"),
+    };
+    if !stl.exists() {
+        return ModelLoad::Unreadable(three_mf_error);
+    }
+    match std::fs::read(&stl) {
+        Ok(bytes) => match parse_stl(&bytes) {
+            Ok(part) => ModelLoad::Loaded(vec![part]),
+            Err(why) => ModelLoad::Unreadable(format!("model.stl: {why}")),
+        },
+        Err(why) => ModelLoad::Unreadable(format!("model.stl: {why}")),
+    }
+}
+
+/// [`load_model`]'s parts, `None` for anything else (the comparison
+/// ghost has no error state).
+pub fn load_model_parts(output_dir: &Path) -> Option<Vec<Part>> {
+    match load_model(output_dir) {
+        ModelLoad::Loaded(parts) => Some(parts),
+        ModelLoad::Absent | ModelLoad::Unreadable(_) => None,
+    }
 }
 
 /// Whether two staged scenes differ in content: part count, or any part's
@@ -1973,13 +2032,13 @@ pub(crate) fn stl_of_box(bounds: [[f64; 3]; 2]) -> Vec<u8> {
     out
 }
 
-/// A Stack layer pinned top-center: the element between fill spacers.
+/// A Stack layer pinned top-center: a shrinking element sits centered; a
+/// filling one (the motion capsule's `maxWidth: 560` frame) takes the
+/// width it is allowed, centered in what is left.
 fn top_center<'a>(layer: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    Row::new()
-        .push(Space::new().width(Length::Fill))
-        .push(layer.into())
-        .push(Space::new().width(Length::Fill))
+    container(layer)
         .width(Length::Fill)
+        .align_x(cosmic::iced::alignment::Horizontal::Center)
         .into()
 }
 
@@ -2016,22 +2075,9 @@ fn preset_label(preset: Preset) -> String {
     }
 }
 
-/// Secondary text at 65% of the ambient color — the empty-state hero's
-/// description (the welcome window's dim-text pattern).
-fn dim_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = cosmic::iced::Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-/// The status bar's color legend (ModelPane.swift:202-213): ten-pixel
-/// dots for the first twelve distinct colors; the tooltip carries the
-/// count label (the a11y stand-in).
+/// The status bar's color legend (ModelPane.swift:202-213): ten-point
+/// dots, 3 pt apart, for the first twelve distinct colors; the tooltip
+/// carries the count label (the a11y stand-in).
 fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
     let mut dots = Row::new().spacing(3);
     for color in legend_dots(colors) {
@@ -2045,29 +2091,332 @@ fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
     .into()
 }
 
-/// One status-bar toggle button (upstream's borderless `Toggle`, shown as
-/// an icon-less text button — the documented glyph divergence): the
-/// selected state in the suggested class, the help text on a tooltip.
-/// `message: None` is upstream's `.disabled` (ModelPane.swift:133-135 gates
-/// misura/sezione on animating) — a button without `on_press`.
+// ── the viewer bar's controls ────────────────────────────────────────────
+//
+// Measured against shots/upstream/project-model.png (2x, halved): the bar
+// is a 1 pt divider over a 28 pt row, 8 pt side padding and spacing
+// (PaneStatusBar.swift:10-23); the small segmented control is 18 pt tall
+// with four 37.5 pt segments; the toggle glyphs sit in 14 pt cells; the
+// size label is 11 pt monospaced secondary text. Colors are macOS's
+// semantic label/separator alphas over the theme's own text background,
+// so dark mode follows the theme.
+
+/// SF Symbols stand-ins drawn to the symbols' shapes (the Cosmic theme has
+/// no grid, cube, ruler, split-square or play-circle glyph).
+const ICON_GRID: &[u8] = include_bytes!("../resources/icons/viewer-grid.svg");
+const ICON_CUBE: &[u8] = include_bytes!("../resources/icons/viewer-cube-transparent.svg");
+const ICON_RULER: &[u8] = include_bytes!("../resources/icons/viewer-ruler.svg");
+const ICON_SECTION: &[u8] = include_bytes!("../resources/icons/viewer-section.svg");
+const ICON_PLAY_CIRCLE: &[u8] = include_bytes!("../resources/icons/viewer-play-circle.svg");
+const ICON_WARNING: &[u8] =
+    include_bytes!("../resources/icons/viewer-exclamationmark-triangle.svg");
+
+const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
+
+const BAR_HEIGHT: f32 = 28.0;
+const BAR_PADDING: f32 = 8.0;
+const BAR_SPACING: f32 = 8.0;
+const BAR_FONT_SIZE: u16 = 11;
+const SEGMENT_HEIGHT: f32 = 18.0;
+const SEGMENT_WIDTH: f32 = 37.5;
+/// The track's inset around the segments (the selected face sits 1 pt
+/// inside the track's edge).
+const SEGMENT_INSET: f32 = 1.0;
+const TOGGLE_CELL: f32 = 14.0;
+
+/// macOS's semantic foreground alphas (labelColor, secondaryLabelColor,
+/// tertiaryLabelColor, separatorColor): black in light, white in dark.
+const LABEL_ALPHA: f32 = 0.85;
+const SECONDARY_ALPHA: f32 = 0.5;
+const TERTIARY_ALPHA: f32 = 0.25;
+const SEPARATOR_ALPHA: f32 = 0.1;
+
+fn ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
+    let base = if theme.cosmic().is_dark {
+        cosmic::iced::Color::WHITE
+    } else {
+        cosmic::iced::Color::BLACK
+    };
+    cosmic::iced::Color { a: alpha, ..base }
+}
+
+/// [`ink`] composited over the text background, opaque: an SVG tint's
+/// alpha is not applied (iced's svg color replaces the glyph's rgb and
+/// keeps only its coverage), so glyph colors must be pre-blended.
+fn solid_ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
+    let ink = ink(theme, 1.0);
+    let under = text_background(theme);
+    let mix = |a: f32, b: f32| a * alpha + b * (1.0 - alpha);
+    cosmic::iced::Color::from_rgb(
+        mix(ink.r, under.r),
+        mix(ink.g, under.g),
+        mix(ink.b, under.b),
+    )
+}
+
+/// The pane's text background (upstream `textBackgroundColor`): white in
+/// a light theme; in a dark one the window background pushed a third of
+/// the way to black, as macOS's text background sits below its window.
+fn text_background(theme: &cosmic::Theme) -> cosmic::iced::Color {
+    let cosmic = theme.cosmic();
+    if cosmic.is_dark {
+        let base = cosmic::iced::Color::from(cosmic.background(false).base);
+        let keep = 0.65;
+        cosmic::iced::Color::from_rgb(base.r * keep, base.g * keep, base.b * keep)
+    } else {
+        cosmic::iced::Color::WHITE
+    }
+}
+
+fn text_background_class() -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(|theme| cosmic::iced::widget::container::Style {
+        background: Some(text_background(theme).into()),
+        ..Default::default()
+    })
+}
+
+fn label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(ink(theme, LABEL_ALPHA)),
+        ..Default::default()
+    }
+}
+
+fn secondary_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(ink(theme, SECONDARY_ALPHA)),
+        ..Default::default()
+    }
+}
+
+fn tertiary_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(ink(theme, TERTIARY_ALPHA)),
+        ..Default::default()
+    }
+}
+
+/// SwiftUI's `Divider()`: one point of separator color.
+fn divider<'a>() -> Element<'a, Message> {
+    container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::custom(|theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(ink(theme, SEPARATOR_ALPHA).into()),
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// A button that draws nothing of its own (SwiftUI's `.borderless`
+/// style): the content carries every pixel.
+pub(crate) fn borderless_button() -> cosmic::theme::Button {
+    fn plain(_theme: &cosmic::Theme) -> button::Style {
+        button::Style::new()
+    }
+    cosmic::theme::Button::Custom {
+        active: Box::new(|_, theme| plain(theme)),
+        disabled: Box::new(plain),
+        hovered: Box::new(|_, theme| plain(theme)),
+        pressed: Box::new(|_, theme| plain(theme)),
+    }
+}
+
+/// A symbolic SVG glyph tinted per state: accent when on, secondary when
+/// off, tertiary when disabled (macOS's borderless toggle).
+fn glyph(bytes: &'static [u8], size: f32, on: bool, enabled: bool) -> Element<'static, Message> {
+    cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(bytes))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .class(cosmic::theme::Svg::custom(move |theme| {
+            let color = if !enabled {
+                solid_ink(theme, TERTIARY_ALPHA)
+            } else if on {
+                theme.cosmic().accent_color().into()
+            } else {
+                solid_ink(theme, SECONDARY_ALPHA)
+            };
+            cosmic::iced::widget::svg::Style { color: Some(color) }
+        }))
+        .into()
+}
+
+/// One bar toggle (upstream's `Toggle(...).toggleStyle(.button)` with an
+/// SF Symbol, borderless, ModelPane.swift:154-161): the glyph alone,
+/// accent-tinted while on; `title` is the accessibility label and `help`
+/// the tooltip. `message: None` is upstream's `.disabled` — a button
+/// without `on_press`.
 fn tool_toggle(
-    selected: bool,
-    label: String,
+    icon: &'static [u8],
+    on: bool,
+    enabled: bool,
+    title: String,
     help: String,
     message: Option<Message>,
 ) -> Element<'static, Message> {
-    let toggle = button::text(label)
-        .class(if selected {
-            cosmic::theme::Button::Suggested
-        } else {
-            cosmic::theme::Button::Standard
-        })
-        .on_press_maybe(message);
+    let cell = container(glyph(icon, TOGGLE_CELL, on, enabled))
+        .width(Length::Fixed(TOGGLE_CELL))
+        .height(Length::Fixed(BAR_HEIGHT))
+        .align_y(cosmic::iced::alignment::Vertical::Center);
+    let toggle = button::custom(cell)
+        .padding(0)
+        .class(borderless_button())
+        .on_press_maybe(message)
+        .description(title);
     tooltip(
         toggle,
         text(help),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
+    .into()
+}
+
+/// A segment's width: the measured 37.5 pt, widened for a label that
+/// would not fit (11 pt text averages ~5 pt a glyph; 6 pt of padding a
+/// side). Every segment takes the widest label's width, as AppKit's
+/// segmented control does.
+fn segment_width(labels: &[String]) -> f32 {
+    let widest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    SEGMENT_WIDTH.max(widest as f32 * 5.0 + 12.0)
+}
+
+/// A macOS segmented control at the small control size, drawn from
+/// containers (libcosmic's segmented button draws its own pill-and-accent
+/// look): a rounded track at 5 % ink, the selected segment a raised face
+/// on the text background with a hairline border and soft shadow, and
+/// 1 pt separators between neighbouring unselected segments. `on_select`
+/// answers each segment's press; `None` disables that segment.
+pub(crate) fn segmented<'a>(
+    labels: Vec<String>,
+    selected: Option<usize>,
+    enabled: bool,
+    on_select: impl Fn(usize) -> Option<Message>,
+) -> Element<'a, Message> {
+    let width = segment_width(&labels);
+    let face_height = SEGMENT_HEIGHT - 2.0 * SEGMENT_INSET;
+    let mut row = Row::new()
+        .height(Length::Fixed(face_height))
+        .align_y(cosmic::iced::Alignment::Center);
+    for (index, label) in labels.into_iter().enumerate() {
+        if index > 0 {
+            let shown = selected != Some(index - 1) && selected != Some(index);
+            row = row.push(
+                container(
+                    Space::new()
+                        .width(Length::Fixed(1.0))
+                        .height(Length::Fixed(9.0)),
+                )
+                .class(cosmic::theme::Container::custom(move |theme| {
+                    cosmic::iced::widget::container::Style {
+                        background: shown.then(|| ink(theme, SEPARATOR_ALPHA).into()),
+                        ..Default::default()
+                    }
+                })),
+            );
+        }
+        let is_selected = selected == Some(index);
+        let face = container(
+            text(label)
+                .size(BAR_FONT_SIZE)
+                .class(cosmic::theme::Text::Custom(if enabled {
+                    label_style
+                } else {
+                    tertiary_label_style
+                })),
+        )
+        .width(Length::Fixed(width))
+        .height(Length::Fill)
+        .align_x(cosmic::iced::alignment::Horizontal::Center)
+        .align_y(cosmic::iced::alignment::Vertical::Center)
+        .class(cosmic::theme::Container::custom(move |theme| {
+            if !is_selected {
+                return cosmic::iced::widget::container::Style::default();
+            }
+            let face = if theme.cosmic().is_dark {
+                ink(theme, 0.28)
+            } else {
+                text_background(theme)
+            };
+            cosmic::iced::widget::container::Style {
+                background: Some(face.into()),
+                border: cosmic::iced::Border {
+                    color: ink(theme, 0.12),
+                    width: 0.5,
+                    radius: 4.5.into(),
+                },
+                shadow: cosmic::iced::Shadow {
+                    color: ink(theme, 0.15),
+                    offset: cosmic::iced::Vector::new(0.0, 0.5),
+                    blur_radius: 1.0,
+                },
+                ..Default::default()
+            }
+        }));
+        let message = if enabled { on_select(index) } else { None };
+        row = row.push(
+            button::custom(face)
+                .padding(0)
+                .class(borderless_button())
+                .on_press_maybe(message),
+        );
+    }
+    container(row)
+        .padding(SEGMENT_INSET)
+        .class(cosmic::theme::Container::custom(|theme| {
+            cosmic::iced::widget::container::Style {
+                background: Some(ink(theme, 0.05).into()),
+                border: cosmic::iced::Border {
+                    radius: 5.5.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// SwiftUI's `ContentUnavailableView` (ModelPane.swift:101-112): a
+/// tertiary glyph, the bold secondary title, the secondary description,
+/// centered in the pane.
+fn content_unavailable<'a>(
+    icon: &'static [u8],
+    title: String,
+    description: String,
+) -> Element<'a, Message> {
+    let glyph = cosmic::iced::widget::svg(cosmic::iced::widget::svg::Handle::from_memory(icon))
+        .width(Length::Fixed(40.0))
+        .height(Length::Fixed(40.0))
+        .class(cosmic::theme::Svg::custom(|theme| {
+            cosmic::iced::widget::svg::Style {
+                color: Some(solid_ink(theme, TERTIARY_ALPHA)),
+            }
+        }));
+    container(
+        Column::new()
+            .push(glyph)
+            .push(Space::new().height(Length::Fixed(14.0)))
+            .push(
+                text(title)
+                    .size(22)
+                    .font(cosmic::font::bold())
+                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+            )
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(
+                text(description)
+                    .size(13)
+                    .align_x(cosmic::iced::alignment::Horizontal::Center)
+                    .class(cosmic::theme::Text::Custom(secondary_label_style)),
+            )
+            .align_x(cosmic::iced::alignment::Alignment::Center),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(cosmic::iced::alignment::Horizontal::Center)
+    .align_y(cosmic::iced::alignment::Vertical::Center)
+    .class(text_background_class())
     .into()
 }
 
@@ -2195,6 +2544,128 @@ mod tests {
         assert_eq!(legend_dots(&colors).len(), 12);
         assert_eq!(legend_label(13), "13 colors");
         let _ = view_legend(&colors);
+    }
+
+    #[test]
+    fn a_project_opens_with_its_plate_and_motion_study_loaded() {
+        let root = mk_project(
+            "open-all",
+            &[],
+            &[
+                "golden/model.3mf",
+                "golden/animation.json",
+                "golden/plate.3mf",
+            ],
+        );
+        let pane = ViewerPane::new_with_settings(
+            &root,
+            MeasurementUnit::Millimeters,
+            None,
+            root.join("settings.json"),
+        );
+        assert!(
+            pane.study.is_some(),
+            "animation.json on disk at open is the study"
+        );
+        assert!(
+            pane.tools
+                .motion_available(pane.model_parts.len(), pane.study.is_some()),
+            "the bar offers the Animazione toggle, not the ask button"
+        );
+        assert!(
+            !pane.plate_parts.is_empty(),
+            "plate.3mf on disk at open is the plate"
+        );
+    }
+
+    #[test]
+    fn load_model_classifies_absent_loaded_and_unreadable() {
+        let neither = tmp_dir("load-neither");
+        assert!(matches!(load_model(&neither), ModelLoad::Absent));
+
+        let good = tmp_dir("load-good");
+        std::fs::copy(fixture("golden/model.3mf"), good.join("model.3mf")).unwrap();
+        assert!(matches!(load_model(&good), ModelLoad::Loaded(parts) if parts.len() == 2));
+
+        // a broken 3MF with no STL beside it names the 3MF's failure
+        let bad_3mf = tmp_dir("load-bad-3mf");
+        std::fs::write(bad_3mf.join("model.3mf"), b"not a zip").unwrap();
+        match load_model(&bad_3mf) {
+            ModelLoad::Unreadable(why) => assert!(why.starts_with("model.3mf: "), "{why}"),
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+
+        // with an STL present, the STL's own error is the text (upstream
+        // parseMesh's fallback Result)
+        let bad_both = tmp_dir("load-bad-both");
+        std::fs::write(bad_both.join("model.3mf"), b"not a zip").unwrap();
+        std::fs::write(bad_both.join("model.stl"), b"short").unwrap();
+        match load_model(&bad_both) {
+            ModelLoad::Unreadable(why) => assert!(why.starts_with("model.stl: "), "{why}"),
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+        assert!(load_model_parts(&bad_both).is_none());
+    }
+
+    #[test]
+    fn unreadable_first_model_sets_the_error_and_a_good_one_clears_it() {
+        let (root, mut pane) = pane("mesh-error", &[], &[]);
+        assert_eq!(pane.mesh_error, None, "no files: the no-model state");
+        std::fs::write(root.join("output/model.stl"), b"garbage").unwrap();
+        pane.reload_outputs();
+        assert!(pane.scene.scene.parts.is_empty());
+        assert!(
+            pane.mesh_error
+                .as_deref()
+                .is_some_and(|why| why.starts_with("model.stl: ")),
+            "a first-load parse failure is the unreadable state: {:?}",
+            pane.mesh_error
+        );
+        let _ = pane.view_model_3d(None);
+
+        std::fs::copy(fixture("golden/model.stl"), root.join("output/model.stl")).unwrap();
+        pane.reload_outputs();
+        assert_eq!(pane.mesh_error, None, "a successful parse clears it");
+        assert_eq!(pane.scene.scene.parts.len(), 1);
+
+        // a later failure records the error but keeps the last good model
+        // on screen (the content shows the mesh whenever one exists)
+        std::fs::write(root.join("output/model.stl"), b"garbage").unwrap();
+        pane.reload_outputs();
+        assert!(pane.mesh_error.is_some());
+        assert_eq!(pane.scene.scene.parts.len(), 1, "last good model kept");
+
+        // the files disappearing clears the error
+        std::fs::remove_file(root.join("output/model.stl")).unwrap();
+        pane.reload_outputs();
+        assert_eq!(pane.mesh_error, None);
+    }
+
+    #[test]
+    fn size_label_reports_the_assembled_model_in_every_layout() {
+        let (_root, mut pane) = pane("info-plate", &[], &["golden/model.3mf", "golden/plate.3mf"]);
+        let assembled = model_size(pane.model_scene.aabb_min, pane.model_scene.aabb_max);
+        pane.set_layout(PartsLayout::Plate);
+        let drawn = model_size(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
+        assert_ne!(
+            drawn, assembled,
+            "fixture truth: the plate lays the parts out wider"
+        );
+        assert_eq!(
+            pane.status_text(),
+            status_info(Some(assembled), MeasurementUnit::Millimeters)
+        );
+    }
+
+    #[test]
+    fn segments_share_the_widest_label_width() {
+        let short = ["Iso", "Front", "Top", "Right"].map(String::from);
+        assert_eq!(segment_width(&short), SEGMENT_WIDTH, "the measured width");
+        let long = ["Iso", "Vorderseite"].map(String::from);
+        assert!(
+            segment_width(&long) > SEGMENT_WIDTH,
+            "a long label widens every segment"
+        );
     }
 
     #[test]
