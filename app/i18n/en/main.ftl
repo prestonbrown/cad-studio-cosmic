@@ -351,3 +351,25 @@ menu-view = View
 version-not-in-history = Version {$version} is not in the history
 # Port addition (no upstream key).
 settings = Settings
+# conv2-ifix: version timestamps (SwiftUI .relative(presentation: .named) and .abbreviated/.shortened)
+version-relative-now = just now
+version-relative-minute = 1 minute ago
+version-relative-minutes = {$n} minutes ago
+version-relative-hour = 1 hour ago
+version-relative-hours = {$n} hours ago
+version-relative-yesterday = yesterday
+version-relative-days = {$n} days ago
+version-date-time = {$month} {$day}, {$year} at {$time}
+version-hour-cycle = 12
+version-month-jan = Jan
+version-month-feb = Feb
+version-month-mar = Mar
+version-month-apr = Apr
+version-month-may = May
+version-month-jun = Jun
+version-month-jul = Jul
+version-month-aug = Aug
+version-month-sep = Sep
+version-month-oct = Oct
+version-month-nov = Nov
+version-month-dec = Dec

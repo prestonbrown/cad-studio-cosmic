@@ -79,44 +79,76 @@ pub fn menu_entries(versions: &[ProjectVersion], current: Option<i64>) -> Vec<Ve
 
 /// The relative half of an entry's subtitle (SwiftUI
 /// `.formatted(.relative(presentation: .named))`): "just now", "5 minutes
-/// ago", "yesterday", "4 days ago". Pure in `now` so the formatter is
-/// testable; distances are non-negative (a future timestamp reads as
-/// "just now").
+/// ago", "yesterday", "4 days ago", in the selected language. Pure in
+/// `now` so the formatter is testable; distances are non-negative (a
+/// future timestamp reads as "just now"). Each bucket names its own
+/// grammatical number: the counted buckets start at 2.
 pub fn relative(at: OffsetDateTime, now: OffsetDateTime) -> String {
     let seconds = (now - at).whole_seconds().max(0);
     match seconds {
-        0..=59 => "just now".to_string(),
-        60..=119 => "1 minute ago".to_string(),
-        120..=3_599 => format!("{} minutes ago", seconds / 60),
-        3_600..=7_199 => "1 hour ago".to_string(),
-        7_200..=86_399 => format!("{} hours ago", seconds / 3600),
-        86_400..=172_799 => "yesterday".to_string(),
-        _ => format!("{} days ago", seconds / 86_400),
+        0..=59 => fl!("version-relative-now"),
+        60..=119 => fl!("version-relative-minute"),
+        120..=3_599 => fl!("version-relative-minutes", n = seconds / 60),
+        3_600..=7_199 => fl!("version-relative-hour"),
+        7_200..=86_399 => fl!("version-relative-hours", n = seconds / 3600),
+        86_400..=172_799 => fl!("version-relative-yesterday"),
+        _ => fl!("version-relative-days", n = seconds / 86_400),
     }
 }
 
 /// The date half of an entry's subtitle (`.formatted(date: .abbreviated,
-/// time: .shortened)`): "Oct 13, 2026 at 3:24 PM" — abbreviated month,
-/// 12-hour clock. UTC: the port has no local-offset lookup, and the
-/// history stores UTC stamps.
+/// time: .shortened)`) in the system time zone: "Oct 13, 2026 at 3:24 PM",
+/// "13 ott 2026, 15:24".
 pub fn abbreviated(at: OffsetDateTime) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let month = MONTHS[usize::from(u8::from(at.month())) - 1];
-    let hour12 = match at.hour() % 12 {
-        0 => 12, // midnight and noon both read 12
-        hour => hour,
+    abbreviated_at(at.to_offset(local_offset(at)))
+}
+
+/// The system time zone's offset at `at` (daylight saving included); UTC
+/// when the zone cannot be read.
+fn local_offset(at: OffsetDateTime) -> time::UtcOffset {
+    use chrono::{Offset, TimeZone};
+    chrono::Local
+        .timestamp_opt(at.unix_timestamp(), 0)
+        .single()
+        .and_then(|local| {
+            time::UtcOffset::from_whole_seconds(local.offset().fix().local_minus_utc()).ok()
+        })
+        .unwrap_or(time::UtcOffset::UTC)
+}
+
+/// [`abbreviated`] for a timestamp already in the zone to show.
+fn abbreviated_at(at: OffsetDateTime) -> String {
+    let month = match at.month() {
+        time::Month::January => fl!("version-month-jan"),
+        time::Month::February => fl!("version-month-feb"),
+        time::Month::March => fl!("version-month-mar"),
+        time::Month::April => fl!("version-month-apr"),
+        time::Month::May => fl!("version-month-may"),
+        time::Month::June => fl!("version-month-jun"),
+        time::Month::July => fl!("version-month-jul"),
+        time::Month::August => fl!("version-month-aug"),
+        time::Month::September => fl!("version-month-sep"),
+        time::Month::October => fl!("version-month-oct"),
+        time::Month::November => fl!("version-month-nov"),
+        time::Month::December => fl!("version-month-dec"),
     };
-    let meridiem = if at.hour() < 12 { "AM" } else { "PM" };
-    format!(
-        "{} {}, {} at {}:{:02} {}",
-        month,
-        at.day(),
-        at.year(),
-        hour12,
-        at.minute(),
-        meridiem
+    // the language's clock: `version-hour-cycle` is 12 or 24
+    let time = if fl!("version-hour-cycle") == "12" {
+        let hour12 = match at.hour() % 12 {
+            0 => 12, // midnight and noon both read 12
+            hour => hour,
+        };
+        let meridiem = if at.hour() < 12 { "AM" } else { "PM" };
+        format!("{hour12}:{:02} {meridiem}", at.minute())
+    } else {
+        format!("{}:{:02}", at.hour(), at.minute())
+    };
+    fl!(
+        "version-date-time",
+        month = month,
+        day = at.day(),
+        year = at.year(),
+        time = time
     )
 }
 
@@ -333,6 +365,7 @@ mod tests {
     /// .named)`).
     #[test]
     fn relative_buckets_like_swiftui() {
+        let _lang = crate::localize::pin_en();
         let now = OffsetDateTime::now_utc();
         assert_eq!(relative(now - time::Duration::seconds(30), now), "just now");
         assert_eq!(
@@ -348,10 +381,29 @@ mod tests {
     /// 3:24 PM" (VersionMenu.swift:19-21).
     #[test]
     fn subtitle_joins_relative_and_abbreviated() {
+        let _lang = crate::localize::pin_en();
         let e = entry(1, 5);
         let s = subtitle(&e, OffsetDateTime::now_utc());
         assert!(s.starts_with("5 minutes ago · "), "{s}");
         assert!(s.contains(", 202"), "abbreviated date present: {s}");
+    }
+
+    /// The date reads in the selected language's abbreviated form and
+    /// 12- or 24-hour clock.
+    #[test]
+    fn the_date_follows_the_language() {
+        let at = time::macros::datetime!(2026-10-13 15:04 UTC);
+        let _lang = crate::localize::pin_en();
+        assert_eq!(abbreviated_at(at), "Oct 13, 2026 at 3:04 PM");
+        assert_eq!(relative(at - time::Duration::days(3), at), "3 days ago");
+        crate::localize::select("it");
+        let italian = (
+            abbreviated_at(at),
+            relative(at - time::Duration::days(3), at),
+        );
+        crate::localize::select("en");
+        assert_eq!(italian.0, "13 ott 2026, 15:04");
+        assert_eq!(italian.1, "3 giorni fa");
     }
 
     /// The card builds in every shape: empty, idle, busy (Element

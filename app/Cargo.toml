@@ -22,6 +22,10 @@ viewer = { path = "../viewer" }
 glam.workspace = true
 uuid.workspace = true
 time.workspace = true
+# the system time zone for displayed timestamps (`time` cannot read the
+# local offset once the process has threads); lopdf already links chrono,
+# so this adds no new copy.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde_json.workspace = true
 thiserror.workspace = true
 # the engine bridge drives tokio channels (TurnHandle.events is a tokio
