@@ -9,13 +9,15 @@
 //! lines.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use engine::agent::claude::TurnRequest;
 use engine::agent::session::{EngineEvent, Session, TurnOutcome};
 use engine::agent::tool_summary::{ToolAction, ToolTitle};
 use engine::project::store::load_metadata;
 use engine::settings::Settings;
+
+mod common;
+use common::*;
 
 /// The fake reads its env at spawn time and `Session::run_turn` snapshots
 /// the login environment per turn, so every [set env → run_turn → turn
@@ -25,27 +27,11 @@ static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 
 const PONG_SID: &str = "94fcba3f-44f9-4003-b32d-c469499dc529";
 
-fn fixture_fake(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/fake-agent")
-        .join(p)
-}
-
-fn fixture_upstream(p: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/upstream")
-        .join(p)
-}
-
 /// A temp project with the real on-disk layout: empty output/, no model.py.
 fn mk_project() -> PathBuf {
     let root = std::env::temp_dir().join(format!("cad-codex-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("output")).unwrap();
     root
-}
-
-fn system_template() -> String {
-    std::fs::read_to_string(fixture_upstream("CADSystemPrompt.md")).unwrap()
 }
 
 fn codex_request() -> TurnRequest {
@@ -95,28 +81,6 @@ async fn run_turn(
     events
 }
 
-/// Drain the handle's events up to and including TurnFinished, bounded by
-/// the suite-wide 5 s margin (never a fixed sleep).
-async fn collect_until_finished(
-    handle: &mut engine::agent::session::TurnHandle,
-) -> Vec<EngineEvent> {
-    let mut events = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match tokio::time::timeout_at(deadline, handle.events.recv()).await {
-            Ok(Some(event)) => {
-                let finished = matches!(event, EngineEvent::TurnFinished(_));
-                events.push(event);
-                if finished {
-                    return events;
-                }
-            }
-            Ok(None) => panic!("events channel closed before TurnFinished: {events:?}"),
-            Err(_) => panic!("timed out before TurnFinished: {events:?}"),
-        }
-    }
-}
-
 fn started_sid(event: &EngineEvent) -> Option<&str> {
     match event {
         EngineEvent::Started { session_id } => session_id.as_deref(),
@@ -146,9 +110,12 @@ fn argv_of(dump: &Path, n: usize) -> Vec<String> {
         .filter(|l| !l.trim().is_empty())
         .map(str::to_string)
         .collect();
-    let invocation: serde_json::Value =
-        serde_json::from_str(lines.get(n).unwrap_or_else(|| panic!("dump line {n}: {lines:?}")))
-            .unwrap();
+    let invocation: serde_json::Value = serde_json::from_str(
+        lines
+            .get(n)
+            .unwrap_or_else(|| panic!("dump line {n}: {lines:?}")),
+    )
+    .unwrap();
     invocation["argv"]
         .as_array()
         .unwrap()
@@ -159,7 +126,8 @@ fn argv_of(dump: &Path, n: usize) -> Vec<String> {
 
 /// `argv` contains `flag` followed immediately by `value`.
 fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
-    argv.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
+    argv.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
 fn codex_settings() -> Settings {
@@ -199,15 +167,18 @@ async fn codex_turn_translates_full_sequence() {
     // reasoning opens and closes a thinking pair
     let thinking = events
         .iter()
-        .filter(|e| matches!(e, EngineEvent::ThinkingStarted | EngineEvent::ThinkingFinished))
+        .filter(|e| {
+            matches!(
+                e,
+                EngineEvent::ThinkingStarted | EngineEvent::ThinkingFinished
+            )
+        })
         .count();
     assert_eq!(thinking, 2, "one start/stop pair: {events:?}");
 
     // the command_execution row: Bash, title from the unwrapped command
     match tool(&events, "cmd_1") {
-        EngineEvent::ToolStarted {
-            name, title, ..
-        } => {
+        EngineEvent::ToolStarted { name, title, .. } => {
             assert_eq!(name, "Bash");
             assert_eq!(
                 title,
@@ -230,8 +201,13 @@ async fn codex_turn_translates_full_sequence() {
         other => panic!("{other:?}"),
     }
     assert!(matches!(
-        events.iter().find(|e| matches!(e, EngineEvent::ToolFinished { id, .. } if id == "fc_1-0")),
-        Some(EngineEvent::ToolFinished { is_error: false, .. })
+        events
+            .iter()
+            .find(|e| matches!(e, EngineEvent::ToolFinished { id, .. } if id == "fc_1-0")),
+        Some(EngineEvent::ToolFinished {
+            is_error: false,
+            ..
+        })
     ));
 
     // the agent message confirms as assistant text and becomes the
@@ -330,7 +306,10 @@ async fn codex_argv_carries_upstream_flags() {
     assert!(has_pair(&argv, "resume", "th_prev"), "{argv:?}");
     // only the image rides -i; the txt attachment does not
     assert!(has_pair(&argv, "-i", "/references/1-shot.png"));
-    assert!(!argv.windows(2).any(|w| w[1].contains("notes.txt")), "{argv:?}");
+    assert!(
+        !argv.windows(2).any(|w| w[1].contains("notes.txt")),
+        "{argv:?}"
+    );
     // the prompt is the LAST argument
     assert_eq!(argv.last().map(String::as_str), Some("please respond"));
     // and none of claude's flags leak into a codex turn
@@ -408,10 +387,16 @@ async fn engine_flip_mid_conversation_resumes_engine_blind() {
     // the two spawns: claude argv first (fresh — no sid stored yet), codex
     // argv second, resuming the sid turn 1 stored (engine-blind)
     let claude_argv = argv_of(&dump, 0);
-    assert!(claude_argv[0] == "-p", "turn 1 is a claude spawn: {claude_argv:?}");
+    assert!(
+        claude_argv[0] == "-p",
+        "turn 1 is a claude spawn: {claude_argv:?}"
+    );
     assert!(!claude_argv.contains(&"--resume".to_string()));
     let codex_argv = argv_of(&dump, 1);
-    assert_eq!(codex_argv[0], "exec", "turn 2 is a codex spawn: {codex_argv:?}");
+    assert_eq!(
+        codex_argv[0], "exec",
+        "turn 2 is a codex spawn: {codex_argv:?}"
+    );
     assert!(
         has_pair(&codex_argv, "resume", PONG_SID),
         "the codex run resumes the claude-stored sid: {codex_argv:?}"

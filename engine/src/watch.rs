@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::project::folder;
+
 /// What the app must reload when a watched output file changes (contract §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReloadKind {
@@ -124,11 +126,11 @@ fn collect(
 fn kind_for(path: &Path) -> Option<ReloadKind> {
     let name = path.file_name()?.to_str()?;
     match name {
-        "manifest.json" => Some(ReloadKind::Manifest),
-        "plate.3mf" => Some(ReloadKind::Plate),
-        "animation.json" => Some(ReloadKind::Motion),
-        "model.3mf" | "model.stl" => Some(ReloadKind::Mesh),
-        "schematic.png" => Some(ReloadKind::Schematic),
+        folder::MANIFEST => Some(ReloadKind::Manifest),
+        folder::PLATE_3MF => Some(ReloadKind::Plate),
+        folder::ANIMATION => Some(ReloadKind::Motion),
+        folder::MODEL_3MF | folder::MODEL_STL => Some(ReloadKind::Mesh),
+        folder::SCHEMATIC_PNG => Some(ReloadKind::Schematic),
         _ if name.starts_with("schematic") && name.ends_with(".svg") => Some(ReloadKind::Schematic),
         _ => None,
     }

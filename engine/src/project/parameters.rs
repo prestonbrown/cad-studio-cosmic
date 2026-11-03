@@ -2,7 +2,7 @@
 //! ProjectOutput.swift `orderedParameters`): the manifest's `parameters`
 //! map ordered by first appearance in model.py, the surgical rewrite
 //! of one parameter's numeric literal in the script (written back with
-//! [`super::store::atomic_write`]), and [`scan`] — the value extraction
+//! [`crate::storage::atomic_write`]), and [`scan`] — the value extraction
 //! from the script itself.
 //!
 //! One deliberate divergence from Swift's `String(Double)`: beyond ~1e16
@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -45,6 +46,19 @@ pub fn ordered_parameters(manifest: &BTreeMap<String, f64>, script: &str) -> Vec
     rows
 }
 
+/// The tail of the assignment grammar after the name (upstream
+/// Project.swift:346): optional type annotation, `=`, then the numeric
+/// literal captured as the last group. [`scan`] and [`rewrite_value`] both
+/// match it, so version comparison and slider rewrites see the same
+/// assignments.
+const NUMBER_RHS: &str = r"\s*(?::[^=\n]+)?=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)";
+
+/// Any assignment name followed by [`NUMBER_RHS`].
+static SCAN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*){NUMBER_RHS}"))
+        .expect("static scan pattern compiles")
+});
+
 /// The `name = <number>` assignments a model.py carries, last write per
 /// name (Python rebinding). Targets the same assignment grammar
 /// [`rewrite_value`] rewrites — typed, indented, spaced, exponent forms
@@ -54,13 +68,7 @@ pub fn ordered_parameters(manifest: &BTreeMap<String, f64>, script: &str) -> Vec
 /// rewrites the script, so the script is the only truthful record of
 /// what a version was recorded with.
 pub fn scan(script: &str) -> BTreeMap<String, f64> {
-    // The literal pattern cannot fail to compile (nothing is interpolated,
-    // unlike [`rewrite_value`]'s escaped-name form).
-    let re = Regex::new(
-        r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)",
-    )
-    .expect("static scan pattern compiles");
-    re.captures_iter(script)
+    SCAN.captures_iter(script)
         .filter_map(|caps| {
             let value = caps[2].parse::<f64>().ok().filter(|v| v.is_finite())?;
             Some((caps[1].to_owned(), value))
@@ -99,13 +107,10 @@ pub fn format_number(value: f64, original: &str) -> String {
 
 /// Rewrite the first assignment to `name` in `script`, replacing only the
 /// captured numeric literal. The pattern is upstream Project.swift:346
-/// verbatim; `regex::escape` stands in for
-/// `NSRegularExpression.escapedPattern`.
+/// verbatim (the escaped name, then [`NUMBER_RHS`]); `regex::escape` stands
+/// in for `NSRegularExpression.escapedPattern`.
 pub fn rewrite_value(script: &str, name: &str, value: f64) -> Result<Rewrite, ParameterError> {
-    let pattern = format!(
-        r"(?m)^\s*{}\s*(?::[^=\n]+)?=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)",
-        regex::escape(name)
-    );
+    let pattern = format!(r"(?m)^\s*{}{NUMBER_RHS}", regex::escape(name));
     // Escaping makes every name a valid pattern, so construction failure is
     // as unreachable as upstream's `try?` path — and lands the same way:
     // the parameter reads as not found.
@@ -136,8 +141,9 @@ pub fn set_parameter(
     name: &str,
     value: f64,
 ) -> Result<Rewrite, ParameterError> {
-    let script = std::fs::read_to_string(project_root.join("model.py"))?;
+    let path = super::folder::model_script(project_root);
+    let script = std::fs::read_to_string(&path)?;
     let rewrite = rewrite_value(&script, name, value)?;
-    super::store::atomic_write(&project_root.join("model.py"), rewrite.script.as_bytes())?;
+    crate::storage::atomic_write(&path, rewrite.script.as_bytes())?;
     Ok(rewrite)
 }

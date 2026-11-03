@@ -13,8 +13,8 @@
 //!   with the unconfirmed streaming row (replace the FIRST unconfirmed row,
 //!   FIFO — upstream `unconfirmedTextIDs.removeFirst()`) is chat state, so it
 //!   belongs to the app. A synthetic API-error assistant block is a text block
-//!   like any other and confirms the same way; whether to display it is M4's
-//!   call, not the engine's.
+//!   like any other and confirms the same way; whether to display it is the
+//!   app's call, not the engine's.
 //! - Tool rows are keyed by the `tool_use` id present at
 //!   `content_block_start`; the assistant snapshot that repeats the block
 //!   carries the full input, which upstream uses only to refine the row's
@@ -73,17 +73,18 @@ use crate::agent::claude::{
     PromptCtx, TurnRequest, build_args, build_prompt, environment_bullets, render_system_prompt,
 };
 use crate::agent::codex::{self, CodexTranslator};
-use crate::agent::locator::{self, AgentKind, AgentPath, shell_env};
+use crate::agent::locator::{self, AgentKind, AgentPath};
 use crate::agent::stream_event::{
     ContentBlock, Delta, InnerEvent, ResultEvent, StreamEvent, SystemKind, ToolResultContent,
     parse_line,
 };
 use crate::agent::tool_summary::{ToolTitle, live_title, summarize};
 use crate::parsing::threemf::parse_3mf;
-use crate::processes::{Line, RunningProcess, spawn_streaming};
+use crate::processes::{Line, RunningProcess, spawn_streaming, tool_environment};
+use crate::project::folder;
 use crate::project::manifest::Manifest;
 use crate::project::outputs::MissingCtx;
-use crate::project::store::{ProjectMetadata, load_metadata, save_metadata};
+use crate::project::store::{ProjectMetadata, load_metadata, load_metadata_or_new, save_metadata};
 use crate::settings::Settings;
 
 /// Names an executable to spawn instead of discovering one — the test and
@@ -427,7 +428,7 @@ impl Attempt {
 
 /// [`Session::run_turn`]'s driver: one attempt, then its terminal event.
 async fn single_turn(mut ctx: TurnCtx) {
-    let metadata = stored_metadata(&ctx.root);
+    let metadata = load_metadata_or_new(&ctx.root);
     let resume_sid = metadata.session_id.clone();
     let attempt = run_attempt(&mut ctx, resume_sid.as_deref()).await;
     let _ = ctx
@@ -445,7 +446,7 @@ async fn full_dance(mut ctx: TurnCtx) {
     let mut attempt_no = 0;
     let mut allows_resume = true;
     loop {
-        let metadata = stored_metadata(&ctx.root);
+        let metadata = load_metadata_or_new(&ctx.root);
         let resume_sid = if allows_resume {
             metadata.session_id
         } else {
@@ -533,7 +534,7 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     let engine = settings.agent_kind();
     let mut driver = TurnDriver {
         root: ctx.root.clone(),
-        metadata: stored_metadata(&ctx.root),
+        metadata: load_metadata_or_new(&ctx.root),
         state: TurnState {
             engine,
             translator: CodexTranslator::default(),
@@ -556,12 +557,12 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
 
     // the missing-output note needs the parts count from the parsed 3MF and
     // a manifest that only counts when it loads
-    let output_dir = ctx.root.join("output");
-    let parts_count = std::fs::read(output_dir.join("model.3mf"))
+    let output_dir = folder::output_dir(&ctx.root);
+    let parts_count = std::fs::read(output_dir.join(folder::MODEL_3MF))
         .ok()
         .and_then(|bytes| parse_3mf(&bytes).ok())
         .map_or(0, |parts| parts.len());
-    let manifest = Manifest::load(&output_dir.join("manifest.json")).ok();
+    let manifest = Manifest::load(&output_dir.join(folder::MANIFEST)).ok();
     let missing = MissingCtx {
         project_root: &ctx.root,
         output_dir: &output_dir,
@@ -594,14 +595,9 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
             &venv_python,
         )),
     }
-    // The login environment is snapshotted per turn: upstream caches it in
-    // its long-lived actor, which M4's app can layer on top the same way.
-    let mut env = shell_env();
-    // ModelBuilder.toolEnvironment's additions ride the login env
-    // (ClaudeRunner.swift:23; upstream-contract.md §1)
-    env.insert("MPLBACKEND".to_string(), "Agg".to_string());
-    env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
-    let env: Vec<(String, String)> = env.into_iter().collect();
+    // the agent runs under the same tool environment as a model.py build
+    // (ClaudeRunner.swift:23), snapshotted per turn
+    let env = tool_environment();
 
     let mut proc = match spawn_streaming(&argv, &ctx.root, &env) {
         Ok(proc) => proc,
@@ -681,10 +677,6 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     }
 }
 
-/// The project's stored metadata, or a fresh document when none loads.
-fn stored_metadata(root: &Path) -> ProjectMetadata {
-    load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(env!("CARGO_PKG_VERSION")))
-}
 
 /// Upstream's classification text: the result line's text joined with the
 /// process's whole stdout and stderr (AgentSession.swift:307).
@@ -708,12 +700,11 @@ fn clear_session_id(root: &Path) {
     }
 }
 
-/// The app-wide venv interpreter, routed through python::env's canonical
-/// data-dir helper so the session can never name a different venv than the
-/// one M5 installs: `~/.local/share/cad-studio/venv/bin/python` on Linux
-/// (spec §2/§6). `{{PYTHON}}` and the restricted-bash entry name it from
-/// day one; its existence is M5's to establish, so nothing here requires
-/// it to be present.
+/// The app-wide venv interpreter, routed through [`crate::python::env::venv_dir`]
+/// so the session can never name a different venv than the one the
+/// installer builds: `~/.local/share/cad-studio/venv/bin/python` on Linux
+/// (spec §2/§6). `{{PYTHON}}` and the restricted-bash entry name it whether
+/// or not the venv exists yet; installing it is the installer's job.
 fn app_venv_python() -> PathBuf {
     crate::python::env::interpreter_path(&crate::python::env::venv_dir())
 }
@@ -762,10 +753,10 @@ fn resolve_executable(engine: AgentKind, settings: &Settings) -> Option<AgentPat
     locator::find_agent(engine, settings.agent_path(engine))
 }
 
-/// Create this turn's tee log under `.cadstudio/logs/`. A failure to open is
-/// not a turn failure — upstream's `try?` simply drops the log too.
+/// Create this turn's tee log under [`folder::logs_dir`]. A failure to open
+/// is not a turn failure — upstream's `try?` simply drops the log too.
 fn open_log(root: &Path) -> Option<std::fs::File> {
-    let dir = root.join(".cadstudio").join("logs");
+    let dir = folder::logs_dir(root);
     std::fs::create_dir_all(&dir).ok()?;
     let name = OffsetDateTime::now_utc().format(&LOG_TIMESTAMP).ok()?;
     std::fs::OpenOptions::new()
@@ -980,38 +971,39 @@ fn outcome(state: &TurnState, stderr: &str, exit_code: Option<i32>) -> TurnOutco
 
 /// Upstream `isBusySession`'s needle over the combined turn text.
 pub fn is_busy_session(text: &str) -> bool {
-    contains_ci(text, "already has an active writer")
+    contains_any_ci(text, &["already has an active writer"])
 }
 
 /// Upstream `isMissingSession`'s needles.
 pub fn is_missing_session(text: &str) -> bool {
-    [
-        "no conversation found",
-        "no rollout found",
-        "session not found",
-        "thread not found",
-    ]
-    .iter()
-    .any(|needle| contains_ci(text, needle))
+    contains_any_ci(
+        text,
+        &[
+            "no conversation found",
+            "no rollout found",
+            "session not found",
+            "thread not found",
+        ],
+    )
 }
 
-/// Upstream `isAuthenticationError`'s needles, with one M4 amendment: the
-/// bare `401` must stand as a whole word — "1401 tokens used" and "duration
+/// Upstream `isAuthenticationError`'s needles, with one deliberate
+/// difference: the bare `401` must stand as a whole word — "1401 tokens used" and "duration
 /// 4.401s" are counts and latencies, not an auth status (upstream's plain
 /// substring match mis-fires on both).
 pub fn is_authentication_error(text: &str) -> bool {
-    [
-        "invalid api key",
-        "/login",
-        "not logged in",
-        "authentication",
-        "oauth token",
-        "unauthorized",
-        "codex login",
-    ]
-    .iter()
-    .any(|needle| contains_ci(text, needle))
-        || contains_word(text, "401")
+    contains_any_ci(
+        text,
+        &[
+            "invalid api key",
+            "/login",
+            "not logged in",
+            "authentication",
+            "oauth token",
+            "unauthorized",
+            "codex login",
+        ],
+    ) || contains_word(text, "401")
 }
 
 /// `\b<needle>\b` for an ASCII needle: some occurrence whose neighboring
@@ -1027,9 +1019,9 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     })
 }
 
-/// `localizedCaseInsensitiveContains` for ASCII needles.
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
+/// `localizedCaseInsensitiveContains` for lowercase ASCII needles, any of
+/// them. The haystack (a whole turn's stdout + stderr) is lowercased once.
+fn contains_any_ci(haystack: &str, needles: &[&str]) -> bool {
+    let haystack = haystack.to_ascii_lowercase();
+    needles.iter().any(|needle| haystack.contains(needle))
 }

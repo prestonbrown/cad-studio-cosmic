@@ -123,6 +123,7 @@ use engine::parsing::Part;
 use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
+use engine::project::folder;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
@@ -469,7 +470,7 @@ impl ViewerPane {
         settings: SettingsStore,
     ) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let output_dir = project_root.join("output");
+        let output_dir = folder::output_dir(&project_root);
         let (events, receiver) = channel::<PaneEvent>();
         // The engine watcher delivers into its own channel; a bridge thread
         // folds it into the pane's single event channel so the relay below
@@ -1098,7 +1099,7 @@ impl ViewerPane {
     /// the manifest, the status bar's warning count, and drops measure
     /// points collected against the old geometry.
     fn reload_outputs(&mut self) {
-        self.manifest = Manifest::load(&self.output_dir.join("manifest.json")).ok();
+        self.manifest = Manifest::load(&self.output_dir.join(folder::MANIFEST)).ok();
         let loaded = match load_model(&self.output_dir) {
             ModelLoad::Loaded(parts) => {
                 self.mesh_error = None;
@@ -1151,7 +1152,7 @@ impl ViewerPane {
     /// fallback lays the model out instead. An unreadable or unparseable
     /// file keeps the LAST GOOD plate (the pane's established model law).
     fn reload_plate(&mut self) {
-        if let Ok(bytes) = std::fs::read(self.output_dir.join("plate.3mf")) {
+        if let Ok(bytes) = std::fs::read(self.output_dir.join(folder::PLATE_3MF)) {
             if let Ok(parts) = parse_3mf(&bytes) {
                 self.plate_loaded = !parts.is_empty();
                 self.plate_parts = parts;
@@ -1885,8 +1886,8 @@ pub enum ModelLoad {
 /// the fallback — including when the 3MF parses but yields ZERO parts (a
 /// well-formed-but-empty file is not a model).
 pub fn load_model(output_dir: &Path) -> ModelLoad {
-    let three_mf = output_dir.join("model.3mf");
-    let stl = output_dir.join("model.stl");
+    let three_mf = output_dir.join(folder::MODEL_3MF);
+    let stl = output_dir.join(folder::MODEL_STL);
     if !three_mf.exists() && !stl.exists() {
         return ModelLoad::Absent;
     }

@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Which agent CLI to locate (upstream `AgentEngine`); Claude is the M2
-/// agent, Codex the M8 alternate.
+/// Which agent CLI to locate (upstream `AgentEngine`); Claude is the
+/// default, Codex the alternate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentKind {
     #[default]

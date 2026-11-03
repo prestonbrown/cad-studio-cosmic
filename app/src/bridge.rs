@@ -55,6 +55,7 @@ use engine::agent::attachments;
 use engine::agent::claude::TurnRequest;
 use engine::agent::locator::AgentKind;
 use engine::agent::session::{EngineEvent, Session, TEST_CLAUDE_ENV, TurnHandle, TurnOutcome};
+use engine::project::folder;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::missing_files;
 use engine::project::parameters::{
@@ -124,7 +125,7 @@ impl Pipeline {
             versions: versions::load_versions(root),
             parameters: refresh_parameters(root),
             build_error: None,
-            missing_outputs: missing_files(&root.join("output")),
+            missing_outputs: missing_files(&folder::output_dir(root)),
             sheet_requested: false,
             draft: None,
             compare_version: None,
@@ -157,9 +158,9 @@ impl Pipeline {
 /// `orderedParameters`). Pure: a missing manifest or model.py reads as no
 /// parameters.
 pub fn refresh_parameters(root: &Path) -> Vec<ModelParameter> {
-    match Manifest::load(&root.join("output").join("manifest.json")) {
+    match Manifest::load(&folder::output_dir(root).join(folder::MANIFEST)) {
         Ok(manifest) => {
-            let script = std::fs::read_to_string(root.join("model.py")).unwrap_or_default();
+            let script = std::fs::read_to_string(folder::model_script(root)).unwrap_or_default();
             ordered_parameters(&manifest.parameters, &script)
         }
         Err(_) => Vec::new(),
@@ -459,7 +460,7 @@ impl Bridge {
         // silently before anything happens. The pre-read is what splits
         // read from write failures downstream; the second read inside the
         // engine helper is the price of not widening its error type.
-        if std::fs::read_to_string(self.root.join("model.py")).is_err() {
+        if std::fs::read_to_string(folder::model_script(&self.root)).is_err() {
             return Ok(());
         }
         match rewrite_parameter(&self.root, name, value) {
@@ -513,7 +514,7 @@ impl Bridge {
                 return Err(BuildRefusal::PythonNotReady);
             }
         }
-        if !self.root.join("model.py").exists() {
+        if !folder::model_script(&self.root).exists() {
             self.pipeline().activity = Activity::Failed(fl!("nessun-model-py-da-compilare"));
             return Err(BuildRefusal::NoModelScript);
         }
@@ -583,7 +584,7 @@ impl Bridge {
             .unwrap_or_else(|| Err(fl!("version-not-in-history", version = number)));
         match outcome {
             Ok(session_id) => {
-                let mut metadata = fresh_metadata(&self.root);
+                let mut metadata = store::load_metadata_or_new(&self.root);
                 metadata.session_id = session_id;
                 metadata.current_version = Some(number);
                 let _ = store::save_metadata(&self.root, &metadata);
@@ -715,18 +716,6 @@ impl Bridge {
 /// the bridge is injected).
 fn default_interpreter() -> PathBuf {
     interpreter_path(&venv_dir())
-}
-
-fn app_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-/// The project's metadata, loaded now — the load-fresh law EVERY writer of
-/// `project.json` follows, the shell's save points included (see
-/// [`Drive::record_version`] for why: the engine writes `session_id` into
-/// the same file mid-turn, and a copy held from launch would clobber it).
-pub fn fresh_metadata(root: &Path) -> ProjectMetadata {
-    store::load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(app_version()))
 }
 
 /// How a drained turn ended, for the driver's queue decision.
@@ -1235,7 +1224,7 @@ impl Drive {
                 }
                 BuildOutcome::Success => {
                     pipeline.parameters = refresh_parameters(&self.root);
-                    pipeline.missing_outputs = missing_files(&self.root.join("output"));
+                    pipeline.missing_outputs = missing_files(&folder::output_dir(&self.root));
                     pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
                 }
                 BuildOutcome::Failed { last_line, output } => {
@@ -1289,7 +1278,7 @@ impl Drive {
     ) -> Option<String> {
         let mut pipeline = self.pipeline();
         pipeline.parameters = refresh_parameters(&self.root);
-        pipeline.missing_outputs = missing_files(&self.root.join("output"));
+        pipeline.missing_outputs = missing_files(&folder::output_dir(&self.root));
         let complete = pipeline.missing_outputs.is_empty();
         pipeline.activity =
             activity::next(Signal::TurnFinished(outcome), complete, transcript.engine);
@@ -1375,9 +1364,10 @@ impl Drive {
         }
     }
 
-    /// The project's metadata, loaded now ([`fresh_metadata`]'s law).
+    /// The project's metadata as it is on disk now
+    /// ([`store::load_metadata_or_new`]).
     fn load_metadata(&self) -> ProjectMetadata {
-        fresh_metadata(&self.root)
+        store::load_metadata_or_new(&self.root)
     }
 }
 
@@ -2088,7 +2078,8 @@ mod tests {
         .await;
         assert_eq!(announced.len(), 1, "{announced:?}");
         assert!(
-            announced[0].starts_with("references/") && announced[0].ends_with(&format!("-1-{leaf}")),
+            announced[0].starts_with("references/")
+                && announced[0].ends_with(&format!("-1-{leaf}")),
             "the copy name is upstream's <stamp>-1-<name>: {}",
             announced[0]
         );
@@ -2204,7 +2195,10 @@ mod tests {
             Role::User,
             "the queued turn's user row persisted"
         );
-        assert_eq!(chat[0].attachments, vec![format!("references/{}", names[0])]);
+        assert_eq!(
+            chat[0].attachments,
+            vec![format!("references/{}", names[0])]
+        );
         drop(guard);
         unsafe {
             std::env::remove_var("CAD_TEST_CLAUDE");

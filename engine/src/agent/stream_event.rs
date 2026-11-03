@@ -10,8 +10,7 @@
 //! `Unknown(type)` rather than failing. [`parse_line`] returns `None` only
 //! for lines that are not a JSON object with a string `type` field — process
 //! noise like blank lines or stray diagnostics — which the caller logs and
-//! skips. [`parse_line_strict`] surfaces the underlying serde error instead
-//! of collapsing it to `None`.
+//! skips.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -60,8 +59,8 @@ pub enum InnerEvent {
         index: i64,
     },
     /// `message_delta` carries the message's final `stop_reason`
-    /// (`end_turn`, `tool_use`, ...); streamed assistant snapshots leave it
-    /// null, so this is where the turn outcome is learned.
+    /// (`end_turn`, `tool_use`, ...). Decoded for completeness: the turn
+    /// outcome comes from the `result` line, never from this.
     MessageDelta {
         stop_reason: Option<String>,
     },
@@ -198,7 +197,7 @@ pub fn parse_line(line: &str) -> Option<StreamEvent> {
 
 /// Like [`parse_line`], surfacing the serde error instead of collapsing it
 /// to `None`.
-pub fn parse_line_strict(line: &str) -> Result<StreamEvent, serde_json::Error> {
+fn parse_line_strict(line: &str) -> Result<StreamEvent, serde_json::Error> {
     serde_json::from_str::<StreamEventRaw>(line).map(StreamEventRaw::into_event)
 }
 

@@ -1,4 +1,4 @@
-//! The real-agent smoke (M2 task 9) — GATED, never run by the suite: it
+//! The real-agent smoke — GATED, never run by the suite: it
 //! spawns the REAL claude executable the locator discovers (no
 //! `CAD_TEST_CLAUDE` override), spending one real turn of Preston's
 //! authenticated account. Only Preston runs it, against a throwaway
@@ -12,12 +12,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use engine::agent::EngineCommand;
 use engine::agent::claude::TurnRequest;
 use engine::agent::session::{EngineEvent, Session, TurnOutcome};
 use engine::settings::Settings;
 
-/// One one-word turn ("pong") through the command surface against the
+/// One one-word turn ("pong") through `Session::send` against the
 /// real executable: every event prints for the eyeball verdict, and the
 /// only assertion is that the dance terminates within the bound without a
 /// `Failed` outcome.
@@ -28,17 +27,14 @@ async fn real_agent_pong() {
         std::env::var("CAD_SMOKE_ROOT").expect("CAD_SMOKE_ROOT must name the fresh smoke project"),
     );
     let mut session = Session::new(Settings::default());
-    let mut running = None;
-    EngineCommand::Send {
-        root,
-        request: TurnRequest {
+    let mut handle = session.send(
+        &root,
+        &TurnRequest {
             prompt: "pong".into(),
             references: Vec::new(),
             images: Vec::new(),
         },
-    }
-    .apply(&mut session, &mut running);
-    let handle = running.as_mut().expect("Send installs the running turn");
+    );
 
     let mut finished = None;
     let deadline = Duration::from_secs(120);

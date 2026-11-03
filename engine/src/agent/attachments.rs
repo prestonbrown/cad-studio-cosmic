@@ -4,7 +4,7 @@
 //! `copyReferences`). UTType conformance is a macOS registry lookup; the
 //! port rules it to an explicit extension allowlist — the formats the
 //! picker and the paste path produce — so the codex argv's `-i` filter and
-//! the app's thumbnail widget (M8) cite ONE predicate. The copy is
+//! the app's thumbnail widget cite ONE predicate. The copy is
 //! engine-owned but BRIDGE-CALLED: it runs at turn start, before the user
 //! row is appended (upstream `copyReferences` inside `send`,
 //! Project.swift:199-201), and the engine's session consumes the returned
@@ -39,7 +39,7 @@ pub fn copy_attachments(sources: &[PathBuf], root: &Path) -> Vec<String> {
     if sources.is_empty() {
         return Vec::new();
     }
-    let references = root.join("references");
+    let references = crate::project::folder::references_dir(root);
     // the directory is created only when there is something to copy
     let _ = std::fs::create_dir_all(&references);
     let stamp = SystemTime::now()
@@ -52,7 +52,7 @@ pub fn copy_attachments(sources: &[PathBuf], root: &Path) -> Vec<String> {
             let number = index + 1;
             let name = format!("{stamp}-{number}-{}", source.file_name()?.to_string_lossy());
             std::fs::copy(source, references.join(&name)).ok()?;
-            Some(format!("references/{name}"))
+            Some(format!("{}/{name}", crate::project::folder::REFERENCES_DIR))
         })
         .collect()
 }
