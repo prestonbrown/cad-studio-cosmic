@@ -257,6 +257,98 @@ async fn busy_retries_once_then_fresh() {
     );
 }
 
+/// The engine a turn runs is decided once, when the turn starts: flipping
+/// the picker on disk during the busy-retry wait leaves the retry on the
+/// turn's engine (it resumes that engine's session), and the handle names
+/// that engine from the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_flip_during_busy_retry_keeps_the_turns_engine() {
+    let root = mk_project();
+    let scenario = scenario_dir(
+        "busy-flip",
+        &["scenarios/busy-then-success.jsonl", "scenarios/pong.jsonl"],
+    );
+    let settings_file = root.join("settings.json");
+    Settings::default().save(&settings_file).unwrap();
+    let mut metadata = ProjectMetadata::new("test");
+    metadata.session_id = Some("seed-sid".into());
+    save_metadata(&root, &metadata).unwrap();
+    let dump = root.join("argv-dump.jsonl");
+
+    let guard = ENV_LOCK.lock().await;
+    // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
+    unsafe {
+        std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
+        std::env::set_var("CAD_FAKE_SCENARIO", &scenario);
+        std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
+        std::env::set_var("CAD_FAKE_ARGV_OUT", &dump);
+        std::env::set_var(
+            "CAD_FAKE_STDERR",
+            fixture_fake("scenarios/busy-then-success.stderr"),
+        );
+    }
+    let mut session = Session::new(Settings::default())
+        .with_system_template(system_template())
+        .with_retry_delay(Duration::from_millis(300))
+        .with_settings_file(settings_file.clone());
+    let mut handle = session.send(
+        &root,
+        &TurnRequest {
+            prompt: "please respond".into(),
+            references: Vec::new(),
+            images: Vec::new(),
+        },
+    );
+    assert_eq!(handle.engine(), engine::agent::locator::AgentKind::Claude);
+
+    // the first attempt is up: flip the picker before the retry wait ends
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, handle.events.recv()).await {
+            Ok(Some(event)) => {
+                let started = matches!(event, EngineEvent::Started { .. });
+                events.push(event);
+                if started {
+                    break;
+                }
+            }
+            other => panic!("no first Started: {other:?} after {events:?}"),
+        }
+    }
+    let mut codex = Settings::default();
+    codex.agent_engine = "codex".into();
+    codex.save(&settings_file).unwrap();
+    events.extend(collect_until_finished(&mut handle).await);
+    drop(guard);
+
+    assert_eq!(
+        finished(&events),
+        &TurnOutcome::Success {
+            session_id: Some(PONG_SID.into()),
+            text: "pong".into()
+        },
+        "{events:?}"
+    );
+    let argv = dump_argv(&dump);
+    assert_eq!(argv.len(), 2, "one busy attempt, one retry");
+    assert!(
+        has_pair(&argv[1], "--resume", BUSY_SID),
+        "the retry resumes the turn's claude session: {:?}",
+        argv[1]
+    );
+    assert!(
+        argv[1].iter().all(|arg| arg != "exec"),
+        "the retry is not a codex run: {:?}",
+        argv[1]
+    );
+    assert_eq!(
+        session.turn_settings().agent_kind(),
+        engine::agent::locator::AgentKind::Codex,
+        "the flip decides the NEXT turn"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn busy_retry_succeeds_second_time() {
     let root = mk_project();
