@@ -236,6 +236,7 @@ impl TurnHandle {
 /// One agent session: the settings and system-prompt template every turn of
 /// a project runs with. The turn itself is stateless across calls — resume
 /// state lives in the project's metadata, re-read per turn.
+#[derive(Clone)]
 pub struct Session {
     settings: Settings,
     /// The settings file each turn re-reads when attached (upstream reads

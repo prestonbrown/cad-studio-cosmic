@@ -587,14 +587,6 @@ impl ProjectWindow {
         }
     }
 
-    /// The engine display name the activity rows interpolate
-    /// (activity::engine_name), resolved fresh from the settings file so a
-    /// mid-conversation engine flip (Ruling 1: the setting is re-read per
-    /// turn) renames the next transition too.
-    fn engine_name(&self) -> &'static str {
-        activity::engine_name(&Settings::load(&self.settings_path).unwrap_or_default())
-    }
-
     /// Apply a structure change (preset switch, pane move): the grid
     /// rebuilds and both the project manifest and the global default
     /// layout persist eagerly (upstream `setLayout` → `persistLayout`).
@@ -639,7 +631,7 @@ impl ProjectWindow {
             // activity crosses to the window the moment it does
             Message::Viewer(crate::viewer_pane::Message::ParameterCommit(name, value)) => {
                 let _ = self.bridge.set_parameter(&name, value);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 Task::none()
             }
             // the ask-the-agent "Crea animazione" button
@@ -653,7 +645,7 @@ impl ProjectWindow {
                         fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
                         Vec::new(),
                     );
-                    self.set_activity(self.bridge.activity().into());
+                    self.set_activity(self.bridge.activity());
                 }
                 Task::none()
             }
@@ -856,7 +848,7 @@ impl ProjectWindow {
         }
         // "Versione N ripristinata" / "Impossibile ripristinare la versione
         // N" either way (Project.swift:319-321)
-        self.set_activity(self.bridge.activity().into());
+        self.set_activity(self.bridge.activity());
         if self.bridge.build_error().is_some() {
             return Task::none();
         }
@@ -900,12 +892,12 @@ impl ProjectWindow {
                     // the pipeline's activity crosses now — the working
                     // status of a send that started, or the refusal's
                     // reason for one that did not (the Build arm's fold)
-                    self.set_activity(self.bridge.activity().into());
+                    self.set_activity(self.bridge.activity());
                 }
             }
             chat_view::Message::SendSuggestion(suggestion) => {
                 let _ = self.bridge.enqueue(suggestion.clone(), Vec::new());
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
             }
             chat_view::Message::Stop => self.bridge.cancel(),
             // a marker row's "Ripristina" (VersionMarker.swift)
@@ -974,7 +966,7 @@ impl ProjectWindow {
                     .and_then(|row| row.detail.clone())
                     .unwrap_or_default();
                 let _ = self.bridge.ask_agent_to_fix(&traceback);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
             }
             // the "Configura l'agente…" row action presents the
             // AGENT-MISSING SHEET — upstream ChatView.swift:101-102 sets
@@ -1012,8 +1004,8 @@ impl ProjectWindow {
                 attachments,
                 engine,
             } => {
-                // the turn's engine names its rows from here on (the
-                // per-turn re-read's answer, resolved at turn start)
+                // the turn's engine (the engine's own pick) names its rows
+                // from here on
                 self.chat.engine = engine;
                 // the user row joins the visible transcript when the send
                 // actually starts (upstream appends it in `send`, before
@@ -1028,38 +1020,19 @@ impl ProjectWindow {
                     action: None,
                     attachments,
                 });
-                self.set_activity(activity::next(
-                    activity::Signal::TurnStarted,
-                    false,
-                    // msg.engine — NOT a fresh file read: the turn's engine
-                    // is in hand beside us, and re-reading here could label
-                    // this turn's status line with the NEXT turn's engine
-                    // after a picker flip (capstone minor)
-                    engine.display_name(),
-                ));
+                // the bridge classifies every turn transition (it holds the
+                // turn's engine); the window mirrors it
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Event(event) => {
-                // the chat reducer owns the rows; the activity folds after
+                // the chat reducer owns the rows; the activity mirrors after
                 self.chat.apply(&event);
                 match &event {
-                    EngineEvent::ToolStarted { title, .. } => {
-                        self.set_activity(activity::next(
-                            activity::Signal::ToolOpened(&crate::engine_text::tool_title(title)),
-                            false,
-                            self.engine_name(),
-                        ));
-                    }
-                    EngineEvent::TurnFinished(outcome) => {
-                        // upstream agentDidFinish: outputs reload before the
-                        // classification reads them (Project.swift:262-276)
+                    EngineEvent::ToolStarted { .. } => self.set_activity(self.bridge.activity()),
+                    EngineEvent::TurnFinished(_) => {
                         self.refresh_missing_outputs();
-                        let empty = self.missing_outputs.is_empty();
-                        self.set_activity(activity::next(
-                            activity::Signal::TurnFinished(outcome),
-                            empty,
-                            self.engine_name(),
-                        ));
+                        self.set_activity(self.bridge.activity());
                         // a turn end is an established layout save point
                         self.save_metadata();
                     }
@@ -1068,11 +1041,7 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::Closed => {
-                self.set_activity(activity::next(
-                    activity::Signal::Closed,
-                    false,
-                    self.engine_name(),
-                ));
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {
@@ -1118,7 +1087,7 @@ impl ProjectWindow {
                 self.sync_version_markers();
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
@@ -1130,7 +1099,7 @@ impl ProjectWindow {
                 // now, not at the next Compila
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
@@ -1214,7 +1183,7 @@ impl ProjectWindow {
                 // failed) activity crosses to the window immediately — the
                 // stop button and the elapsed timer ride it.
                 let _ = self.bridge.start_build(None);
-                self.set_activity(self.bridge.activity().into());
+                self.set_activity(self.bridge.activity());
                 Task::none()
             }
             Command::Export => {
