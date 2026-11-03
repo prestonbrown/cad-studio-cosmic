@@ -10,11 +10,10 @@
 //! Shared/PaneStatusBar.swift). The bar's toggle state and the overlay
 //! family that floats over the canvas (parts panel top-leading, measure
 //! badge top-center, section controls bottom-center — [`crate::parts_overlay`])
-//! read from [`tools`](ViewerTools), the T8 state hub. MSAA is an OPT-IN
-//! pane option (default 1×): the spec §5 decision renders the mesh pass
-//! through `MeshPipeline::with_msaa`'s 4× pipeline set, reached by flipping
-//! `Options::msaa` (the in-place rebuild — iced's Storage owns one
-//! pipeline per type).
+//! read from [`tools`](ViewerTools), the T8 state hub. The mesh pass
+//! renders at 4× MSAA (`MeshPipeline::with_msaa`, the spec §5 decision),
+//! as SceneKit's macOS SCNView multisamples 4× by default; upstream has no
+//! control for it, so neither does the bar.
 //!
 //! Output reload: `engine::watch::watch_directory(output, 300 ms)` (upstream
 //! 0.3 s), forwarded through the same relay pattern the schematic pane
@@ -186,7 +185,6 @@ pub enum Message {
     ModifiersChanged(Modifiers),
     Preset(Preset),
     Fit,
-    ToggleMsaa,
     /// A watched output file settled (engine watcher → relay).
     Reload(ReloadKind),
     /// The canvas area's size, reported from layout — iced has no resize
@@ -321,13 +319,9 @@ pub struct ViewerPane {
     pub input: CameraInput,
     /// The preset picker's selection (upstream keeps the last picked).
     pub preset: Preset,
-    /// MSAA opt-in (scope binding): false renders 1× (the default), true
-    /// flips `Options::msaa` to 4 — `MeshPipeline::with_msaa`'s pipeline
-    /// set, rebuilt in place.
-    pub msaa: bool,
-    /// Display unit for the status-bar size label and the measure badge
-    /// (upstream reads `@AppStorage` live; [`ViewerPane::set_unit`] is the
-    /// settings window's path in).
+    /// Display unit for the status-bar size label and the measure badge,
+    /// read at view time (upstream reads `@AppStorage` live): the settings
+    /// window's change reaches an open pane by assigning this field.
     pub unit: MeasurementUnit,
     /// The last model parse failure's text (upstream `meshError`,
     /// ProjectOutput.swift:150-160): set by a failed parse, cleared by a
@@ -502,7 +496,6 @@ impl ViewerPane {
             scene: ModelScene::new(empty.clone()),
             input: CameraInput::new([0.0; 3], [0.0; 3]),
             preset: Preset::Iso,
-            msaa: false,
             unit,
             mesh_error: None,
             warnings: 0,
@@ -549,6 +542,7 @@ impl ViewerPane {
         // everything already on disk loads at open, as upstream's first
         // `reload()` sees every output as changed (ProjectOutput.swift:
         // 38-64): the model, then the plate and the motion study over it
+        pane.scene.msaa = MSAA_SAMPLES;
         pane.reload_outputs();
         pane.reload_plate();
         pane.reload_motion();
@@ -630,10 +624,6 @@ impl ViewerPane {
                 self.input.set_framing_reference(self.frame_aabb);
                 self.input.fit();
                 self.sync_pose();
-            }
-            Message::ToggleMsaa => {
-                self.msaa = !self.msaa;
-                self.scene.msaa = if self.msaa { 4 } else { 1 };
             }
             Message::Reload(kind) => match kind {
                 // model-shaped outputs rebuild the scene; the manifest
@@ -1740,7 +1730,6 @@ impl ViewerPane {
         let info = self.status_text();
         bar = bar
             .push(view_legend(&arrangement::legend_colors(&self.model_parts)))
-            .push(self.msaa_toggle(parts_empty))
             .push(Space::new().width(Length::Fill))
             .push(
                 text(info)
@@ -1777,30 +1766,9 @@ impl ViewerPane {
     fn preset_picker(&self, parts_empty: bool) -> Element<'_, Message> {
         let labels = PRESETS.iter().map(|preset| preset_label(*preset)).collect();
         let selected = PRESETS.iter().position(|preset| *preset == self.preset);
-        segmented(labels, selected, !parts_empty, |index| {
+        segmented(labels, selected, !parts_empty, BAR_SEGMENTS, |index| {
             bar_on_press(parts_empty, Some(Message::Preset(PRESETS[index])))
         })
-    }
-
-    /// The MSAA opt-in: shows the active sample count, clicks flip 1× ↔ 4×
-    /// (the `with_msaa` pipeline set, rebuilt in place). Port-specific —
-    /// upstream has no counterpart — so it takes the bar's quietest form,
-    /// the size label's secondary monospaced text, and rides the row's
-    /// no-model disable (:151).
-    fn msaa_toggle(&self, parts_empty: bool) -> Element<'_, Message> {
-        let label = text(format!("{}×", self.scene.msaa))
-            .size(BAR_FONT_SIZE)
-            .font(cosmic::font::mono())
-            .class(cosmic::theme::Text::Custom(if parts_empty {
-                tertiary_label_style
-            } else {
-                secondary_label_style
-            }));
-        button::custom(label)
-            .padding(0)
-            .class(borderless_button())
-            .on_press_maybe(bar_on_press(parts_empty, Some(Message::ToggleMsaa)))
-            .into()
     }
 }
 
@@ -2103,20 +2071,23 @@ fn view_legend(colors: &[[u8; 3]]) -> Element<'static, Message> {
 
 /// SF Symbols stand-ins drawn to the symbols' shapes (the Cosmic theme has
 /// no grid, cube, ruler, split-square or play-circle glyph).
-const ICON_GRID: &[u8] = include_bytes!("../resources/icons/viewer-grid.svg");
-const ICON_CUBE: &[u8] = include_bytes!("../resources/icons/viewer-cube-transparent.svg");
-const ICON_RULER: &[u8] = include_bytes!("../resources/icons/viewer-ruler.svg");
-const ICON_SECTION: &[u8] = include_bytes!("../resources/icons/viewer-section.svg");
-const ICON_PLAY_CIRCLE: &[u8] = include_bytes!("../resources/icons/viewer-play-circle.svg");
-const ICON_WARNING: &[u8] =
-    include_bytes!("../resources/icons/viewer-exclamationmark-triangle.svg");
+const ICON_GRID: &[u8] = include_bytes!("../resources/icons/grid.svg");
+const ICON_CUBE: &[u8] = include_bytes!("../resources/icons/cube.transparent.svg");
+const ICON_RULER: &[u8] = include_bytes!("../resources/icons/ruler.svg");
+const ICON_SECTION: &[u8] = include_bytes!("../resources/icons/square.split.diagonal.svg");
+const ICON_PLAY_CIRCLE: &[u8] = include_bytes!("../resources/icons/play.circle.svg");
+const ICON_WARNING: &[u8] = include_bytes!("../resources/icons/exclamationmark.triangle.svg");
+
+/// The mesh pass's sample count (docs/research/msaa-decision.md).
+const MSAA_SAMPLES: u32 = 4;
 
 const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::Right];
 
 const BAR_HEIGHT: f32 = 28.0;
 const BAR_PADDING: f32 = 8.0;
 const BAR_SPACING: f32 = 8.0;
-const BAR_FONT_SIZE: u16 = 11;
+/// PaneStatusBar's `.system(size: 11)` and the small control size's font.
+const BAR_FONT_SIZE: f32 = crate::typography::scaled(11.0);
 const SEGMENT_HEIGHT: f32 = 18.0;
 const SEGMENT_WIDTH: f32 = 37.5;
 /// The track's inset around the segments (the selected face sits 1 pt
@@ -2131,7 +2102,7 @@ const SECONDARY_ALPHA: f32 = 0.5;
 const TERTIARY_ALPHA: f32 = 0.25;
 const SEPARATOR_ALPHA: f32 = 0.1;
 
-fn ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
+pub(crate) fn ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
     let base = if theme.cosmic().is_dark {
         cosmic::iced::Color::WHITE
     } else {
@@ -2155,14 +2126,12 @@ fn solid_ink(theme: &cosmic::Theme, alpha: f32) -> cosmic::iced::Color {
 }
 
 /// The pane's text background (upstream `textBackgroundColor`): white in
-/// a light theme; in a dark one the window background pushed a third of
-/// the way to black, as macOS's text background sits below its window.
+/// a light theme; in a dark one the theme's window background, which sits
+/// just below the viewport's dark gray as macOS's #1E1E1E sits below it.
 fn text_background(theme: &cosmic::Theme) -> cosmic::iced::Color {
     let cosmic = theme.cosmic();
     if cosmic.is_dark {
-        let base = cosmic::iced::Color::from(cosmic.background(false).base);
-        let keep = 0.65;
-        cosmic::iced::Color::from_rgb(base.r * keep, base.g * keep, base.b * keep)
+        cosmic.background(false).base.into()
     } else {
         cosmic::iced::Color::WHITE
     }
@@ -2185,6 +2154,14 @@ fn label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
 fn secondary_label_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
     cosmic::iced::widget::text::Style {
         color: Some(ink(theme, SECONDARY_ALPHA)),
+        ..Default::default()
+    }
+}
+
+/// A filled selected segment's label (white in both appearances).
+fn white_label_style(_theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(cosmic::iced::Color::WHITE),
         ..Default::default()
     }
 }
@@ -2272,13 +2249,36 @@ fn tool_toggle(
     .into()
 }
 
-/// A segment's width: the measured 37.5 pt, widened for a label that
+/// How a [`segmented`] control draws: its narrowest segment, and how the
+/// selected segment shows. AppKit raises the selected segment as a face
+/// on the text background in a plain bar, and fills it with a dark tint
+/// under white text when the control sits on a material (the section
+/// capsule, section.png).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SegmentLook {
+    pub min_width: f32,
+    pub on_material: bool,
+}
+
+/// The bar's preset picker: four 37.5 pt segments, raised selection.
+const BAR_SEGMENTS: SegmentLook = SegmentLook {
+    min_width: SEGMENT_WIDTH,
+    on_material: false,
+};
+
+/// The section capsule's axis picker: 18 pt segments, filled selection.
+pub(crate) const MATERIAL_SEGMENTS: SegmentLook = SegmentLook {
+    min_width: 18.0,
+    on_material: true,
+};
+
+/// A segment's width: the look's minimum, widened for a label that
 /// would not fit (11 pt text averages ~5 pt a glyph; 6 pt of padding a
 /// side). Every segment takes the widest label's width, as AppKit's
 /// segmented control does.
-fn segment_width(labels: &[String]) -> f32 {
+fn segment_width(labels: &[String], min_width: f32) -> f32 {
     let widest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    SEGMENT_WIDTH.max(widest as f32 * 5.0 + 12.0)
+    min_width.max(widest as f32 * 5.0 + 12.0)
 }
 
 /// A macOS segmented control at the small control size, drawn from
@@ -2291,9 +2291,10 @@ pub(crate) fn segmented<'a>(
     labels: Vec<String>,
     selected: Option<usize>,
     enabled: bool,
+    look: SegmentLook,
     on_select: impl Fn(usize) -> Option<Message>,
 ) -> Element<'a, Message> {
-    let width = segment_width(&labels);
+    let width = segment_width(&labels, look.min_width);
     let face_height = SEGMENT_HEIGHT - 2.0 * SEGMENT_INSET;
     let mut row = Row::new()
         .height(Length::Fixed(face_height))
@@ -2316,14 +2317,17 @@ pub(crate) fn segmented<'a>(
             );
         }
         let is_selected = selected == Some(index);
+        let label_class = if !enabled {
+            tertiary_label_style
+        } else if is_selected && look.on_material {
+            white_label_style
+        } else {
+            label_style
+        };
         let face = container(
             text(label)
                 .size(BAR_FONT_SIZE)
-                .class(cosmic::theme::Text::Custom(if enabled {
-                    label_style
-                } else {
-                    tertiary_label_style
-                })),
+                .class(cosmic::theme::Text::Custom(label_class)),
         )
         .width(Length::Fixed(width))
         .height(Length::Fill)
@@ -2332,6 +2336,16 @@ pub(crate) fn segmented<'a>(
         .class(cosmic::theme::Container::custom(move |theme| {
             if !is_selected {
                 return cosmic::iced::widget::container::Style::default();
+            }
+            if look.on_material {
+                return cosmic::iced::widget::container::Style {
+                    background: Some(ink(theme, 0.3).into()),
+                    border: cosmic::iced::Border {
+                        radius: theme.cosmic().corner_radii.radius_xs.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
             }
             let face = if theme.cosmic().is_dark {
                 ink(theme, 0.28)
@@ -2343,7 +2357,7 @@ pub(crate) fn segmented<'a>(
                 border: cosmic::iced::Border {
                     color: ink(theme, 0.12),
                     width: 0.5,
-                    radius: 4.5.into(),
+                    radius: theme.cosmic().corner_radii.radius_xs.into(),
                 },
                 shadow: cosmic::iced::Shadow {
                     color: ink(theme, 0.15),
@@ -2363,11 +2377,17 @@ pub(crate) fn segmented<'a>(
     }
     container(row)
         .padding(SEGMENT_INSET)
-        .class(cosmic::theme::Container::custom(|theme| {
+        .class(cosmic::theme::Container::custom(move |theme| {
             cosmic::iced::widget::container::Style {
-                background: Some(ink(theme, 0.05).into()),
+                background: Some(ink(theme, if look.on_material { 0.06 } else { 0.05 }).into()),
+                // the small-control radius, one inset wider than the face
                 border: cosmic::iced::Border {
-                    radius: 5.5.into(),
+                    radius: theme
+                        .cosmic()
+                        .corner_radii
+                        .radius_xs
+                        .map(|r| r + SEGMENT_INSET)
+                        .into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2398,14 +2418,14 @@ fn content_unavailable<'a>(
             .push(Space::new().height(Length::Fixed(14.0)))
             .push(
                 text(title)
-                    .size(22)
+                    .size(crate::typography::TITLE)
                     .font(cosmic::font::bold())
                     .class(cosmic::theme::Text::Custom(secondary_label_style)),
             )
             .push(Space::new().height(Length::Fixed(6.0)))
             .push(
                 text(description)
-                    .size(13)
+                    .size(crate::typography::BODY)
                     .align_x(cosmic::iced::alignment::Horizontal::Center)
                     .class(cosmic::theme::Text::Custom(secondary_label_style)),
             )
@@ -2660,10 +2680,10 @@ mod tests {
     #[test]
     fn segments_share_the_widest_label_width() {
         let short = ["Iso", "Front", "Top", "Right"].map(String::from);
-        assert_eq!(segment_width(&short), SEGMENT_WIDTH, "the measured width");
+        assert_eq!(segment_width(&short, SEGMENT_WIDTH), SEGMENT_WIDTH);
         let long = ["Iso", "Vorderseite"].map(String::from);
         assert!(
-            segment_width(&long) > SEGMENT_WIDTH,
+            segment_width(&long, SEGMENT_WIDTH) > SEGMENT_WIDTH,
             "a long label widens every segment"
         );
     }
@@ -2773,18 +2793,9 @@ mod tests {
     }
 
     #[test]
-    fn msaa_defaults_off_and_toggles_pipeline_count() {
-        let (_, mut pane) = pane("msaa", &[], &[]);
-        assert!(!pane.msaa, "opt-in: default off");
-        assert_eq!(pane.scene.msaa, 1, "1x by default");
-
-        let _ = pane.update(Message::ToggleMsaa);
-        assert!(pane.msaa);
-        assert_eq!(pane.scene.msaa, 4, "with_msaa's pipeline set");
-
-        let _ = pane.update(Message::ToggleMsaa);
-        assert!(!pane.msaa);
-        assert_eq!(pane.scene.msaa, 1);
+    fn the_mesh_pass_renders_at_4x_msaa() {
+        let (_, pane) = pane("msaa", &[], &[]);
+        assert_eq!(pane.scene.msaa, 4, "with_msaa's pipeline set by default");
     }
 
     #[test]
@@ -3959,7 +3970,6 @@ mod tests {
             Message::ToggleSection,
             Message::ToggleAnimation,
             Message::RequestMotionStudy,
-            Message::ToggleMsaa,
         ];
         for message in pressables {
             assert!(

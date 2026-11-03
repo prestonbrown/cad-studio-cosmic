@@ -65,13 +65,13 @@ type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::theme::Theme, cosmic::Ren
 /// MotionControls.swift:63) — freedesktop stand-in.
 /// SF Symbols stand-ins (play.fill, pause.fill,
 /// exclamationmark.triangle.fill), tinted at draw time.
-const PLAY_FILL: &[u8] = include_bytes!("../resources/icons/viewer-play-fill.svg");
-const PAUSE_FILL: &[u8] = include_bytes!("../resources/icons/viewer-pause-fill.svg");
+const PLAY_FILL: &[u8] = include_bytes!("../resources/icons/play.fill.svg");
+const PAUSE_FILL: &[u8] = include_bytes!("../resources/icons/pause.fill.svg");
 const WARNING_FILL: &[u8] =
-    include_bytes!("../resources/icons/viewer-exclamationmark-triangle-fill.svg");
+    include_bytes!("../resources/icons/exclamationmark.triangle.fill.svg");
 
-/// SwiftUI's `.caption` at the capsule's small control size: 10 pt.
-const CAPTION: u16 = 10;
+/// SwiftUI's `.caption`, the capsule's text style.
+const CAPTION: f32 = crate::typography::CAPTION;
 
 /// Upstream `.foregroundStyle(.red)` (:63) — systemRed, sRGB
 /// (255, 59, 48)/255.
