@@ -192,6 +192,38 @@ fn render_frame_with_poses_format(
         ghost,
         options: *options,
     };
+    render_frame_struct(device, queue, pipeline, &frame, w, h, format)
+}
+
+/// One `Frame` at `w` x `h` in `format`: `prepare_parts`, then
+/// [`draw_and_read`] with the pipeline's own render pass.
+fn render_frame_struct(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    frame: &Frame<'_>,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+) -> Vec<u8> {
+    pipeline.prepare_parts(device, queue, (w, h), frame);
+    draw_and_read(device, queue, w, h, format, |encoder, view| {
+        pipeline.render(encoder, view, [0.0, 0.0, w as f32, h as f32]);
+    })
+}
+
+/// A `w` x `h` target in `format`, cleared to the app background, `draw`
+/// recorded on top, read back tightly packed (`w * h * 4` bytes in the
+/// format's channel order). `queue.write_buffer` calls made before this
+/// are ordered ahead of the submitted encoder's commands.
+fn draw_and_read(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+    draw: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
+) -> Vec<u8> {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless target"),
         size: wgpu::Extent3d {
@@ -207,7 +239,6 @@ fn render_frame_with_poses_format(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare_parts(device, queue, (w, h), &frame);
     let mut encoder = device.create_command_encoder(&Default::default());
     // clear to the app background first, then viewer pass loads on top
     // (mirrors iced underlay)
@@ -232,7 +263,7 @@ fn render_frame_with_poses_format(
         });
         drop(pass);
     }
-    pipeline.render(&mut encoder, &view, [0.0, 0.0, w as f32, h as f32]);
+    draw(&mut encoder, &view);
     // buffer copies require bytes_per_row 256-aligned; 800 * 4 = 3200 is not,
     // so pad the rows and strip the padding on readback
     let stride = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
@@ -908,6 +939,133 @@ fn cap_color_matches_blended_system_red() {
             "channel {i}: {lin:?}"
         );
     }
+}
+
+/// Renders `model` the way iced does: `Program::draw` builds the frame's
+/// primitive, `Primitive::prepare` stages it, `Primitive::render` records
+/// the viewer pass over the cleared target.
+fn render_adapter(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    model: &viewer::render::ModelScene,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    use iced::widget::shader::{Primitive, Program, Viewport};
+    let bounds = iced::Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: w as f32,
+        height: h as f32,
+    };
+    let primitive = Program::<()>::draw(model, &(), iced::mouse::Cursor::Unavailable, bounds);
+    let viewport = Viewport::with_physical_size(iced::Size::new(w, h), 1.0);
+    primitive.prepare(pipeline, device, queue, &bounds, &viewport);
+    let clip = iced::Rectangle {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    draw_and_read(
+        device,
+        queue,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        |encoder, view| primitive.render(pipeline, encoder, view, &clip),
+    )
+}
+
+/// Exploded + section through the iced adapter: the cap must fill the cut
+/// of every exploded part. The golden lid explodes up along MODEL z (scene
+/// y), past the assembled box, and an X cut's cap quad spans scene y and z,
+/// so a cap sized from the assembled box stops short of the pushed lid.
+/// The oracle is the same frame drawn with a cap quad far larger than any
+/// part: the stencil clips a cap to the solid, so that frame's red count
+/// is the full cut area.
+#[test]
+fn exploded_section_cap_covers_every_pushed_part() {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use viewer::tools::arrangement;
+    use viewer::tools::section::{self, SectionAxis};
+
+    let (device, queue) = gpu::device_queue();
+    let parts = golden_parts();
+    let scene = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
+    let none = BTreeSet::new();
+    let arranged = arrangement::arrange(
+        &parts,
+        &[],
+        engine::settings::PartsLayout::Exploded,
+        1.0,
+        &none,
+        &none,
+    );
+    let lid_push = arranged.offsets.iter().map(|o| o[2]).fold(0.0f32, f32::max);
+    assert!(lid_push > 2.0, "the lid explodes up: offsets {:?}", arranged.offsets);
+    let eff = arrangement::effective_model_aabb(&parts, &arranged);
+
+    let mut model = viewer::render::ModelScene::new(scene.clone());
+    model.poses = arranged
+        .offsets
+        .iter()
+        .map(|o| {
+            Some(glam::Mat4::from_translation(glam::vec3(o[0], o[2], -o[1])).to_cols_array_2d())
+        })
+        .collect::<Vec<_>>()
+        .into();
+    // the pane's plane: the raw X plane over the effective MODEL box, plus
+    // the scene pin along scene x
+    let (axis, raw) = section::scene_plane(SectionAxis::X, 0.5, eff);
+    let pinned = scene.to_scene([raw, 0.0, 0.0])[axis as usize];
+    model.set_section(Some((axis, pinned)));
+    // look down -x at the cap, framed on the exploded scene box
+    let scene_eff = (
+        scene.to_scene([eff.0[0], eff.1[1], eff.0[2]]),
+        scene.to_scene([eff.1[0], eff.0[1], eff.1[2]]),
+    );
+    let (target, distance) = camera::frame(scene_eff.0, scene_eff.1);
+    let (yaw, pitch) = camera::Preset::Right.yaw_pitch();
+    model.set_pose(yaw, pitch, distance, target);
+
+    let (w, h) = (800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let drawn = cap_red_pixels(&render_adapter(device, queue, &mut pipeline, &model, w, h));
+
+    let mut cam = Camera::orbiting(distance, yaw, pitch, target, w as f32 / h as f32);
+    cam.section_enable = 1.0;
+    cam.section_axis = axis;
+    cam.section_pos = pinned;
+    let appearances = default_appearances(&scene);
+    let oracle = Frame {
+        camera: &cam,
+        scene: &scene,
+        poses: &model.poses,
+        appearances: &appearances,
+        effective_aabb: ([-1e4; 3], [1e4; 3]),
+        grid: None,
+        markers: None,
+        ghost: None,
+        options: Options::default(),
+    };
+    let full = cap_red_pixels(&render_frame_struct(
+        device,
+        queue,
+        &mut pipeline,
+        &oracle,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ));
+    eprintln!("exploded X cut: lid push {lid_push}, adapter cap {drawn} px, full cut {full} px");
+    assert!(full > 2_000, "both parts' cuts are in view: {full} px");
+    assert!(
+        drawn * 100 >= full * 99,
+        "the cap must cover the whole cut: {drawn} of {full} red px"
+    );
 }
 
 #[test]
