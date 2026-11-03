@@ -297,9 +297,11 @@ impl Welcome {
                     .height(Length::Fill)
                     .class(cosmic::theme::Container::WindowBackground),
             )
-            .push(container(
-                cosmic::widget::divider::vertical::default().height(Length::Fill),
-            ))
+            // `Divider()`: the separator hairline between the panes
+            .push(
+                container(Space::new().width(1).height(Length::Fill))
+                    .class(ui::surface::fill(Tone::Separator, 1.0, Corner::None, false)),
+            )
             .push(recents_list)
             .height(Length::Fill)
             .into()
@@ -321,8 +323,8 @@ impl Welcome {
             .into()
         } else {
             // the sidebar list's insets: rows start 16 px in, the first
-            // 17 px down
-            let mut rows = Column::new().spacing(6).padding([14, 10]);
+            // 17 px down, 46 px apart
+            let mut rows = Column::new().spacing(2).padding([12, 10]);
             for (index, path) in recents.iter().enumerate() {
                 rows = rows.push(self.recent_row(index, path));
             }
