@@ -1413,7 +1413,7 @@ fn turn_failure_activity(outcome: &TurnOutcome, engine: AgentKind) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use cosmic::iced::futures::StreamExt;
     use engine::agent::tool_summary::live_title;
@@ -1424,7 +1424,7 @@ mod tests {
     /// process: every setter/clearer of a CAD_FAKE_*/CAD_TEST_CLAUDE var
     /// holds this lock for the whole test (house pattern — app/tests/
     /// build_pipeline.rs, engine/tests/session_lifecycle.rs).
-    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    pub(crate) static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     fn fake_agent() -> PathBuf {
