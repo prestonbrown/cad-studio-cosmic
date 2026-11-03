@@ -68,9 +68,9 @@
 
 **Root cause on record (2026-10-28):** NOT persisted busy state — a cold start is idle by construction (pinned by `cold_start_over_crashed_store_starts_turns`); the observed swallow was `Bridge::enqueue`'s python-readiness refusal arriving with zero chat-surface feedback (EnvState::Unknown until the one-shot venv check lands; a send during that window vanished). Surfacing is landed with the refusal fix; two follow-ups recorded in carry-forwards: the status-line naming is an upstream ADDITION (upstream refuses sheet-only — Project.swift:192-196), and a FAILED venv check has no retry (the Python tab or a wave-2 item owns that).
 
-- [ ] **Step 1:** The rise MECHANISM is already in-tree (the refusal diff landed both halves: `enqueue` calls `begin_turn()` synchronously — bridge.rs — and the Send arm folds `bridge.activity()` after the Ok/refused match). This task adds the missing PIN: a failing-first test that a successful send flips `is_busy()` true in the SAME update (upstream Project.swift:192-208 parity) — written RED-against-the-mechanism (delete the fold, watch it fail), then GREEN.
-- [ ] **Step 2:** Implement ONLY if the pin fails (nothing to write otherwise — review MINOR 10: an implementer following the old text would re-implement an existing fold).
-- [ ] **Step 3:** thelio gate via controller.
+- [x] **Step 1:** The rise MECHANISM is already in-tree (the refusal diff landed both halves: `enqueue` calls `begin_turn()` synchronously — bridge.rs — and the Send arm folds `bridge.activity()` after the Ok/refused match). This task adds the missing PIN: a failing-first test that a successful send flips `is_busy()` true in the SAME update (upstream Project.swift:192-208 parity) — written RED-against-the-mechanism (delete the fold, watch it fail), then GREEN.
+- [x] **Step 2:** Implement ONLY if the pin fails (nothing to write otherwise — review MINOR 10: an implementer following the old text would re-implement an existing fold).
+- [x] **Step 3:** thelio gate via controller.
 
 ### Task 1: i18n corpus regeneration + fl! sweep
 
@@ -81,11 +81,11 @@
 **Interfaces:**
 - Produces: `fl!("key", args…)` with named args; engine `SystemRowId` (or equivalent) enum; `substitute_placeholders` DELETED (three call sites migrate: activity.rs:101, viewer_pane.rs:1148, viewer_pane.rs:1950); `language` field in `engine/src/settings.rs` read in `main.rs` before `localize()`.
 
-- [ ] **Step 1:** Upgrade the extractor: `%@`/`%lld`/`%d`/`%.Nf` → `{$name}` with positional arg names (`{$arg}`, `{$arg-2}`, … or semantic names where the sweep knows them); name the five format-only keys (`motion-value-row`, `version-timestamps`, `activity-accessibility-label`, `speed-option`, `settings-none`); fix the `\"` branch (fluent has no backslash escape); preserve literal `\n`.
-- [ ] **Step 2:** Regenerate all four catalogs; diff-audit: no message lost, arg counts match — the parity test iterates the UNION of keys across all four files and FAILS on any file missing a key (per-file iteration would pass silently on missing it/de/fr keys — review MINOR 7). Port-added strings with no upstream key (PYTHON_SETUP_REQUIRED at minimum, plus whatever the new surfaces coin) land in ALL FOUR files in the same change: real translations where confident, English carry-over flagged for review where not.
-- [ ] **Step 3:** Sweep the literals → `fl!` (the inventory §6 lists every module with counts; engine system rows become ids localized at the bridge).
-- [ ] **Step 4:** Language setting: `language: Option<String>` in engine settings, `select()` at startup, next-launch semantics; the Settings task's language picker writes it.
-- [ ] **Step 5:** Tests: placeholder-set parity across catalogs; every swept module's string tests updated; RED→GREEN evidence per the house pattern.
+- [x] **Step 1:** Upgrade the extractor: `%@`/`%lld`/`%d`/`%.Nf` → `{$name}` with positional arg names (`{$arg}`, `{$arg-2}`, … or semantic names where the sweep knows them); name the five format-only keys (`motion-value-row`, `version-timestamps`, `activity-accessibility-label`, `speed-option`, `settings-none`); fix the `\"` branch (fluent has no backslash escape); preserve literal `\n`.
+- [x] **Step 2:** Regenerate all four catalogs; diff-audit: no message lost, arg counts match — the parity test iterates the UNION of keys across all four files and FAILS on any file missing a key (per-file iteration would pass silently on missing it/de/fr keys — review MINOR 7). Port-added strings with no upstream key (PYTHON_SETUP_REQUIRED at minimum, plus whatever the new surfaces coin) land in ALL FOUR files in the same change: real translations where confident, English carry-over flagged for review where not.
+- [x] **Step 3:** Sweep the literals → `fl!` (the inventory §6 lists every module with counts; engine system rows become ids localized at the bridge).
+- [x] **Step 4:** Language setting: `language: Option<String>` in engine settings, `select()` at startup, next-launch semantics; the Settings task's language picker writes it.
+- [x] **Step 5:** Tests: placeholder-set parity across catalogs; every swept module's string tests updated; RED→GREEN evidence per the house pattern.
 
 ### Task 2: REMOVED at plan review — menu-shape probes ruled unnecessary
 
@@ -101,11 +101,11 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 - Consumes: the existing `StreamEvent` pipeline (session.rs process()); `AgentKind` grows `Codex`.
 - Produces: `TurnRequest.images` (new field; unit tests construct it; the bridge fills it in Task 4) and the shared `is_image` predicate (engine-side, extension allowlist porting Attachments.swift:4-7's UTType conformance — png/jpg/jpeg/tiff/webp/gif/bmp); `codex::build_args(&Settings, &TurnRequest, …)` (argv per CodexRunner.swift:19-40 incl. `tomlString` escaping and `-i` per image attachment); `CodexTranslator::events(line) -> Vec<StreamEvent>` mapping per CodexRunner.swift:63-171 — thread.started/item.started/item.completed/file_change/agent_message/**turn.completed AND turn.failed** (error.message → finished) **plus top-level `error`** (stashed as the fallback text for a later turn.failed, :84-91), `/bin/zsh -lc` unwrapping — the failure events are covered in the recorded-lines tests (Review Focus 2's paths).
 
-- [ ] **Step 1:** Unit tests for `tomlString` (backslash, quote, \n, \r, \t, C0 as \uXXXX) and the translator's event mapping from recorded fake lines — RED.
-- [ ] **Step 2:** Implement codex.rs (argv + translator) — GREEN.
-- [ ] **Step 3:** Locator + settings readers + session dispatch (re-read per turn, engine-blind resume sid — Ruling 1; engine display name).
-- [ ] **Step 4:** Fake-agent e2e on thelio: a scripted codex-JSON emitter drives a full turn through the existing harness (thread started → tool rows → file_change pairs → completed).
-- [ ] **Step 5:** Sheets' install commands (LINUX ruling: `npm install -g @openai/codex` only — upstream's `brew install --cask codex` line is macOS-only and does not port) + auth naming ("codex login" already needled).
+- [x] **Step 1:** Unit tests for `tomlString` (backslash, quote, \n, \r, \t, C0 as \uXXXX) and the translator's event mapping from recorded fake lines — RED.
+- [x] **Step 2:** Implement codex.rs (argv + translator) — GREEN.
+- [x] **Step 3:** Locator + settings readers + session dispatch (re-read per turn, engine-blind resume sid — Ruling 1; engine display name).
+- [x] **Step 4:** Fake-agent e2e on thelio: a scripted codex-JSON emitter drives a full turn through the existing harness (thread started → tool rows → file_change pairs → completed).
+- [x] **Step 5:** Sheets' install commands (LINUX ruling: `npm install -g @openai/codex` only — upstream's `brew install --cask codex` line is macOS-only and does not port) + auth naming ("codex login" already needled).
 
 ### Task 4: Attachments completion (paste, drag-drop, thumbnails, reference-copy move)
 
@@ -117,12 +117,12 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 - Consumes: `engine::agent::claude::copy_attachments` (moves to a path-neutral home if ruled by the implementer — keep it engine-owned, bridge-called).
 - Produces: persisted rows carrying `references/<stamp>-<n>-<name>`; a `references_from` surface the prompt reuses; image-type attachments split for codex `-i` (Task 3 consumes).
 
-- [ ] **Step 1:** Bridge copy-at-turn-start tests (row carries copy names; a QUEUED send copies when it starts, not when queued — Ruling 4; inv §3) — RED.
-- [ ] **Step 2:** Move the copy call; rows + prompt consistent; engine run_attempt single-writer cleanup — GREEN.
-- [ ] **Step 3:** Thumbnail widget + strip/rows wiring (draft strip roots at original paths; sent rows root at projectRoot — one widget, root parameter).
-- [ ] **Step 4:** Paste — PROBE-OR-DIVERGENCE gated (review MAJOR 3: clipboard CONTENT reads are the same unproven surface class as drag-drop): (a) probe what the pinned rev exposes for reading clipboard content (PNG bytes, uri-list) from app context — winit-shell clipboard is text-only at best; arbitrary-MIME needs data-control/portal machinery; any subprocess fallback (wl-paste) is a DEPENDENCY RULING, never an implementer improvisation; (b) the app-level ⌘V ROUTING is settled (⌥⌘I precedent, text-only paste falls through); (c) if no clean content-read surfaces, ship the routing + an explicit attach affordance and record paste-to-attach as a divergence rather than a hack. Temp-file naming for pasted images when the path exists: `std::env::temp_dir().join("CAD Studio Attachments")`, upstream's shape.
-- [ ] **Step 5:** Drag-drop: probe the pinned rev's DroppedFile surface (window-level at minimum); wire what exists, record the rest as divergence if the pin cannot surface it.
-- [ ] **Step 6:** Visual: fixture citations (ChatInputView.swift:62-104, 156-184; MessageView.swift:10-23) + :99 frames of the draft strip and a sent row.
+- [x] **Step 1:** Bridge copy-at-turn-start tests (row carries copy names; a QUEUED send copies when it starts, not when queued — Ruling 4; inv §3) — RED.
+- [x] **Step 2:** Move the copy call; rows + prompt consistent; engine run_attempt single-writer cleanup — GREEN.
+- [x] **Step 3:** Thumbnail widget + strip/rows wiring (draft strip roots at original paths; sent rows root at projectRoot — one widget, root parameter).
+- [x] **Step 4:** Paste — PROBE-OR-DIVERGENCE gated (review MAJOR 3: clipboard CONTENT reads are the same unproven surface class as drag-drop): (a) probe what the pinned rev exposes for reading clipboard content (PNG bytes, uri-list) from app context — winit-shell clipboard is text-only at best; arbitrary-MIME needs data-control/portal machinery; any subprocess fallback (wl-paste) is a DEPENDENCY RULING, never an implementer improvisation; (b) the app-level ⌘V ROUTING is settled (⌥⌘I precedent, text-only paste falls through); (c) if no clean content-read surfaces, ship the routing + an explicit attach affordance and record paste-to-attach as a divergence rather than a hack. Temp-file naming for pasted images when the path exists: `std::env::temp_dir().join("CAD Studio Attachments")`, upstream's shape.
+- [x] **Step 5:** Drag-drop: probe the pinned rev's DroppedFile surface (window-level at minimum); wire what exists, record the rest as divergence if the pin cannot surface it.
+- [x] **Step 6:** Visual: fixture citations (ChatInputView.swift:62-104, 156-184; MessageView.swift:10-23) + :99 frames of the draft strip and a sent row.
 
 ### Task 5: ZIP export
 
@@ -134,9 +134,9 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 - Consumes: the existing reveal (ShowItems) and activity surfaces; the catalog keys `pacchetto-esportato` / `esportazione-non-riuscita` (Task 1 ensures they're placeable-clean).
 - Produces: `Command::Export`; `/usr/bin/zip -j -q <dest> <files…>` argv (no shell), NOT-FOUND → the failed activity row.
 
-- [ ] **Step 1:** `export_files` tests (dotfile exclusion, missing model.py, empty output) — RED → GREEN.
-- [ ] **Step 2:** Portal SaveFile (suggested `"<name>.zip"`, Downloads), REMOVE a pre-existing destination before spawning (Project.swift:444 — `zip -j` into an existing archive adds/updates entries, leaving stale ones), spawn, status → activity + reveal; menu/toolbar/keybind wiring per Commands.swift:130-132 and ProjectWindow.swift:135-140.
-- [ ] **Step 3:** :99 frame of the flow. This task OWNS the `drive` `saveas <path>` extension (tested parse arm) if the portal blocks scripted runs; Task 14 audits/accumulates what landed.
+- [x] **Step 1:** `export_files` tests (dotfile exclusion, missing model.py, empty output) — RED → GREEN.
+- [x] **Step 2:** Portal SaveFile (suggested `"<name>.zip"`, Downloads), REMOVE a pre-existing destination before spawning (Project.swift:444 — `zip -j` into an existing archive adds/updates entries, leaving stale ones), spawn, status → activity + reveal; menu/toolbar/keybind wiring per Commands.swift:130-132 and ProjectWindow.swift:135-140.
+- [x] **Step 3:** :99 frame of the flow. This task OWNS the `drive` `saveas <path>` extension (tested parse arm) if the portal blocks scripted runs; Task 14 audits/accumulates what landed.
 
 ### Task 6: Settings window + About
 
@@ -148,63 +148,63 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 - Consumes: Task 3's engine settings readers; the python sheet's env states (the Python tab reuses them).
 - Produces: `windows::settings` with Generale (location, language — writes Task 1's field, next-launch footer; PrintPreferencesSection reuse), Agente (engine picker + per-engine sections + effort + restricted-bash claude-only + codex sandbox note), Python (interpreter/verify/reinstall), Avanzate (streaming picker, isolate toggle + apiKeyHelper footer).
 
-- [ ] **Step 1:** Tab-state round-trip tests — RED.
-- [ ] **Step 2:** The window (new-window pattern per Ruling 6), fields bound through the ONE-writer law (engine settings.json; cosmic-config only for window state).
-- [ ] **Step 3:** About: the credits dialog (the literal-\n key survives Task 1); version from `env!("CARGO_PKG_VERSION")`.
-- [ ] **Step 4:** ConfigureClaude presents the AGENT-MISSING SHEET (ChatView.swift:101-102 — upstream has no settings path off that action or that sheet; Ruling 6). No tab route.
-- [ ] **Step 5:** :99 frames of each tab, verified against SettingsView.swift:3-242 citations in-module — NOTE the gallery has NO settings/About captures (gap recorded at review); either a small follow-up capture session on the upstream build products (`~/code/cad-studio-upstream/build/`) or fixture-citation-only verification, ruled by the implementer and recorded in Task 16's disposition. The Python tab's Verifica button CLOSES the failed-venv-check-no-retry follow-up (manual retry — carry-forwards M9). Step 2's engine-picker docs carry Ruling 1's quirk note (re-read-per-turn beats the footer text — an upstream quirk).
+- [x] **Step 1:** Tab-state round-trip tests — RED.
+- [x] **Step 2:** The window (new-window pattern per Ruling 6), fields bound through the ONE-writer law (engine settings.json; cosmic-config only for window state).
+- [x] **Step 3:** About: the credits dialog (the literal-\n key survives Task 1); version from `env!("CARGO_PKG_VERSION")`.
+- [x] **Step 4:** ConfigureClaude presents the AGENT-MISSING SHEET (ChatView.swift:101-102 — upstream has no settings path off that action or that sheet; Ruling 6). No tab route.
+- [x] **Step 5:** :99 frames of each tab, verified against SettingsView.swift:3-242 citations in-module — NOTE the gallery has NO settings/About captures (gap recorded at review); either a small follow-up capture session on the upstream build products (`~/code/cad-studio-upstream/build/`) or fixture-citation-only verification, ruled by the implementer and recorded in Task 16's disposition. The Python tab's Verifica button CLOSES the failed-venv-check-no-retry follow-up (manual retry — carry-forwards M9). Step 2's engine-picker docs carry Ruling 1's quirk note (re-read-per-turn beats the footer text — an upstream quirk).
 
 ### Task 7: Whole-bar no-model disable
 
 **Files:** `app/src/viewer_pane.rs` (`view_status_bar` + `preset_picker` + `msaa_toggle`).
-- [ ] **Step 1:** Test: with `scene.parts.is_empty()`, every pressable in the bar reports no `on_press` (drive-message level where possible; the on_press_maybe sweep at minimum gets a construction test per toggle).
-- [ ] **Step 2:** The sweep: preset buttons, grid/wireframe (newly gated), measure/section (compose with `!animating`), animation slot per upstream's own gating, MSAA — all `on_press_maybe((!parts_empty).then…)` per ModelPane.swift:120-152.
-- [ ] **Step 3:** Frame pair into shots/: bar enabled vs disabled.
+- [x] **Step 1:** Test: with `scene.parts.is_empty()`, every pressable in the bar reports no `on_press` (drive-message level where possible; the on_press_maybe sweep at minimum gets a construction test per toggle).
+- [x] **Step 2:** The sweep: preset buttons, grid/wireframe (newly gated), measure/section (compose with `!animating`), animation slot per upstream's own gating, MSAA — all `on_press_maybe((!parts_empty).then…)` per ModelPane.swift:120-152.
+- [x] **Step 3:** Frame pair into shots/: bar enabled vs disabled.
 
 ### Task 8: ToggleParameters menu entry
 
 **Files:** `app/src/windows/project.rs` (View menu build).
-- [ ] **Step 1:** STATIC label ("Mostra/nascondi parametri") + carry-forwards divergence entry — Ruling 9's safe branch, taken at plan review (the flip-label shape, Commands.swift:69-73, is unreachable evidence-wise while the corruption boundary is unpinned; struck Task 2).
-- [ ] **Step 2:** Menu-construction test + ⌥⌘I still routed once (no double-fire with the app router).
+- [x] **Step 1:** STATIC label ("Mostra/nascondi parametri") + carry-forwards divergence entry — Ruling 9's safe branch, taken at plan review (the flip-label shape, Commands.swift:69-73, is unreachable evidence-wise while the corruption boundary is unpinned; struck Task 2).
+- [x] **Step 2:** Menu-construction test + ⌥⌘I still routed once (no double-fire with the app router).
 
 ### Task 9: Space-through-editor fix
 
 **Files:** `app/src/app.rs` (key router), `app/src/viewer_pane.rs` (drop the pane-level Space arm).
-- [ ] **Step 1:** The router drops bare Space while any text editor holds focus; the pane's listener keeps Esc only. Focus surface: query the pin's editor-focus API first; if the pin exposes none, fall back to the app layer tracking chat-editor focus by routing (the chat pane knows its editor); if neither, record the divergence and keep the pane's animating-gate no-op.
-- [ ] **Step 2:** Tests: subscription-level (Space with editor focus → no TogglePlayback; without → reaches the pane) — the subscription-builds pattern plus whatever focus surface the probe finds; MotionControls.swift:19 citation.
+- [x] **Step 1:** The router drops bare Space while any text editor holds focus; the pane's listener keeps Esc only. Focus surface: query the pin's editor-focus API first; if the pin exposes none, fall back to the app layer tracking chat-editor focus by routing (the chat pane knows its editor); if neither, record the divergence and keep the pane's animating-gate no-op.
+- [x] **Step 2:** Tests: subscription-level (Space with editor focus → no TogglePlayback; without → reaches the pane) — the subscription-builds pattern plus whatever focus surface the probe finds; MotionControls.swift:19 citation.
 
 ### Task 10: Speed-menu shape (closed at review)
 
 **Files:** `app/src/motion_controls.rs` (doc-only change).
-- [ ] **Step 1:** Close as RE-RULED divergence: the dropdown + adjacent loop button stands (Ruling 12's safe branch, taken at plan review — struck Task 2); update the module doc's divergence note to say ruled, not pending, and strike the carry-forward.
+- [x] **Step 1:** Close as RE-RULED divergence: the dropdown + adjacent loop button stands (Ruling 12's safe branch, taken at plan review — struck Task 2); update the module doc's divergence note to say ruled, not pending, and strike the carry-forward.
 
 ### Task 11: Fixwave (spinner, tie rounding, scrub strike, additionals)
 
 **Files:** `app/src/windows/project.rs` + `app/src/chat_view.rs` (spinner sizing per the API probe), `app/src/motion_controls.rs` (half-up tie helper), `app/src/viewer_pane.rs` (scrub-emitter audit → strike), overlay-sync triggers (`project.rs` ParameterCommitted/BuildFinished arms), the Fit framing one-liner, `engine/src/agent/session.rs` (auth needle word boundary + test), `app/src/activity.rs` (manifest warnings), `README.md` (just note).
-- [ ] **Step 1:** Each item: test-first where behavioral (tie helper: `0.125(1,2)` → "0.13"; auth needle: "Authorization failed 401x" does not match; overlay sync: rows update on the two events), construction/frame checks where visual (spinner), record-and-strike where theoretical (scrub).
-- [ ] **Step 2:** The translucent-sort ruling applies here (Ruling 15): if Preston's verdict says visible, the far→near sort lands as this task's renderer step; else strike.
+- [x] **Step 1:** Each item: test-first where behavioral (tie helper: `0.125(1,2)` → "0.13"; auth needle: "Authorization failed 401x" does not match; overlay sync: rows update on the two events), construction/frame checks where visual (spinner), record-and-strike where theoretical (scrub).
+- [x] **Step 2:** The translucent-sort ruling applies here (Ruling 15): if Preston's verdict says visible, the far→near sort lands as this task's renderer step; else strike.
 
 ### Task 12: Version-popover watch (pin-bump probe)
 
 **Files:** none in-tree (probe in a scratch worktree).
-- [ ] **Step 1:** Worktree with libcosmic `cargo update` to the newest rev satisfying the wgpu-28 constraint; build + the drive repro (the jar project, study-drop + clock-click). Fixed upstream ⇒ a RULED follow-up, not an in-task revert: pin bump + menu-root restore + FULL suite + the texteditor repro re-run (a pin bump is a whole-app regression surface — the controller re-rules whether it lands in M8 or M9); not fixed ⇒ carry the watch to M9. Also grep the bumped rev's `iced/winit/src/conversion.rs` for `PinchGesture` (the M4 pinch watch's trigger is this same bump). The PROBE worktree is always discarded; carry-forwards updated either way.
+- [x] **Step 1:** Worktree with libcosmic `cargo update` to the newest rev satisfying the wgpu-28 constraint; build + the drive repro (the jar project, study-drop + clock-click). Fixed upstream ⇒ a RULED follow-up, not an in-task revert: pin bump + menu-root restore + FULL suite + the texteditor repro re-run (a pin bump is a whole-app regression surface — the controller re-rules whether it lands in M8 or M9); not fixed ⇒ carry the watch to M9. Also grep the bumped rev's `iced/winit/src/conversion.rs` for `PinchGesture` (the M4 pinch watch's trigger is this same bump). The PROBE worktree is always discarded; carry-forwards updated either way.
 
 ### Task 13: Packaging (`just install`)
 
 **Files:** `justfile` (install target), `app/resources/` (a .desktop + metainfo, icons already present), `README.md`.
 **BLOCKING INPUT: APP_ID sign-off (Ruling 8) — Preston confirms `net.brownhouse.CadStudio` (or renames) before this task dispatches.**
-- [ ] **Step 1:** `.desktop` (StartupWMClass = APP_ID — verified against COSMIC window grouping on :99), hicolor icons named per the icon-lookup law (PYTHON_SHEET_ICON assumption), metainfo with CARGO_PKG_VERSION sourcing.
-- [ ] **Step 2:** `just install` → `~/.local` (the thelio hand-install becomes reproducible); `just uninstall`.
-- [ ] **Step 3:** Verify on thelio: install, launch from the dock, window groups under one icon, uninstall clean.
+- [x] **Step 1:** `.desktop` (StartupWMClass = APP_ID — verified against COSMIC window grouping on :99), hicolor icons named per the icon-lookup law (PYTHON_SHEET_ICON assumption), metainfo with CARGO_PKG_VERSION sourcing.
+- [x] **Step 2:** `just install` → `~/.local` (the thelio hand-install becomes reproducible); `just uninstall`.
+- [x] **Step 3:** Verify on thelio: install, launch from the dock, window groups under one icon, uninstall clean.
 
 ### Task 14: Drive-harness extensions accumulated this milestone
 
 **Files:** `app/src/drive.rs`.
-- [ ] **Step 1:** Whatever Tasks 5-6 needed (`saveas <path>`, settings commands if added) lands as tested parse arms — the harness is how every UI task self-verifies.
+- [x] **Step 1:** Whatever Tasks 5-6 needed (`saveas <path>`, settings commands if added) lands as tested parse arms — the harness is how every UI task self-verifies.
 
 ### Task 15: Whole-branch capstone review (opus)
 
-- [ ] **Step 1:** The most-capable-model whole-branch review over the M8 range (BASE recorded at wave start); feature-grep every task's user-visible behavior post-merge (the M6 lesson).
+- [x] **Step 1:** The most-capable-model whole-branch review over the M8 range (BASE recorded at wave start); feature-grep every task's user-visible behavior post-merge (the M6 lesson).
 
 ### Task 16: Visual match pass (the close gate's named step)
 
