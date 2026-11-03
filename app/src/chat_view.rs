@@ -12,44 +12,51 @@
 //! Split of message handling (the shell wires this in the window task):
 //! [`ChatPane::update`] owns what is purely widget state (draft editing,
 //! disclosures, copy-to-clipboard); `Send`/`Stop`/`RowAction`/`OpenUrl`/
-//! `Attach`/`Detach`/`RemoveQueued`/`SendQueuedNow`/`SendSuggestion` are the
+//! `Attach`/`Detach`/`RemoveQueued`/`SendQueuedNow`/`SendSuggestion`/
+//! `RestoreVersion` are the
 //! SHELL's — it reads `ChatState` (e.g. `take_draft()`) and drives the
 //! bridge, then calls [`ChatPane::sent`] after a send consumed the draft.
 //!
 //! User-visible strings read through `fl!` at render time (the key names
-//! the en/main.ftl entry). Icon names are freedesktop-theme approximations
-//! of upstream SF Symbols; the theme in play decides what actually shows
-//! (cosmetic — flagged for the shell task).
+//! the en/main.ftl entry). Upstream's SF Symbols ship as SVGs drawn after
+//! the symbols (app/resources/icons/chat/), tinted with the macOS semantic
+//! colors resolved against the active theme; text uses the macOS text
+//! styles' point sizes and line heights ([`TextStyle`]).
 //!
-//! Upstream pieces deliberately NOT here: `VersionMarker` rows (M5 — the
-//! versions model doesn't exist yet; summary rows render as plain caption
-//! text). Attachments render as upstream's `AttachmentThumbnail`s — one
-//! widget, the draft strip at 52px over the staged originals and sent rows
-//! at 64px over the project root (the paste and drag-drop surfaces are the
-//! shell's; their content type lives in [`crate::attachments`]).
+//! Version markers (summary rows naming a version) resolve against the
+//! version mirror on [`ChatState`] (`versions`, `current_version`), which
+//! the window keeps in sync with the bridge; their Restore link is
+//! [`Message::RestoreVersion`], the shell's. Attachments render as
+//! upstream's `AttachmentThumbnail`s — one widget, the draft strip at 52px
+//! over the staged originals and sent rows at 64px over the project root
+//! (the paste and drag-drop surfaces are the shell's; their content type
+//! lives in [`crate::attachments`]).
 
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use cosmic::Element;
 use cosmic::Task;
+use cosmic::iced::advanced::text::EllipsizeHeightLimit;
+use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::font::{Style as FontStyle, Weight as FontWeight};
 use cosmic::iced::keyboard;
 use cosmic::iced::widget::container::Style as ContainerStyle;
 use cosmic::iced::widget::image::Handle;
-use cosmic::iced::widget::text::{Span, Wrapping};
+use cosmic::iced::widget::text::{Ellipsize, LineHeight, Span, Wrapping};
 use cosmic::iced::widget::{operation, rich_text};
-use cosmic::iced::{Color, Font, Length};
+use cosmic::iced::{Alignment, Color, Font, Length};
 use cosmic::widget::text_editor::{self, Binding, Content};
 use cosmic::widget::{Column, Row, Space, button, container};
 use engine::project::store::{Action, ChatMessage, Role, ToolState};
 use uuid::Uuid;
 
 use crate::attachments::{self, ClipboardContent};
-use crate::chat::ChatState;
+use crate::chat::{self, ChatState, MarkerAffordance};
 use crate::fl;
 use crate::markdown::{self, MdStyle};
+use crate::typography;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
 /// alias would default to iced's own theme and stop converting into
@@ -161,6 +168,9 @@ pub enum Message {
     AttachContent(ClipboardContent),
     RemoveQueued(Uuid),
     SendQueuedNow,
+    /// A version marker's "Ripristina" link (ChatView.swift:209-213): the
+    /// shell restores that version.
+    RestoreVersion(i64),
 }
 
 // ─── pane state ────────────────────────────────────────────────────────────
@@ -266,18 +276,31 @@ pub fn view_chat<'a>(
         container(empty_state(chat.engine))
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_x(cosmic::iced::alignment::Horizontal::Center)
-            .align_y(cosmic::iced::alignment::Vertical::Center)
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center)
             .into()
     } else {
+        // upstream LazyVStack(spacing: 12) + .padding(12), closed by the
+        // 1pt "bottom" anchor row (ChatView.swift:45-59)
         let mut rows = Column::new().spacing(12).padding(12).width(Length::Fill);
         for entry in entries(chat, busy) {
             rows = rows.push(match entry {
-                ChatEntry::Row(message) => row_for(pane, chat, message, root),
+                ChatEntry::Row(message) => row_for(pane, chat, message, busy, root),
                 ChatEntry::StreamingIndicator => streaming_indicator(),
             });
         }
-        rows.into()
+        rows = rows.push(Space::new().height(Length::Fixed(1.0)));
+        // Bottom anchoring for a short history (defaultScrollAnchor(.bottom),
+        // ChatView.swift:61): the pane column hands its Fill child a minimum
+        // height equal to the viewport, the scrollable passes that minimum
+        // to its content, and a Shrink container resolves to
+        // max(content, minimum) — so the rows sit at the bottom until they
+        // outgrow the viewport. Longer histories scroll; the shell's
+        // `scroll_to_bottom` keeps the newest row in view.
+        container(rows)
+            .width(Length::Fill)
+            .align_y(Vertical::Bottom)
+            .into()
     };
     let transcript = cosmic::widget::scrollable::scrollable(body)
         .id(transcript_id())
@@ -296,15 +319,16 @@ fn row_for<'a>(
     pane: &'a ChatPane,
     chat: &'a ChatState,
     message: &'a ChatMessage,
+    busy: bool,
     root: &Path,
 ) -> Element<'a, Message> {
     match message.role {
         Role::Tool => tool_row(pane, message),
         Role::Thinking => thinking_row(chat, message),
-        // VersionMarker rows (summary rows whose detail parses as a version
-        // number) are M5: without the versions model every summary row is
-        // the plain interrupted-marker text (ChatView.swift:78-86).
-        Role::Summary => summary_row(message),
+        Role::Summary => match chat::version_number(message) {
+            Some(number) => version_marker(chat, message, number, busy),
+            None => summary_row(message),
+        },
         Role::User | Role::System | Role::Assistant => message_view(pane, message, root),
     }
 }
@@ -324,9 +348,9 @@ fn message_view<'a>(
     }
 }
 
-/// The user's bubble: attachment thumbnails over the text, on a subtle
-/// rounded fill (MessageView.swift:10-27 — 64px thumbs resolved against
-/// `projectRoot`, the text below).
+/// The user's bubble (MessageView.swift:10-27): 64px attachment thumbnails
+/// over the body text, padding 10, `.quaternary.opacity(0.5)` fill in an
+/// 8pt rounded rectangle with a separator stroke.
 fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     let mut stack = Column::new().spacing(8);
     if !message.attachments.is_empty() {
@@ -337,12 +361,13 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
         stack = stack.push(thumbs);
     }
     if !message.text.is_empty() {
-        stack = stack.push(body_text(message.text.as_str()));
+        // .textSelection(.enabled) (MessageView.swift:21)
+        stack = stack.push(styled_text(message.text.as_str(), BODY, Tint::Label).selectable());
     }
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(subtle_style(8.0, 1.0))
+        .class(fill_style(QUATERNARY * 0.5, 8.0, true))
         .into()
 }
 
@@ -383,8 +408,10 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
         container(body)
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))
-            .class(subtle_style(6.0, 1.0)),
-        body_text(file_name),
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center)
+            .class(fill_style(QUATERNARY, 6.0, true)),
+        styled_text(file_name, CALLOUT, Tint::Label),
         cosmic::widget::tooltip::Position::FollowCursor,
     );
     tile.into()
@@ -398,14 +425,20 @@ fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
         .spacing(3)
         .push(icon("text-x-generic", (size * 0.5) as u16))
         .push(
-            secondary_text(caption.to_string())
-                .size((8.0f32).max(size * 0.15))
-                .font(Font {
-                    weight: FontWeight::Semibold,
-                    ..cosmic::font::default()
-                }),
+            styled_text(
+                caption.to_string(),
+                TextStyle {
+                    size: (8.0f32).max(size * 0.15),
+                    line_height: (8.0f32).max(size * 0.15) * 1.25,
+                },
+                Tint::Secondary,
+            )
+            .font(Font {
+                weight: FontWeight::Semibold,
+                ..cosmic::font::default()
+            }),
         )
-        .align_x(cosmic::iced::alignment::Alignment::Center)
+        .align_x(Alignment::Center)
         .into()
 }
 
@@ -421,7 +454,9 @@ thread_local! {
 
 fn decoded_thumbnail(path: &Path) -> Option<Handle> {
     let key = path.to_string_lossy().into_owned();
-    THUMBNAILS.with(|cache| cache.borrow().get(&key).cloned()).flatten()
+    THUMBNAILS
+        .with(|cache| cache.borrow().get(&key).cloned())
+        .flatten()
         .or_else(|| {
             let decoded = std::fs::read(path)
                 .ok()
@@ -437,30 +472,49 @@ fn decoded_thumbnail(path: &Path) -> Option<Handle> {
 }
 
 /// The draft strip (ChatInputView.swift:82-104): the staged attachments'
-/// 52px thumbnails in a horizontal scroll, each with its remove button
-/// (upstream overlays `xmark.circle.fill` at the top-trailing corner; the
-/// button rides beside the tile, top-aligned — the closest iced shape).
+/// 52px thumbnails in a horizontal scroll, spacing 8, each with its remove
+/// button overlaid on the top-trailing corner, offset (5, -5) — the tile
+/// sits 5px down and in from a 57px cell so the overhanging button stays
+/// inside the cell's bounds (and clickable).
 fn attachment_strip<'a>(paths: &'a [String], root: &Path) -> Element<'a, Message> {
-    let mut tiles = Row::new().spacing(8);
+    let mut tiles = Row::new().spacing(8 - 5);
     for path in paths {
-        let tile = Row::new()
-            .align_y(cosmic::iced::alignment::Alignment::Start)
-            .push(attachment_thumbnail(path, root, 52.0))
-            .push(
-                button::icon(icon_handle("window-close", 12))
-                    .on_press(Message::Detach(path.clone()))
-                    .name(fl!("rimuovi")),
-            );
-        tiles = tiles.push(tile);
+        let remove = button::custom(sf_icon(XMARK_CIRCLE_FILL, 14, Tint::Scrim))
+            .padding(0)
+            .class(cosmic::theme::Button::Transparent)
+            .on_press(Message::Detach(path.clone()));
+        let cell = cosmic::iced::widget::stack![
+            container(attachment_thumbnail(path, root, 52.0)).padding([5.0, 5.0, 0.0, 0.0]),
+            container(cosmic::widget::tooltip(
+                remove,
+                styled_text(fl!("rimuovi"), CALLOUT, Tint::Label),
+                cosmic::widget::tooltip::Position::FollowCursor,
+            ))
+            .width(Length::Fill)
+            .align_x(Horizontal::Right),
+        ];
+        tiles = tiles.push(cell);
     }
     cosmic::widget::scrollable::horizontal(tiles).into()
 }
 
-/// Assistant text: inline markdown, mapped span by span (upstream
-/// `MarkdownText`; the fence segments already flattened to code-styled spans
-/// by [`markdown::to_ir`]).
+/// Assistant text (upstream `MarkdownText`, MessageView.swift:80-96): the
+/// message's segments stacked with spacing 8 — prose as inline-markdown
+/// body text, fenced code as a [`code_block`] card.
 fn markdown_text(md: &str) -> Element<'static, Message> {
-    let spans: Vec<Span<'_, String>> = markdown::to_ir(md)
+    let mut column = Column::new().spacing(8).width(Length::Fill);
+    for segment in markdown::segments(md) {
+        column = column.push(match segment {
+            markdown::Segment::Text(spans) => markdown_spans(spans),
+            markdown::Segment::Code(code) => code_block(&code, None),
+        });
+    }
+    column.into()
+}
+
+/// One prose segment's inline spans as rich text at body size.
+fn markdown_spans(ir: Vec<markdown::MdSpan>) -> Element<'static, Message> {
+    let spans: Vec<Span<'_, String>> = ir
         .into_iter()
         .map(|span| {
             let mut out = Span::<String>::new(span.text);
@@ -491,43 +545,50 @@ fn markdown_text(md: &str) -> Element<'static, Message> {
     rich_text(spans)
         .on_link_click(Message::OpenUrl)
         .font(cosmic::font::default())
+        .size(BODY.size)
+        .line_height(BODY.line_height())
+        .width(Length::Fill)
         .wrapping(Wrapping::Word)
         .into()
 }
 
-/// Upstream `SystemMessageView` (MessageView.swift:36-78): icon + text, a
-/// details disclosure for the error text, and the row's action button.
+/// Upstream `SystemMessageView` (MessageView.swift:36-78): callout text
+/// with an info (secondary) or warning (orange) symbol, a "Dettagli"
+/// disclosure over the error text, and the row's action button; padding
+/// 10 on an orange 8% fill with a 25% orange stroke, radius 8.
 fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Message> {
     let mut stack = Column::new().spacing(8);
     let warns = message.detail.is_some();
     let head = Row::new()
-        .spacing(8)
-        .push(icon(
-            if warns {
-                "dialog-warning"
-            } else {
-                "dialog-information"
-            },
-            16,
-        ))
-        .push(body_text(message.text.as_str()));
+        .spacing(6)
+        .align_y(Alignment::Start)
+        .push(if warns {
+            sf_icon(EXCLAMATION_TRIANGLE_FILL, 14, Tint::Orange)
+        } else {
+            sf_icon(INFO_CIRCLE_FILL, 14, Tint::Secondary)
+        })
+        // .textSelection(.enabled) (MessageView.swift:45)
+        .push(styled_text(message.text.as_str(), CALLOUT, Tint::Label).selectable());
     stack = stack.push(head);
     if message.detail.is_some() {
-        stack = stack.push(
-            button::text(fl!("dettagli"))
-                .class(cosmic::theme::Button::Text)
-                .on_press(Message::ToggleDetail(message.id)),
-        );
-        if pane.detail.contains(&message.id) {
+        let open = pane.detail.contains(&message.id);
+        stack = stack.push(disclosure_label(
+            open,
+            styled_text(fl!("dettagli"), CALLOUT, Tint::Label).into(),
+            Message::ToggleDetail(message.id),
+        ));
+        if open {
             if let Some(detail) = &message.detail {
-                stack = stack.push(code_block(detail));
+                stack = stack.push(code_block(detail, None));
             }
         }
     }
     if let Some(action) = message.action {
+        // .controlSize(.small): the small push button's 11pt label
         stack = stack.push(
-            button::text(action_title(action))
-                .class(cosmic::theme::Button::Text)
+            button::custom(styled_text(action_title(action), CAPTION_LINK, Tint::Label))
+                .padding([3.0, 9.0])
+                .class(cosmic::theme::Button::Standard)
                 .on_press(Message::RowAction(message.id, action)),
         );
     }
@@ -547,14 +608,16 @@ fn action_title(action: Action) -> String {
     }
 }
 
-/// Upstream `ThinkingRow` (ChatView.swift:156-179): secondary text with a
-/// spinner while the row is the active one.
+/// Upstream `ThinkingRow` (ChatView.swift:156-179): callout, secondary
+/// brain symbol and text, a mini spinner while the row is the active one;
+/// padding 8 horizontal, 2 vertical.
 fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a, Message> {
     let active = chat.active_thinking_id == Some(message.id);
     let mut line = Row::new()
         .spacing(6)
-        .push(icon("brain", 14))
-        .push(secondary_text(message.text.as_str()));
+        .align_y(Alignment::Center)
+        .push(sf_icon(BRAIN, 14, Tint::Secondary))
+        .push(styled_text(message.text.as_str(), CALLOUT, Tint::Secondary));
     if active {
         // .controlSize(.mini) (ChatView.swift:170) — cosmic's default is a
         // 48px ring; mini is the ~12px macOS size
@@ -567,65 +630,113 @@ fn thinking_row<'a>(chat: &'a ChatState, message: &'a ChatMessage) -> Element<'a
 }
 
 /// Upstream's plain summary row (ChatView.swift:80-86): caption-size mono
-/// secondary text.
+/// secondary text, 6pt bottom padding.
 fn summary_row<'a>(message: &'a ChatMessage) -> Element<'a, Message> {
     container(
-        secondary_text(message.text.as_str())
-            .font(cosmic::font::mono())
-            .size(12),
+        styled_text(message.text.as_str(), CAPTION, Tint::Secondary).font(cosmic::font::mono()),
     )
     .padding([0.0, 0.0, 6.0, 0.0])
     .width(Length::Fill)
     .into()
 }
 
-/// Upstream `ToolActivityRow` (ToolActivityRow.swift:12-67): collapsed
-/// title+state+live preview, expanding to the accumulated input and the
-/// output.
+/// Upstream `VersionMarker` (ChatView.swift:181-220): caption, secondary —
+/// the clock-arrow symbol, the row text in mono, then "Attuale" for the
+/// version the project sits on or a "Ripristina" link (disabled while
+/// busy) for any other recorded version; 6pt bottom padding.
+fn version_marker<'a>(
+    chat: &'a ChatState,
+    message: &'a ChatMessage,
+    number: i64,
+    busy: bool,
+) -> Element<'a, Message> {
+    let mut line = Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(sf_icon(CLOCK_ARROW_CIRCLEPATH, 11, Tint::Secondary))
+        .push(
+            styled_text(message.text.as_str(), CAPTION, Tint::Secondary).font(cosmic::font::mono()),
+        )
+        .push(Space::new().width(Length::Fill));
+    match chat::marker_affordance(number, &chat.versions, chat.current_version, busy) {
+        MarkerAffordance::None => {}
+        MarkerAffordance::Current => {
+            line = line.push(styled_text(fl!("attuale"), CAPTION, Tint::Secondary));
+        }
+        MarkerAffordance::Restore { enabled } => {
+            line = line.push(link_button(
+                fl!("ripristina"),
+                CAPTION,
+                enabled.then_some(Message::RestoreVersion(number)),
+            ));
+        }
+    }
+    container(line)
+        .padding([0.0, 0.0, 6.0, 0.0])
+        .width(Length::Fill)
+        .into()
+}
+
+/// Upstream `ToolActivityRow` (ToolActivityRow.swift:12-67): a
+/// DisclosureGroup whose label is the tool symbol (16pt frame, secondary),
+/// the one-line middle-truncated title and the state mark; the live
+/// preview under it while running; expanding to the input (12-line cap)
+/// and output code cards. Callout text, padding 8×4, a
+/// `.quaternary.opacity(0.35)` fill in a 6pt rounded rectangle, no stroke.
 fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Message> {
     let Some(tool) = &message.tool else {
-        return body_text(message.text.as_str()).into();
+        return styled_text(message.text.as_str(), CALLOUT, Tint::Label).into();
     };
     let expanded = pane.expanded.contains(&message.id);
 
-    // collapsed label: icon · title · state (tap toggles)
-    let mut label = Row::new()
+    let title = Row::new()
         .spacing(6)
-        .push(icon(tool_icon(&tool.name), 16))
-        .push(body_text(message.text.as_str()).width(Length::Fill));
-    label = label.push(state_mark(tool.state));
-    let label = cosmic::widget::mouse_area(container(label).width(Length::Fill))
-        .on_press(Message::ToggleToolRow(message.id));
-
-    let mut stack = Column::new().spacing(4).push(label);
+        .align_y(Alignment::Center)
+        .push(
+            container(sf_icon(tool_icon(&tool.name), 14, Tint::Secondary))
+                .width(Length::Fixed(16.0))
+                .align_x(Horizontal::Center),
+        )
+        .push(
+            styled_text(message.text.as_str(), CALLOUT, Tint::Label)
+                .wrapping(Wrapping::None)
+                .ellipsize(Ellipsize::Middle(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill),
+        )
+        .push(state_mark(tool.state));
+    let mut label = Column::new().spacing(4).push(title);
     if let Some(preview) = tool.preview.as_deref() {
         if !preview.is_empty() && tool.state == ToolState::Running {
-            stack = stack.push(
+            label = label.push(
                 container(
-                    secondary_text(preview.to_string())
+                    styled_text(preview.to_string(), PREVIEW, Tint::Secondary)
                         .font(cosmic::font::mono())
-                        .size(11),
+                        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(4))),
                 )
                 .padding([0.0, 0.0, 0.0, 22.0])
                 .width(Length::Fill),
             );
         }
     }
+
+    let mut stack = Column::new().push(disclosure_label(
+        expanded,
+        label.into(),
+        Message::ToggleToolRow(message.id),
+    ));
     if expanded {
-        let mut body = Column::new().spacing(6);
-        if !tool.input.is_empty() {
-            body = body.push(code_block(&tool.input));
-        }
+        let mut body = Column::new().spacing(6).padding([4.0, 0.0, 0.0, 0.0]);
+        body = body.push(code_block(&tool.input, Some(TOOL_INPUT_LINES)));
         if let Some(output) = &tool.output {
             if !output.is_empty() {
                 let full = pane.full_output.contains(&message.id);
-                body = body.push(code_block(&shown_output(output, full)));
+                body = body.push(code_block(&shown_output(output, full), None));
                 if output.chars().count() > OUTPUT_PREVIEW_LEN && !full {
-                    body = body.push(
-                        button::text(fl!("mostra-tutto"))
-                            .class(cosmic::theme::Button::Text)
-                            .on_press(Message::ToggleFullOutput(message.id)),
-                    );
+                    body = body.push(link_button(
+                        fl!("mostra-tutto"),
+                        CAPTION_LINK,
+                        Some(Message::ToggleFullOutput(message.id)),
+                    ));
                 }
             }
         }
@@ -634,22 +745,46 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
     container(stack)
         .padding([4.0, 8.0])
         .width(Length::Fill)
-        .class(subtle_style(6.0, 0.35))
+        .class(fill_style(QUATERNARY * 0.35, 6.0, false))
         .into()
 }
 
-/// Upstream `stateIcon` (ToolActivityRow.swift:85-98). The green/red are
-/// upstream's explicit semantic colors, not theme-derived (cosmetic).
+/// A macOS DisclosureGroup label: the chevron (right when closed, down
+/// when open) in a 13px leading column, then the label centered against
+/// it; the whole row is the tap target, and the chevron's column holds it
+/// at the AppKit disclosure row height at minimum.
+fn disclosure_label<'a>(
+    open: bool,
+    label: Element<'a, Message>,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let chevron = container(sf_icon(
+        if open { CHEVRON_DOWN } else { CHEVRON_RIGHT },
+        9,
+        Tint::Secondary,
+    ))
+    .width(Length::Fixed(13.0))
+    .height(Length::Fixed(DISCLOSURE_ROW))
+    .align_y(Vertical::Center);
+    let row = Row::new()
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .push(chevron)
+        .push(container(label).width(Length::Fill));
+    cosmic::widget::mouse_area(row).on_press(on_press).into()
+}
+
+/// Upstream `stateIcon` (ToolActivityRow.swift:85-98): a mini spinner while
+/// running, a green checkmark on success, a red xmark otherwise. The
+/// tooltip carries upstream's stateDescription (the accessibility label).
 fn state_mark(state: ToolState) -> Element<'static, Message> {
-    // the tooltip carries upstream's stateDescription (the accessibility
-    // label); iced's glyphs have no label of their own
     let mark = match state {
         // the running mark is .controlSize(.mini) (ToolActivityRow.swift:90)
-        ToolState::Running => Element::from(
-            cosmic::widget::progress_bar::indeterminate_circular().size(12.0),
-        ),
-        ToolState::Succeeded => glyph("✓", STATE_OK),
-        ToolState::Failed => glyph("✗", STATE_ERR),
+        ToolState::Running => {
+            Element::from(cosmic::widget::progress_bar::indeterminate_circular().size(12.0))
+        }
+        ToolState::Succeeded => sf_icon(CHECKMARK, 13, Tint::Green),
+        ToolState::Failed => sf_icon(XMARK, 12, Tint::Red),
     };
     let description = match state {
         ToolState::Running => fl!("in-corso"),
@@ -658,57 +793,74 @@ fn state_mark(state: ToolState) -> Element<'static, Message> {
     };
     cosmic::widget::tooltip(
         mark,
-        body_text(description.to_string()),
+        styled_text(description.to_string(), CALLOUT, Tint::Label),
         cosmic::widget::tooltip::Position::FollowCursor,
     )
     .into()
 }
 
-const STATE_OK: Color = Color::from_rgb(0.18, 0.66, 0.34);
-const STATE_ERR: Color = Color::from_rgb(0.90, 0.32, 0.32);
-
-fn glyph(ch: &str, color: Color) -> Element<'static, Message> {
-    body_text(ch.to_string())
-        .class(cosmic::theme::Text::Color(color))
-        .into()
-}
-
-/// Upstream `icon` (ToolActivityRow.swift:74-83): per-tool SF Symbol →
-/// freedesktop names (cosmetic — theme decides).
-fn tool_icon(name: &str) -> &'static str {
+/// Upstream `icon` (ToolActivityRow.swift:74-83): the per-tool SF Symbol.
+fn tool_icon(name: &str) -> &'static [u8] {
     match name {
-        "Bash" => "utilities-terminal",
-        "Write" => "text-editor",
-        "Edit" | "MultiEdit" => "document-edit",
-        "Read" | "Grep" | "Glob" => "edit-find",
-        "TodoWrite" => "view-list",
-        _ => "system-run",
+        "Bash" => TERMINAL,
+        "Write" => DOC_BADGE_PLUS,
+        "Edit" | "MultiEdit" => PENCIL,
+        "Read" | "Grep" | "Glob" => DOC_TEXT_MAGNIFYINGGLASS,
+        "TodoWrite" => CHECKLIST,
+        _ => WRENCH_AND_SCREWDRIVER,
     }
 }
 
-/// Upstream `CodeBlock` (MessageView.swift:114-144): mono text on a subtle
-/// rounded fill with a copy button. Upstream scrolls horizontally and caps
-/// the tool input at 12 lines; iced has neither here — text wraps and the
-/// full text shows (flagged for the shell's polish pass).
-fn code_block<'a>(code: &str) -> Element<'a, Message> {
-    let body = Row::new()
-        .push(
-            secondary_text(code.to_string())
-                .font(cosmic::font::mono())
-                .width(Length::Fill)
-                .wrapping(Wrapping::Glyph),
-        )
-        .push(
-            button::icon(icon_handle("edit-copy", 14))
-                .on_press(Message::CopyCode(code.to_string()))
-                .name(fl!("copia")),
-        )
-        .spacing(8);
-    container(body)
-        .padding(8)
-        .width(Length::Fill)
-        .class(subtle_style(6.0, 1.0))
-        .into()
+/// Upstream `CodeBlock` (MessageView.swift:114-144): 11pt mono text with
+/// padding 8 (+24 trailing for the button), horizontally scrollable, on a
+/// quaternary system fill in a 6pt rounded rectangle, with a borderless
+/// copy button overlaid top-trailing (padding 6). `line_limit` is the
+/// tool input's `lineLimit(12)`.
+fn code_block<'a>(code: &str, line_limit: Option<usize>) -> Element<'a, Message> {
+    let shown = match line_limit {
+        Some(limit) => clip_lines(code, limit),
+        None => code.to_string(),
+    };
+    let text = styled_text(shown, CODE, Tint::Label)
+        .font(cosmic::font::mono())
+        .wrapping(Wrapping::None);
+    let scroller = cosmic::widget::scrollable::horizontal(container(text).padding([
+        8.0,
+        8.0 + 24.0,
+        8.0,
+        8.0,
+    ]))
+    .width(Length::Fill);
+    let copy = cosmic::widget::tooltip(
+        button::custom(sf_icon(DOC_ON_DOC, 12, Tint::Secondary))
+            .padding(3)
+            .class(cosmic::theme::Button::Icon)
+            .on_press(Message::CopyCode(code.to_string())),
+        styled_text(fl!("copia"), CALLOUT, Tint::Label),
+        cosmic::widget::tooltip::Position::FollowCursor,
+    );
+    cosmic::iced::widget::stack![
+        container(scroller)
+            .width(Length::Fill)
+            .class(fill_style(QUATERNARY * 0.5, 6.0, false)),
+        container(copy)
+            .width(Length::Fill)
+            .padding(3)
+            .align_x(Horizontal::Right),
+    ]
+    .into()
+}
+
+/// SwiftUI `lineLimit(n)` over a code string: the first `n` lines, the
+/// last of them ending in "…" when more were cut.
+pub fn clip_lines(code: &str, limit: usize) -> String {
+    let lines: Vec<&str> = code.lines().collect();
+    if lines.len() <= limit {
+        return code.to_string();
+    }
+    let mut out = lines[..limit].join("\n");
+    out.push('…');
+    out
 }
 
 /// Upstream ChatView.swift:50-54: a small busy marker while the agent works
@@ -720,11 +872,15 @@ fn streaming_indicator() -> Element<'static, Message> {
         .into()
 }
 
-/// Upstream `ChatEmptyState` (ChatView.swift:107-154). The engine line
-/// names the engine that will run the first turn (upstream reads
-/// `AgentEngine.current` at render; the port seeds ChatState's engine from
-/// the settings at window build — an empty transcript means no turn ran to
-/// re-seed it).
+/// Upstream `ChatEmptyState` (ChatView.swift:107-154): the 40pt light
+/// `cube.transparent` symbol in tertiary, the title3-semibold title over
+/// the callout secondary subtitle (spacing 4), then the suggestion buttons
+/// — callout `sparkles` labels padded 10×6 on a `.quaternary.opacity(0.6)`
+/// 6pt rounded fill, spacing 6, at most 340pt wide; spacing 16 between
+/// the groups, padding 20. The engine line names the engine that will run
+/// the first turn (upstream reads `AgentEngine.current` at render; the
+/// port seeds ChatState's engine from the settings at window build — an
+/// empty transcript means no turn ran to re-seed it).
 fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Message> {
     let suggestions = [
         fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
@@ -732,50 +888,66 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         fl!("distanziale-cilindrico-12-mm-alto-15-mm-con-foro-m3"),
         fl!("supporto-per-smartphone-inclinato-a-60"),
     ];
-    let mut list = Column::new().spacing(6);
+    let mut list = Column::new().spacing(6).width(Length::Fill).max_width(340);
     for suggestion in suggestions {
+        let label = Row::new()
+            .spacing(8)
+            .align_y(Alignment::Start)
+            .push(
+                container(sf_icon(SPARKLES, 14, Tint::Label))
+                    .height(Length::Fixed(CALLOUT.line_height))
+                    .align_y(Vertical::Center),
+            )
+            .push(styled_text(suggestion.to_string(), CALLOUT, Tint::Label).width(Length::Fill));
         list = list.push(
             button::custom(
-                // the label needs an explicit color class: under a
-                // Transparent button the inherited one is fully transparent
-                // (see ambient_text_class)
-                container(
-                    body_text(suggestion.to_string())
-                        .width(Length::Fill)
-                        .class(ambient_text_class()),
-                )
-                .padding([6.0, 10.0])
-                .width(Length::Fill)
-                .class(subtle_style(6.0, 0.6)),
+                container(label)
+                    .padding([6.0, 10.0])
+                    .width(Length::Fill)
+                    .class(fill_style(QUATERNARY * 0.6, 6.0, false)),
             )
+            .padding(0)
+            .width(Length::Fill)
             .class(cosmic::theme::Button::Transparent)
             .on_press(Message::SendSuggestion(suggestion.to_string())),
         );
     }
+    let heading = Column::new()
+        .spacing(4)
+        .align_x(Alignment::Center)
+        .push(
+            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tint::Label).font(Font {
+                weight: FontWeight::Semibold,
+                ..cosmic::font::default()
+            }),
+        )
+        .push(
+            styled_text(
+                fl!(
+                    "scrive-lo-script-cad-genera-il-modello-3d-e-la-tavola-tecnica",
+                    agent = engine.display_name()
+                ),
+                CALLOUT,
+                Tint::Secondary,
+            )
+            .align_x(Horizontal::Center),
+        );
     Column::new()
         .spacing(16)
-        // upstream `cube.transparent`; package-x-generic is the Pop-theme
-        // stand-in (preferences-desktop-3d exists in no Pop theme)
-        .push(icon("package-x-generic", 40))
-        .push(body_text(fl!("descrivi-un-oggetto")).size(18))
-        .push(secondary_text(fl!(
-            "scrive-lo-script-cad-genera-il-modello-3d-e-la-tavola-tecnica",
-            agent = engine.display_name()
-        )))
+        .push(sf_icon(CUBE_TRANSPARENT, 40, Tint::Tertiary))
+        .push(heading)
         .push(list)
-        // upstream caps the column at 340 pt; Fill+max keeps a narrower
-        // chat pane from overflowing its bounds
         .width(Length::Fill)
-        .max_width(340)
         .padding(20)
-        .align_x(cosmic::iced::alignment::Alignment::Center)
+        .align_x(Alignment::Center)
         .into()
 }
 
 // ─── input bar ─────────────────────────────────────────────────────────────
 
-/// Upstream `ChatInputView` (ChatInputView.swift:4-80) with `QueueList`
-/// (ChatInputView.swift:186-248).
+/// Upstream `ChatInputView` (ChatInputView.swift:11-58): a divider, the
+/// queue list and draft strip when present, then the input field inset 10
+/// on every side.
 fn input_bar<'a>(
     pane: &'a ChatPane,
     chat: &'a ChatState,
@@ -784,286 +956,597 @@ fn input_bar<'a>(
     queue_paused: bool,
     root: &Path,
 ) -> Element<'a, Message> {
-    let mut stack = Column::new();
-    stack = stack.push(cosmic::widget::divider::horizontal::default());
+    let mut stack = Column::new().width(Length::Fill);
+    stack = stack.push(
+        container(Space::new().height(Length::Fixed(1.0)))
+            .width(Length::Fill)
+            .class(fill_style(SEPARATOR, 0.0, false)),
+    );
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
     }
     if !chat.draft_attachments.is_empty() {
         stack = stack.push(
-            container(attachment_strip(&chat.draft_attachments, root))
-                .padding([10.0, 12.0, 0.0, 12.0]),
+            container(attachment_strip(&chat.draft_attachments, root)).padding([
+                10.0 - 5.0,
+                12.0,
+                0.0,
+                12.0,
+            ]),
         );
     }
-    stack = stack.push(input_row(pane, chat, busy));
-
-    // the card floats inside the pane: the outer inset keeps its rounded
-    // corners off the pane edge instead of clipping against it
-    container(
-        container(stack)
-            .width(Length::Fill)
-            .padding(10)
-            .class(subtle_style(8.0, 1.0)),
-    )
-    .width(Length::Fill)
-    .padding([0.0, 6.0, 6.0, 6.0])
-    .into()
+    stack = stack.push(container(input_field(pane, chat, busy)).padding(10));
+    stack.into()
 }
 
-/// Upstream `QueueList` (ChatInputView.swift:186-248).
+/// Upstream `QueueList` (ChatInputView.swift:186-248): the paused/active
+/// caption header with "Invia ora", then the numbered callout rows on a
+/// `.quaternary.opacity(0.5)` 7pt fill, padding 10×7, each with its
+/// tertiary remove button; padding 10 (no bottom).
 fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'a, Message> {
     let mut head = Row::new()
         .spacing(6)
-        .push(icon(
-            if paused {
-                "media-playback-pause"
-            } else {
-                "document-open-recent"
-            },
-            14,
+        .align_y(Alignment::Center)
+        .push(sf_icon(
+            if paused { PAUSE_CIRCLE } else { CLOCK },
+            13,
+            Tint::Secondary,
         ))
-        .push(secondary_text(if paused {
-            fl!("in-coda-in-pausa-dopo-l-ultimo-errore")
-        } else {
-            fl!("in-coda-partiranno-uno-alla-volta")
-        }))
+        .push(styled_text(
+            if paused {
+                fl!("in-coda-in-pausa-dopo-l-ultimo-errore")
+            } else {
+                fl!("in-coda-partiranno-uno-alla-volta")
+            },
+            CAPTION,
+            Tint::Secondary,
+        ))
         .push(Space::new().width(Length::Fill));
     if paused && !busy {
-        head = head.push(
-            button::text(fl!("invia-ora"))
-                .class(cosmic::theme::Button::Text)
-                .on_press(Message::SendQueuedNow),
-        );
+        head = head.push(link_button(
+            fl!("invia-ora"),
+            CAPTION_LINK,
+            Some(Message::SendQueuedNow),
+        ));
     }
     let mut items = Column::new().spacing(4);
     for (index, item) in queue.iter().enumerate() {
-        let mut body = Column::new().spacing(2);
+        let mut body = Column::new().spacing(2).width(Length::Fill);
         let preview = if item.text.is_empty() {
             fl!("solo-immagini")
         } else {
             item.text.clone()
         };
-        body = body.push(body_text(preview));
+        body = body.push(
+            styled_text(preview, CALLOUT, Tint::Label)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(2))),
+        );
         if item.images > 0 {
-            body = body.push(secondary_text(fl!("lld-immagini", count = item.images)));
+            body = body.push(
+                Row::new()
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .push(sf_icon(PHOTO, 11, Tint::Secondary))
+                    .push(styled_text(
+                        fl!("lld-immagini", count = item.images),
+                        CAPTION,
+                        Tint::Secondary,
+                    )),
+            );
         }
+        let remove = cosmic::widget::tooltip(
+            button::custom(sf_icon(XMARK_CIRCLE_FILL, 14, Tint::Tertiary))
+                .padding(0)
+                .class(cosmic::theme::Button::Transparent)
+                .on_press(Message::RemoveQueued(item.id)),
+            styled_text(fl!("rimuovi-dalla-coda"), CALLOUT, Tint::Label),
+            cosmic::widget::tooltip::Position::FollowCursor,
+        );
         items = items.push(
             container(
                 Row::new()
                     .spacing(8)
-                    .push(secondary_text(format!("{}", index + 1)).size(12))
-                    .push(body.width(Length::Fill))
+                    .align_y(Alignment::Start)
                     .push(
-                        button::icon(icon_handle("window-close", 14))
-                            .on_press(Message::RemoveQueued(item.id))
-                            .name(fl!("rimuovi-dalla-coda")),
-                    ),
+                        container(styled_text(
+                            format!("{}", index + 1),
+                            CAPTION,
+                            Tint::Secondary,
+                        ))
+                        .width(Length::Fixed(14.0))
+                        .height(Length::Fixed(CALLOUT.line_height))
+                        .align_x(Horizontal::Center)
+                        .align_y(Vertical::Center),
+                    )
+                    .push(body)
+                    .push(remove),
             )
             .padding([7.0, 10.0])
             .width(Length::Fill)
-            .class(subtle_style(7.0, 0.5)),
+            .class(fill_style(QUATERNARY * 0.5, 7.0, false)),
         );
     }
-    container(Column::new().spacing(6).push(head).push(items))
-        .padding([10.0, 10.0, 0.0, 10.0])
-        .width(Length::Fill)
-        .into()
+    let items = cosmic::widget::scrollable::vertical(items).height(Length::Shrink);
+    container(
+        Column::new()
+            .spacing(6)
+            .push(head)
+            .push(container(items).max_height(150.0)),
+    )
+    .padding([10.0, 10.0, 0.0, 10.0])
+    .width(Length::Fill)
+    .into()
 }
 
-/// The editor row: attach · input · send (ChatInputView.swift:20-57) and the
-/// busy-state send area (ChatInputView.swift:116-153).
-fn input_row<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
-    let mut line = Row::new()
-        .spacing(6)
-        .align_y(cosmic::iced::alignment::Alignment::End);
-    line = line.push(
-        button::icon(icon_handle("mail-attachment", 14))
-            .on_press(Message::Attach)
-            .name(fl!("allega-file"))
-            .description(fl!(
-                "allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"
-            )),
+/// The input field (ChatInputView.swift:20-57): a text-background field,
+/// radius 8, separator stroke (accent at 60% while focused), holding the
+/// paperclip at its leading edge, the plain multi-line text field (1-6
+/// lines) and the send area at its trailing edge, bottom-aligned, spacing
+/// 6, padding 10 leading / 6 trailing / 6 vertical.
+///
+/// The editor itself draws the field (its style is the only place the
+/// focus state is visible), with its text inset past the two buttons; the
+/// buttons ride a transparent layer stacked over it. Clicks between the
+/// buttons fall through to the editor (iced's stack passes the cursor on
+/// when the upper layer's interaction there is none).
+fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
+    let attach = cosmic::widget::tooltip(
+        button::custom(sf_icon(PAPERCLIP, 14, Tint::Secondary))
+            .padding(0)
+            .class(cosmic::theme::Button::Transparent)
+            .on_press(Message::Attach),
+        styled_text(
+            fl!("allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"),
+            CALLOUT,
+            Tint::Label,
+        ),
+        cosmic::widget::tooltip::Position::Top,
     );
-    line = line.push(
-        text_editor::text_editor(&pane.input)
-            .id(input_id())
-            // The id must live on exactly ONE tree level: cosmic's editor
-            // wrapper (context-menu mode, default) forwards the inner
-            // editor's id as its own, so both levels enter iced's
-            // name-keyed NAMED state map and clobber each other's records
-            // — the inner slot is left stateless and the next layout
-            // panics ("Downcast on stateless state"). Collapsing the
-            // wrapper keeps rip+restore symmetric; the right-click menu
-            // is the casualty until libcosmic stops forwarding id().
-            .context_menu(false)
-            .placeholder(if busy {
-                fl!("scrivi-il-prossimo-messaggio-partir-al-termine")
-            } else {
-                fl!("descrivi-l-oggetto-o-la-modifica")
-            })
-            .on_action(Message::Draft)
-            // Return sends; shift/option+Return breaks the line
-            // (ChatInputView.swift:39-47). Ctrl+V routes to the shell
-            // while focused — upstream's local keyDown monitor
-            // (ChatInputView.swift:62-73) attaches files when the
-            // clipboard holds them and lets every other paste fall
-            // through to the editor.
-            .key_binding(|press| {
-                if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
+    let (send, send_width) = send_area(chat, busy);
+    let editor = text_editor::text_editor(&pane.input)
+        .id(input_id())
+        // The id must live on exactly ONE tree level: cosmic's editor
+        // wrapper (context-menu mode, default) forwards the inner
+        // editor's id as its own, so both levels enter iced's
+        // name-keyed NAMED state map and clobber each other's records
+        // — the inner slot is left stateless and the next layout
+        // panics ("Downcast on stateless state"). Collapsing the
+        // wrapper keeps rip+restore symmetric; the right-click menu
+        // is the casualty until libcosmic stops forwarding id().
+        .context_menu(false)
+        .placeholder(if busy {
+            fl!("scrivi-il-prossimo-messaggio-partir-al-termine")
+        } else {
+            fl!("descrivi-l-oggetto-o-la-modifica")
+        })
+        .on_action(Message::Draft)
+        // Return sends; shift/option+Return breaks the line
+        // (ChatInputView.swift:39-47). Ctrl+V routes to the shell
+        // while focused — upstream's local keyDown monitor
+        // (ChatInputView.swift:62-73) attaches files when the
+        // clipboard holds them and lets every other paste fall
+        // through to the editor.
+        .key_binding(|press| {
+            if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
+                && !press.modifiers.shift()
+                && !press.modifiers.alt()
+            {
+                Some(Binding::Custom(Message::Send))
+            } else if let keyboard::Key::Character(ch) = &press.key {
+                if ch.eq_ignore_ascii_case("v")
+                    && press.modifiers.control()
                     && !press.modifiers.shift()
                     && !press.modifiers.alt()
+                    && matches!(press.status, text_editor::Status::Focused { .. })
                 {
-                    Some(Binding::Custom(Message::Send))
-                } else if let keyboard::Key::Character(ch) = &press.key {
-                    if ch.eq_ignore_ascii_case("v")
-                        && press.modifiers.control()
-                        && !press.modifiers.shift()
-                        && !press.modifiers.alt()
-                        && matches!(press.status, text_editor::Status::Focused { .. })
-                    {
-                        Some(Binding::Custom(Message::Paste))
-                    } else {
-                        Binding::from_key_press(press)
-                    }
+                    Some(Binding::Custom(Message::Paste))
                 } else {
                     Binding::from_key_press(press)
                 }
-            })
-            // the editor's width DEFAULTS to Length::Fill (iced
-            // text_editor.rs leaves it Fill; the width() setter only
-            // takes pixels), so it already fills the row between the
-            // attach and send buttons
-            .min_height(24)
-            .max_height(140),
-    );
-    line = line.push(send_area(chat, busy));
-    line.into()
+            } else {
+                Binding::from_key_press(press)
+            }
+        })
+        .size(BODY.size)
+        .line_height(BODY.line_height())
+        // leading: padding 10 + the 14pt paperclip in its 16pt frame +
+        // spacing 6; trailing: spacing 6 + the send area + padding 6
+        .padding([
+            FIELD_PAD_Y,
+            6.0 + send_width + 6.0,
+            FIELD_PAD_Y,
+            10.0 + 16.0 + 6.0,
+        ])
+        // .lineLimit(1...6) — iced bounds the TEXT area with these and
+        // adds the padding on top
+        .min_height(BODY.line_height)
+        .max_height(6.0 * BODY.line_height)
+        .style(field_style);
+    let buttons = Row::new()
+        .align_y(Alignment::End)
+        .push(
+            container(attach)
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(BODY.line_height))
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(send);
+    cosmic::iced::widget::stack![
+        editor,
+        container(buttons)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([SEND_PAD_Y, 6.0, SEND_PAD_Y, 10.0])
+            .align_y(Vertical::Bottom),
+    ]
+    .into()
 }
 
-/// Upstream `sendButton` (ChatInputView.swift:116-153): while busy, queue-add
-/// (only with something to queue) plus stop; otherwise the send button,
-/// disabled unless `can_send`.
-fn send_area<'a>(chat: &'a ChatState, busy: bool) -> Element<'a, Message> {
-    let mut buttons = Row::new().spacing(4);
+/// Upstream `sendButton` (ChatInputView.swift:116-153): while busy, the
+/// accent `text.badge.plus` queue-add (only with something to queue) plus
+/// the 18pt `stop.circle.fill`; otherwise the 18pt `arrow.up.circle.fill`,
+/// accent when `can_send`, secondary and disabled otherwise. Returns the
+/// area and its width (the editor's trailing inset).
+fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32) {
+    let glyph_button =
+        |svg: &'static [u8], size: u16, tint: Tint, msg: Option<Message>, tip: String| {
+            Element::from(cosmic::widget::tooltip(
+                button::custom(sf_icon(svg, size, tint))
+                    .padding(0)
+                    .class(cosmic::theme::Button::Transparent)
+                    .on_press_maybe(msg),
+                styled_text(tip, CALLOUT, Tint::Label),
+                cosmic::widget::tooltip::Position::Top,
+            ))
+        };
     if busy {
+        let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+        let mut width = 18.0;
         if chat.can_send() {
-            buttons = buttons.push(
-                button::icon(icon_handle("list-add", 15))
-                    .on_press(Message::Send)
-                    .name(fl!("aggiungi-alla-coda"))
-                    .description(fl!("aggiungi-alla-coda-partir-al-termine-invio")),
-            );
+            row = row.push(glyph_button(
+                TEXT_BADGE_PLUS,
+                15,
+                Tint::Accent,
+                Some(Message::Send),
+                fl!("aggiungi-alla-coda-partir-al-termine-invio"),
+            ));
+            width += 15.0 + 6.0;
         }
-        buttons = buttons.push(
-            button::icon(icon_handle("media-playback-stop", 18))
-                .on_press(Message::Stop)
-                .name(fl!("stop"))
-                .description(fl!("interrompi")),
-        );
+        row = row.push(glyph_button(
+            STOP_CIRCLE_FILL,
+            18,
+            Tint::Label,
+            Some(Message::Stop),
+            fl!("interrompi"),
+        ));
+        (row.into(), width)
     } else {
-        buttons = buttons.push(
-            button::icon(icon_handle("go-up", 18))
-                .on_press_maybe(chat.can_send().then_some(Message::Send))
-                .name(fl!("invia"))
-                .description(fl!("invia-invio")),
-        );
+        let can_send = chat.can_send();
+        (
+            glyph_button(
+                ARROW_UP_CIRCLE_FILL,
+                18,
+                if can_send {
+                    Tint::Accent
+                } else {
+                    Tint::Disabled
+                },
+                can_send.then_some(Message::Send),
+                fl!("invia-invio"),
+            ),
+            18.0,
+        )
     }
-    buttons.into()
 }
 
 // ─── shared bits ───────────────────────────────────────────────────────────
 
-/// The ambient readable text color at full strength. For text inside a
-/// `Button::Transparent`: cosmic's transparent button style resolves its
-/// inherited text color from a component whose every color is
-/// `(0,0,0,0)` (theme TRANSPARENT_COMPONENT), and iced's `Text` uses the
-/// inherited color when none is set — so un-colored text under a
-/// Transparent button renders invisible. An explicit class opts back in.
-fn ambient_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
-        color: Some(theme.cosmic().background(false).on.into()),
-        ..Default::default()
+/// An upstream text style on COSMIC's scale: the size from
+/// [`crate::typography`] and the line height upstream's SF metrics give
+/// that style (16/13 body, 15/12 callout, 13/10 caption, 20/15 title3,
+/// 14/11 for 11pt), scaled the same way. The family is the user's.
+#[derive(Clone, Copy)]
+struct TextStyle {
+    size: f32,
+    line_height: f32,
+}
+
+impl TextStyle {
+    fn line_height(self) -> LineHeight {
+        LineHeight::Absolute(self.line_height.into())
+    }
+}
+
+const BODY: TextStyle = TextStyle {
+    size: typography::BODY,
+    line_height: typography::scaled(16.0),
+};
+const CALLOUT: TextStyle = TextStyle {
+    size: typography::CALLOUT,
+    line_height: typography::scaled(15.0),
+};
+const CAPTION: TextStyle = TextStyle {
+    size: typography::CAPTION,
+    line_height: typography::scaled(13.0),
+};
+/// `.buttonStyle(.link).controlSize(.small)` — the small control font.
+const CAPTION_LINK: TextStyle = TextStyle {
+    size: typography::scaled(11.0),
+    line_height: typography::scaled(14.0),
+};
+const TITLE3: TextStyle = TextStyle {
+    size: typography::TITLE3,
+    line_height: typography::scaled(20.0),
+};
+/// CodeBlock's `.system(size: 11)` mono (MessageView.swift:122).
+const CODE: TextStyle = TextStyle {
+    size: typography::scaled(11.0),
+    line_height: typography::scaled(14.0),
+};
+/// The running tool's live preview (ToolActivityRow.swift:45, 10.5pt mono).
+const PREVIEW: TextStyle = TextStyle {
+    size: typography::scaled(10.5),
+    line_height: typography::scaled(13.0),
+};
+
+/// The tool input card's `lineLimit(12)` (ToolActivityRow.swift:16).
+const TOOL_INPUT_LINES: usize = 12;
+/// An AppKit disclosure row's height.
+const DISCLOSURE_ROW: f32 = 24.0;
+/// The input field's vertical text inset (upstream: 6pt around the field's
+/// text line, ChatInputView.swift:51, which lands the field at 32pt with
+/// macOS metrics).
+const FIELD_PAD_Y: f32 = 8.0;
+/// The send glyph's inset inside the field: centered on one body line.
+const SEND_PAD_Y: f32 = (BODY.line_height + 2.0 * FIELD_PAD_Y - 18.0) / 2.0;
+
+/// macOS label-color opacities over the text color (NSColor
+/// `quaternaryLabelColor` fills, `separatorColor` strokes).
+const QUATERNARY: f32 = 0.10;
+const SEPARATOR: f32 = 0.10;
+
+/// What a glyph or text is painted with — macOS semantic colors resolved
+/// against the active theme (the label hierarchy is the theme's text
+/// color at falling opacities, so dark mode follows on its own).
+#[derive(Clone, Copy)]
+enum Tint {
+    Label,
+    Secondary,
+    Tertiary,
+    /// A disabled control's glyph (`Color.secondary` under `.disabled`).
+    Disabled,
+    Accent,
+    Green,
+    Red,
+    Orange,
+    /// The draft tile's remove button: `.black.opacity(0.6)` behind a
+    /// white mark (the circle's knock-out shows the tile through).
+    Scrim,
+}
+
+fn label_color(theme: &cosmic::Theme) -> Color {
+    Color::from(theme.cosmic().background(false).on)
+}
+
+fn with_alpha(mut color: Color, alpha: f32) -> Color {
+    color.a *= alpha;
+    color
+}
+
+fn tint(theme: &cosmic::Theme, tint: Tint) -> Color {
+    let cosmic = theme.cosmic();
+    match tint {
+        Tint::Label | Tint::Secondary | Tint::Tertiary | Tint::Disabled => {
+            with_alpha(label_color(theme), tint_alpha(tint))
+        }
+        Tint::Accent => Color::from(cosmic.accent.base),
+        // upstream's .green / .red / .orange are the system status colors;
+        // the theme's success / destructive / warning tokens are COSMIC's
+        Tint::Green => Color::from(cosmic.success.base),
+        Tint::Red => Color::from(cosmic.destructive.base),
+        Tint::Orange => Color::from(cosmic.warning.base),
+        Tint::Scrim => Color::from_rgba(0.0, 0.0, 0.0, tint_alpha(tint)),
+    }
+}
+
+/// Text at a macOS text style in a semantic tint, wrapping at word
+/// boundaries. The owned binding keeps iced's invariant `Text<'a>` at
+/// `'static` — a borrowed `&str` would tie the widget to the row
+/// reference's lifetime.
+fn styled_text<'a>(body: impl Into<String>, style: TextStyle, color: Tint) -> Text<'a> {
+    let owned: String = body.into();
+    cosmic::widget::text(owned)
+        .size(style.size)
+        .line_height(style.line_height())
+        .wrapping(Wrapping::Word)
+        .class(text_class(color))
+}
+
+fn text_class(color: Tint) -> cosmic::theme::Text {
+    // cosmic's Text::Custom takes a plain fn pointer: one per tint
+    fn style(theme: &cosmic::Theme, color: Tint) -> cosmic::iced::widget::text::Style {
+        cosmic::iced::widget::text::Style {
+            color: Some(tint(theme, color)),
+            selected_fill: with_alpha(Color::from(theme.cosmic().accent.base), 0.35),
+            selected_text_color: None,
+        }
+    }
+    cosmic::theme::Text::Custom(match color {
+        Tint::Label => |t| style(t, Tint::Label),
+        Tint::Secondary => |t| style(t, Tint::Secondary),
+        Tint::Tertiary => |t| style(t, Tint::Tertiary),
+        Tint::Disabled => |t| style(t, Tint::Disabled),
+        Tint::Accent => |t| style(t, Tint::Accent),
+        Tint::Green => |t| style(t, Tint::Green),
+        Tint::Red => |t| style(t, Tint::Red),
+        Tint::Orange => |t| style(t, Tint::Orange),
+        Tint::Scrim => |t| style(t, Tint::Scrim),
     })
 }
 
-/// Default-body text that wraps at word boundaries. The owned binding keeps
-/// iced's invariant `Text<'a>` at `'static` — a borrowed `&str` would tie the
-/// widget to the row reference's lifetime.
-fn body_text<'a>(body: impl Into<String>) -> Text<'a> {
-    let owned: String = body.into();
-    cosmic::widget::text(owned).wrapping(Wrapping::Word)
+/// A `.buttonStyle(.link)` button: accent text, no chrome, dimmed and
+/// inert when `on_press` is `None`.
+fn link_button<'a>(
+    label: String,
+    style: TextStyle,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let color = if on_press.is_some() {
+        Tint::Accent
+    } else {
+        Tint::Disabled
+    };
+    button::custom(styled_text(label, style, color))
+        .padding(0)
+        .class(cosmic::theme::Button::Transparent)
+        .on_press_maybe(on_press)
+        .into()
 }
 
-/// A themed icon widget by freedesktop name; size in px (cosmetic layer).
+/// An SF Symbol as a tinted SVG at `size` px. The symbolic recolor paints
+/// the tint's RGB opaquely, so the tint's alpha rides the icon's opacity.
+fn sf_icon<'a>(svg: &'static [u8], size: u16, color: Tint) -> Element<'a, Message> {
+    cosmic::widget::icon::from_svg_bytes(svg)
+        .symbolic(true)
+        .icon()
+        .size(size)
+        .opacity(tint_alpha(color))
+        .class(cosmic::theme::Svg::custom(move |theme| {
+            cosmic::iced::widget::svg::Style {
+                color: Some(Color {
+                    a: 1.0,
+                    ..tint(theme, color)
+                }),
+            }
+        }))
+        .into()
+}
+
+/// The alpha [`tint`] gives `color` — theme-independent (every tint's
+/// opacity is fixed; only its RGB follows the theme).
+fn tint_alpha(color: Tint) -> f32 {
+    match color {
+        Tint::Label => 0.85,
+        Tint::Secondary => 0.5,
+        Tint::Tertiary => 0.26,
+        Tint::Disabled => 0.25,
+        Tint::Scrim => 0.6,
+        Tint::Accent | Tint::Green | Tint::Red | Tint::Orange => 1.0,
+    }
+}
+
+/// A themed icon widget by freedesktop name; size in px (the file-type
+/// tile's icon, where the theme's own MIME art is the point).
 fn icon(name: &str, size: u16) -> cosmic::widget::Icon {
     cosmic::widget::icon::from_name(name).size(size).icon()
 }
 
-/// The same, as a button's icon handle.
-fn icon_handle(name: &str, size: u16) -> cosmic::widget::icon::Handle {
-    cosmic::widget::icon::from_name(name).size(size).handle()
+/// The SF Symbols the pane draws, as SVGs shaped after the symbols
+/// (app/resources/icons/chat/).
+const PAPERCLIP: &[u8] = include_bytes!("../resources/icons/chat/paperclip.svg");
+const ARROW_UP_CIRCLE_FILL: &[u8] =
+    include_bytes!("../resources/icons/chat/arrow-up-circle-fill.svg");
+const STOP_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/stop-circle-fill.svg");
+const TEXT_BADGE_PLUS: &[u8] = include_bytes!("../resources/icons/chat/text-badge-plus.svg");
+const CHEVRON_RIGHT: &[u8] = include_bytes!("../resources/icons/chat/chevron-right.svg");
+const CHEVRON_DOWN: &[u8] = include_bytes!("../resources/icons/chat/chevron-down.svg");
+const TERMINAL: &[u8] = include_bytes!("../resources/icons/chat/terminal.svg");
+const DOC_BADGE_PLUS: &[u8] = include_bytes!("../resources/icons/chat/doc-badge-plus.svg");
+const PENCIL: &[u8] = include_bytes!("../resources/icons/chat/pencil.svg");
+const DOC_TEXT_MAGNIFYINGGLASS: &[u8] =
+    include_bytes!("../resources/icons/chat/doc-text-magnifyingglass.svg");
+const CHECKLIST: &[u8] = include_bytes!("../resources/icons/chat/checklist.svg");
+const WRENCH_AND_SCREWDRIVER: &[u8] =
+    include_bytes!("../resources/icons/chat/wrench-and-screwdriver.svg");
+const CHECKMARK: &[u8] = include_bytes!("../resources/icons/chat/checkmark.svg");
+const XMARK: &[u8] = include_bytes!("../resources/icons/chat/xmark.svg");
+const XMARK_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/xmark-circle-fill.svg");
+const DOC_ON_DOC: &[u8] = include_bytes!("../resources/icons/chat/doc-on-doc.svg");
+const CLOCK_ARROW_CIRCLEPATH: &[u8] =
+    include_bytes!("../resources/icons/chat/clock-arrow-circlepath.svg");
+const CLOCK: &[u8] = include_bytes!("../resources/icons/chat/clock.svg");
+const PAUSE_CIRCLE: &[u8] = include_bytes!("../resources/icons/chat/pause-circle.svg");
+const PHOTO: &[u8] = include_bytes!("../resources/icons/chat/photo.svg");
+const SPARKLES: &[u8] = include_bytes!("../resources/icons/chat/sparkles.svg");
+const CUBE_TRANSPARENT: &[u8] = include_bytes!("../resources/icons/chat/cube-transparent.svg");
+const BRAIN: &[u8] = include_bytes!("../resources/icons/chat/brain.svg");
+const INFO_CIRCLE_FILL: &[u8] = include_bytes!("../resources/icons/chat/info-circle-fill.svg");
+const EXCLAMATION_TRIANGLE_FILL: &[u8] =
+    include_bytes!("../resources/icons/chat/exclamationmark-triangle-fill.svg");
+
+/// The theme corner radius for an upstream radius in points. Upstream's
+/// rounded rectangles (6-8pt) are all the small-control class; 8pt is the
+/// theme's `radius_s` and smaller ones keep their proportion to it, so the
+/// user's roundness setting (round / slightly round / square) applies.
+fn corner(theme: &cosmic::Theme, upstream_pt: f32) -> cosmic::iced::border::Radius {
+    let r = theme.cosmic().corner_radii.radius_s;
+    let k = upstream_pt / 8.0;
+    [r[0] * k, r[1] * k, r[2] * k, r[3] * k].into()
 }
 
-fn secondary_text<'a>(body: impl Into<String>) -> Text<'a> {
-    let owned: String = body.into();
-    body_text(owned).class(secondary_text_class())
-}
-
-fn secondary_text_class() -> cosmic::theme::Text {
-    cosmic::theme::Text::Custom(|theme| {
-        let mut color = Color::from(theme.cosmic().background(false).on);
-        color.a *= 0.65;
-        cosmic::iced::widget::text::Style {
-            color: Some(color),
-            ..Default::default()
-        }
-    })
-}
-
-/// A subtle rounded fill with a hairline border — the port of upstream's
-/// `.quaternary.opacity(alpha)` + separator stroke. `alpha` is upstream's
-/// opacity for the surface it picked (1.0 = the solid fill); `radius`
-/// approximates upstream's corner radius.
-fn subtle_style(radius: f32, alpha: f32) -> cosmic::theme::Container<'static> {
+/// A rounded fill of the text color at `alpha` (macOS `.quaternary` and
+/// friends composite the label color over whatever is behind), with an
+/// optional separator stroke; `radius` is upstream's, in points (see
+/// [`corner`]).
+fn fill_style(alpha: f32, radius: f32, stroke: bool) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| {
-        let mut base = Color::from(theme.cosmic().background(false).component.base);
-        base.a *= alpha;
-        let mut border_color = Color::from(theme.cosmic().background(false).on);
-        border_color.a = 0.15;
-        let r = theme.cosmic().corner_radii.radius_s;
-        let scale = radius / 8.0;
+        let label = label_color(theme);
         ContainerStyle {
-            background: Some(cosmic::iced::Background::Color(base)),
+            background: Some(cosmic::iced::Background::Color(with_alpha(label, alpha))),
             border: cosmic::iced::Border {
-                color: border_color,
-                width: 1.0,
-                radius: [r[0] * scale, r[1] * scale, r[2] * scale, r[3] * scale].into(),
+                color: if stroke {
+                    with_alpha(label, SEPARATOR)
+                } else {
+                    Color::TRANSPARENT
+                },
+                width: if stroke { 1.0 } else { 0.0 },
+                radius: corner(theme, radius),
             },
             ..Default::default()
         }
     })
 }
 
-/// Upstream's orange system-row tint (MessageView.swift:67-68) — explicit
-/// color like upstream's, faded over the theme background.
+/// The input field (ChatInputView.swift:52-56): the text-background
+/// surface (upstream NSColor `textBackgroundColor`; here the theme's
+/// component surface, which lifts off the pane in light and dark alike),
+/// radius 8pt, a separator stroke that turns accent at 60% while focused;
+/// body text, placeholder in the placeholder-text color (label at 25%).
+fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_editor::Style {
+    let label = label_color(theme);
+    let background = Color::from(theme.cosmic().background(false).component.base);
+    let stroke = match status {
+        text_editor::Status::Focused { .. } => {
+            with_alpha(Color::from(theme.cosmic().accent.base), 0.6)
+        }
+        _ => with_alpha(label, SEPARATOR),
+    };
+    text_editor::Style {
+        background: background.into(),
+        border: cosmic::iced::Border {
+            color: stroke,
+            width: 1.0,
+            radius: corner(theme, 8.0),
+        },
+        placeholder: with_alpha(label, 0.25),
+        value: tint(theme, Tint::Label),
+        selection: with_alpha(Color::from(theme.cosmic().accent.base), 0.35),
+    }
+}
+
+/// Upstream's orange system-row tint (MessageView.swift:67-68): orange at
+/// 8% over the background, a 25% orange stroke, radius 8.
 fn warn_style() -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(|theme| {
-        let base = Color::from(theme.cosmic().background(false).base);
-        let orange = Color::from_rgb(1.0, 0.58, 0.02);
-        let blended = Color::from_rgba(
-            orange.r * 0.08 + base.r * 0.92,
-            orange.g * 0.08 + base.g * 0.92,
-            orange.b * 0.08 + base.b * 0.92,
-            1.0,
-        );
-        let mut border = orange;
-        border.a = 0.25;
+        let orange = tint(theme, Tint::Orange);
         ContainerStyle {
-            background: Some(cosmic::iced::Background::Color(blended)),
+            background: Some(cosmic::iced::Background::Color(with_alpha(orange, 0.08))),
             border: cosmic::iced::Border {
-                color: border,
+                color: with_alpha(orange, 0.25),
                 width: 1.0,
-                radius: theme.cosmic().corner_radii.radius_s.into(),
+                radius: corner(theme, 8.0),
             },
             ..Default::default()
         }
@@ -1073,7 +1556,7 @@ fn warn_style() -> cosmic::theme::Container<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::ChatState;
+    use crate::chat::{self, ChatState, MarkerAffordance};
     use engine::agent::session::EngineEvent;
     use engine::project::store::{Action, Role};
     use std::time::Instant;
@@ -1286,8 +1769,7 @@ mod tests {
         // a decodable image the thumbnail widget can load, and a
         // non-image file that takes the file-type tile
         let png = root.join("references").join("1790000000-1-sketch.png");
-        let tiny =
-            image::RgbaImage::from_pixel(4, 4, image::Rgba([12, 34, 56, 255]));
+        let tiny = image::RgbaImage::from_pixel(4, 4, image::Rgba([12, 34, 56, 255]));
         tiny.save(&png).unwrap();
         std::fs::write(root.join("references").join("1790000000-2-notes.txt"), b"x").unwrap();
 
@@ -1349,6 +1831,55 @@ mod tests {
         chat.append(user_row("make the wall 4 mm"));
 
         let pane = ChatPane::new();
+        let _ = view_chat(&pane, &chat, true, &[], false, &root);
+    }
+
+    /// lineLimit(12) parity for the tool input card: twelve lines pass
+    /// through untouched; past that the first twelve show and the last
+    /// visible one ends in an ellipsis.
+    #[test]
+    fn clip_lines_caps_at_limit() {
+        let twelve: String = (1..=12)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(clip_lines(&twelve, 12), twelve);
+        let thirteen = format!("{twelve}\n13");
+        let clipped = clip_lines(&thirteen, 12);
+        assert_eq!(clipped.lines().count(), 12);
+        assert!(clipped.ends_with("12…"), "{clipped}");
+        assert_eq!(clip_lines("one", 12), "one");
+        assert_eq!(clip_lines("", 12), "");
+    }
+
+    /// Version markers, fenced code cards and the plain summary caption
+    /// all build: a transcript holding a current marker, a restorable one
+    /// (idle and busy), an unknown one, an interrupted marker, and an
+    /// assistant row with a fence.
+    #[test]
+    fn markers_and_code_cards_construct() {
+        let root = std::env::temp_dir().join(format!("cad-chatview-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let summary = |text: &str, detail: Option<&str>| ChatMessage {
+            role: Role::Summary,
+            detail: detail.map(str::to_string),
+            ..user_row(text)
+        };
+        let assistant = ChatMessage {
+            role: Role::Assistant,
+            ..user_row("Ecco:\n```python\nprint(1)\n```\nfatto")
+        };
+        let mut chat = ChatState::new(vec![
+            summary("Versione 1", Some("1")),
+            summary("Versione 2", Some("2")),
+            summary("Versione 9", Some("9")),
+            summary("Interrotto", None),
+            assistant,
+        ]);
+        chat.versions = vec![1, 2];
+        chat.current_version = Some(2);
+        let pane = ChatPane::new();
+        let _ = view_chat(&pane, &chat, false, &[], false, &root);
         let _ = view_chat(&pane, &chat, true, &[], false, &root);
     }
 }
