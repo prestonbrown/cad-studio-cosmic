@@ -1485,10 +1485,50 @@ impl ProjectWindow {
         // upstream gates export and slicer on output.hasThreeMF
         let has_3mf = self.output_dir().join(folder::MODEL_3MF).exists();
 
-        // icon sizes and button widths: the upstream capture's glyph bboxes
-        // and center-to-center pitch (sidebar→play 38, play→stop 34, the
-        // primary group 38), halved to the 1x basis
-        let start = Row::new()
+        let start = self.view_toolbar_start(busy);
+        let end = self.view_toolbar_end(busy, has_3mf);
+
+        let bar: Element<'_, Message> = cosmic::widget::header_bar()
+            .focused(focused)
+            .on_close(Message::App(AppRequest::Close))
+            .on_minimize(Message::App(AppRequest::Window(WindowOp::Minimize)))
+            .on_maximize(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+            .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
+            .on_double_click(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+            .on_right_click(Message::App(AppRequest::Window(WindowOp::Menu)))
+            .start(start)
+            .center(self.view_activity())
+            .end(end)
+            .into();
+        // the bar's own height is libcosmic's fixed 47; the strip it is
+        // centered in carries the same drag/maximize/menu wiring so the
+        // whole 52 px band moves the window
+        let band = cosmic::widget::mouse_area(
+            container(bar)
+                .width(Length::Fill)
+                .height(Length::Fixed(HEADER_HEIGHT))
+                .align_y(cosmic::iced::alignment::Vertical::Center),
+        )
+        .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
+        .on_double_press(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+        .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
+        Column::with_capacity(2)
+            .push(band)
+            .push(
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
+                    surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false),
+                ),
+            )
+            .into()
+    }
+
+    /// The header's leading group: the menu bar (with the Open Recent
+    /// card), the chat toggle, Compila and Stop. Icon sizes and button
+    /// widths, here and in [`Self::view_toolbar_end`]: the upstream
+    /// capture's glyph bboxes and center-to-center pitch (sidebar→play 38,
+    /// play→stop 34, the primary group 38), halved to the 1x basis.
+    fn view_toolbar_start(&self, busy: bool) -> Element<'_, Message> {
+        Row::new()
             .align_y(cosmic::iced::Alignment::Center)
             .push({
                 // "Apri recenti" (Commands.swift:30-40) drops its card from
@@ -1525,9 +1565,14 @@ impl ProjectWindow {
                 32.0,
                 busy.then_some(Message::Command(Command::Stop)),
                 fl!("interrompi"),
-            ));
+            ))
+            .into()
+    }
 
-        let end = Row::new()
+    /// The header's primary-action group: versions, reveal, export,
+    /// slicer, parameters.
+    fn view_toolbar_end(&self, busy: bool, has_3mf: bool) -> Element<'_, Message> {
+        Row::new()
             .align_y(cosmic::iced::Alignment::Center)
             .push({
                 let mut versions = popover(crate::version_menu::version_button(
@@ -1587,39 +1632,7 @@ impl ProjectWindow {
                 38.0,
                 Some(Message::Command(Command::ToggleParameters)),
                 fl!("mostra-o-nascondi-i-parametri-i"),
-            ));
-
-        let bar: Element<'_, Message> = cosmic::widget::header_bar()
-            .focused(focused)
-            .on_close(Message::App(AppRequest::Close))
-            .on_minimize(Message::App(AppRequest::Window(WindowOp::Minimize)))
-            .on_maximize(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
-            .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
-            .on_double_click(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
-            .on_right_click(Message::App(AppRequest::Window(WindowOp::Menu)))
-            .start(start)
-            .center(self.view_activity())
-            .end(end)
-            .into();
-        // the bar's own height is libcosmic's fixed 47; the strip it is
-        // centered in carries the same drag/maximize/menu wiring so the
-        // whole 52 px band moves the window
-        let band = cosmic::widget::mouse_area(
-            container(bar)
-                .width(Length::Fill)
-                .height(Length::Fixed(HEADER_HEIGHT))
-                .align_y(cosmic::iced::alignment::Vertical::Center),
-        )
-        .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
-        .on_double_press(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
-        .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
-        Column::with_capacity(2)
-            .push(band)
-            .push(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
-                    surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false),
-                ),
-            )
+            ))
             .into()
     }
 
