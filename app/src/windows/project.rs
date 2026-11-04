@@ -493,9 +493,8 @@ impl ProjectWindow {
             grid,
             size: DEFAULT_SIZE,
             chat: {
-                // seed the engine from the settings snapshot so the empty
-                // transcript's placeholder names the engine that will run
-                // the first turn; each TurnStarted re-seeds per turn
+                // the engine names the rows until the first TurnStarted
+                // re-seeds it per turn
                 let mut chat = ChatState::new(store::load_chat(&root).unwrap_or_default());
                 chat.engine = settings.agent_kind();
                 chat
@@ -1358,6 +1357,7 @@ impl ProjectWindow {
                         &self.queue,
                         self.queue_paused,
                         &self.root,
+                        &self.settings,
                     )
                     .map(Message::Chat),
                     |content: Option<ClipboardContent>, _action| {
@@ -3182,5 +3182,33 @@ mod tests {
         assert_eq!(window.bridge.compare_version(), None);
         assert!(!window.viewer.comparing);
         assert!(window.viewer.scene.ghost.is_none());
+    }
+
+    /// The empty transcript's placeholder names the engine setting as it is
+    /// at render (`view_chat` calls `empty_state_engine` with the window's
+    /// store), so a flip made after the window opened shows on the next
+    /// view.
+    #[tokio::test]
+    async fn empty_transcript_names_the_current_engine() {
+        let root = std::env::temp_dir().join(format!("cad-engine-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let settings = SettingsStore::in_temp_dir();
+        let (window, _bridge_task) = ProjectWindow::new(root, &settings);
+        assert_eq!(
+            chat_view::empty_state_engine(&window.settings),
+            engine::agent::locator::AgentKind::Claude
+        );
+        settings
+            .update(|stored| stored.agent_engine = "codex".to_string())
+            .unwrap();
+        assert_eq!(
+            chat_view::empty_state_engine(&window.settings),
+            engine::agent::locator::AgentKind::Codex,
+            "read at render, not at window build"
+        );
     }
 }

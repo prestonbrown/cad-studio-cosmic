@@ -70,9 +70,7 @@ pub struct ChatState {
     /// thinking/auth/error rows interpolate and the login command the auth
     /// row shows (AgentLocator.swift:11-30). Set at turn start from the
     /// per-turn settings re-read so a flipped engine names its
-    /// own rows from its first turn; the window seeds it from the settings
-    /// so the empty transcript's placeholder names the engine that will
-    /// run the first turn. Defaults claude, like `AgentEngine(rawValue:)`.
+    /// own rows from its first turn. Defaults claude, like `AgentEngine(rawValue:)`.
     pub engine: AgentKind,
     /// The input bar's draft (upstream `ChatViewModel.draft`).
     pub draft: String,

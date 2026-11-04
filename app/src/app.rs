@@ -333,9 +333,7 @@ impl Application for CadStudio {
                     .first()
                     .map(|path| {
                         let msg = settings::Message::LocationChosen(path.clone());
-                        let task = self.update_settings_any(msg.clone());
-                        self.fold_settings_state(&msg);
-                        task
+                        self.update_settings_any(msg)
                     })
                     .unwrap_or_else(Task::none),
                 Err(_cancelled) => Task::none(),
@@ -809,6 +807,7 @@ impl CadStudio {
                     .settings
                     .update(|stored| sheet.stage_custom_path(stored));
                 sheet.checking = true;
+                self.reseed_settings_windows();
                 let engine = settings.agent_kind();
                 let future = locate_agent(engine, settings.agent_path(engine).map(str::to_string));
                 return Task::future(async move {
@@ -1007,15 +1006,14 @@ impl CadStudio {
         Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
     }
 
-    /// One settings-window message: fold the mirror, perform the write
-    /// (load-modify-save, the ONE-writer law), then the effects.
+    /// One settings-window message: the write (load-modify-save, the
+    /// ONE-writer law), the mirror fold on success, then the effects.
     fn update_settings(&mut self, id: window::Id, msg: settings::Message) -> Task<Action<Message>> {
         if !matches!(self.windows.get(&id), Some(WindowKind::Settings(_))) {
             return Task::none();
         }
-        let task = self.update_settings_any(msg.clone());
         let before = self.settings_height();
-        self.fold_settings_state(&msg);
+        let task = self.update_settings_any(msg.clone());
         let resize = match (before, self.settings_height()) {
             (Some(before), Some(after)) => settings_resize(id, before, after),
             _ => Task::none(),
@@ -1045,21 +1043,42 @@ impl CadStudio {
         }
     }
 
-    /// The write + effects of one settings message, against whichever
-    /// settings window is open (there is at most one; the portal's answer
-    /// arrives here when the window that asked has since closed).
+    /// Re-seed the open settings window's mirror from the settings file, so
+    /// a write made elsewhere (the agent sheet's path) or a refused one
+    /// leaves the window showing what is persisted.
+    fn reseed_settings_windows(&mut self) {
+        let fresh = self.settings.load();
+        for window in self.windows.values_mut() {
+            if let WindowKind::Settings(state) = window {
+                state.reseed(&fresh);
+            }
+        }
+    }
+
+    /// The write, the mirror fold and the effects of one settings message,
+    /// against whichever settings window is open (there is at most one; the
+    /// portal's answer arrives here when the window that asked has since
+    /// closed).
     fn update_settings_any(&mut self, msg: settings::Message) -> Task<Action<Message>> {
         // the write: engine settings.json only, through the one store; an
-        // effect message (a tab switch, a locate) writes nothing
-        if settings::persists(&msg)
-            && self
+        // effect message (a tab switch, a locate) writes nothing. The
+        // mirror takes the message only when the write landed; a refused
+        // save re-seeds it from disk instead of showing an unsaved value.
+        if settings::persists(&msg) {
+            let saved = self
                 .settings
                 .update(|persisted| {
                     settings::stage(&msg, persisted);
                 })
-                .is_ok()
-        {
-            self.push_unit_to_viewers();
+                .is_ok();
+            if saved {
+                self.push_unit_to_viewers();
+                self.fold_settings_state(&msg);
+            } else {
+                self.reseed_settings_windows();
+            }
+        } else {
+            self.fold_settings_state(&msg);
         }
         match msg {
             settings::Message::ChooseLocation(starting) => {
@@ -2350,5 +2369,76 @@ mod shell_behavior {
             None
         );
         assert_eq!(sheet_key_role(&Key::Named(Named::Tab), &none), None);
+    }
+
+    fn open_settings_window(f: &mut Fixture) -> window::Id {
+        let id = window::Id::unique();
+        let state = SettingsState::new(&f.app.settings.load());
+        f.app.windows.insert(id, WindowKind::Settings(state));
+        id
+    }
+
+    fn settings_state(f: &Fixture, id: window::Id) -> &SettingsState {
+        match f.app.windows.get(&id) {
+            Some(WindowKind::Settings(state)) => state,
+            _ => panic!("the settings window is gone"),
+        }
+    }
+
+    /// The agent sheet's Verify persists the custom path; an open settings
+    /// window shows it without a reopen.
+    #[test]
+    fn settings_window_reseeds_when_agent_path_changes_underneath() {
+        let mut f = fixture();
+        let id = open_settings_window(&mut f);
+        assert_eq!(settings_state(&f, id).custom_paths[0], "");
+        f.app.agent_missing = Some(sheets::AgentMissing {
+            kind: AgentKind::Claude,
+            custom_path: "/opt/tools/claude".to_string(),
+            ..sheets::AgentMissing::default()
+        });
+        let _ = f
+            .app
+            .update(Message::AgentSheet(sheets::AgentMessage::Verify));
+        assert_eq!(settings_state(&f, id).custom_paths[0], "/opt/tools/claude");
+    }
+
+    /// A settings write the store refuses leaves the window's mirror on
+    /// the persisted value.
+    #[test]
+    fn a_failed_settings_save_does_not_leave_the_mirror_ahead_of_the_file() {
+        let mut f = fixture();
+        let id = open_settings_window(&mut f);
+        std::fs::write(f.app.settings.path(), "not json").unwrap();
+        let _ = f.app.update(Message::Settings(
+            id,
+            settings::Message::Model(AgentKind::Claude, "opus".to_string()),
+        ));
+        assert_eq!(
+            settings_state(&f, id).models[0],
+            "",
+            "the refused save is not shown"
+        );
+        std::fs::write(f.app.settings.path(), "{}").unwrap();
+        let _ = f.app.update(Message::Settings(
+            id,
+            settings::Message::Model(AgentKind::Claude, "opus".to_string()),
+        ));
+        assert_eq!(settings_state(&f, id).models[0], "opus", "a saved one is");
+    }
+
+    /// Verifica after a failed environment check starts a new check.
+    #[tokio::test]
+    async fn verifica_after_a_failed_check_reruns_the_check() {
+        let mut f = fixture();
+        let id = open_settings_window(&mut f);
+        f.app.python.state.state = EnvState::Failed("broken".to_string());
+        let _ = f
+            .app
+            .update(Message::Settings(id, settings::Message::PythonCheck));
+        assert!(
+            matches!(f.app.python.state.state, EnvState::Checking),
+            "the check restarts"
+        );
     }
 }
