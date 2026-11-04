@@ -16,7 +16,7 @@
 //! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
 //! copy button; pickers are form pickers ([`ui::picker`]), and the print-preferences
 //! section renders as a grouped Form ([`ui::form`]). Sheets are COSMIC
-//! dialog cards over the window's dimmed body ([`present`]); the python
+//! dialog cards over the window's washed body ([`present`]); the python
 //! and agent-missing sheets scroll their content above pinned action rows
 //! so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
@@ -426,8 +426,35 @@ fn sheet_head<'a, M: 'a>(
         .into()
 }
 
-/// `card` presented as a sheet over `body`: the body dimmed under the
-/// theme's dialog shade, the card centered on it. Presses and wheel
+/// The share of the window content's contrast that shows through a
+/// sheet's scrim: macOS washes a window behind a sheet to about 38% of its
+/// contrast in both appearances (white paper to the window gray, a red
+/// face to a muted rose in light, to a dark maroon in dark).
+pub const SHEET_CONTENT_RETAINED: f32 = 0.38;
+
+/// The scrim a sheet lays over its window, from the theme's window
+/// `background` and its dialog `shade` alpha: content keeps
+/// [`SHEET_CONTENT_RETAINED`] of its contrast and washes toward the window
+/// background, and the window background itself ends exactly under the
+/// theme's shade. A shade already darker than that wash is drawn alone.
+pub fn sheet_scrim(background: cosmic::iced::Color, shade_alpha: f32) -> cosmic::iced::Color {
+    let kept = 1.0 - shade_alpha;
+    if kept <= SHEET_CONTENT_RETAINED {
+        return cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, shade_alpha);
+    }
+    let alpha = 1.0 - SHEET_CONTENT_RETAINED;
+    // over any pixel x: x·retained + background·(kept − retained)
+    let gain = (kept - SHEET_CONTENT_RETAINED) / alpha;
+    cosmic::iced::Color::from_rgba(
+        background.r * gain,
+        background.g * gain,
+        background.b * gain,
+        alpha,
+    )
+}
+
+/// `card` presented as a sheet over `body`: the body washed under
+/// [`sheet_scrim`], the card centered on it. Presses and wheel
 /// scrolls that miss the card land on the shade (`swallow`), never on the
 /// body below.
 pub fn present<'a, M: Clone + 'a>(
@@ -443,7 +470,10 @@ pub fn present<'a, M: Clone + 'a>(
             .align_y(cosmic::iced::Alignment::Center)
             .class(cosmic::theme::Container::custom(|theme| {
                 cosmic::iced::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(theme.cosmic().shade.into())),
+                    background: Some(cosmic::iced::Background::Color(sheet_scrim(
+                        theme.cosmic().bg_color().into(),
+                        theme.cosmic().shade.alpha,
+                    ))),
                     ..Default::default()
                 }
             })),
@@ -750,6 +780,47 @@ fn callout<'a>(label: impl Into<String>) -> Text<'a> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// `scrim` source-over `under`, one channel.
+    fn over(
+        scrim: cosmic::iced::Color,
+        under: f32,
+        channel: fn(cosmic::iced::Color) -> f32,
+    ) -> f32 {
+        channel(scrim) * scrim.a + under * (1.0 - scrim.a)
+    }
+
+    #[test]
+    fn sheet_scrim_keeps_the_measured_contrast_and_lands_the_background_under_the_shade() {
+        let light = cosmic::iced::Color::from_rgb(0.84, 0.84, 0.84);
+        let dark = cosmic::iced::Color::from_rgb(0.11, 0.11, 0.11);
+        for (background, shade) in [(light, 0.08), (dark, 0.32)] {
+            let scrim = sheet_scrim(background, shade);
+            let red = |c: cosmic::iced::Color| c.r;
+            let white = over(scrim, 1.0, red);
+            let black = over(scrim, 0.0, red);
+            assert!(
+                (white - black - SHEET_CONTENT_RETAINED).abs() < 1e-5,
+                "{white} {black}"
+            );
+            let window = over(scrim, background.r, red);
+            assert!(
+                (window - background.r * (1.0 - shade)).abs() < 1e-5,
+                "{window}"
+            );
+            // a wash toward the window color, not a plain black dim
+            assert!(black > 0.0);
+        }
+        // light washes toward a light gray, dark toward a near black
+        assert!(over(sheet_scrim(light, 0.08), 0.0, |c| c.r) > 0.4);
+        assert!(over(sheet_scrim(dark, 0.32), 0.0, |c| c.r) < 0.06);
+    }
+
+    #[test]
+    fn sheet_scrim_past_the_wash_is_the_shade_alone() {
+        let scrim = sheet_scrim(cosmic::iced::Color::WHITE, 0.7);
+        assert_eq!(scrim, cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.7));
+    }
 
     /// The custom path field round-trips into the engine settings: a typed
     /// path lands verbatim (trimmed), an emptied field clears the setting
