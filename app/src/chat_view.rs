@@ -1598,8 +1598,24 @@ mod tests {
 
         let pane = ChatPane::new();
         let empty = ChatState::new(Vec::new());
-        let _ = view_chat(&pane, &empty, false, &[], false, &root, engine::agent::locator::AgentKind::Claude);
-        let _ = view_chat(&pane, &empty, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(
+            &pane,
+            &empty,
+            false,
+            &[],
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
+        let _ = view_chat(
+            &pane,
+            &empty,
+            true,
+            &[],
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
 
         // a user row with both attachment forms: the relative copy names
         // current rows carry, and an absolute original (the legacy shape)
@@ -1620,8 +1636,24 @@ mod tests {
             text: "next up".into(),
             images: 1,
         }];
-        let _ = view_chat(&pane, &chat, true, &queue, true, &root, engine::agent::locator::AgentKind::Claude);
-        let _ = view_chat(&pane, &chat, false, &queue, false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(
+            &pane,
+            &chat,
+            true,
+            &queue,
+            true,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
+        let _ = view_chat(
+            &pane,
+            &chat,
+            false,
+            &queue,
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
 
         // the decoded thumbnail cached the real PNG and recorded the
         // missing file as known-failed (the tile, not a retry)
@@ -1654,7 +1686,15 @@ mod tests {
         chat.append(user_row("make the wall 4 mm"));
 
         let pane = ChatPane::new();
-        let _ = view_chat(&pane, &chat, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(
+            &pane,
+            &chat,
+            true,
+            &[],
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
     }
 
     /// Version markers, fenced code cards and the plain summary caption
@@ -1684,7 +1724,23 @@ mod tests {
         chat.versions = vec![1, 2];
         chat.current_version = Some(2);
         let pane = ChatPane::new();
-        let _ = view_chat(&pane, &chat, false, &[], false, &root, engine::agent::locator::AgentKind::Claude);
-        let _ = view_chat(&pane, &chat, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(
+            &pane,
+            &chat,
+            false,
+            &[],
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
+        let _ = view_chat(
+            &pane,
+            &chat,
+            true,
+            &[],
+            false,
+            &root,
+            engine::agent::locator::AgentKind::Claude,
+        );
     }
 }

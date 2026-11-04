@@ -795,10 +795,7 @@ fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
         ));
     vec![
         form::section(vec![
-            form::row(
-                fl!("interprete"),
-                path_text(interpreter_label(&home)),
-            ),
+            form::row(fl!("interprete"), path_text(interpreter_label(&home))),
             form::row(fl!("build123d"), build123d),
             form::full_row(actions),
         ]),
