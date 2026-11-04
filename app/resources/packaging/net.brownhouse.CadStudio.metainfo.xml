@@ -11,6 +11,10 @@
   <description>
     <p>Describe a part, get a printable model. CAD Studio drives your locally installed Claude Code (or Codex) and build123d to turn a description into a printable 3D model and its technical drawing.</p>
   </description>
+  <developer id="net.brownhouse">
+    <name>Preston Brown</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
   <launchable type="desktop-id">net.brownhouse.CadStudio.desktop</launchable>
   <releases>
     <release version="@CARGO_PKG_VERSION@" date="2026-10-28"/>

@@ -43,7 +43,7 @@ install profile="release":
         $HOME/.local/share/icons/hicolor/256x256/apps \
         $HOME/.local/share/icons/hicolor/512x512/apps
     install -m 755 \
-        target/{{ if profile == "dev" { "debug" } else { profile } }}/cad-studio \
+        ${CARGO_TARGET_DIR:-target}/{{ if profile == "dev" { "debug" } else { profile } }}/cad-studio \
         $HOME/.local/bin/cad-studio
     sed -e "s|@BIN@|$HOME/.local/bin/cad-studio|" \
         app/resources/packaging/{{app-id}}.desktop \
