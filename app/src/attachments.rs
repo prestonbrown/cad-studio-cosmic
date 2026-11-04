@@ -156,13 +156,18 @@ pub fn resolve_attachment(path: &str, root: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pasted_bytes_that_do_not_decode_are_refused() {
-        assert_eq!(saved_image(b"not an image"), None);
+    fn tiny_png() -> Vec<u8> {
         let mut png = Vec::new();
         image::DynamicImage::new_rgba8(2, 2)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
+        png
+    }
+
+    #[test]
+    fn pasted_bytes_that_do_not_decode_are_refused() {
+        assert_eq!(saved_image(b"not an image"), None);
+        let png = tiny_png();
         let saved = saved_image(&png).expect("valid PNG bytes save");
         assert_eq!(std::fs::read(&saved).unwrap(), png);
         let _ = std::fs::remove_file(saved);
@@ -240,7 +245,7 @@ mod tests {
     /// (Attachments.swift:26-31) and the name sorts by time.
     #[test]
     fn saved_image_writes_upstreams_temp_shape() {
-        let path = saved_image(b"png-bytes").expect("a writable tmp");
+        let path = saved_image(&tiny_png()).expect("a writable tmp");
         let text = path.to_string_lossy().into_owned();
         assert!(
             path.to_string_lossy().contains("CAD Studio Attachments"),
@@ -260,7 +265,7 @@ mod tests {
                 && stamp.rfind('.').is_some(),
             "{stamp}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), b"png-bytes");
+        assert_eq!(std::fs::read(&path).unwrap(), tiny_png());
     }
 
     /// The read-side law: relative `references/…` names resolve against the
