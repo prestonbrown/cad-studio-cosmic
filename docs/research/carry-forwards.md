@@ -276,6 +276,7 @@ minors, each with its owner:
   single-menu shape is unreachable evidence-wise while the menu-corruption
   boundary is unpinned; struck plan Task 2, the bug record). Revisit only
   if M9 pins the boundary; motion_controls' module doc carries the ruling.
+  **Owner: M9 Task 5** (speed menu single-menu shape and ✓ marks).
 - Translucent parts composite in slot order (no sort among translucents,
   depth-write off) where SceneKit sorts transparents back-to-front —
   cosmetic; the offscreen playback shots are the eyeball-verdict venue
@@ -352,7 +353,8 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   text-only item flips are ruled out until M9 certifies them
   (docs/research/libcosmic-menu-dynamic-items-bug.md; the plan's struck
   Task 2 records why no probe can certify it today). Revisit only if M9
-  pins the boundary. ~~The pre-existing mostra/nascondi-chat View-root
+  pins the boundary (**owner: M9 Task 5**, the flipping parameters label).
+  ~~The pre-existing mostra/nascondi-chat View-root
   flip (M4 vintage) is the one remaining text-only flip against that
   ruling — untested hazard, same owner (M9 boundary pin or a fixwave
   that statics its label the same way).~~ (wave 2: static "Mostra o
@@ -456,7 +458,9 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   so flipping the picker during a busy wait changes the retry's engine
   there. The port's retry resumes a claude session id, which only the same
   engine can resume; the picker's write decides the next turn.
-- Gallery-2 divergences (light + dark against shots/upstream, 2026-11-04):
+- Gallery-2 divergences (light + dark against shots/upstream, 2026-11-04).
+  The header height, picker menu, version menu clipping and focus ring below
+  are ACCEPTED (M9 Ruling 4, not revisited):
   - The COSMIC header bar is ~19 px taller than the macOS title bar; its
     height follows the user's header-density setting (libcosmic
     header_bar.rs:384-427).
@@ -466,28 +470,33 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   - The version menu is clipped to the window; upstream's menu window can
     extend past it.
   - The playback speed menu's ✓ marks are text, and its width shortens the
-    scrub slider by ~25 px.
+    scrub slider by ~25 px. **Owner: M9 Task 5** (✓ marks).
   - The lid's specular falloff is missing. In dark playback the ghost's
     side faces read 10-19 low in red, because the opaque side shading is
-    darker.
+    darker. (No M9 owner; cosmetic, awaiting a ruling.)
   - A focused sheet field's ring sits inside the field; libcosmic's outside
     ring leaves a 1 px gap.
   - The agent-missing sheet lists only the npm install line (`brew --cask`
-    is macOS-only).
+    is macOS-only). (Platform-correct by construction; no owner needed.)
 
 ## M9 / general
 
-- Attachments divergences (M8 T4 review, 2026-10-28): (a) paste reads
-  uri-list + PNG only — upstream also pastes TIFF (Attachments.swift:15-18);
-  TIFF paste falls through to text. (b) non-image tiles use the generic
-  text-x-generic icon where upstream's NSWorkspace.icon(forFile:) is
-  per-file-type (cosmetic). (c) saved_image stages undecodable bytes with no
-  decode gate (upstream's NSImage(data:) refuses at paste) — a mislabeled
-  paste ships to the agent as a reference; gate or accept. Owner: M9 polish /
-  T11 fixwave if cheap. Also: the frame pass owes one real COSMIC Files
-  drag-drop (T4's own open probe) and the queue-count nuance (upstream labels
-  all attachments "N immagini"; port counts images only — pre-existing).
-
+- Attachments divergences (M8 T4 review, 2026-10-28):
+  - (a) Paste reads uri-list + PNG only; upstream also pastes TIFF
+    (Attachments.swift:15-18) and TIFF paste falls through to text.
+    **ACCEPTED DIVERGENCE (M9 Ruling 2):** COSMIC screenshot tools and
+    browsers offer `image/png`, and the `image` crate's tiff decoder would be
+    a dependency for a path nobody on the target desktop takes.
+  - (b) Non-image tiles use the generic text-x-generic icon where upstream's
+    NSWorkspace.icon(forFile:) is per-file-type (cosmetic). **Owner: M9 Task 3.**
+  - (c) saved_image stages undecodable bytes with no decode gate (upstream's
+    NSImage(data:) refuses at paste), so a mislabeled paste ships to the agent
+    as a reference. **Owner: M9 Task 3** (decode gate).
+  - Queue-count nuance: upstream labels all attachments "N immagini"; the port
+    counts images only. **M9 Ruling 3: match upstream** (count every
+    attachment). **Owner: M9 Task 3** (`queue_label_counts_every_attachment`).
+  - The frame pass owes one real COSMIC Files drag-drop (T4's own open probe).
+    **Owner: M9 Task 8** (needs a COSMIC session).
 
 - ~~Spinner sizing (2026-10-28, Preston's play session): the header
   ActivityViewer spinner and the chat thinking-row spinner render at the
@@ -541,13 +550,18 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   per-pane icons (package-x-generic / x-office-document) + fl! strings —
   upstream shows both too, but centered and icon-distinct. (3) the chat
   input card floats (outer inset) instead of clipping the pane's bottom
-  edge. OPEN follow-ups from the fix review: the input row's send area
-  should be eyeballed for width starvation (the editor's width DEFAULTS
-  to Length::Fill — iced text_editor.rs:159 — and if iced's flex pass
-  starves later Shrink children the send button collapses; reviewer's
-  hypothesis, unverified live); six hand-copies of the two text-color
-  rules across four modules (one shared styling module due when a 7th
-  copy appears).
+  edge. Follow-ups from the fix review, both closed: ~~the input row's
+  send area should be eyeballed for width starvation (the editor's width
+  DEFAULTS to Length::Fill — iced text_editor.rs:159)~~ — eyeballed: the
+  gallery-2 captures (scripts/rig/shots/spec:1 `project-light`, :12
+  `project-dark`) show the send button at full width at the input row's
+  trailing edge in both appearances (there is no automated pin; a layout
+  regression shows in the next capall); ~~six hand-copies of the two
+  text-color rules across four modules~~ — they live in `ui::tone`
+  (app/src/ui/tone.rs: `Tone::text`, `text_style`), and grep finds no
+  text-color rule outside it other than segmented.rs's disabled-selected
+  label (a different rule); the remaining `background(false).on` uses are
+  svg ink and control fills, not text. Pinned by `ui::tone::tests::the_text_class_draws_the_role`.
 - **FIXED (2026-10-15): project window panicked on its 2nd frame —
   `Downcast on stateless state`** (iced tree.rs:505) at TextEditor layout
   inside the chat pane. Root cause (proven by instrumenting
@@ -613,29 +627,40 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   dedups by root; two roots = two windows); the fix is window-tagged event
   routing (the pane has no window-focus knowledge today) — a later-milestone
   design, recorded here until then. The single-window case is unaffected
-  (T9 verified the editor-capture mechanism end-to-end).
+  (T9 verified the editor-capture mechanism end-to-end). **Owner: M9 Task 2.**
 
 - Settings-window follow-ups (M8 T6 review, 2026-10-29, all LOW): (a)
-  ConfigureClaude parity is one half short — upstream auto-presents the
-  agent-missing sheet PER TURN on a missing executable (AgentSession.swift:
-  41-47) and appends the .configureClaude row; the port auto-presents at
-  startup only, and a mid-session bad custom path (reachable via the new
-  Agente tab) yields a plain error row with no action — the engine marker
-  (T3's flagged wiring) and the per-turn auto-present file together; (b) the
-  empty-transcript placeholder engine name seeds at window build, stale
-  across a mid-session flip until the next turn (upstream reads at render);
-  (c) an open settings window doesn't re-seed when the agent sheet writes
-  agent_path underneath it (stale display, no lost write). Cosmetic notes:
-  mirror-fold on a failed persist save; Python tab interpreter not
-  tilde-abbreviated; About unreachable from welcome-only (recorded).
+  ~~ConfigureClaude parity: upstream auto-presents the agent-missing sheet PER
+  TURN on a missing executable (AgentSession.swift:41-47) and appends the
+  .configureClaude row.~~ Struck: a turn that ends `TurnOutcome::AgentMissing`
+  routes through `AgentLocated(false)` into `present_agent_missing`
+  (app/src/app.rs:712-723, :359-367, :604), and `ChatState` appends the
+  Configure-agent system row (app/src/chat.rs:449-455). Pinned by
+  `app::tests::an_agent_missing_turn_presents_the_agent_sheet` (app.rs:2254)
+  and `engine_text::tests::turn_markers_append_localized_system_rows` (engine_text.rs:226). (b) the empty-transcript placeholder engine name
+  seeds at window build, stale across a mid-session flip until the next turn
+  (upstream reads at render) — **Owner: M9 Task 4**; (c) an open settings window
+  doesn't re-seed when the agent sheet writes agent_path underneath it (stale
+  display, no lost write) — **Owner: M9 Task 4**. Cosmetic notes: mirror-fold
+  on a failed persist save (no M9 owner); Python tab interpreter not
+  tilde-abbreviated and About unreachable from welcome-only — **Owner: M9
+  Task 4**.
 
-- Python-sheet progress steps stay English in every locale (M8 i18n-completion
-  review): sheets.rs renders engine-side STEP_* consts verbatim
-  (engine/src/python/env.rs:70-78, cross-crate data) while all eight catalog
-  keys exist ×4 — the engine-emits-ids pattern (T1's SystemRow route) is the
-  fix shape; owner M9 i18n polish.
-- New-project sheet: Return on an empty/invalid name still advances
-  (on_submit fires regardless; upstream guards isNameValid at
-  NewProjectSheet.swift:57) — pre-existing divergence, made VISIBLE by the
-  portal title now carrying the project name placeable ("Choose where to
-  create the folder \\"\\""). Owner: M9 polish or the next sheets touch.
+- ~~Python-sheet progress steps stay English in every locale: sheets.rs
+  rendered engine-side STEP_* consts verbatim.~~ Struck: the engine emits
+  `EnvStep` ids and the app resolves them through the catalogs
+  (app/src/engine_text.rs:15-28; the sheet's step label is
+  `engine_text::env_step(*step)`, app/src/sheets.rs:549; no `STEP_` const
+  remains in app/ or engine/). Pinned by
+  `engine_text::tests::every_engine_id_has_a_key_in_all_four_catalogs` and
+  `ids_render_in_the_selected_language` (en and it).
+- New-project sheet: Return on an empty/invalid name advanced (on_submit fires
+  regardless; upstream guards isNameValid at NewProjectSheet.swift:57).
+  Guarded now: `Message::Advance` advances only when `validation_error()` is
+  None (app/src/windows/welcome.rs:98-102), and the Avanti button is
+  disabled on the same verdict (:159). The validity verdict is pinned by
+  `name_validation_wires_the_engine_rules` (welcome.rs:506) and the valid
+  path by `create_failure_lands_in_the_alert`, but NO test drives `Advance`
+  with an invalid name, so the entry stays OPEN until one does.
+  **Owner: M9 Task 4** (pin `new_project_return_on_invalid_name_advances_nothing`
+  beside the welcome About work).
