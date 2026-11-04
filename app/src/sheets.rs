@@ -741,7 +741,7 @@ fn body<'a>(label: impl Into<String>) -> Text<'a> {
 fn headline<'a>(label: impl Into<String>) -> Text<'a> {
     body(label)
         .size(typography::HEADLINE)
-        .font(crate::typography::font(cosmic::iced::font::Weight::Semibold))
+        .font(typography::font(cosmic::iced::font::Weight::Semibold))
 }
 
 /// `.callout`.

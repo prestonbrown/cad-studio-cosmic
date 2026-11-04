@@ -882,7 +882,8 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         .spacing(4)
         .align_x(Alignment::Center)
         .push(
-            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary).font(crate::typography::font(FontWeight::Semibold)),
+            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary)
+                .font(crate::typography::font(FontWeight::Semibold)),
         )
         .push(
             styled_text(

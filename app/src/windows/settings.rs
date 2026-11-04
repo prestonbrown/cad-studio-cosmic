@@ -575,9 +575,10 @@ fn view_general(state: &SettingsState) -> Vec<Element<'_, Message>> {
         .spacing(8)
         .align_y(Alignment::Center)
         .push(path_text(abbreviate_with_tilde(&state.location, &home)))
-        .push(
-            ui::button::push(fl!("scegli-2"), Some(Message::ChooseLocation(state.location.clone()))),
-        );
+        .push(ui::button::push(
+            fl!("scegli-2"),
+            Some(Message::ChooseLocation(state.location.clone())),
+        ));
     let language_titles = LanguageChoice::ALL
         .iter()
         .map(|choice| choice.title())
@@ -723,9 +724,12 @@ fn engine_section(state: &SettingsState) -> Element<'_, Message> {
             ),
         ),
         form::full_row(
-            Row::new().push(Space::new().width(Length::Fill)).push(
-                ui::button::push(fl!("verifica"), (!checking).then_some(Message::Verify(kind))),
-            ),
+            Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(ui::button::push(
+                    fl!("verifica"),
+                    (!checking).then_some(Message::Verify(kind)),
+                )),
         ),
     ])
 }
@@ -754,12 +758,14 @@ fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
     let actions = Row::new()
         .spacing(8)
         .push(Space::new().width(Length::Fill))
-        .push(
-            ui::button::push(fl!("verifica"), (!installing).then_some(Message::PythonCheck)),
-        )
-        .push(
-            ui::button::push(fl!("reinstalla"), (!installing).then_some(Message::PythonReinstall)),
-        );
+        .push(ui::button::push(
+            fl!("verifica"),
+            (!installing).then_some(Message::PythonCheck),
+        ))
+        .push(ui::button::push(
+            fl!("reinstalla"),
+            (!installing).then_some(Message::PythonReinstall),
+        ));
     vec![
         form::section(vec![
             form::row(

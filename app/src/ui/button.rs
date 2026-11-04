@@ -135,11 +135,7 @@ fn push_face(theme: &cosmic::Theme) -> cosmic::iced::Color {
     let cosmic = theme.cosmic();
     if cosmic.is_dark {
         let background = cosmic.background(false);
-        super::tone::mix(
-            background.base.into(),
-            background.on.into(),
-            PUSH_DARK_FACE,
-        )
+        super::tone::mix(background.base.into(), background.on.into(), PUSH_DARK_FACE)
     } else {
         cosmic.palette.neutral_0.into()
     }

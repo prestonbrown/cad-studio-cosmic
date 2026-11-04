@@ -34,7 +34,7 @@ const GLYPH: f32 = BOX;
 const GAP: f32 = 6.0;
 /// The chevron box fill against [`Tone::Quaternary`] (upstream's box
 /// reads 13 levels under the 232 form box).
-const BOX_FILL: f32 = 1.0;
+const BOX_FILL: f32 = 0.7;
 
 /// A form picker over `options`, showing `selected`; `on_select` gets the
 /// chosen option's index.
@@ -118,7 +118,11 @@ mod tests {
 
     #[test]
     fn a_chosen_label_maps_back_to_its_index() {
-        let options = vec!["System".to_string(), "English".to_string(), "Deutsch".to_string()];
+        let options = vec![
+            "System".to_string(),
+            "English".to_string(),
+            "Deutsch".to_string(),
+        ];
         assert_eq!(index_of(&options, "English"), 1);
         assert_eq!(index_of(&options, "Deutsch"), 2);
         assert_eq!(index_of(&options, "System"), 0);

@@ -223,7 +223,9 @@ fn header() -> Element<'static, Message> {
                     .push(
                         text(fl!("parametri"))
                             .size(typography::HEADLINE)
-                            .font(crate::typography::font(cosmic::iced::font::Weight::Semibold))
+                            .font(crate::typography::font(
+                                cosmic::iced::font::Weight::Semibold,
+                            ))
                             .class(Tone::Primary.text(BACKDROP)),
                     ),
             )
