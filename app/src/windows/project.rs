@@ -751,8 +751,8 @@ impl ProjectWindow {
             // wrote it (ProjectOutput.swift:48-51)
             ReloadKind::Manifest => {
                 self.refresh_missing_outputs();
-                let parameters = bridge::refresh_parameters(&self.root);
-                self.viewer.sync_parameters(&parameters);
+                self.bridge.reload_parameters();
+                self.viewer.sync_parameters(&self.bridge.parameters());
             }
             ReloadKind::Motion => {}
         }
@@ -2593,6 +2593,39 @@ mod tests {
             window.activity = activity;
             let _ = window.view_activity();
         }
+    }
+
+    /// A manifest written outside a build or turn (the output watch's
+    /// Manifest reload) refreshes the bridge's parameter list as well as
+    /// the overlay: a later slider commit reads the bridge's rows.
+    #[tokio::test]
+    async fn a_manifest_reload_refreshes_the_bridge_parameters() {
+        let root = std::env::temp_dir().join(format!("cad-mfst-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let store = SettingsStore::in_temp_dir();
+        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &store);
+        assert!(window.bridge.parameters().is_empty());
+
+        std::fs::write(root.join("model.py"), "wall = 3\n").unwrap();
+        std::fs::write(
+            root.join("output/manifest.json"),
+            r#"{"parameters": {"wall": 3}}"#,
+        )
+        .unwrap();
+        let _ = window.update(Message::OutputReload(ReloadKind::Manifest));
+
+        let names: Vec<String> = window
+            .bridge
+            .parameters()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["wall"], "the bridge holds the manifest's set");
+        assert_eq!(window.viewer.parameters.sliders.len(), 1);
     }
 
     /// The overlay-sync triggers the M6 review owed (carry-forwards M6):

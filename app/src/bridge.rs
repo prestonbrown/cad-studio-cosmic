@@ -639,6 +639,12 @@ impl Bridge {
         self.pipeline().python_ready()
     }
 
+    /// The manifest changed on disk, whoever wrote it
+    /// (ProjectOutput.swift:48-51): re-read the parameter rows.
+    pub fn reload_parameters(&self) {
+        self.pipeline().parameters = refresh_parameters(&self.root);
+    }
+
     /// The parameter panel's rows, manifest order (upstream `parameters`).
     pub fn parameters(&self) -> Vec<ModelParameter> {
         self.pipeline().parameters.clone()
