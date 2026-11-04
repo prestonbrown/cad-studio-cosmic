@@ -68,9 +68,9 @@ case "${1:-}" in
     if exists "$bindir/claude.stub"; then
       mv "$bindir/claude.stub" "$bindir/claude"
     else
-      mkdir -p "$bindir" && cp "$stub_src" "$bindir/claude" && chmod +x "$bindir/claude"
+      mkdir -p "$bindir" && cp "$stub_src" "$bindir/claude"
     fi
-    if [ $? -ne 0 ] || ! is_stub "$bindir/claude"; then
+    if ! chmod +x "$bindir/claude" 2>/dev/null || ! is_stub "$bindir/claude"; then
       # never leave the rig without a claude: put the real one back
       [ -n "$moved" ] && mv "$bindir/claude.real" "$bindir/claude"
       swap_die "could not install the stub at $bindir/claude; claude left as it was"
