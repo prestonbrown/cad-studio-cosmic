@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAD Studio for COSMIC</title>
+<meta name="description" content="Describe a part, get a printable model. A Rust port of cad-studio for the COSMIC desktop.">
+<style>
+:root{color-scheme:light dark;--bg:#fafafa;--fg:#1c1c1e;--muted:#5c5c63;--accent:#0b6e8f;--card:#fff;--line:#d9d9de;--code:#eef0f3}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#ececf0;--muted:#a0a0aa;--accent:#5cc4e6;--card:#1f1f23;--line:#33333a;--code:#26262b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:1.0625rem/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:46rem;margin:0 auto;padding:2rem 1rem 3rem}
+h1{font-size:2rem;line-height:1.2;margin:0 0 .5rem}
+h2{font-size:1.35rem;margin:2.25rem 0 .5rem}
+p,li{margin:.5rem 0}
+ul{padding-left:1.25rem}
+a{color:var(--accent)}
+.lead{font-size:1.2rem;color:var(--muted)}
+img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin:1rem 0}
+pre,code{background:var(--code);border-radius:6px;font:.95em ui-monospace,SFMono-Regular,Menlo,monospace}
+code{padding:.1em .35em}
+pre{padding:.75rem 1rem;overflow-x:auto}
+pre code{padding:0;background:none}
+.note{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.5rem 1rem}
+footer{margin-top:3rem;color:var(--muted);font-size:.95rem}
+</style>
+</head>
+<body>
+<main>
+<h1>CAD Studio for COSMIC</h1>
+<p class="lead">Describe a part, get a printable model.</p>
+<p>CAD Studio is a Rust port of <a href="https://github.com/filippofinke/cad-studio">cad-studio</a> for the <a href="https://system76.com/cosmic">COSMIC desktop</a>. You chat with your locally installed Claude Code or Codex. The agent writes a parametric <a href="https://build123d.readthedocs.io">build123d</a> <code>model.py</code>. The app runs it, shows the result in 3D, shows the technical drawings, and hands the print plate to your slicer.</p>
+<p><a href="https://github.com/prestonbrown/cad-studio-cosmic">Source code on GitHub</a></p>
+
+<img src="images/project-light.png" alt="The project window in the light theme: chat, 3D model and drawing" width="1320" height="840" loading="lazy">
+<img src="images/project-dark.png" alt="The project window in the dark theme" width="1320" height="840" loading="lazy">
+
+<h2>Features</h2>
+<ul>
+<li>Chat with Claude Code or Codex. Progress, tool calls and thinking stream in as they happen. Prompts sent during a turn queue up.</li>
+<li>3D viewer on the GPU: orbit, pan, zoom, view presets, measure, section cut, exploded parts, and a print-plate layout.</li>
+<li>Animation playback for models that ship an <code>animation.json</code> study.</li>
+<li>Parameter sliders. Moving one rewrites the value in <code>model.py</code> and rebuilds without the agent.</li>
+<li>ISO technical drawings beside the model.</li>
+<li>Version history. Restore any version, or compare one against the current model.</li>
+<li>Attachments on prompts.</li>
+<li>ZIP export of the printable files, and open-in-slicer for the plate.</li>
+<li>Printer-aware rules: the printer type and model you set are passed to the agent.</li>
+<li>Follows the COSMIC theme: light or dark, accent color, fonts, corner radii and text scale.</li>
+<li>English, Italian, German and French.</li>
+</ul>
+<p>Project folders use the same on-disk formats as the macOS app, so a project opens in either.</p>
+
+<h2>Requirements</h2>
+<ul>
+<li>A COSMIC desktop session on Linux.</li>
+<li>A Rust toolchain, to build, and <a href="https://github.com/casey/just"><code>just</code></a>, to install.</li>
+<li>Claude Code or Codex, installed and logged in (<code>claude</code>, or <code>codex login</code>).</li>
+<li><code>uv</code> is recommended. The app uses it to create its build123d environment. Without it, the app falls back to a Python 3.10 to 3.13 interpreter with <code>venv</code>.</li>
+<li><code>/usr/bin/zip</code>, for the ZIP export.</li>
+</ul>
+
+<h2>Install</h2>
+<pre><code>git clone https://github.com/prestonbrown/cad-studio-cosmic
+cd cad-studio-cosmic
+just install      # build release, install into ~/.local
+just uninstall    # remove exactly what install laid down</code></pre>
+<p>The binary goes in <code>~/.local/bin</code>. The desktop entry, metainfo and icons go under <code>~/.local/share</code>. The app then appears in the COSMIC app grid.</p>
+
+<h2>First run</h2>
+<ol>
+<li>A setup sheet asks for your printer type and model.</li>
+<li>The app looks for <code>claude</code> or <code>codex</code>. If it finds neither, a sheet points you at Settings &gt; Agent.</li>
+<li>If the build123d environment is missing, the Python sheet installs it. This takes a minute or two the first time.</li>
+<li>The welcome window offers Create New Project and Open Existing Project.</li>
+</ol>
+<img src="images/welcome.png" alt="The welcome window" width="780" height="460" loading="lazy">
+
+<h2>Credit</h2>
+<div class="note">
+<p>This is a port of <a href="https://github.com/filippofinke/cad-studio">cad-studio</a> by Filippo Finke, which is MIT licensed. His copyright is kept, with the port's copyright added. The design and the on-disk formats come from his app.</p>
+<p>CAD Studio for COSMIC is MIT licensed too. It is not affiliated with Anthropic.</p>
+</div>
+
+<footer>
+<p><a href="https://github.com/prestonbrown/cad-studio-cosmic">Source</a> · <a href="https://github.com/prestonbrown/cad-studio-cosmic/blob/main/README.md">README</a> · <a href="https://github.com/prestonbrown/cad-studio-cosmic/blob/main/LICENSE">License</a> · <a href="https://github.com/filippofinke/cad-studio">Original cad-studio</a></p>
+</footer>
+</main>
+</body>
+</html>

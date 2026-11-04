@@ -14,6 +14,8 @@
   <developer id="net.brownhouse">
     <name>Preston Brown</name>
   </developer>
+  <url type="homepage">https://prestonbrown.github.io/cad-studio-cosmic/</url>
+  <url type="vcs-browser">https://github.com/prestonbrown/cad-studio-cosmic</url>
   <content_rating type="oars-1.1"/>
   <launchable type="desktop-id">net.brownhouse.CadStudio.desktop</launchable>
   <releases>

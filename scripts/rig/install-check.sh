@@ -28,19 +28,7 @@ desktop=$local_dir/share/applications/$app_id.desktop
 metainfo=$local_dir/share/metainfo/$app_id.metainfo.xml
 
 if desktop-file-validate "$desktop"; then ok "desktop-file-validate"; else bad "desktop-file-validate"; fi
-# The project has no public homepage yet, so url-homepage-missing is the one
-# tag allowed to remain.
-validate_out=$(appstreamcli validate --no-net "$metainfo" 2>&1)
-validate_rc=$?
-echo "$validate_out"
-if [ "$validate_rc" = 0 ]; then
-    ok "appstreamcli validate"
-elif echo "$validate_out" | grep -E '^[WEIP]: ' | grep -qv 'url-homepage-missing' \
-    || ! echo "$validate_out" | grep -q '^[WEIP]: .*url-homepage-missing'; then
-    bad "appstreamcli validate (exit $validate_rc)"
-else
-    ok "appstreamcli validate (exit $validate_rc, only the homepage tag)"
-fi
+if appstreamcli validate --no-net "$metainfo"; then ok "appstreamcli validate"; else bad "appstreamcli validate"; fi
 
 for size in 128 256 512; do
     icon=$local_dir/share/icons/hicolor/${size}x${size}/apps/$app_id.png

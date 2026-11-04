@@ -126,12 +126,17 @@ struct Metainfo {
     /// Element name → trimmed text (the leaf texts the pins read —
     /// launchable's desktop-id is element text, not an attribute).
     texts: BTreeMap<String, String>,
+    /// `<url type=…>` kind → text.
+    urls: BTreeMap<String, String>,
+    /// The `type` of the open `<url>` element, until its text arrives.
+    url_kind: Option<String>,
 }
 
 impl Metainfo {
     fn note(&mut self, e: &BytesStart<'_>) {
         match e.local_name().as_ref() {
             b"component" => self.component_type = attr(e, b"type"),
+            b"url" => self.url_kind = attr(e, b"type"),
             b"release" => {
                 self.release_version = attr(e, b"version");
                 self.release_date = attr(e, b"date");
@@ -175,6 +180,9 @@ fn metainfo_parses_and_carries_the_app_identity() {
             Ok(Event::Text(t)) => {
                 let text = t.xml10_content().expect("metainfo text").into_owned();
                 let element = open.last().cloned().unwrap_or_default();
+                if let (Some(kind), "url") = (meta.url_kind.take(), element.as_str()) {
+                    meta.urls.insert(kind, text.clone());
+                }
                 let key = match open.len().checked_sub(2).map(|i| open[i].as_str()) {
                     Some("developer") => format!("developer/{element}"),
                     _ => element,
@@ -187,6 +195,15 @@ fn metainfo_parses_and_carries_the_app_identity() {
         }
     }
     assert_eq!(meta.component_type.as_deref(), Some("desktop-application"));
+    assert_eq!(
+        meta.urls.get("homepage").map(String::as_str),
+        Some("https://prestonbrown.github.io/cad-studio-cosmic/"),
+        "the homepage is the project's GitHub Pages site"
+    );
+    assert_eq!(
+        meta.urls.get("vcs-browser").map(String::as_str),
+        Some("https://github.com/prestonbrown/cad-studio-cosmic"),
+    );
     assert_eq!(meta.texts.get("id").map(String::as_str), Some(APP_ICON));
     assert_eq!(
         meta.texts.get("name").map(String::as_str),
