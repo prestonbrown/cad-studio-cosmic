@@ -460,7 +460,7 @@ async fn slice_offscreen_render() {
         scene: &scene,
         poses: &poses,
         appearances: &appearances,
-        effective_aabb: (scene.aabb_min, scene.aabb_max),
+        section: None,
         grid: Some(overlay.as_ref()),
         markers: None,
         ghost: None,

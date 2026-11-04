@@ -451,41 +451,26 @@ impl Application for CadStudio {
         let focused = self.core.focused_window() == Some(id);
         match self.windows.get(&id) {
             Some(WindowKind::Welcome) => {
-                // The first-run setup sheet REPLACES the welcome body.
-                // Presented as a popover it had to be modal (upstream is
-                // dismiss-blocked), and libcosmic's modal popovers capture
-                // mouse events window-wide — killing the header bar's
-                // drag/close. As the body, the card centers in the window
-                // and the chrome stays live.
-                if let Some(setup) = &self.setup {
-                    let card: Element<'_, Message> =
-                        sheets::view_setup(setup).map(Message::SetupSheet);
-                    let centered = container(card)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(cosmic::iced::alignment::Horizontal::Center)
-                        .align_y(cosmic::iced::alignment::Vertical::Center)
-                        .into();
-                    return self.decorate_borderless(id, focused, centered);
-                }
+                // The first-run and new-project sheets present over the
+                // dimmed welcome body (WelcomeWindow.swift:23-31) as a
+                // layer of the window's own view, not a modal popover:
+                // libcosmic's modal popovers capture mouse events
+                // window-wide, killing the header's drag and close.
                 let body = self
                     .welcome
                     .view(self.recents.paths())
                     .map(Message::Welcome);
-                // The new-project sheet presents over the welcome window
-                // (NewProjectSheet.swift attaches there). It also replaces
-                // the body — a modal popover would kill the window chrome
-                // (see the setup branch above).
+                if let Some(setup) = &self.setup {
+                    let card: Element<'_, Message> =
+                        sheets::view_setup(setup).map(Message::SetupSheet);
+                    let presented = sheets::present(body, card, Message::Noop);
+                    return self.decorate_borderless(id, focused, presented);
+                }
                 let body = match self.welcome.creating.as_ref() {
                     Some(sheet) => {
                         let card: Element<'_, Message> = welcome::new_project::view(sheet)
                             .map(|m| Message::Welcome(welcome::Message::NewSheet(m)));
-                        container(card)
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .align_x(cosmic::iced::alignment::Horizontal::Center)
-                            .align_y(cosmic::iced::alignment::Vertical::Center)
-                            .into()
+                        sheets::present(body, card, Message::Noop)
                     }
                     None => body,
                 };
@@ -517,7 +502,9 @@ impl Application for CadStudio {
             Some(WindowKind::Settings(state)) => {
                 let body = settings::view(state, &self.python.state.state)
                     .map(move |m| Message::Settings(id, m));
-                self.decorate(id, focused, body, &fl!("settings"))
+                // the window title names the selected tab, as upstream's
+                // Settings scene does
+                self.decorate(id, focused, body, &state.tab.title())
             }
             Some(WindowKind::About) => {
                 let body: cosmic::Element<'_, Message> = settings::view_about();
@@ -1311,9 +1298,10 @@ impl CadStudio {
 
     /// Wrap a window's body with the app-level sheets (python setup, then
     /// agent-missing; ProjectWindow.swift:59-68 stacks python over
-    /// agent-missing). The first-run sheet is NOT here: it replaces the
-    /// welcome body instead (see `view_window`) because a modal popover
-    /// captures mouse events window-wide, killing the window chrome.
+    /// agent-missing). The first-run and new-project sheets are NOT here:
+    /// they present as a layer of the welcome view (see `view_window`)
+    /// because a modal popover captures mouse events window-wide, killing
+    /// the window chrome.
     /// These two are modal gates over the project canvas — blocking the
     /// content behind them is the intent.
     fn apply_sheets<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {

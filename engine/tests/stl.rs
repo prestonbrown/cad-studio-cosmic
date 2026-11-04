@@ -23,7 +23,7 @@ fn binary_golden_parses_with_known_geometry() {
     let part = parse_stl(&bytes).unwrap();
     assert_eq!(part.triangle_count(), 24);
     assert_eq!(part.positions.len(), 24 * 3);
-    let (mn, mx) = part.aabb();
+    let (mn, mx) = part.aabb().unwrap().pair();
     assert_eq!(mn, [-30.0, -30.0, -4.0]);
     assert_eq!(mx, [30.0, 30.0, 22.0]);
     assert!(part.triangle_colors.iter().all(|c| c.is_none()));
