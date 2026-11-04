@@ -18,3 +18,11 @@ set-Agente-dark 900x900 dark 5 set-Agente.drive nosize,win=Settings|General|Agen
 set-Python-dark 900x900 dark 5 set-Python.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Avanzate-dark 900x900 dark 5 set-Avanzate.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 about-dark 900x900 dark 5 about.drive nosize,win=About
+pysheet-light 1320x840 light 7 open.drive ownfix,env=PYTHONHOME=/nonexistent
+agentmiss-light 1320x840 light 13 agentmiss.drive ownfix,json=agentEngine:codex
+chaterr-light 1320x840 light 14 chaterr.drive ownfix,json=agentEngine:codex
+builderr-light 1320x840 light 12 builderr.drive ownfix
+pysheet-dark 1320x840 dark 7 open.drive ownfix,env=PYTHONHOME=/nonexistent
+agentmiss-dark 1320x840 dark 13 agentmiss.drive ownfix,json=agentEngine:codex
+chaterr-dark 1320x840 dark 14 chaterr.drive ownfix,json=agentEngine:codex
+builderr-dark 1320x840 dark 12 builderr.drive ownfix

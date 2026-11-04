@@ -1,0 +1,7 @@
+setup Continue
+sleep 1200
+recent /home/pbrown/fixtures-cap/empty-project
+sleep 7000
+build
+sleep 2000
+noop

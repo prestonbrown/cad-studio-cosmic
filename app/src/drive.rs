@@ -28,6 +28,7 @@
 //!                                 # history card open/closed — the
 //!                                 # toolbar clock button's message (the
 //!                                 # frame pass's card capture)
+//! build                           # the toolbar's Build Model button
 //! python Close                    # the python setup sheet's Close
 //! agent Close                     # the agent-missing sheet's Close
 //! settings <tab name>             # open (or focus) the settings window
@@ -135,6 +136,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 Step::Msg(Message::DriveChat(rest.to_string()))
             }
             "versioncard" => Step::Msg(Message::DriveVersionCard),
+            "build" => Step::Msg(Message::DriveBuild),
             "python" => match rest {
                 "Close" => Step::Msg(Message::PythonSheet(sheets::PythonMessage::Close)),
                 _ => return Err(format!("line {}: unknown python command", number + 1)),
@@ -300,6 +302,14 @@ mod tests {
     fn versioncard_command_toggles_the_card() {
         let steps = parse("versioncard\n").unwrap();
         assert!(matches!(steps[0], Step::Msg(Message::DriveVersionCard)));
+    }
+
+    /// `build` is the toolbar's Build Model press on the focused project
+    /// window.
+    #[test]
+    fn build_command_presses_build() {
+        let steps = parse("build\n").unwrap();
+        assert!(matches!(steps[0], Step::Msg(Message::DriveBuild)));
     }
 
     /// The arms the smoke-flow test executes but never asserts, plus

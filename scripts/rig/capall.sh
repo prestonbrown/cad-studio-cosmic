@@ -11,6 +11,11 @@
 #     fresh     start without first-run-complete (the setup sheet shows)
 #     nosize    keep the app's own window sizes (default: every window fills the screen)
 #     win=Text  capture only the window whose title contains Text (default: the screen)
+#     env=K=V   launch the app with K=V in its environment (repeatable)
+#     json=K:V  set string key K to V in the shot's cad-studio/settings.json (repeatable)
+#     ownfix    run against a private copy of $FIXTURES (default ~/fixtures-cap): the drive
+#               file's fixture paths are rewritten to it, so a shot that writes to its
+#               project (a chat send) leaves the shared fixture untouched
 # RECENTS (env, optional): a file copied in as each shot's recents list, so
 # welcome captures show a fixed set. MAXJOBS (env, default 8): shots in flight;
 # software rendering makes first paint slow when too many start at once.
@@ -37,11 +42,24 @@ while read -r shot geom mode wait drive opts; do
                        || echo false > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark"
     [ -n "${RECENTS:-}" ] && cp "$RECENTS" "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents"
     case "$opts" in *,fresh,*) rm -f "$cfg/cosmic/net.brownhouse.CadStudio/v1/first-run-complete" ;; esac
+    envs=()
+    IFS=, read -ra fields <<<"$opts"
+    for f in "${fields[@]}"; do
+      case "$f" in
+        env=*) envs+=("${f#env=}") ;;
+        json=*) kv=${f#json=}
+          sed -i "s#\"${kv%%:*}\": [^,]*#\"${kv%%:*}\": \"${kv#*:}\"#" "$cfg/cad-studio/settings.json" ;;
+      esac
+    done
+    fx=
+    case "$opts" in *,ownfix,*)
+      fx=$(mktemp -d /tmp/capfx.XXXX); cp -a "${FIXTURES:-$HOME/fixtures-cap}/." "$fx/"
+      sed "s#$HOME/fixtures-cap#$fx#g" "$drive" > "$fx/shot.drive"; drive=$fx/shot.drive ;; esac
     Xvfb $disp -screen 0 ${geom}x24 -nolisten tcp >/dev/null 2>&1 & xp=$!
     sleep 0.5
     echo "$(ts) launch $shot on $disp" > "$out/$shot.log"
     DISPLAY=$disp WAYLAND_DISPLAY= XDG_CONFIG_HOME=$cfg LIBGL_ALWAYS_SOFTWARE=1 \
-      WGPU_BACKEND=${WGPU_BACKEND:-gl} CAD_STUDIO_DRIVE=$drive "$bin" >> "$out/$shot.log" 2>&1 & ap=$!
+      WGPU_BACKEND=${WGPU_BACKEND:-gl} CAD_STUDIO_DRIVE=$drive env "${envs[@]}" "$bin" >> "$out/$shot.log" 2>&1 & ap=$!
     sleep 2
     case "$opts" in *,nosize,*) ;; *)
       for w in $(DISPLAY=$disp xdotool search --pid $ap 2>/dev/null); do
@@ -64,7 +82,7 @@ while read -r shot geom mode wait drive opts; do
       sleep 1; snap
     done
     echo "$(ts) captured alive=$(kill -0 $ap 2>/dev/null && echo y || echo n)" >> "$out/$shot.log"
-    kill $ap 2>/dev/null; sleep 0.5; kill $xp 2>/dev/null; rm -rf "$cfg"
+    kill $ap 2>/dev/null; sleep 0.5; kill $xp 2>/dev/null; rm -rf "$cfg" ${fx:+"$fx"}
   ) &
   while [ "$(jobs -rp | wc -l)" -ge "$maxjobs" ]; do sleep 0.3; done
 done < "$spec"

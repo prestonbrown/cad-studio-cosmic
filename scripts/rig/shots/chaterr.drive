@@ -1,0 +1,9 @@
+setup Continue
+sleep 1200
+recent /home/pbrown/fixtures-cap/box-fixture
+sleep 7000
+chat Aggiungi due fori da 3 mm.
+sleep 2500
+agent Close
+sleep 1000
+noop

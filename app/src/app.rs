@@ -97,6 +97,9 @@ pub enum Message {
     /// command) — the toolbar clock button's own message, so the frame
     /// pass can capture the card presented.
     DriveVersionCard,
+    /// The drive harness's Build: the toolbar Build Model button's own
+    /// command on the focused project window (CAD_STUDIO_DRIVE's `build`).
+    DriveBuild,
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -288,6 +291,16 @@ impl Application for CadStudio {
             Message::DriveVersionCard => self
                 .project_window()
                 .map(|id| Task::done(Message::Project(id, project::Message::ToggleVersionCard)))
+                .unwrap_or_else(Task::none)
+                .map(Action::App),
+            Message::DriveBuild => self
+                .project_window()
+                .map(|id| {
+                    Task::done(Message::Project(
+                        id,
+                        project::Message::Command(project::Command::Build),
+                    ))
+                })
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
