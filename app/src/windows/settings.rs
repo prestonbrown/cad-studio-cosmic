@@ -68,13 +68,14 @@ pub fn height(tab: Tab, engine: AgentKind) -> f32 {
 
 /// The About window's geometry: AppKit's standard About panel, 284 wide
 /// (shots/upstream/about.png), the header, then the content as tall as
-/// its text runs; the copyright block is three lines (both LICENSE holders
-/// and the license name), which the 284 px width cannot hold on one.
+/// its text runs: the upstream-base line, the two-line port credit and the
+/// three-line copyright block (both LICENSE holders and the license name),
+/// none of which the 284 px width holds on one line.
 pub const ABOUT_WIDTH: f32 = 284.0;
 /// The upstream cad-studio release this port is based on; About and the
 /// metainfo description both state it.
 pub const UPSTREAM_BASE: &str = "1.2.0";
-pub const ABOUT_HEIGHT: f32 = 306.0;
+pub const ABOUT_HEIGHT: f32 = 350.0;
 /// The About content's top inset under the header: the icon's frame
 /// starts 8 px below the titlebar, as under AppKit's.
 const ABOUT_TOP: f32 = 8.0;
