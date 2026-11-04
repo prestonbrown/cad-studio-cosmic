@@ -11,7 +11,6 @@
 //! the pane-derived pair; the manifest warnings join through the pane's
 //! reload-fresh copy of the manifest.
 
-
 use engine::agent::locator::AgentKind;
 use engine::agent::session::TurnOutcome;
 #[cfg(test)]

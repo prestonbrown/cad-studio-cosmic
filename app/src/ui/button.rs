@@ -316,7 +316,10 @@ mod tests {
         let dark = cosmic::Theme::dark();
         let rest = push_face(&dark, 0.0);
         let hover = push_face(&dark, HOVER);
-        assert!(rest.a < 1.0, "a dark face must let the surface show through");
+        assert!(
+            rest.a < 1.0,
+            "a dark face must let the surface show through"
+        );
         assert!(hover.a > rest.a);
         let light = cosmic::Theme::light();
         assert_eq!(push_face(&light, 0.0).a, 1.0);
