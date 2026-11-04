@@ -55,7 +55,10 @@
 //! A turn's settings, the engine among them, are decided once when the turn
 //! starts ([`Session::turn_settings`]) and every attempt of its dance runs
 //! under them: the busy retry resumes the same engine's session even when
-//! the picker flips during the wait. The decision rides the handle
+//! the picker flips during the wait. Upstream re-reads the engine on every
+//! `run()`, the busy retry's included (AgentSession.swift:31, :76); the port
+//! departs because the retry resumes a claude session id, which a codex
+//! retry could not resume. The decision rides the handle
 //! ([`TurnHandle::engine`]), so a caller names the turn by the engine that
 //! actually runs it.
 
