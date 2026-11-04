@@ -75,19 +75,33 @@ pub enum Look {
     /// In a plain bar: a raised face on the text background, hairline and
     /// soft shadow (the viewer bar's preset picker).
     Raised,
-    /// On a material: a filled gray pill under a semibold white label (the
-    /// Parts card's layout picker, the section axis picker).
+    /// On a material: a filled gray pill under a semibold white label in
+    /// a recessed track (the Parts card's layout picker).
     Filled,
+    /// On a capsule material: the filled pill and label in a track tinted
+    /// toward `on` instead of recessed (the section axis picker: upstream
+    /// reads its track 51 and face 121 on a 38 capsule in dark mode, 217
+    /// and 153 on 230 in light mode).
+    Tinted,
 }
 
 impl Look {
     fn backdrop(self) -> Backdrop {
         match self {
             Self::Raised => Backdrop::Plain,
-            Self::Filled => Backdrop::Material,
+            Self::Filled | Self::Tinted => Backdrop::Material,
         }
     }
+
+    /// A filled pill under a white label marks the selection.
+    fn fills(self) -> bool {
+        matches!(self, Self::Filled | Self::Tinted)
+    }
 }
+
+/// The tinted look's track and face: the material pulled toward `on`.
+const TINTED_TRACK: f32 = 0.06;
+const TINTED_FACE: f32 = 0.38;
 
 /// One segment's width when the control sizes itself: the widest label's
 /// estimated advance plus the side padding (iced has no text measurement
@@ -106,6 +120,7 @@ fn track(theme: &cosmic::Theme, look: Look) -> cosmic::iced::Color {
     match look {
         Look::Raised => wash(theme, 0.05),
         Look::Filled => filled_track(theme),
+        Look::Tinted => mix(material(theme), Tone::Primary.solid(theme), TINTED_TRACK),
     }
 }
 
@@ -139,18 +154,34 @@ fn face(theme: &cosmic::Theme, look: Look) -> Style {
             ..Default::default()
         },
         // the track pressed toward `on`: 178 on 242 in light mode
-        Look::Filled => Style {
-            background: Some(Background::Color(mix(
-                track(theme, look),
-                Tone::Primary.solid(theme),
-                0.26,
-            ))),
+        Look::Filled | Look::Tinted => Style {
+            background: Some(Background::Color(if look == Look::Tinted {
+                mix(material(theme), Tone::Primary.solid(theme), TINTED_FACE)
+            } else {
+                mix(track(theme, look), Tone::Primary.solid(theme), 0.26)
+            })),
             border: Border {
                 radius,
                 ..Default::default()
             },
             ..Default::default()
         },
+    }
+}
+
+/// A disabled control's selected label on the filled face: nearly lost in
+/// the face, a touch toward white (upstream, playback-dark.png: 80 on a
+/// 74 face; playback.png: 190 on 178).
+const HELD_LABEL_LIFT: f32 = 0.08;
+
+fn held_label(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    let face = match face(theme, Look::Filled).background {
+        Some(Background::Color(color)) => color,
+        _ => track(theme, Look::Filled),
+    };
+    cosmic::iced::widget::text::Style {
+        color: Some(mix(face, cosmic::iced::Color::WHITE, HELD_LABEL_LIFT)),
+        ..super::tone::text_style(theme, Tone::OnFill, Backdrop::Material)
     }
 }
 
@@ -192,11 +223,16 @@ pub fn segmented<M: Clone + 'static>(
         let is_selected = selected == Some(index);
         let tone = match (message.is_some(), is_selected, look) {
             (false, _, _) => Tone::Tertiary,
-            (true, true, Look::Filled) => Tone::OnFill,
+            (true, true, look) if look.fills() => Tone::OnFill,
             (true, _, _) => Tone::Primary,
         };
-        let mut label = text(label).size(size.label()).class(tone.text(backdrop));
-        if is_selected && look == Look::Filled {
+        let class = if message.is_none() && is_selected && look == Look::Filled {
+            cosmic::theme::Text::Custom(held_label)
+        } else {
+            tone.text(backdrop)
+        };
+        let mut label = text(label).size(size.label()).class(class);
+        if is_selected && look.fills() {
             label = label.font(typography::font(cosmic::iced::font::Weight::Semibold));
         }
         let face = container(label)
@@ -281,6 +317,16 @@ mod tests {
         let (card, track) = (gray(material(&light)), gray(filled_track(&light)));
         assert!(track > card, "light track {track} on card {card}");
         for theme in [dark, light] {
+            // a disabled selection's label nearly vanishes into its face
+            let held = held_label(&theme).color.map(gray).unwrap();
+            let face_gray = match face(&theme, Look::Filled).background {
+                Some(Background::Color(c)) => gray(c),
+                other => panic!("{other:?}"),
+            };
+            assert!(
+                (1..=20).contains(&(held - face_gray)),
+                "{held} on {face_gray}"
+            );
             let face = match face(&theme, Look::Filled).background {
                 Some(Background::Color(c)) => gray(c),
                 other => panic!("{other:?}"),
@@ -290,11 +336,31 @@ mod tests {
         }
     }
 
+    /// The tinted track sits a step off the capsule toward `on` (lighter
+    /// in dark mode, darker in light mode), and its face well beyond it.
+    #[test]
+    fn tinted_track_leans_toward_on() {
+        let gray = |c: cosmic::iced::Color| (c.g * 255.0).round() as i32;
+        for (theme, sign) in [(cosmic::Theme::dark(), 1), (cosmic::Theme::light(), -1)] {
+            let card = gray(material(&theme));
+            let track = gray(track(&theme, Look::Tinted));
+            let face = match face(&theme, Look::Tinted).background {
+                Some(Background::Color(c)) => gray(c),
+                other => panic!("{other:?}"),
+            };
+            assert!(
+                (5..=20).contains(&(sign * (track - card))),
+                "{track} on {card}"
+            );
+            assert!(sign * (face - track) >= 40, "{face} on {track}");
+        }
+    }
+
     #[test]
     fn every_shape_builds() {
         #[derive(Clone)]
         struct Pick;
-        for look in [Look::Raised, Look::Filled] {
+        for look in [Look::Raised, Look::Filled, Look::Tinted] {
             for width in [Length::Fill, Length::Shrink] {
                 let items = vec![("A".to_string(), Some(Pick)), ("B".to_string(), None)];
                 for size in [Size::Small, Size::Regular] {

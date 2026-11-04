@@ -144,8 +144,7 @@ const PULLDOWN_LEAD: f32 = 4.0;
 fn chevron_offset(items: &[String], label: &str, size: f32) -> Option<f32> {
     let chars = |text: &str| text.chars().count();
     let widest = items.iter().map(|item| chars(item)).max().unwrap_or(0);
-    (widest > chars(label))
-        .then(|| PULLDOWN_LEAD + chars(label) as f32 * size * ADVANCE + 2.0)
+    (widest > chars(label)).then(|| PULLDOWN_LEAD + chars(label) as f32 * size * ADVANCE + 2.0)
 }
 
 /// One option: its label, shown in the list, and its index, which the
@@ -188,7 +187,10 @@ mod tests {
     fn the_chevron_follows_a_label_narrower_than_the_list() {
         let pages = vec!["1. Assembly".to_string(), "2. Base".to_string()];
         assert_eq!(chevron_offset(&pages, "1/2 · Assembly", 11.0), None);
-        let speeds = vec!["✓\u{2002}1×".to_string(), "\u{2002}\u{2002}Loop".to_string()];
+        let speeds = vec![
+            "✓\u{2002}1×".to_string(),
+            "\u{2002}\u{2002}Loop".to_string(),
+        ];
         let offset = chevron_offset(&speeds, "1×", 12.0).unwrap();
         assert!((offset - (PULLDOWN_LEAD + 2.0 * 12.0 * ADVANCE + 2.0)).abs() < 1e-4);
     }

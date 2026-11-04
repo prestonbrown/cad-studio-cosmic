@@ -124,5 +124,8 @@ fn speed_menu_holds_the_speeds_then_ripeti() {
     for (index, speed) in SPEEDS.iter().enumerate() {
         assert!(matches!(speed_menu_pick(index), Message::SetSpeed(s) if s == *speed));
     }
-    assert!(matches!(speed_menu_pick(SPEEDS.len()), Message::ToggleLoops));
+    assert!(matches!(
+        speed_menu_pick(SPEEDS.len()),
+        Message::ToggleLoops
+    ));
 }

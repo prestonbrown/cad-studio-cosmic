@@ -177,6 +177,9 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
 pub const HOVER: f32 = 0.06;
 /// The pressed wash of a borderless control.
 pub const PRESS: f32 = 0.12;
+/// The wash of a toolbar control whose menu or card is open (upstream's
+/// open version menu: 214 on a 238 toolbar, 75 on a dark 55).
+pub const HELD: f32 = 0.10;
 
 /// The selected-text highlight: the accent at a third, so the selected
 /// glyphs stay readable through it.

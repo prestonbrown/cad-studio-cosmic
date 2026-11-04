@@ -1245,12 +1245,7 @@ impl SchematicPane {
             .collect();
         let menu = crate::ui::picker::pulldown(
             items,
-            fl!(
-                "lld-lld",
-                page = index + 1,
-                total = pages,
-                title = title
-            ),
+            fl!("lld-lld", page = index + 1, total = pages, title = title),
             SMALL_CONTROL_TEXT,
             12.0,
             BACKDROP,

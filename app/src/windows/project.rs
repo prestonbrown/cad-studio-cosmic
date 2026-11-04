@@ -2227,17 +2227,21 @@ mod tests {
     #[test]
     fn dark_hairlines_are_shadows() {
         use cosmic::iced::widget::container::Catalog;
-        let gray = |theme: &cosmic::Theme, scale, shade| {
-            match theme.style(&hairline_class(scale, shade)).background {
-                Some(cosmic::iced::Background::Color(c)) => (c.g * 255.0).round() as i32,
-                other => panic!("{other:?}"),
-            }
+        let gray = |theme: &cosmic::Theme, scale, shade| match theme
+            .style(&hairline_class(scale, shade))
+            .background
+        {
+            Some(cosmic::iced::Background::Color(c)) => (c.g * 255.0).round() as i32,
+            other => panic!("{other:?}"),
         };
         let dark = cosmic::Theme::dark();
         let base = (Color::from(dark.cosmic().background(false).base).g * 255.0).round() as i32;
         let divider = gray(&dark, DIVIDER_SCALE, DIVIDER_SHADE);
         let hairline = gray(&dark, HAIRLINE_SCALE, HAIRLINE_SHADE);
-        assert!(divider < base && hairline < base, "{divider} {hairline} on {base}");
+        assert!(
+            divider < base && hairline < base,
+            "{divider} {hairline} on {base}"
+        );
         assert!((divider - 10).abs() <= 3, "divider {divider}");
         assert!((hairline - 19).abs() <= 3, "hairline {hairline}");
         let light = cosmic::Theme::light();

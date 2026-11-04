@@ -186,7 +186,14 @@ pub fn collision_text(collisions: &[Collision]) -> String {
 /// `✓` (the unchecked ones by a same-width gap, as macOS indents them).
 pub fn speed_menu_items(speed: f64, loops: bool) -> Vec<String> {
     let mark = |checked: bool, label: String| {
-        format!("{}{label}", if checked { "✓\u{2002}" } else { "\u{2002}\u{2002}" })
+        format!(
+            "{}{label}",
+            if checked {
+                "✓\u{2002}"
+            } else {
+                "\u{2002}\u{2002}"
+            }
+        )
     };
     SPEEDS
         .iter()
