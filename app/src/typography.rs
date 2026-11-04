@@ -57,6 +57,13 @@ pub const SMALL_CONTROL: f32 = scaled(11.0);
 /// The interface font at the weight an upstream `.fontWeight(_)` asks for,
 /// resolved against the faces the user's interface family actually carries.
 ///
+/// `.headline`: `text` semibold at the headline size.
+pub fn headline<'a>(
+    text: cosmic::iced::widget::Text<'a, cosmic::Theme, cosmic::Renderer>,
+) -> cosmic::iced::widget::Text<'a, cosmic::Theme, cosmic::Renderer> {
+    text.size(HEADLINE).font(font(Weight::Semibold))
+}
+
 /// Every weighted text in the views goes through here. See [`weight`].
 pub fn font(upstream: Weight) -> Font {
     let base = cosmic::font::default();
@@ -99,15 +106,33 @@ const REGULAR: u16 = 400;
 
 /// The upright, normal-width weights `family` carries in the font system,
 /// cached per family until the font system loads another font.
+///
+/// The renderer may hold the font system, and a view never blocks on it:
+/// while it is held the family's last known weights answer (a font load
+/// in between only makes them one version stale), and only a family never
+/// seen before falls back to the font system's own matching for that
+/// frame.
 fn available_weights(family: Family) -> Vec<u16> {
     use cosmic::iced::advanced::graphics::text::{cosmic_text::fontdb, font_system};
-    type Cache = HashMap<String, (cosmic::iced::advanced::graphics::text::Version, Vec<u16>)>;
+    type Cache = HashMap<Family, (cosmic::iced::advanced::graphics::text::Version, Vec<u16>)>;
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-    // The renderer may hold the font system; never block a view on it.
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Ok(system) = font_system().try_read() else {
-        return Vec::new();
+        return cache
+            .get(&family)
+            .map(|(_, weights)| weights.clone())
+            .unwrap_or_default();
     };
+    let version = system.version();
+    if let Some((cached, weights)) = cache.get(&family)
+        && *cached == version
+    {
+        return weights.clone();
+    }
     let db = system.db();
     let name = match family {
         Family::Name(name) => name.to_owned(),
@@ -117,16 +142,6 @@ fn available_weights(family: Family) -> Vec<u16> {
         Family::Fantasy => db.family_name(&fontdb::Family::Fantasy).to_owned(),
         Family::Monospace => db.family_name(&fontdb::Family::Monospace).to_owned(),
     };
-    let version = system.version();
-    let mut cache = CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((cached, weights)) = cache.get(&name)
-        && *cached == version
-    {
-        return weights.clone();
-    }
     let mut weights: Vec<u16> = db
         .faces()
         .filter(|face| {
@@ -141,7 +156,7 @@ fn available_weights(family: Family) -> Vec<u16> {
         .collect();
     weights.sort_unstable();
     weights.dedup();
-    cache.insert(name, (version, weights.clone()));
+    cache.insert(family, (version, weights.clone()));
     weights
 }
 

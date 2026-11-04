@@ -110,9 +110,7 @@ pub mod new_project {
         let mut stack = Column::new()
             .spacing(16)
             .push(
-                text(fl!("scegli-le-opzioni-per-il-nuovo-progetto"))
-                    .size(typography::HEADLINE)
-                    .font(crate::typography::font(Weight::Semibold)),
+                typography::headline(text(fl!("scegli-le-opzioni-per-il-nuovo-progetto"))),
             )
             .push(
                 Row::new()

@@ -29,7 +29,6 @@ use engine::project::store;
 use engine::python::env::{
     EnvEvent, EnvHandle, EnvState, check, command_probe, reinstall, streaming_spawn, venv_dir,
 };
-use engine::settings::Settings as EngineSettings;
 
 use crate::fl;
 use crate::recents::{self, Recents};
@@ -933,7 +932,8 @@ impl CadStudio {
             state.update(&settings::Message::Tab(tab));
             let focus = *id;
             let resize = settings_resize(focus, before, state.height());
-            return Task::batch([resize, window::gain_focus(focus).map(Action::App)]);
+            let title = self.set_window_title(tab.title(), focus);
+            return Task::batch([resize, title, window::gain_focus(focus).map(Action::App)]);
         }
         let settings = self.settings.load();
         let mut state = SettingsState::new(&settings);
@@ -943,7 +943,8 @@ impl CadStudio {
             None,
         ));
         self.windows.insert(id, WindowKind::Settings(state));
-        let title = self.set_window_title(fl!("settings"), id);
+        // the window title follows the selected tab, as the header does
+        let title = self.set_window_title(tab.title(), id);
         let locates = settings::ENGINES.map(|kind| {
             let custom = settings.agent_path(kind).map(str::to_string);
             Task::future(locate_agent_path(kind, custom))
@@ -988,7 +989,11 @@ impl CadStudio {
             (Some(before), Some(after)) => settings_resize(id, before, after),
             _ => Task::none(),
         };
-        Task::batch([task, resize])
+        let title = match msg {
+            settings::Message::Tab(tab) => self.set_window_title(tab.title(), id),
+            _ => Task::none(),
+        };
+        Task::batch([task, resize, title])
     }
 
     /// The open settings window's content height, if one is open.
@@ -1013,10 +1018,9 @@ impl CadStudio {
     /// settings window is open (there is at most one; the portal's answer
     /// arrives here when the window that asked has since closed).
     fn update_settings_any(&mut self, msg: settings::Message) -> Task<Action<Message>> {
-        // the write: engine settings.json only, through the one store; a
-        // message that stages nothing (a tab switch, a locate) writes nothing
-        let stages = settings::stage(&msg, &mut EngineSettings::default());
-        if stages
+        // the write: engine settings.json only, through the one store; an
+        // effect message (a tab switch, a locate) writes nothing
+        if settings::persists(&msg)
             && self
                 .settings
                 .update(|persisted| {

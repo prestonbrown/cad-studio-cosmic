@@ -415,12 +415,10 @@ pub enum Message {
     Isolates(bool),
 }
 
-/// The ONE-writer fold: one field message → its engine-settings mutation
-/// (upstream's @AppStorage bindings write live; the trims mirror
-/// `AppSettings.string`, which reads empty-as-absent). Returns whether the
-/// settings changed and must persist — the effect messages stage nothing.
-pub fn stage(message: &Message, settings: &mut Settings) -> bool {
-    let trimmed = |text: &str| (!text.trim().is_empty()).then(|| text.trim().to_string());
+/// Whether `message` is a field write that must persist. The decision
+/// rests on the message's kind alone, so a caller can make it before
+/// loading the settings; the effect messages persist nothing.
+pub fn persists(message: &Message) -> bool {
     match message {
         Message::Tab(_)
         | Message::ChooseLocation(_)
@@ -428,13 +426,37 @@ pub fn stage(message: &Message, settings: &mut Settings) -> bool {
         | Message::PythonReinstall
         | Message::Verify(_)
         | Message::Located(_, _) => false,
+        Message::LocationChosen(_)
+        | Message::Language(_)
+        | Message::PrintPref(_)
+        | Message::Engine(_)
+        | Message::CustomPath(_, _)
+        | Message::Model(_, _)
+        | Message::Effort(_)
+        | Message::RestrictedBash(_)
+        | Message::Streaming(_)
+        | Message::Isolates(_) => true,
+    }
+}
+
+/// The ONE-writer fold: one field message → its engine-settings mutation
+/// (upstream's @AppStorage bindings write live; the trims mirror
+/// `AppSettings.string`, which reads empty-as-absent). An effect message
+/// ([`persists`] false) leaves `settings` alone.
+pub fn stage(message: &Message, settings: &mut Settings) {
+    let trimmed = |text: &str| (!text.trim().is_empty()).then(|| text.trim().to_string());
+    match message {
+        Message::Tab(_)
+        | Message::ChooseLocation(_)
+        | Message::PythonCheck
+        | Message::PythonReinstall
+        | Message::Verify(_)
+        | Message::Located(_, _) => {}
         Message::LocationChosen(path) => {
             settings.default_project_location = path.clone();
-            true
         }
         Message::Language(language) => {
             settings.language = language.as_setting().map(str::to_string);
-            true
         }
         Message::PrintPref(pref) => {
             match pref {
@@ -442,38 +464,30 @@ pub fn stage(message: &Message, settings: &mut Settings) -> bool {
                 PrintPrefMessage::PrinterModel(model) => settings.printer_model = trimmed(model),
                 PrintPrefMessage::Unit(unit) => settings.measurement_unit = *unit,
             }
-            true
         }
         Message::Engine(engine) => {
             settings.agent_engine = match engine {
                 AgentKind::Claude => "claude".to_string(),
                 AgentKind::Codex => "codex".to_string(),
             };
-            true
         }
         Message::CustomPath(kind, path) => {
             settings.set_agent_path(*kind, trimmed(path));
-            true
         }
         Message::Model(kind, model) => {
             settings.set_agent_model(*kind, trimmed(model));
-            true
         }
         Message::Effort(effort) => {
             settings.claude_effort = effort.as_setting().map(str::to_string);
-            true
         }
         Message::RestrictedBash(on) => {
             settings.restricted_bash = *on;
-            true
         }
         Message::Streaming(on) => {
             settings.streaming_output = *on;
-            true
         }
         Message::Isolates(on) => {
             settings.isolates_claude = *on;
-            true
         }
     }
 }
@@ -660,7 +674,7 @@ fn view_agent(state: &SettingsState) -> Vec<Element<'_, Message>> {
     if state.engine == AgentKind::Claude {
         parts.push(form::section(vec![form::row(
             fl!("bash-limitato"),
-            cosmic::widget::toggler(state.restricted_bash).on_toggle(Message::RestrictedBash),
+            form::switch(state.restricted_bash, Message::RestrictedBash),
         )]));
         parts.push(form::footer(fl!(
             "con-bash-limitato-l-agente-pu-eseguire-solo-l-interprete-python-dell-ambiente-di-cad-studio-e-alcuni-comandi-di-sola-lettura-ls-cat-head-pi-sicuro-ma-l-agente-ha-meno-autonomia-per-diagnosticare-i-problemi-e-alcuni-tentativi-potrebbero-essere-rifiutati"
@@ -797,7 +811,7 @@ fn view_advanced(state: &SettingsState) -> Vec<Element<'_, Message>> {
         )),
         form::section(vec![form::row(
             fl!("ignora-le-configurazioni-personali-dell-agente"),
-            cosmic::widget::toggler(state.isolates).on_toggle(Message::Isolates),
+            form::switch(state.isolates, Message::Isolates),
         )]),
         form::footer(fl!(
             "l-agente-cad-non-carica-le-tue-impostazioni-utente-hook-plugin-e-server-mcp-di-claude-code-config-toml-di-codex-cos-parte-pi-velocemente-e-risponde-in-modo-prevedibile-disattiva-se-la-tua-autenticazione-dipende-da-impostazioni-utente-ad-esempio-apikeyhelper"
@@ -822,9 +836,9 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         .width(Length::Fill)
         .align_x(Alignment::Center)
         .push(ui::icon::app(64.0))
-        .push(Space::new().height(12))
+        .push(Space::new().height(6))
         .push(
-            body("CAD Studio")
+            body(fl!("cad-studio"))
                 .size(typography::TITLE3)
                 .font(crate::typography::font(Weight::Bold))
                 .class(Tone::Primary.text(Backdrop::Plain)),
@@ -846,7 +860,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
     container(column)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([14, 20, 14, 20])
+        .padding([8, 20, 24, 20])
         .class(cosmic::theme::Container::WindowBackground)
         .into()
 }
@@ -976,19 +990,23 @@ mod tests {
     #[test]
     fn field_messages_stage_their_settings_writes() {
         let mut settings = Settings::default();
-        assert!(!stage(&Message::Tab(Tab::Python), &mut settings));
-        assert!(!stage(
+        let stage_and_persists = |message: &Message, settings: &mut Settings| {
+            stage(message, settings);
+            persists(message)
+        };
+        assert!(!stage_and_persists(&Message::Tab(Tab::Python), &mut settings));
+        assert!(!stage_and_persists(
             &Message::ChooseLocation(PathBuf::from("/x")),
             &mut settings
         ));
-        assert!(!stage(&Message::PythonCheck, &mut settings));
-        assert!(!stage(&Message::PythonReinstall, &mut settings));
-        assert!(!stage(
+        assert!(!stage_and_persists(&Message::PythonCheck, &mut settings));
+        assert!(!stage_and_persists(&Message::PythonReinstall, &mut settings));
+        assert!(!stage_and_persists(
             &Message::Located(AgentKind::Claude, None),
             &mut settings
         ));
         assert!(
-            !stage(&Message::Verify(AgentKind::Claude), &mut settings),
+            !stage_and_persists(&Message::Verify(AgentKind::Claude), &mut settings),
             "Verify stages nothing"
         );
         assert_eq!(
@@ -1011,7 +1029,7 @@ mod tests {
             "no effect message writes anything"
         );
 
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::LocationChosen(PathBuf::from("/home/me/Documents")),
             &mut settings
         ));
@@ -1020,26 +1038,26 @@ mod tests {
             PathBuf::from("/home/me/Documents")
         );
 
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::Language(LanguageChoice::Deutsch),
             &mut settings
         ));
         assert_eq!(settings.language.as_deref(), Some("de"));
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::Language(LanguageChoice::System),
             &mut settings
         ));
         assert_eq!(settings.language, None, "System clears the override");
 
-        assert!(stage(&Message::Engine(AgentKind::Codex), &mut settings));
+        assert!(stage_and_persists(&Message::Engine(AgentKind::Codex), &mut settings));
         assert_eq!(settings.agent_engine, "codex");
 
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::CustomPath(AgentKind::Codex, "  ~/.local/bin/codex  ".into()),
             &mut settings
         ));
         assert_eq!(settings.codex_path.as_deref(), Some("~/.local/bin/codex"));
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::CustomPath(AgentKind::Codex, "   ".into()),
             &mut settings
         ));
@@ -1049,38 +1067,38 @@ mod tests {
             "the other engine's key is untouched"
         );
 
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::Model(AgentKind::Codex, " gpt-5.2-codex ".into()),
             &mut settings
         ));
         assert_eq!(settings.codex_model.as_deref(), Some("gpt-5.2-codex"));
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::Model(AgentKind::Codex, String::new()),
             &mut settings
         ));
         assert_eq!(settings.codex_model, None);
 
-        assert!(stage(&Message::Effort(Effort::Low), &mut settings));
+        assert!(stage_and_persists(&Message::Effort(Effort::Low), &mut settings));
         assert_eq!(settings.claude_effort.as_deref(), Some("low"));
-        assert!(stage(&Message::Effort(Effort::AgentDefault), &mut settings));
+        assert!(stage_and_persists(&Message::Effort(Effort::AgentDefault), &mut settings));
         assert_eq!(settings.claude_effort, None);
 
-        assert!(stage(&Message::RestrictedBash(true), &mut settings));
+        assert!(stage_and_persists(&Message::RestrictedBash(true), &mut settings));
         assert!(settings.restricted_bash);
-        assert!(stage(&Message::Streaming(false), &mut settings));
+        assert!(stage_and_persists(&Message::Streaming(false), &mut settings));
         assert!(!settings.streaming_output);
-        assert!(stage(&Message::Isolates(false), &mut settings));
+        assert!(stage_and_persists(&Message::Isolates(false), &mut settings));
         assert!(!settings.isolates_claude);
 
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::PrintPref(PrintPrefMessage::PrinterType(PrinterType::Sls)),
             &mut settings
         ));
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::PrintPref(PrintPrefMessage::PrinterModel("  P1S  ".into())),
             &mut settings
         ));
-        assert!(stage(
+        assert!(stage_and_persists(
             &Message::PrintPref(PrintPrefMessage::Unit(MeasurementUnit::Centimeters)),
             &mut settings
         ));
@@ -1108,7 +1126,8 @@ mod tests {
             Message::Isolates(false),
             Message::RestrictedBash(true),
         ] {
-            assert!(stage(&message, &mut settings));
+            assert!(persists(&message));
+            stage(&message, &mut settings);
         }
         settings.save(&file).unwrap();
         let reloaded = Settings::load(&file).unwrap();

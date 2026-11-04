@@ -221,11 +221,7 @@ fn header() -> Element<'static, Message> {
                     .align_y(Alignment::Center)
                     .push(slider_glyph())
                     .push(
-                        text(fl!("parametri"))
-                            .size(typography::HEADLINE)
-                            .font(crate::typography::font(
-                                cosmic::iced::font::Weight::Semibold,
-                            ))
+                        typography::headline(text(fl!("parametri")))
                             .class(Tone::Primary.text(BACKDROP)),
                     ),
             )

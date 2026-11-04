@@ -728,9 +728,7 @@ fn body<'a>(label: impl Into<String>) -> Text<'a> {
 
 /// `.headline`: semibold at body size.
 fn headline<'a>(label: impl Into<String>) -> Text<'a> {
-    body(label)
-        .size(typography::HEADLINE)
-        .font(typography::font(cosmic::iced::font::Weight::Semibold))
+    typography::headline(body(label))
 }
 
 /// `.callout`.
