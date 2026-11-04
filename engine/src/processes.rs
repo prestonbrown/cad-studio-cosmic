@@ -174,11 +174,13 @@ pub fn reap_orphans() -> Vec<u32> {
     reap_orphans_at(&path)
 }
 
-/// Signal EVERY registered pid with SIGTERM — orphan or not — then empty the
-/// registry (upstream `RunningProcesses.terminateAll`, run on SIGTERM and at
-/// app termination; the reap's ppid/starttime guards are crash recovery and
-/// do not apply to an orderly shutdown). Returns the pids that were
-/// signalled.
+/// SIGTERM every registered pid this process owns — its own children and
+/// orphans (parent now init) — then rewrite the registry to the entries a
+/// different live process still parents (upstream
+/// `RunningProcesses.terminateAll`, run on SIGTERM and at app termination).
+/// The registry file is per user, not per instance: a second running app
+/// keeps its agent, build and python children across this one's quit.
+/// Returns the pids that were signalled.
 pub fn terminate_all() -> Vec<u32> {
     let path = registry_path();
     terminate_all_at(&path)
@@ -187,15 +189,22 @@ pub fn terminate_all() -> Vec<u32> {
 /// [`terminate_all`] against an explicit registry file.
 pub fn terminate_all_at(path: &Path) -> Vec<u32> {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let killed = registered_pids(path)
-        .into_iter()
-        .filter(|&pid| ps(pid).is_some())
-        .map(|pid| {
-            let _ = signal(pid, "-TERM");
-            pid
-        })
-        .collect();
-    persist(path, &BTreeSet::new());
+    let me = std::process::id();
+    let mut killed = Vec::new();
+    let mut others = BTreeSet::new();
+    for pid in registered_pids(path) {
+        match ps(pid) {
+            Some((ppid, _)) if ppid == me || ppid == 1 => {
+                let _ = signal(pid, "-TERM");
+                killed.push(pid);
+            }
+            Some(_) => {
+                others.insert(pid);
+            }
+            None => {}
+        }
+    }
+    persist(path, &others);
     killed
 }
 

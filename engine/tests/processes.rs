@@ -421,6 +421,44 @@ async fn terminate_all_signals_live_children_too() {
     );
 }
 
+/// The registry is shared by every running instance: a child another live
+/// process parents (here a `sleep` under its own `sh`) is not this process's
+/// to terminate and stays listed for its owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn terminate_all_spares_another_instances_children() {
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    let mut owner = Command::new("/bin/sh")
+        .args(["-c", "sleep 5 & echo $!; wait"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(owner.stdout.as_mut().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    let theirs: u32 = first.trim().parse().unwrap();
+    assert_eq!(ppid_of(theirs), Some(owner.id()));
+    register_at(&registry, theirs);
+
+    let killed = engine::processes::terminate_all_at(&registry);
+    assert!(killed.is_empty(), "another process's child is not signalled");
+    assert!(alive(theirs));
+    assert_eq!(
+        std::fs::read_to_string(&registry)
+            .unwrap()
+            .split_once(':')
+            .map(|(pid, _)| pid.to_string()),
+        Some(theirs.to_string()),
+        "it stays listed for its owner"
+    );
+    let _ = Command::new("/bin/kill").arg(theirs.to_string()).status();
+    let _ = owner.wait();
+}
+
 /// SIGTERM's signal number without a libc dependency (the tests otherwise
 /// avoid one, matching the engine's `/bin/kill` approach).
 const TERM_SIG: i32 = 15;
