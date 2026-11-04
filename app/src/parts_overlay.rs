@@ -403,7 +403,7 @@ pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
             })
             .collect(),
         selected,
-        Look::Filled,
+        Look::Tinted,
         Size::Small,
         Length::Shrink,
     );

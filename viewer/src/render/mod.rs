@@ -921,10 +921,10 @@ impl MeshPipeline {
     /// (the last prepared frame's visible slots; hidden parts are absent):
     /// the opaque set first (filled triangles or the wireframe hairline
     /// list; a collision part among them colors flat red through the
-    /// shader flag), then the translucent set through the blend pipelines
-    /// (same topology choice, alpha from the model uniform) — then, when
-    /// the camera sections, the cap quad, then the compare ghost, and last
-    /// the unlit overlays (grid, then measure markers) — into the pass's
+    /// shader flag), then, when the camera sections, the cap quad, then
+    /// the grid, then the translucent set through the blend pipelines
+    /// (same topology choice, alpha from the model uniform), then the
+    /// compare ghost, and last the measure markers — into the pass's
     /// color attachment (msaa or single-sample alike: everything here
     /// inherits the pass attachment and matches its sample count).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -948,10 +948,32 @@ impl MeshPipeline {
                 pass.draw(0..resident.vertex_count, 0..1);
             }
         }
-        // The translucent set after every opaque part, before the cap: it
-        // blends over what is already drawn and must not occlude anything
-        // after it (no depth write) — a collision part never lands here
-        // (opaque by partition), so the flat-red branch never blends.
+        if self.draw_cap {
+            // Same pass, after the mesh: the stencil attachment already holds
+            // the parity the mesh's inc/dec left, so the quad only survives
+            // where the cut opened the solid.
+            pass.set_pipeline(&self.pipelines.cap);
+            pass.set_stencil_reference(0);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.cap_buf.slice(..));
+            pass.draw(0..4, 0..1);
+        }
+        // The grid after the opaque parts and the cap (it writes no depth;
+        // the parts occlude it through the depth test), before anything
+        // translucent so that blends over it.
+        if let Some(grid) = self.grid.as_ref() {
+            pass.set_pipeline(&self.pipelines.grid);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, grid.vertex_buf.slice(..));
+            pass.draw(0..grid.vertex_count, 0..1);
+        }
+        // The translucent set after the opaque parts and the grid: it
+        // blends over both (the grid shows dimmed through a static part
+        // during playback, as RealityKit sorts its transparent entities)
+        // and must not occlude anything after it (no depth write) — a
+        // collision part never lands here (opaque by partition), so the
+        // flat-red branch never blends. Playback and sectioning exclude
+        // each other, so the cap never meets this set.
         if !self.drawn_translucent.is_empty() {
             if self.wireframe {
                 pass.set_pipeline(&self.pipelines.line_blend);
@@ -972,19 +994,10 @@ impl MeshPipeline {
                 }
             }
         }
-        if self.draw_cap {
-            // Same pass, after the mesh: the stencil attachment already holds
-            // the parity the mesh's inc/dec left, so the quad only survives
-            // where the cut opened the solid.
-            pass.set_pipeline(&self.pipelines.cap);
-            pass.set_stencil_reference(0);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.cap_buf.slice(..));
-            pass.draw(0..4, 0..1);
-        }
-        // The compare ghost between the cap and the overlays: depth-tested
-        // against the opaque mesh (a ghost behind the model hides) but never
-        // writing depth, so it cannot occlude the grid or markers after it.
+        // The compare ghost after the grid, before the markers:
+        // depth-tested against the opaque mesh (a ghost behind the model
+        // hides) but never writing depth, so it cannot occlude the markers
+        // after it.
         // Drawn in wireframe mode too — upstream's ghost is independent of
         // the wireframe toggle (facts #44/#45 disable the interior shell,
         // not the ghost).
@@ -997,18 +1010,14 @@ impl MeshPipeline {
                 pass.draw_indexed(0..resident.edge_count, 0, 0..1);
             }
         }
-        // Overlays last, painter-ordered (they write no depth): the grid,
-        // then the measure markers after it — both unlit vertex-colored,
-        // depth-tested against the parts so the model occludes them, but
-        // never writing depth, so they never occlude what follows.
-        for overlay in [self.grid.as_ref(), self.marker.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        // The measure markers last (they write no depth): unlit
+        // vertex-colored, depth-tested against the parts so the model
+        // occludes them.
+        if let Some(marker) = self.marker.as_ref() {
             pass.set_pipeline(&self.pipelines.grid);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, overlay.vertex_buf.slice(..));
-            pass.draw(0..overlay.vertex_count, 0..1);
+            pass.set_vertex_buffer(0, marker.vertex_buf.slice(..));
+            pass.draw(0..marker.vertex_count, 0..1);
         }
     }
 }

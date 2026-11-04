@@ -10,7 +10,7 @@ use cosmic::widget::{button, tooltip};
 
 use super::icon::{self, Symbol};
 use super::surface::Corner;
-use super::tone::{Backdrop, HOVER, PRESS, Tone, wash};
+use super::tone::{Backdrop, HELD, HOVER, PRESS, Tone, wash};
 use crate::typography;
 
 /// The tone a button's content draws in: `tone` while it has a message,
@@ -44,6 +44,14 @@ const BORDER: f32 = 0.05;
 /// (macOS toolbar items), or, `bordered`, the hairline pill a toolbar
 /// `Menu` label sits in.
 pub fn hover_wash(bordered: bool, corner: Corner) -> cosmic::theme::Button {
+    held_wash(bordered, corner, false)
+}
+
+/// [`hover_wash`] for a control that opens a menu or card: while `held`
+/// (open) it rests at the [`HELD`] wash. cosmic's custom button classes
+/// never see the button's `selected` flag (src/theme/style/button.rs:209
+/// at the pinned rev), so the state rides in the class.
+pub fn held_wash(bordered: bool, corner: Corner, held: bool) -> cosmic::theme::Button {
     let style = move |theme: &cosmic::Theme, fill: f32| {
         let mut style = button::Style::new();
         style.background = (fill > 0.0).then(|| Background::Color(wash(theme, fill)));
@@ -54,10 +62,11 @@ pub fn hover_wash(bordered: bool, corner: Corner) -> cosmic::theme::Button {
         }
         style
     };
+    let rest = if held { HELD } else { 0.0 };
     cosmic::theme::Button::Custom {
-        active: Box::new(move |_, theme| style(theme, 0.0)),
+        active: Box::new(move |_, theme| style(theme, rest)),
         disabled: Box::new(move |theme| style(theme, 0.0)),
-        hovered: Box::new(move |_, theme| style(theme, HOVER)),
+        hovered: Box::new(move |_, theme| style(theme, HOVER.max(rest))),
         pressed: Box::new(move |_, theme| style(theme, PRESS)),
     }
 }
@@ -318,5 +327,19 @@ mod tests {
         assert_eq!(content_tone(Tone::Accent, &Some(())), Tone::Accent);
         assert_eq!(content_tone(Tone::Accent, &None::<()>), Tone::Tertiary);
         assert_eq!(content_tone(Tone::Secondary, &None::<()>), Tone::Tertiary);
+    }
+
+    /// A held (open) toolbar control rests washed; a plain one rests bare.
+    #[test]
+    fn a_held_control_rests_at_the_held_wash() {
+        use cosmic::widget::button::Catalog;
+        let theme = cosmic::Theme::dark();
+        let rest = |class: &cosmic::theme::Button| theme.active(false, false, class).background;
+        assert_eq!(rest(&hover_wash(true, Corner::S)), None);
+        assert_eq!(
+            rest(&held_wash(true, Corner::S, true)),
+            Some(Background::Color(wash(&theme, HELD)))
+        );
+        assert_eq!(rest(&held_wash(true, Corner::S, false)), None);
     }
 }

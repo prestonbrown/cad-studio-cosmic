@@ -77,6 +77,10 @@ const GRID_SPACING: f32 = 1.0;
 /// The pane divider: a separator wash scaled to #D4D4D5 between #EBEBEC
 /// panes (project-model.png).
 const DIVIDER_SCALE: f32 = 1.17;
+/// In a dark theme the pane divider is a shadow, not a highlight: the
+/// window base pressed this far toward the palette's black (upstream: 10
+/// between 40 and 33 panes, project-model-dark.png).
+const DIVIDER_SHADE: f32 = 0.63;
 
 /// The pane grid's minimum pane extent (iced's default, named so the drag
 /// hit-test computes the same regions the grid lays out).
@@ -93,6 +97,32 @@ const CAPSULE_SCALE: f32 = 0.76;
 /// The toolbar's bottom hairline: a separator scaled to the measured
 /// #C5C5C6 over #EEEEF0.
 const HAIRLINE_SCALE: f32 = 2.1;
+/// The dark theme's toolbar hairline, pressed toward black like
+/// [`DIVIDER_SHADE`] (upstream: 19 under the toolbar).
+const HAIRLINE_SHADE: f32 = 0.3;
+
+/// A project-window hairline: the separator wash at `scale` in a light
+/// theme; in a dark one the window base pressed toward the palette's
+/// black by `shade`, as macOS draws dark split and toolbar dividers
+/// below both neighbours.
+fn hairline_class(scale: f32, shade: f32) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let cosmic = theme.cosmic();
+        let color = if cosmic.is_dark {
+            ui::tone::mix(
+                cosmic.background(false).base.into(),
+                cosmic.palette.neutral_0.into(),
+                shade,
+            )
+        } else {
+            ui::tone::wash(theme, Tone::Separator.alpha(theme, Backdrop::Plain) * scale)
+        };
+        cosmic::iced::widget::container::Style {
+            background: Some(color.into()),
+            ..Default::default()
+        }
+    })
+}
 
 /// The capsule's `.font(.system(size: 12))` (ActivityViewer.swift:34) on
 /// COSMIC's text scale.
@@ -1382,12 +1412,7 @@ impl ProjectWindow {
         container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(surface::fill(
-                Tone::Separator,
-                DIVIDER_SCALE,
-                Corner::None,
-                None,
-            ))
+            .class(hairline_class(DIVIDER_SCALE, DIVIDER_SHADE))
             .into()
     }
 
@@ -1517,10 +1542,12 @@ impl ProjectWindow {
         .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
         Column::with_capacity(2)
             .push(band)
-            .push(surface::divider_scaled(
-                surface::Axis::Horizontal,
-                HAIRLINE_SCALE,
-            ))
+            .push(
+                container(Space::new().width(Length::Fill).height(1.0))
+                    .width(Length::Fill)
+                    .height(1.0)
+                    .class(hairline_class(HAIRLINE_SCALE, HAIRLINE_SHADE)),
+            )
             .into()
     }
 
@@ -2180,6 +2207,42 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The project window's hairlines sit below both neighbours in a dark
+    /// theme (upstream: the split divider 10, the toolbar hairline 19 over
+    /// a 40 window) and stay the separator wash in a light one.
+    #[test]
+    fn dark_hairlines_are_shadows() {
+        use cosmic::iced::widget::container::Catalog;
+        let gray = |theme: &cosmic::Theme, scale, shade| match theme
+            .style(&hairline_class(scale, shade))
+            .background
+        {
+            Some(cosmic::iced::Background::Color(c)) => (c.g * 255.0).round() as i32,
+            other => panic!("{other:?}"),
+        };
+        let dark = cosmic::Theme::dark();
+        let base = (Color::from(dark.cosmic().background(false).base).g * 255.0).round() as i32;
+        let divider = gray(&dark, DIVIDER_SCALE, DIVIDER_SHADE);
+        let hairline = gray(&dark, HAIRLINE_SCALE, HAIRLINE_SHADE);
+        assert!(
+            divider < base && hairline < base,
+            "{divider} {hairline} on {base}"
+        );
+        assert!((divider - 10).abs() <= 3, "divider {divider}");
+        assert!((hairline - 19).abs() <= 3, "hairline {hairline}");
+        let light = cosmic::Theme::light();
+        let wash = ui::tone::wash(
+            &light,
+            Tone::Separator.alpha(&light, Backdrop::Plain) * DIVIDER_SCALE,
+        );
+        assert_eq!(
+            light
+                .style(&hairline_class(DIVIDER_SCALE, DIVIDER_SHADE))
+                .background,
+            Some(wash.into())
+        );
+    }
 
     /// A layout change over a settings file that does not parse leaves the
     /// file alone and says so on the activity line.

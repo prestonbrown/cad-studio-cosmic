@@ -45,5 +45,12 @@ pysheet-dark python-sheet-dark.png
 agentmiss-dark agent-missing-dark.png
 chaterr-dark chat-error-dark.png
 builderr-dark build-error-dark.png
+parts-light parts.png
+section-light section.png
+playback-light playback.png
+partscol-light parts-collapsed.png
+parts-dark parts-dark.png
+section-dark section-dark.png
+playback-dark playback-dark.png
 EOF
 rm -f "$out/.up.png"

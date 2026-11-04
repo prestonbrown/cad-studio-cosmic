@@ -103,3 +103,29 @@ fn values_render_in_first_appearance_order() {
         "the controls must iterate value_names(), never the BTreeMap"
     );
 }
+
+/// The speed menu lists every speed then Ripeti, checks the current speed
+/// and an on loop, and each entry sends its own message.
+#[test]
+fn speed_menu_holds_the_speeds_then_ripeti() {
+    use app::motion_controls::{speed_menu_items, speed_menu_pick};
+    use app::viewer_pane::Message;
+    use viewer::playback::SPEEDS;
+    let items = speed_menu_items(1.0, true);
+    assert_eq!(items.len(), SPEEDS.len() + 1);
+    let checked: Vec<usize> = (0..items.len())
+        .filter(|i| items[*i].starts_with('✓'))
+        .collect();
+    let one = SPEEDS.iter().position(|s| *s == 1.0).unwrap();
+    assert_eq!(checked, [one, SPEEDS.len()]);
+    assert!(items[one].ends_with(&speed_label(1.0)));
+    let off = speed_menu_items(1.0, false);
+    assert!(!off[SPEEDS.len()].starts_with('✓'));
+    for (index, speed) in SPEEDS.iter().enumerate() {
+        assert!(matches!(speed_menu_pick(index), Message::SetSpeed(s) if s == *speed));
+    }
+    assert!(matches!(
+        speed_menu_pick(SPEEDS.len()),
+        Message::ToggleLoops
+    ));
+}

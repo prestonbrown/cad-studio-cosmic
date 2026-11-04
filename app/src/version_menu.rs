@@ -223,8 +223,7 @@ pub fn version_button<Message: Clone + 'static>(
         .height(Length::Fixed(27.0));
     let root = button::custom(label)
         .padding(0)
-        .class(ui_button::hover_wash(true, Corner::S))
-        .selected(open)
+        .class(ui_button::held_wash(true, Corner::S, open))
         .on_press(on_toggle)
         .name(fl!("versioni"));
     ui_button::with_help(

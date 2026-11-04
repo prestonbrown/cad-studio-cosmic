@@ -29,6 +29,11 @@
 //!                                 # toolbar clock button's message (the
 //!                                 # frame pass's card capture)
 //! build                           # the toolbar's Build Model button
+//! viewer <toggle>                 # a viewer toggle on the project window:
+//!                                 # Parameters (the overlay), Section,
+//!                                 # Animation, PartsCollapsed (the Parts
+//!                                 # card's chevron), Playback (play/pause),
+//!                                 # Scrub <seconds> (the motion scrubber)
 //! python Close                    # the python setup sheet's Close
 //! agent Close                     # the agent-missing sheet's Close
 //! settings <tab name>             # open (or focus) the settings window
@@ -50,6 +55,7 @@ use cosmic::Task;
 
 use crate::app::Message;
 use crate::sheets;
+use crate::viewer_pane;
 use crate::windows::welcome;
 
 /// One parsed script line: a pause, or a message to feed the app.
@@ -137,6 +143,14 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             }
             "versioncard" => Step::Msg(Message::DriveVersionCard),
             "build" => Step::Msg(Message::DriveBuild),
+            "viewer" => Step::Msg(Message::DriveViewer(viewer_toggle(rest).ok_or_else(
+                || {
+                    format!(
+                        "line {}: viewer wants Parameters/Section/Animation/PartsCollapsed/Playback/Scrub <s>",
+                        number + 1
+                    )
+                },
+            )?)),
             "python" => match rest {
                 "Close" => Step::Msg(Message::PythonSheet(sheets::PythonMessage::Close)),
                 _ => return Err(format!("line {}: unknown python command", number + 1)),
@@ -167,6 +181,21 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
         steps.push(step);
     }
     Ok(steps)
+}
+
+/// The viewer toggle a `viewer` line names.
+fn viewer_toggle(name: &str) -> Option<viewer_pane::Message> {
+    Some(match name {
+        "Parameters" => viewer_pane::Message::ToggleParameters,
+        "Section" => viewer_pane::Message::ToggleSection,
+        "Animation" => viewer_pane::Message::ToggleAnimation,
+        "PartsCollapsed" => viewer_pane::Message::TogglePartsCollapsed,
+        "Playback" => viewer_pane::Message::TogglePlayback,
+        _ => {
+            let seconds = name.strip_prefix("Scrub ")?.trim().parse().ok()?;
+            viewer_pane::Message::Scrub(seconds)
+        }
+    })
 }
 
 /// The `init` seam: when `CAD_STUDIO_DRIVE` names a script, stream its
@@ -310,6 +339,38 @@ mod tests {
     fn build_command_presses_build() {
         let steps = parse("build\n").unwrap();
         assert!(matches!(steps[0], Step::Msg(Message::DriveBuild)));
+    }
+
+    /// `viewer <toggle>` delivers the named viewer-pane toggle; an unknown
+    /// or missing toggle is an error.
+    #[test]
+    fn viewer_command_names_each_toggle() {
+        let steps = parse(
+            "viewer Parameters\nviewer Section\nviewer Animation\n\
+             viewer PartsCollapsed\nviewer Playback\nviewer Scrub 0.1\n",
+        )
+        .unwrap();
+        let toggles: Vec<_> = steps
+            .iter()
+            .map(|step| match step {
+                Step::Msg(Message::DriveViewer(msg)) => format!("{msg:?}"),
+                other => panic!("not a viewer step: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            toggles,
+            [
+                "ToggleParameters",
+                "ToggleSection",
+                "ToggleAnimation",
+                "TogglePartsCollapsed",
+                "TogglePlayback",
+                "Scrub(0.1)"
+            ]
+        );
+        assert!(parse("viewer Grid").is_err());
+        assert!(parse("viewer").is_err());
+        assert!(parse("viewer Scrub soon").is_err());
     }
 
     /// The arms the smoke-flow test executes but never asserts, plus

@@ -12,6 +12,8 @@
 //!   including thousands grouping and ICU's half-up exact-tie rounding.
 //! - [`speed_label`] — the speed menu's `\(speed)×` labels (:38, :44)
 //!   formatted through the `speed-option` catalog key.
+//! - [`speed_menu_items`] / [`speed_menu_pick`] — the menu's entries (the
+//!   speeds, then Ripeti) and the message each sends.
 //! - [`collision_text`] — the collision pairs line (:81-89); the `↔`,
 //!   `mm³`, and separators are upstream's literals (no catalog key backs
 //!   them).
@@ -22,12 +24,12 @@
 //! deliberate:
 //!
 //! - Upstream nests the speed picker and the Ripeti toggle in ONE menu
-//!   (:35-49); the port shows the speed dropdown with an adjacent loop
-//!   button: cosmic's menu overlay corrupts widget state on dynamic-ish
-//!   content while the corruption boundary is unpinned (docs/research/
-//!   libcosmic-menu-dynamic-items-bug.md), so the single-menu shape is
-//!   out of reach until that boundary is pinned.
-//! - iced sliders and cosmic dropdowns carry no accessibility text at the
+//!   (:35-49); the port's menu is the kit's borderless pull-down (iced's
+//!   pick list, not a cosmic menu: docs/research/
+//!   libcosmic-menu-dynamic-items-bug.md), whose entries are plain
+//!   labels, so the checkmarks of the inline picker and the toggle are a
+//!   leading `✓` on the checked entries ([`speed_menu_items`]).
+//! - iced sliders and pick lists carry no accessibility text at the
 //!   pinned rev, so their descriptions render as tooltips (the parts
 //!   overlay's slider pattern); buttons get real descriptions.
 //! - The warning glyph is `dialog-warning`, the freedesktop stand-in for
@@ -43,13 +45,14 @@
 //! owns.
 
 use cosmic::Element;
-use cosmic::iced::widget::slider;
 use cosmic::iced::{Alignment, Length};
-use cosmic::widget::{Column, Row, button, container, dropdown, text, tooltip};
+use cosmic::widget::{Column, Row, container, text, tooltip};
 use engine::parsing::animation::{Collision, MotionStudy, StudyState};
 use viewer::playback::{MotionPlayer, SCRUB_FLOOR, SPEEDS};
 
 use crate::fl;
+use crate::ui::picker::pulldown;
+use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::surface::{self, Corner};
 use crate::ui::{Backdrop, Symbol, Tone, icon::icon};
 use crate::viewer_pane::Message;
@@ -178,11 +181,40 @@ pub fn collision_text(collisions: &[Collision]) -> String {
         .join(", ")
 }
 
+/// The speed menu's entries (MotionControls.swift:35-48): every speed,
+/// then the Ripeti toggle, the checked speed and an on toggle led by
+/// `✓` (the unchecked ones by a same-width gap, as macOS indents them).
+pub fn speed_menu_items(speed: f64, loops: bool) -> Vec<String> {
+    let mark = |checked: bool, label: String| {
+        format!(
+            "{}{label}",
+            if checked {
+                "✓\u{2002}"
+            } else {
+                "\u{2002}\u{2002}"
+            }
+        )
+    };
+    SPEEDS
+        .iter()
+        .map(|option| mark(*option == speed, speed_label(*option)))
+        .chain(std::iter::once(mark(loops, fl!("ripeti"))))
+        .collect()
+}
+
+/// The message the speed menu's entry at `index` sends: a speed, or
+/// (past the speeds) the Ripeti toggle.
+pub fn speed_menu_pick(index: usize) -> Message {
+    SPEEDS
+        .get(index)
+        .map_or(Message::ToggleLoops, |speed| Message::SetSpeed(*speed))
+}
+
 // ─── view ──────────────────────────────────────────────────────────────────
 
 /// The whole capsule (MotionControls.swift:9-79): row 1 carries play or
-/// pause, the scrub slider, the time readout, the speed dropdown, and the
-/// loop toggle; row 2 appears only when the state at `player.time` has a
+/// pause, the scrub slider, the time readout, and the speed menu (which
+/// holds the loop toggle); row 2 appears only when the state at `player.time` has a
 /// label, values, or collisions (:51). Everything rendered is copied or
 /// formatted into owned strings, so the element's lifetime is free of
 /// the references passed in (the parameters overlay's rule).
@@ -206,9 +238,9 @@ pub fn view_motion_controls<'a>(
 }
 
 /// Row 1 (MotionControls.swift:12-50), spacing 10: the play/pause button
-/// (16 px icon, `.frame(width: 16)`), the scrub slider over
-/// `0..=max(duration, 0.001)` (:23), the mono readout, the speed
-/// dropdown, and the loop toggle.
+/// (16 px icon, `.frame(width: 16)`), the small scrub slider over
+/// `0..=max(duration, 0.001)` (:23), the caption readout, and the
+/// borderless speed menu holding the speeds and Ripeti.
 fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, Message> {
     // play.fill / pause.fill in a 16 pt frame, borderless (:14-20)
     // pause.fill draws on a 16-unit grid; play.fill is cropped to its
@@ -235,35 +267,32 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
         help,
         tooltip::Position::FollowCursor,
     );
-    let scrub = tooltip(
-        slider(
-            0.0..=study.duration().max(SCRUB_FLOOR),
-            player.time,
-            Message::Scrub,
-        )
-        .width(Length::Fill),
-        text(fl!("tempo-dell-animazione")),
-        tooltip::Position::FollowCursor,
+    let scrub = with_rail_ends(
+        tooltip(
+            small_slider(
+                0.0..=study.duration().max(SCRUB_FLOOR),
+                player.time,
+                Message::Scrub,
+                Length::Fill,
+            ),
+            text(fl!("tempo-dell-animazione")),
+            tooltip::Position::FollowCursor,
+        ),
+        Length::Fill,
     );
-    let readout = mono_dim(time_readout(player.time, study.duration())).size(CAPTION);
-    // The closed dropdown shows the selected entry's label, which is
-    // exactly speed_label(player.speed) for every speed the menu can set.
-    let speeds: Vec<String> = SPEEDS.iter().map(|speed| speed_label(*speed)).collect();
-    let selected = SPEEDS.iter().position(|speed| *speed == player.speed);
+    let readout = digits_dim(time_readout(player.time, study.duration())).size(CAPTION);
     let speed = tooltip(
-        dropdown(speeds, selected, |index| Message::SetSpeed(SPEEDS[index])),
+        pulldown(
+            speed_menu_items(player.speed, player.loops),
+            speed_label(player.speed),
+            CAPTION,
+            CAPTION,
+            BACKDROP,
+            speed_menu_pick,
+        ),
         text(fl!("velocit-di-riproduzione")), // the menu's help (:49)
         tooltip::Position::FollowCursor,
     );
-    // The on-state shows through the class (the parts picker's idiom):
-    // cosmic's builder buttons carry no selected flag at this pin.
-    let loop_toggle = button::text(fl!("ripeti"))
-        .class(if player.loops {
-            cosmic::theme::Button::Suggested
-        } else {
-            cosmic::theme::Button::Standard
-        })
-        .on_press(Message::ToggleLoops);
     Row::new()
         .spacing(10)
         .align_y(cosmic::iced::Alignment::Center)
@@ -271,12 +300,11 @@ fn controls_row<'a>(player: &MotionPlayer, study: &MotionStudy) -> Element<'a, M
         .push(scrub)
         .push(readout)
         .push(speed)
-        .push(loop_toggle)
         .into()
 }
 
 /// Row 2 (MotionControls.swift:51-70), spacing 12: the phase label at
-/// medium weight, each value as `name formatted` in mono dim — iterated
+/// medium weight, each value as `name formatted` in secondary — iterated
 /// in `value_names()` order, never the BTreeMap's (the module's ordering
 /// law) — and, when the state carries collisions, the warning glyph and
 /// the joined pairs in red.
@@ -293,7 +321,7 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
     for name in study.value_names() {
         if let Some(value) = state.values.get(name) {
             row = row.push(
-                mono_dim(fl!(
+                digits_dim(fl!(
                     "motion-value-row",
                     name = name,
                     value = format_significant(*value, 1, 3)
@@ -324,10 +352,10 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
     row.into()
 }
 
-/// The readout and the values row's dim monospace (upstream's caption
-/// `.monospacedDigit().foregroundStyle(.secondary)`).
-fn mono_dim(body: String) -> Text<'static> {
-    text(body)
-        .font(cosmic::font::mono())
-        .class(Tone::Secondary.text(BACKDROP))
+/// The readout and the values row: upstream's caption
+/// `.monospacedDigit().foregroundStyle(.secondary)`: the interface font
+/// in the secondary role. iced selects no OpenType features, so the
+/// figures are the family's default ones rather than forced tabular.
+fn digits_dim(body: String) -> Text<'static> {
+    text(body).class(Tone::Secondary.text(BACKDROP))
 }

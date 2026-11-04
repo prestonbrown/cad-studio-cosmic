@@ -28,3 +28,11 @@ pysheet-dark 1320x840 dark 7 open.drive ownfix,env=PYTHONHOME=/nonexistent
 agentmiss-dark 1320x840 dark 13 agentmiss.drive ownfix,json=agentEngine:codex
 chaterr-dark 1320x840 dark 14 chaterr.drive ownfix,json=agentEngine:codex
 builderr-dark 1320x840 dark 12 builderr.drive ownfix
+parts-light 1320x840 light 10 parts.drive
+section-light 1320x840 light 10 section.drive
+playback-light 1320x840 light 12 playback.drive
+partscol-light 1320x840 light 10 partscol.drive
+parts-dark 1320x840 dark 10 parts.drive
+section-dark 1320x840 dark 10 section.drive
+playback-dark 1320x840 dark 12 playback.drive
+partscol-dark 1320x840 dark 10 partscol.drive

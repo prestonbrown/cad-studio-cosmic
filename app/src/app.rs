@@ -100,6 +100,10 @@ pub enum Message {
     /// The drive harness's Build: the toolbar Build Model button's own
     /// command on the focused project window (CAD_STUDIO_DRIVE's `build`).
     DriveBuild,
+    /// The drive harness's viewer toggles (CAD_STUDIO_DRIVE's `viewer`
+    /// command): a viewer-pane message delivered to the project window, as
+    /// the toolbar button or overlay chevron that sends it would.
+    DriveViewer(crate::viewer_pane::Message),
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -301,6 +305,11 @@ impl Application for CadStudio {
                         project::Message::Command(project::Command::Build),
                     ))
                 })
+                .unwrap_or_else(Task::none)
+                .map(Action::App),
+            Message::DriveViewer(msg) => self
+                .project_window()
+                .map(|id| Task::done(Message::Project(id, project::Message::Viewer(msg))))
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),

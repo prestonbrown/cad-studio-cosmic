@@ -52,12 +52,18 @@ const MAJOR_ALPHA: f32 = 0.28;
 const LINE_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// The theme-dependent overlay colors, linear rgb: grid lines (drawn at
-/// the minor/major alphas) and the bed outline.
+/// the minor/major alphas over `backdrop`) and the bed outline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub line: [f32; 3],
     pub accent: [f32; 3],
+    /// The viewport background the lines sit on, linear gray
+    /// ([`background_srgb`] through the sRGB EOTF).
+    pub backdrop: f32,
 }
+
+/// The dark viewport, `Color(white: 0.13)` = sRGB 33, linear.
+const DARK_BACKDROP: f32 = 0.015_208_514;
 
 impl Palette {
     /// Dark appearance: white lines (ModelViewer.swift:429-430), the
@@ -65,6 +71,7 @@ impl Palette {
     pub const DARK: Palette = Palette {
         line: LINE_COLOR,
         accent: ACCENT,
+        backdrop: DARK_BACKDROP,
     };
 
     /// The palette for an appearance and a linear accent color: black
@@ -73,7 +80,25 @@ impl Palette {
         Palette {
             line: if dark { LINE_COLOR } else { [0.0; 3] },
             accent,
+            backdrop: super::parts::srgb_to_linear(background_srgb(dark)[0]),
         }
+    }
+
+    /// A grid line at `alpha`, as the opaque color RealityKit's blend
+    /// leaves on the backdrop. RealityKit blends in linear light, so a
+    /// 10 % white line lifts the dark viewport from sRGB 33 to 95 while a
+    /// 10 % black one dims the light viewport only from 240 to 229; an
+    /// alpha blend in the viewer's display-encoded target would give 55
+    /// and 216 instead. Mixing in linear here and drawing the line opaque
+    /// lands on upstream's value whatever the target's encoding (the
+    /// lines lie on the bare backdrop: the model occludes them, and they
+    /// never overlap another line except where two cross).
+    pub fn line_over_backdrop(&self, alpha: f32) -> [f32; 4] {
+        let mut color = [0.0, 0.0, 0.0, 1.0];
+        for (out, line) in color.iter_mut().zip(self.line) {
+            *out = self.backdrop + (line - self.backdrop) * alpha;
+        }
+        color
     }
 }
 
@@ -240,7 +265,7 @@ pub fn geometry_with(
         } else {
             (MINOR_WIDTH, MINOR_ALPHA)
         };
-        let color = [palette.line[0], palette.line[1], palette.line[2], alpha];
+        let color = palette.line_over_backdrop(alpha);
         let (o, h) = (offset as f32, half);
         line_quad([o, GRID_Y, -h], [o, GRID_Y, h], width, color, &mut vertices);
         line_quad([-h, GRID_Y, o], [h, GRID_Y, o], width, color, &mut vertices);
@@ -338,10 +363,12 @@ mod tests {
         for (dark, line) in [(false, [0.0; 3]), (true, [1.0; 3])] {
             let g = geometry_with(aabb, Some([80.0, 80.0]), Palette::new(dark, accent));
             let lines = &g.vertices[..g.steps.len() * 12];
+            let palette = Palette::new(dark, accent);
+            assert_eq!(palette.line, line, "dark={dark}");
             for (i, v) in lines.iter().enumerate() {
                 let major = g.steps[i / 12].major;
                 let alpha = if major { MAJOR_ALPHA } else { MINOR_ALPHA };
-                assert_eq!(v.color, [line[0], line[1], line[2], alpha], "dark={dark}");
+                assert_eq!(v.color, palette.line_over_backdrop(alpha), "dark={dark}");
             }
             let bed = &g.vertices[g.steps.len() * 12..g.steps.len() * 12 + 24];
             assert!(bed.iter().all(|v| v.color == [0.0, 0.2, 1.0, 1.0]));
@@ -355,6 +382,31 @@ mod tests {
             geometry(aabb, None).content_hash,
             geometry_with(aabb, None, Palette::new(false, ACCENT)).content_hash
         );
+    }
+
+    /// Grid lines land where RealityKit's linear-light blend puts them on
+    /// the viewport (measured off shots/upstream/project-model(-dark).png:
+    /// minors peak at sRGB 229 on the light 240 and ~92 on the dark 33),
+    /// drawn opaque so the target's encoding cannot re-blend them.
+    #[test]
+    fn grid_lines_blend_in_linear_light_over_the_backdrop() {
+        use super::super::parts::{linear_to_srgb_f, srgb_to_linear};
+        assert_eq!(Palette::DARK, Palette::new(true, ACCENT));
+        assert!((Palette::DARK.backdrop - srgb_to_linear(33)).abs() < 1e-7);
+        let srgb = |c: [f32; 4]| {
+            assert_eq!(c[3], 1.0, "drawn opaque");
+            assert!(c[0] == c[1] && c[1] == c[2], "a neutral gray");
+            (linear_to_srgb_f(c[0]) * 255.0).round() as u8
+        };
+        let light = Palette::new(false, ACCENT);
+        let dark = Palette::DARK;
+        assert_eq!(srgb(light.line_over_backdrop(MINOR_ALPHA)), 229);
+        assert_eq!(srgb(dark.line_over_backdrop(MINOR_ALPHA)), 95);
+        assert_eq!(srgb(light.line_over_backdrop(MAJOR_ALPHA)), 208);
+        assert_eq!(srgb(dark.line_over_backdrop(MAJOR_ALPHA)), 147);
+        // no line at all is the backdrop itself
+        assert_eq!(srgb(light.line_over_backdrop(0.0)), 240);
+        assert_eq!(srgb(dark.line_over_backdrop(0.0)), 33);
     }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
@@ -486,7 +538,7 @@ mod tests {
         // one major quad, exactly (Swift quad() order): the offset-0 x-line
         // runs (0,-0.05,-160) -> (0,-0.05,160); along = (0,0,1), so
         // side = cross(along, (0,1,0)) · 0.25 = (-0.25, 0, 0)
-        let major_color = [LINE_COLOR[0], LINE_COLOR[1], LINE_COLOR[2], MAJOR_ALPHA];
+        let major_color = Palette::DARK.line_over_backdrop(MAJOR_ALPHA);
         let at = |x: f32, z: f32| GridVertex {
             pos: [x, GRID_Y, z],
             color: major_color,
@@ -509,10 +561,7 @@ mod tests {
         let minor = g.steps.iter().position(|s| s.offset == 10.0).unwrap();
         let v = &g.vertices[minor * 12];
         assert!(close(v.pos, [10.125, GRID_Y, -160.0]), "{:?}", v.pos);
-        assert_eq!(
-            v.color,
-            [LINE_COLOR[0], LINE_COLOR[1], LINE_COLOR[2], MINOR_ALPHA]
-        );
+        assert_eq!(v.color, Palette::DARK.line_over_backdrop(MINOR_ALPHA));
 
         // bed Some: accent rectangle at y = 0.06 after the lines, before the
         // tripod; bed None drew none of those
