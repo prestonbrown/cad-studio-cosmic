@@ -22,3 +22,15 @@ libs, mesa (llvmpipe/lavapipe), Xvfb, xdotool, imagemagick, fonts, xdg-user-dirs
 `~/.local/share/icons/Cosmic`, rustup, uv + the build123d venv at
 `~/.local/share/cad-studio/venv`. Snapshots: `ssh zeus sudo incus snapshot
 list cad-dev` (`base-toolchain` is the clean provisioned state).
+
+## Batch captures (capall.sh)
+`scripts/rig/shots/` holds the drive scripts, `spec` (20 shots: 10 states ×
+light/dark) and `recents.ron` (the two fixture projects upstream's gallery
+shows). On the rig, with the fixture built at ~/fixtures-cap:
+
+    ~/wt/<name>/fixtures/matched-state/make-box-fixture.sh ~/fixtures-cap
+    RECENTS=~/wt/<name>/scripts/rig/shots/recents.ron \
+      ~/wt/<name>/scripts/rig/capall.sh ~/targets/<name>/release/cad-studio ~/capout ~/wt/<name>/scripts/rig/shots/spec
+
+Every shot gets its own Xvfb and ~/.config copy; 8 run at once; each waits
+until its frame has painted. The full set takes under 20 s.

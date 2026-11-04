@@ -1,0 +1,5 @@
+setup Continue
+sleep 600
+about
+sleep 1200
+noop

@@ -1,0 +1,5 @@
+setup Continue
+sleep 600
+settings Agente
+sleep 1200
+noop

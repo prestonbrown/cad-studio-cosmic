@@ -1,0 +1,7 @@
+setup Continue
+sleep 1200
+recent /home/pbrown/fixtures-cap/box-fixture
+sleep 5000
+versioncard
+sleep 800
+noop

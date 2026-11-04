@@ -1,0 +1,5 @@
+setup Continue
+sleep 600
+welcome NewProject
+sleep 800
+noop
