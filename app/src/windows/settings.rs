@@ -54,10 +54,9 @@ pub const WIDTH: f32 = 600.0;
 /// window fits each tab's content (shots/upstream/settings-*.png, 1x:
 /// General 413, Agent 633, Python 260, Advanced 323), so the port resizes
 /// on every tab or engine switch. Each value is the tab's content under
-/// the port's header plus upstream's bottom margin (last baseline to the
-/// window edge, about 25 px), at the default text scale in English; the
-/// body still scrolls should a longer translation or a larger text scale
-/// run past it.
+/// the port's header plus the form's bottom margin, measured at the
+/// default text scale in English; the body still scrolls should a longer
+/// translation or a larger text scale run past it.
 pub fn height(tab: Tab, engine: AgentKind) -> f32 {
     match (tab, engine) {
         (Tab::General, _) => 474.0,
