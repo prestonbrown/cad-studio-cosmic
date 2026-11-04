@@ -655,7 +655,7 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
 /// CUT_FACE_LINEAR (0.692, 0.032, 0.022) reads back as (217, 50, 41) — a
 /// brief's linear-g `g < 90` band would misfire on exactly that. Calibrated
-/// from a measured histogram (T4, per-part colors under two-light shading):
+/// from a measured histogram (per-part colors under two-light shading):
 /// cap (217,50,41) — the cap shader is unlit, so it alone is
 /// shading-invariant; blue base faces (11,61,95), (13,67,103), (16,75,115);
 /// red lid faces (113,15,16), (123,17,19), (137,21,23); background
@@ -906,7 +906,7 @@ fn y_axis_section_keeps_the_model_above_side() {
     );
 }
 
-/// The discard does not depend on winding (carry-forward M6 line 1): flip
+/// The discard does not depend on winding: flip
 /// one part's triangle windings and the above-plane pixels still disappear.
 /// The plane sits BELOW the pinned aabb, so keep-below keeps nothing —
 /// every fragment is above it and the discard alone decides every pixel;
@@ -1131,7 +1131,7 @@ fn viewport_resize_reallocates_depth_and_renders() {
     );
 }
 
-/// Aspect comes from the viewport (Review Focus 3, the discriminator): the
+/// Aspect comes from the viewport: the
 /// same model, framed identically (framing is aspect-free), rendered at
 /// 800×600 (4:3) and 1280×600 (≈2.13:1) — equal heights. With a vertical
 /// FOV a point's pixel x offset scales as h / (2·tan(fov/2))·aspect_factor
@@ -1172,10 +1172,8 @@ fn aspect_from_viewport() {
     let ratio = wide as f64 / narrow as f64;
     // measured on Metal: identical ink counts (98560) and bbox widths
     // (468 px) at both sizes — ratio 1.000; the 5% band only absorbs
-    // driver rounding. (T3 re-measure: per-part colors made the dark-blue
-    // face ink-visible, lifting the count from the neutral-era 31834; the
-    // bbox width is unchanged.) Under the 16:9 hardcode this same render
-    // measures 1.606 (verified against this test during T2).
+    // driver rounding. A hardcoded 16:9 aspect reads 1.606 on this same
+    // render.
     assert!(
         (0.95..=1.05).contains(&ratio),
         "ink bbox width ratio {ratio:.3} must be ~1.0 — viewport aspect must drive the projection (16:9 hardcode reads ~1.6)"
@@ -1228,11 +1226,9 @@ fn msaa_smooths_a_diagonal_edge() {
     // at 1x the pipeline writes unblended single-sample fragments, so every
     // pixel IS a pure chroma — anything else is a blend/state leak
     assert_eq!(e1, 0, "1x frame must contain only pure-chroma pixels");
-    // measured 1153 blend pixels at 4x on Metal — unchanged by two-light
-    // shading (T4 re-measure: the blended edge set is geometric; T3's
-    // luminance-band predecessor read 1199 at T2 until per-part colors
-    // killed that band and the chroma metric replaced it); the floor
-    // guards "real AA happened"
+    // measured 1153 blend pixels at 4x on Metal under two-light shading
+    // (the blended edge set is geometric, so shading leaves it alone); the
+    // floor guards "real AA happened"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too. The options
@@ -1267,7 +1263,7 @@ fn msaa_smooths_a_diagonal_edge() {
     );
 }
 
-/// Carry-forward strike (M6 T7): the alpha-blended grid survives the 4x
+/// The alpha-blended grid survives the 4x
 /// MSAA resolve path. The grid pipeline runs INSIDE the multisample pass,
 /// so its straight-alpha lines blend onto the transparent-cleared
 /// attachment and the resolve+blit composite carries them back over the
@@ -1311,7 +1307,7 @@ fn msaa_resolves_keep_grid_alpha() {
     );
 }
 
-/// Per-part colors reach pixels (Review Focus 4). The golden model paints
+/// Per-part colors reach pixels. The golden model paints
 /// base #1F78B5 and lid #D62629; every ink pixel of a 1x frame (no blends —
 /// the pipeline writes unblended, single-sample) must classify, by
 /// chromaticity-normalized nearest of the two expected linear colors, as
@@ -1331,7 +1327,7 @@ fn two_parts_two_colors() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let (blue, red) = fixture_chromas();
-    // Measured on Metal (T4, two-light shading): a 1x frame has exactly 6
+    // Measured on Metal (two-light shading): a 1x frame has exactly 6
     // distinct ink values — three blue faces and three red faces, each
     // within 0.0074 of its part's chroma (u8 quantization noise), the
     // nearest WRONG color 1.42 away. TOL 0.05 holds ~7x noise headroom and
@@ -1417,7 +1413,7 @@ fn neutral_when_uncolored() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let neutral = face_chromas(NEUTRAL, &iso_visible_normals());
-    // Measured on Metal (T4, two-light shading): max chroma distance over
+    // Measured on Metal (two-light shading): max chroma distance over
     // all 98560 ink pixels is 0.0115 (u8 quantization on the lit-neutral
     // faces — ambient-only faces are dark and quantize coarser); TOL 0.05
     // is >4x that. A per-triangle default color or sRGB passthrough lands
@@ -1661,7 +1657,7 @@ fn plain_target_shader_carries_the_srgb_encode() {
         wgpu::TextureFormat::Bgra8Unorm,
     );
     // the two visible faces' expected STORED bytes: the linear lit through
-    // the encode the shader now carries (encode_srgb is its test twin)
+    // the encode the shader carries (encode_srgb is its test twin)
     let lits = [
         white_shade([0.0, 1.0, 0.0]),
         white_shade([
@@ -1713,7 +1709,7 @@ fn plain_target_shader_carries_the_srgb_encode() {
         face
     );
 
-    // review F2: the plain path must be BYTE-COMPARABLE to a same-frame
+    // the plain path must be BYTE-COMPARABLE to a same-frame
     // sRGB-attachment render (the hardware encode vs the shader encode)
     // — assert the mean absolute delta over the frame is within 2/255
     // (piecewise-vs-hardware rounding; anything structural shows up >>).
@@ -1751,12 +1747,11 @@ fn wireframe_renders_lines_not_faces() {
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
-    // measured on Metal: solid 98560 ink px, wireframe 3423 — that was the
-    // edge list WITHOUT face diagonals; upstream parity (facts #44, .lines
+    // measured on Metal: solid 98560 ink px, wireframe 3423 for the edge
+    // list WITHOUT face diagonals; upstream parity (facts #44, .lines
     // draws every triangle edge) adds the 12 diagonals, which can only
     // grow wire ink. Even a 3x growth reads ratio 0.104, inside the band,
-    // and the floor only rises — full-suite re-measure deferred to the
-    // thelio merge gate (laptop test policy)
+    // and the floor only rises
     assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
     let ratio = wi as f64 / si as f64;
     assert!(
@@ -2100,7 +2095,7 @@ fn orientation_grid_discriminates_mirrors() {
     }
 }
 
-/// The M0-deferred orientation obligation: the readback's occupied-cell
+/// The orientation check: the readback's occupied-cell
 /// pattern must match a CPU rasterization of the SAME triangles through
 /// the SAME view_proj — a flipped projection, viewport, or readback row
 /// order lands the L where the CPU grid says nothing is. Agreement is
@@ -2152,7 +2147,7 @@ fn orientation_pattern_matches_projection() {
     };
     assert_grid_agrees(&px, "1x");
     // and through the resolve+blit path, where a UV flip in the blit would
-    // mirror the composited frame — the M0 obligation's actual subject
+    // mirror the composited frame — the orientation check's actual subject
     let mut p4 = MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
     let px4 = render_frame_with_poses(
         device,
@@ -2590,7 +2585,7 @@ fn collision_paints_flat_red_on_every_normal() {
     }
 }
 
-/// Carry-forward class (the M3/M6 grid-alpha bug, now on mesh parts): a 0.22
+/// The grid-alpha failure class, on mesh parts: a 0.22
 /// part through the 4x MSAA resolve must still composite at 0.22 — neither
 /// snapped to the opaque color (alpha lost) nor to the background. The 4x
 /// options ride the harness core directly: default options carry msaa 1 and

@@ -16,7 +16,7 @@
 //!
 //! The discard tests the fragment's world position alone — never winding,
 //! face orientation, or the stencil parity the cap quad uses — so a
-//! flipped-STL part sections identically (carry-forward M6 line 1).
+//! flipped-STL part sections identically.
 //!
 //! [`scene_plane`] states the plane in RAW-remap scene coordinates;
 //! [`pinned_plane`] adds the scene's floor pin along that axis and the cap

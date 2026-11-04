@@ -6,7 +6,7 @@
 //! 167-168): `(-center.x, -min.y, -center.z)`, putting the model floor at
 //! scene y=0 and centering x/z. The pin is recorded on the struct and
 //! [`PartScene::to_scene`]/[`PartScene::to_model`] are its public crossing
-//! — the grid, bed outline, and tripod (Task 5) and `camera::frame`'s
+//! — the grid, bed outline, and tripod and `camera::frame`'s
 //! `(0, size.y/2, 0)` target are all stated against this pinned frame.
 //!
 //! Per-triangle colors stage here too: `TriangleColor::Some` is u8 sRGB
@@ -578,7 +578,7 @@ mod tests {
         }
     }
 
-    /// Task 4: every staged triangle is flat-shaded with its own face
+    /// Every staged triangle is flat-shaded with its own face
     /// normal — all 3 corners carry normalize(cross(b−a, c−a)) of the
     /// STAGED (remapped, floor-pinned) positions, recomputed here
     /// independently of the staging code. A zero-area triangle falls back
@@ -633,7 +633,7 @@ mod tests {
 
     /// The f32 EOTF is the exact core the u8 form delegates to: every u8
     /// value through `srgb_to_linear_f(c / 255)` equals `srgb_to_linear(c)`,
-    /// so downstream f32 callers (T3's cap color, T6's marker orange) sit on
+    /// so downstream f32 callers (the cap color, the marker orange) sit on
     /// the same curve the staging paints with.
     #[test]
     fn srgb_to_linear_f_is_the_u8_forms_core() {
@@ -654,8 +654,8 @@ mod tests {
 
     /// `to_scene` is exactly the staging map (remap + the struct's pin), and
     /// `to_model` inverts it: every MODEL corner lands on its staged byte,
-    /// and the roundtrip returns the MODEL corner — the crossing T5's
-    /// picking and T11's marker placement ride.
+    /// and the roundtrip returns the MODEL corner — the crossing
+    /// picking and marker placement ride.
     #[test]
     fn to_scene_to_model_match_staging_and_roundtrip() {
         let parts = golden_3mf_parts();
@@ -679,7 +679,7 @@ mod tests {
     /// `from_parts_with_pin` stages against a caller-chosen frame: the
     /// recorded pin is the input, and the staged bytes sit at exactly
     /// (foreign pin − own pin) from `from_parts`'s — the comparison ghost's
-    /// contract (T12 stages the old model in the CURRENT scene's frame).
+    /// contract (the ghost stages the old model in the CURRENT scene's frame).
     #[test]
     fn from_parts_with_pin_honors_a_foreign_pin() {
         let parts = golden_3mf_parts();

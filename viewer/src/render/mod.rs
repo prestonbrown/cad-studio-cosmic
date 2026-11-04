@@ -14,7 +14,7 @@
 //! camera moves. What legitimately writes per frame: the camera uniform,
 //! the section-cap quad, and each visible part's model uniform — the
 //! [`Frame`] pose path moves and hides parts (draw-skip on `None`)
-//! without touching a vertex, and M7's playback rides the same binding:
+//! without touching a vertex, and motion playback rides the same binding:
 //! poses AND the collision/translucency appearance flags are uniform
 //! state (80 B/part), never vertex re-staging.
 //!
@@ -54,8 +54,8 @@
 //! spheres at the picked points plus the two-point link. Both are
 //! depth-tested so the model occludes them, but neither writes depth.
 //!
-//! The compare ghost (M5's comparison split — this port owns the render
-//! half): a second [`PartScene`] staged from the comparison version in
+//! The compare ghost (the render half of version comparison; the app
+//! owns the comparison state): a second [`PartScene`] staged from the comparison version in
 //! the CURRENT scene's pin (`PartScene::from_parts_with_pin`,
 //! ModelViewer.swift:135 — ghostEntity hangs under `content`) draws as
 //! an unlit systemOrange wireframe at [`GHOST_ALPHA`] through its own
@@ -1194,7 +1194,7 @@ mod tests {
         assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
     }
 
-    /// T1-review carry, resolved: the content hash covers the STAGED vertex
+    /// The content hash covers the STAGED vertex
     /// bytes and `from_parts` paints `neutral` into the color field, so two
     /// scenes differing only in neutral already differ in staged content —
     /// no separate hash input is needed. This test is the proof, and the
@@ -1273,8 +1273,8 @@ mod tests {
     }
 
     /// The GPU-first transform law: a pose change moves ink through the
-    /// model uniform alone — zero vertex uploads (the M3 behavior this
-    /// task retires restaged the whole part).
+    /// model uniform alone — zero vertex uploads, never a restage of
+    /// the whole part.
     #[test]
     fn pose_change_moves_ink_without_uploads() {
         let (device, queue) = gpu::device_queue();

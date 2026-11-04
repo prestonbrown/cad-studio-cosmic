@@ -43,7 +43,7 @@ pub struct ModelScene {
     /// update costs one refcount bump, never a mesh copy or re-stage.
     pub poses: Arc<[PartPose]>,
     /// Per-part motion appearance flags for the next frame — opaque
-    /// defaults until the animation pane's playback (T6) writes per-frame
+    /// defaults until the animation pane's playback writes per-frame
     /// translucent static parts and flat-red colliding ones. Arc-shared
     /// like `poses`, so an appearance update is a refcount bump too.
     pub appearances: Arc<[PartAppearance]>,
@@ -57,7 +57,7 @@ pub struct ModelScene {
     /// `PartScene` built from the comparison version WITH THIS SCENE'S
     /// PIN (`PartScene::from_parts_with_pin(.., self.scene.pin)`,
     /// ModelViewer.swift:135: ghostEntity under `content`). The app layer
-    /// owns the comparison state (M5's `comparison_parameters`) and swaps
+    /// owns the comparison state (`comparison_parameters`) and swaps
     /// the scene here on a version change; `None` draws none.
     pub ghost: Option<Arc<PartScene>>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
@@ -81,7 +81,7 @@ pub struct ModelScene {
     section: Option<SectionPlane>,
     /// The aabb [`ModelScene::grid`] was last built against — the change
     /// check [`ModelScene::set_overlay_frame`] compares against. Normally
-    /// the staged scene's own; the pane's frozen stamp (T10) writes
+    /// the staged scene's own; the pane's frozen stamp writes
     /// layout-switch-time values here instead.
     grid_aabb: ([f32; 3], [f32; 3]),
     /// The overlay rebuilt for the last non-default palette a [`Themed`]
@@ -181,7 +181,7 @@ impl ModelScene {
     /// scene/layout/plate-identity changes and hands its FROZEN `grid_aabb`
     /// — upstream rebuilds the grid on sceneID, never on explode/hidden
     /// sweeps, so the grid's size freezes at layout-switch-time explode and
-    /// the pane's stamp is what reproduces that quirk (T10 owns the
+    /// the pane's stamp is what reproduces that quirk (the pane owns the
     /// freezing; this method only obeys the inputs it is given).
     pub fn set_overlay_frame(&mut self, aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) {
         if aabb == self.grid_aabb && bed == self.bed {
@@ -362,7 +362,7 @@ mod tests {
     /// rebuildGrid/showBed guards, ModelViewer.swift:165-190): the
     /// constructor's own (aabb, None) rebuilds nothing, a bed change
     /// rebuilds with the outline in the mesh, and an aabb change rebuilds
-    /// at the new extents — the seam T10 stamps on scene/layout/plate
+    /// at the new extents — the seam the pane stamps on scene/layout/plate
     /// identity changes, reproducing upstream's grid freeze through
     /// explode/hidden sweeps (those never reach this method).
     #[test]

@@ -251,7 +251,7 @@ mod target_space_tests {
     use crate::render::parts;
 
     /// The WGSL encode string's curve constants must match the Rust twin
-    /// exactly (review F1: a typo in the string passes every pure test —
+    /// exactly (a typo in the string passes every pure test —
     /// only the GPU test would catch it, which runs on one machine).
     #[test]
     fn wgsl_encode_constants_match_the_rust_twin() {

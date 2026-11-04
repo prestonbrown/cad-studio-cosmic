@@ -209,7 +209,7 @@ pub fn arrange(
 /// (the all-hidden fallback's input) it degrades to the all-parts union —
 /// WITH each slot's arrangement offset applied, i.e. the arranged-but-
 /// invisible scene, not the assembled box (an all-hidden Exploded fold
-/// carries the explode pushes). T10 caller contract: that degrade feeds
+/// carries the explode pushes). Caller contract: that degrade feeds
 /// framing only, so the all-hidden frame matches the layout the user lands
 /// in on unhiding; section/cap/grid positions stay visible-only domains.
 /// An empty scene keeps a finite zero box for the camera math (the
