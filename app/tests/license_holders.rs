@@ -18,10 +18,16 @@ fn about_copyright_names_both_license_holders_in_every_catalog() {
     }
     for lang in ["en", "it", "de", "fr"] {
         let ftl = read(&format!("i18n/{lang}/main.ftl"));
-        let line = ftl
+        let start = ftl
             .lines()
-            .find(|l| l.starts_with("about-copyright ="))
+            .position(|l| l.starts_with("about-copyright ="))
             .unwrap_or_else(|| panic!("{lang}: no about-copyright entry"));
+        // The entry runs through its indented continuation lines.
+        let entry: Vec<&str> = ftl.lines().skip(start).enumerate()
+            .take_while(|(i, l)| *i == 0 || l.starts_with(' '))
+            .map(|(_, l)| l)
+            .collect();
+        let line = entry.join("\n");
         for holder in HOLDERS {
             assert!(line.contains(holder), "{lang}: {line:?} lacks {holder}");
         }

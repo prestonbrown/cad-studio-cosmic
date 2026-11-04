@@ -68,9 +68,10 @@ pub fn height(tab: Tab, engine: AgentKind) -> f32 {
 
 /// The About window's geometry: AppKit's standard About panel, 284 wide
 /// (shots/upstream/about.png), the header, then the content as tall as
-/// its text runs.
+/// its text runs; the copyright block is three lines (both LICENSE holders
+/// and the license name), which the 284 px width cannot hold on one.
 pub const ABOUT_WIDTH: f32 = 284.0;
-pub const ABOUT_HEIGHT: f32 = 270.0;
+pub const ABOUT_HEIGHT: f32 = 306.0;
 /// The About content's top inset under the header: the icon's frame
 /// starts 8 px below the titlebar, as under AppKit's.
 const ABOUT_TOP: f32 = 8.0;
