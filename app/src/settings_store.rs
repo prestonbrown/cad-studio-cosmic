@@ -2,11 +2,13 @@
 //! fresh and every writer goes through [`SettingsStore::update`], so nothing
 //! holds a copy that a write elsewhere can leave stale: a project window
 //! opened after a toggle in another window sees that toggle. One error
-//! policy for every writer: the edit applies over what readers see (the
-//! file, or defaults when it cannot be read), and a failed save is logged
-//! here and returned.
+//! policy for every writer: a file that exists but cannot be read is never
+//! written over (readers see defaults, writers are refused, so one bad field
+//! cannot erase every other setting), and every failure is logged here and
+//! returned. The refusal is logged once per process, not once per toggle.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use engine::settings::{Settings, SettingsError, settings_path};
 use time::OffsetDateTime;
@@ -45,24 +47,37 @@ impl SettingsStore {
         Settings::load(&self.path).unwrap_or_default()
     }
 
-    /// Load fresh, apply `edit`, save.
+    /// Load fresh, apply `edit`, save. A file that exists but does not
+    /// parse refuses the update untouched; a missing file is a fresh
+    /// install and is created.
     pub fn update(&self, edit: impl FnOnce(&mut Settings)) -> Result<(), SettingsError> {
-        let mut settings = self.load();
-        edit(&mut settings);
-        match settings.save(&self.path) {
-            Ok(()) => Ok(()),
+        let mut settings = match Settings::load(&self.path) {
+            Ok(settings) => settings,
             Err(why) => {
-                let now = OffsetDateTime::now_utc()
-                    .format(&Rfc3339)
-                    .unwrap_or_default();
-                eprintln!(
-                    "{now} cad-studio: settings save to {} failed: {why}",
-                    self.path.display()
-                );
-                Err(why)
+                if !REFUSAL_LOGGED.swap(true, Ordering::Relaxed) {
+                    log(&format!(
+                        "settings at {} cannot be read, so no setting is saved until the file is fixed: {why}",
+                        self.path.display()
+                    ));
+                }
+                return Err(why);
             }
-        }
+        };
+        edit(&mut settings);
+        settings.save(&self.path).inspect_err(|why| {
+            log(&format!("settings save to {} failed: {why}", self.path.display()));
+        })
     }
+}
+
+/// Whether this process has already reported an unreadable settings file.
+static REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn log(line: &str) {
+    let now = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default();
+    eprintln!("{now} cad-studio: {line}");
 }
 
 #[cfg(test)]
@@ -95,6 +110,18 @@ mod tests {
         assert_eq!(saved.agent_engine, "codex");
         assert!(saved.default_layout.is_some());
         assert!(saved.parameters_collapsed);
+    }
+
+    /// A file that exists but does not parse is never overwritten: one bad
+    /// field must not cost every other setting on the next toggle.
+    #[test]
+    fn an_unreadable_file_refuses_the_update_and_stays_byte_for_byte() {
+        let store = SettingsStore::in_temp_dir();
+        let bytes = br#"{"recentProjects": null, "agentEngine": "codex", "claudePath": "/opt/claude"}"#;
+        std::fs::write(store.path(), bytes).unwrap();
+        assert!(store.update(|s| s.parameters_collapsed = true).is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+        assert!(store.load().claude_path.is_none(), "readers keep the defaults");
     }
 
     /// A save that cannot land is reported, not swallowed.

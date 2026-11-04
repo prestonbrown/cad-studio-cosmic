@@ -376,3 +376,6 @@ version-month-dec = dic
 
 # About window
 about-copyright = © 2026 Filippo Finke · MIT License
+
+# Settings store
+settings-unreadable = Il file delle impostazioni non è leggibile, quindi le modifiche non vengono salvate.

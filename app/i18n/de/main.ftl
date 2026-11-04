@@ -376,3 +376,6 @@ version-month-dec = Dez.
 
 # About window
 about-copyright = © 2026 Filippo Finke · MIT License
+
+# Settings store
+settings-unreadable = Die Einstellungsdatei kann nicht gelesen werden, daher werden Änderungen nicht gespeichert.

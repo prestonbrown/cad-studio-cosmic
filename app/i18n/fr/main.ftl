@@ -376,3 +376,6 @@ version-month-dec = déc.
 
 # About window
 about-copyright = © 2026 Filippo Finke · MIT License
+
+# Settings store
+settings-unreadable = Le fichier de réglages est illisible, les modifications ne sont donc pas enregistrées.

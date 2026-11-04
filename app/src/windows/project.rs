@@ -58,6 +58,7 @@ use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
 use crate::typography;
+use engine::settings::SettingsError;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
 use crate::version_menu;
@@ -577,7 +578,11 @@ impl ProjectWindow {
         self.chat_visible = true;
         self.grid = panes::from_layout(&panes::displayed(&node, true));
         self.save_metadata();
-        let _ = panes::persist_layout(&self.root, &self.settings, &node);
+        if let Err(panes::PersistLayoutError::Settings(SettingsError::Json(_))) =
+            panes::persist_layout(&self.root, &self.settings, &node)
+        {
+            self.set_activity(Activity::Failed(fl!("settings-unreadable")));
+        }
     }
 
     /// Rebuild the grid over the current layout (a visibility flip).
@@ -2195,6 +2200,26 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layout change over a settings file that does not parse leaves the
+    /// file alone and says so on the activity line.
+    #[tokio::test]
+    async fn an_unreadable_settings_file_shows_on_the_activity_line() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-badsettings-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let settings = SettingsStore::in_temp_dir();
+        let bytes = br#"{"recentProjects": null}"#;
+        std::fs::write(settings.path(), bytes).unwrap();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &settings);
+        let _ = window.update(Message::Command(Command::LayoutChatBottom));
+        assert_eq!(window.activity, Activity::Failed(fl!("settings-unreadable")));
+        assert_eq!(std::fs::read(settings.path()).unwrap(), bytes);
+    }
 
     /// Every shortcut in the table is a command the window implements, and
     /// the upstream bindings land on the expected commands
