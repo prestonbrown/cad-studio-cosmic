@@ -244,35 +244,85 @@ fn field_style() -> cosmic::theme::TextInput {
     }
 }
 
-/// A standalone bordered `TextField` (a sheet's field, outside a grouped
-/// Form): the text background in a separator hairline, the accent ring
+/// A sheet's field's height: macOS's rounded-border `TextField`, 22 px
+/// (shots/upstream/agent-missing.png and new-project.png, light and dark).
+pub const SHEET_FIELD_HEIGHT: f32 = 22.0;
+/// The line a sheet field's text sits on, whatever its size, so every
+/// sheet field comes out [`SHEET_FIELD_HEIGHT`] tall.
+const SHEET_FIELD_LINE: f32 = 18.0;
+/// The field's fill in a dark theme, a lift off its sheet toward the `on`
+/// color (upstream's field reads 40 on its 29 sheet in both sheets).
+const SHEET_FIELD_DARK_LIFT: f32 = 0.055;
+/// The focus ring: macOS's ring is the accent at about half strength, 3 px
+/// wide over the field's edge (the field's fill shows 16 px of its 22).
+const SHEET_FIELD_RING: f32 = 3.0;
+const SHEET_FIELD_RING_ALPHA: f32 = 0.5;
+
+/// A standalone rounded-border `TextField` on a sheet (outside a grouped
+/// Form) with its text at `size`: [`SHEET_FIELD_HEIGHT`] tall, styled by
+/// [`sheet_field_appearance`].
+pub fn sheet_field<'a, M: Clone + 'static>(
+    placeholder: impl Into<std::borrow::Cow<'a, str>>,
+    value: impl Into<std::borrow::Cow<'a, str>>,
+    size: f32,
+) -> cosmic::widget::text_input::TextInput<'a, M> {
+    let appearance = |focused| move |theme: &cosmic::Theme| sheet_field_appearance(theme, focused);
+    cosmic::widget::text_input::text_input(placeholder, value)
+        .size(size)
+        .line_height(cosmic::iced::widget::text::LineHeight::Absolute(
+            SHEET_FIELD_LINE.into(),
+        ))
+        .padding([(SHEET_FIELD_HEIGHT - SHEET_FIELD_LINE) / 2.0, 6.0])
+        .style(cosmic::theme::TextInput::Custom {
+            active: Box::new(appearance(false)),
+            error: Box::new(appearance(false)),
+            hovered: Box::new(appearance(false)),
+            focused: Box::new(appearance(true)),
+            disabled: Box::new(appearance(false)),
+        })
+}
+
+/// A sheet field's look: the sheet's own fill in a light theme and a lift
+/// off it in a dark one, a separator hairline at rest, the accent ring
 /// while focused, the tertiary placeholder.
-pub fn boxed_field_style() -> cosmic::theme::TextInput {
-    fn appearance(theme: &cosmic::Theme, focused: bool) -> cosmic::widget::text_input::Appearance {
-        cosmic::widget::text_input::Appearance {
-            background: Background::Color(surface::text_background(theme)),
-            border_radius: Corner::Xs.radius(theme),
-            border_offset: None,
-            border_width: 1.0,
-            border_color: if focused {
-                Tone::Accent.solid(theme)
-            } else {
-                Tone::Separator.color(theme, Backdrop::Plain)
+pub fn sheet_field_appearance(
+    theme: &cosmic::Theme,
+    focused: bool,
+) -> cosmic::widget::text_input::Appearance {
+    let cosmic = theme.cosmic();
+    let sheet = surface::text_background(theme);
+    let fill = if cosmic.is_dark {
+        super::tone::mix(
+            sheet,
+            cosmic.background(false).on.into(),
+            SHEET_FIELD_DARK_LIFT,
+        )
+    } else {
+        sheet
+    };
+    let (border_width, border_color) = if focused {
+        (
+            SHEET_FIELD_RING,
+            cosmic::iced::Color {
+                a: SHEET_FIELD_RING_ALPHA,
+                ..Tone::Accent.solid(theme)
             },
-            label_color: Tone::Primary.color(theme, Backdrop::Plain),
-            placeholder_color: Tone::Tertiary.color(theme, Backdrop::Plain),
-            selected_text_color: Tone::OnAccent.solid(theme),
-            icon_color: None,
-            text_color: Some(Tone::Primary.color(theme, Backdrop::Plain)),
-            selected_fill: Tone::Accent.solid(theme),
-        }
-    }
-    cosmic::theme::TextInput::Custom {
-        active: Box::new(|theme| appearance(theme, false)),
-        error: Box::new(|theme| appearance(theme, false)),
-        hovered: Box::new(|theme| appearance(theme, false)),
-        focused: Box::new(|theme| appearance(theme, true)),
-        disabled: Box::new(|theme| appearance(theme, false)),
+        )
+    } else {
+        (1.0, Tone::Separator.color(theme, Backdrop::Plain))
+    };
+    cosmic::widget::text_input::Appearance {
+        background: Background::Color(fill),
+        border_radius: Corner::Xs.radius(theme),
+        border_offset: None,
+        border_width,
+        border_color,
+        label_color: Tone::Primary.color(theme, Backdrop::Plain),
+        placeholder_color: Tone::Tertiary.color(theme, Backdrop::Plain),
+        selected_text_color: Tone::OnAccent.solid(theme),
+        icon_color: None,
+        text_color: Some(Tone::Primary.color(theme, Backdrop::Plain)),
+        selected_fill: Tone::Accent.solid(theme),
     }
 }
 
@@ -339,3 +389,53 @@ const SWITCH_KNOB: f32 = SWITCH_HEIGHT - 2.0 * SWITCH_INSET;
 /// The off track against [`Tone::Quaternary`] (upstream's reads 32 levels
 /// under the form box).
 const SWITCH_OFF: f32 = 1.4;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fill(theme: &cosmic::Theme, focused: bool) -> cosmic::iced::Color {
+        match sheet_field_appearance(theme, focused).background {
+            Background::Color(color) => color,
+            other => panic!("a sheet field fills with a color, not {other:?}"),
+        }
+    }
+
+    /// Upstream's dark field reads 40 on its 29 sheet: the field must lift
+    /// off its sheet, not vanish into it.
+    #[test]
+    fn a_dark_sheet_field_lifts_off_its_sheet() {
+        let dark = cosmic::Theme::dark();
+        let sheet = surface::text_background(&dark);
+        let lift = fill(&dark, false).r - sheet.r;
+        assert!(
+            (8.0 / 255.0..14.0 / 255.0).contains(&lift),
+            "dark lift {:.1} of 255",
+            lift * 255.0
+        );
+        let light = cosmic::Theme::light();
+        assert_eq!(fill(&light, false), surface::text_background(&light));
+    }
+
+    #[test]
+    fn a_sheet_field_rests_on_a_hairline_and_rings_while_focused() {
+        let theme = cosmic::Theme::light();
+        let rest = sheet_field_appearance(&theme, false);
+        assert_eq!(rest.border_width, 1.0);
+        assert_eq!(
+            rest.border_color,
+            Tone::Separator.color(&theme, Backdrop::Plain)
+        );
+        let focused = sheet_field_appearance(&theme, true);
+        assert_eq!(focused.border_width, SHEET_FIELD_RING);
+        let accent = Tone::Accent.solid(&theme);
+        assert_eq!(
+            focused.border_color,
+            cosmic::iced::Color {
+                a: SHEET_FIELD_RING_ALPHA,
+                ..accent
+            }
+        );
+        assert_eq!(fill(&theme, true), fill(&theme, false));
+    }
+}

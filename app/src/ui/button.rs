@@ -13,6 +13,10 @@ use super::surface::Corner;
 use super::tone::{Backdrop, HELD, HOVER, PRESS, Tone, wash};
 use crate::typography;
 
+/// Between a sheet's or dialog's action buttons (an `HStack`'s default
+/// spacing).
+pub const ACTION_GAP: f32 = 8.0;
+
 /// The tone a button's content draws in: `tone` while it has a message,
 /// tertiary while disabled.
 pub fn content_tone<M>(tone: Tone, on_press: &Option<M>) -> Tone {

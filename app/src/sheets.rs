@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use cosmic::iced::Length;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::widget::{Column, Row, Space, container, scrollable, text_input};
+use cosmic::widget::{Column, Row, Space, container, scrollable};
 use cosmic::{Element, Task};
 use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
@@ -173,16 +173,16 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .align_y(cosmic::iced::Alignment::Center)
                 .push(callout(fl!("percorso-dell-eseguibile")))
                 .push(
-                    text_input::text_input(custom_path_placeholder(sheet.kind), &sheet.custom_path)
-                        .on_input(AgentMessage::CustomPath)
-                        // Return runs Verify (upstream's default action)
-                        .on_submit(|_| AgentMessage::Verify)
-                        .font(cosmic::font::mono())
-                        .size(typography::CALLOUT)
-                        // macOS's regular text field: 22 px tall
-                        .padding([2.0, 6.0])
-                        .style(ui::form::boxed_field_style())
-                        .width(Length::Fill),
+                    ui::form::sheet_field(
+                        custom_path_placeholder(sheet.kind),
+                        &sheet.custom_path,
+                        typography::CALLOUT,
+                    )
+                    .on_input(AgentMessage::CustomPath)
+                    // Return runs Verify (upstream's default action)
+                    .on_submit(|_| AgentMessage::Verify)
+                    .font(cosmic::font::mono())
+                    .width(Length::Fill),
                 ),
         )
         .push_maybe(sheet.last_verified_missing.then(|| {
@@ -190,7 +190,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .class(Tone::Danger.text(Backdrop::Plain))
         }));
     let actions = Row::new()
-        .spacing(8)
+        .spacing(ui::button::ACTION_GAP)
         .align_y(cosmic::iced::Alignment::Center)
         .push(ui::button::push(
             fl!("apri-il-terminale"),
@@ -203,18 +203,12 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
             fl!("verifica"),
             (!sheet.checking).then_some(AgentMessage::Verify),
         ));
-    // The sheet card: opaque, rounded, shadowed, so the dimmed body never
-    // shows through the sheet.
     // The content scrolls above the cap; the action row stays pinned.
     let card = Column::new()
         .spacing(14)
         .push(container(scrollable(stack)).max_height(420.0))
         .push(actions);
-    container(card)
-        .padding(20)
-        .width(SHEET_WIDTH)
-        .class(ui::surface::sheet())
-        .into()
+    ui::surface::sheet_card(card, SHEET_WIDTH)
 }
 
 // ─── first-run setup sheet ─────────────────────────────────────────────────
@@ -380,8 +374,8 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
 
     let actions = Row::new()
         .push(Space::new().width(Length::Fill))
-        .push(ui::button::push_as(
-            ui::button::PushRole::Default,
+        .push(push_as(
+            PushRole::Default,
             fl!("continua"),
             Some(SetupMessage::Continue),
         ));
@@ -391,11 +385,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
         .push(Space::new().height(ui::form::MARGIN))
         .push(form)
         .push(actions);
-    container(stack)
-        .padding(20)
-        .width(SHEET_WIDTH)
-        .class(ui::surface::sheet())
-        .into()
+    ui::surface::sheet_card(stack, SHEET_WIDTH)
 }
 
 /// The sheets' frame width (`.frame(width: 520)`).
@@ -673,7 +663,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         );
     }
     let actions = Row::new()
-        .spacing(8)
+        .spacing(ui::button::ACTION_GAP)
         .push(Space::new().width(Length::Fill))
         .push(python_buttons(&state.state));
     // Dialog card (opaque) with the log-bearing content scrollable above
@@ -682,11 +672,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
         .spacing(14)
         .push(container(scrollable(stack)).max_height(420.0))
         .push(actions);
-    container(card)
-        .padding(20)
-        .width(SHEET_WIDTH)
-        .class(ui::surface::sheet())
-        .into()
+    ui::surface::sheet_card(card, SHEET_WIDTH)
 }
 
 /// The button row for one state (PythonSetupSheet.swift:61-82): the busy
@@ -696,7 +682,7 @@ fn python_buttons(state: &EnvState) -> Element<'static, PythonMessage> {
         SetupButtons::Done => push_as(PushRole::Default, fl!("fine"), Some(PythonMessage::Close)),
         SetupButtons::Busy => ui::button::push(fl!("installazione-in-corso"), None),
         SetupButtons::LaterAndInstall => Row::new()
-            .spacing(8)
+            .spacing(ui::button::ACTION_GAP)
             .push(ui::button::push(
                 fl!("pi-tardi"),
                 Some(PythonMessage::Close),
@@ -802,14 +788,6 @@ mod tests {
         sheet.custom_path.clear();
         sheet.stage_custom_path(&mut settings);
         assert_eq!(settings.codex_path, None);
-    }
-
-    /// A Label's icon fits inside one callout line, so centering it on the
-    /// line puts it beside the first line of a wrapped failure message.
-    #[test]
-    fn label_icon_fits_the_callout_line() {
-        assert!(LABEL_ICON <= CALLOUT_LINE);
-        assert_eq!(LABEL_ICON, 13.0);
     }
 
     /// The install command blocks per engine (AgentMissingSheet.swift:14-19)

@@ -204,27 +204,36 @@ pub fn fill_stroked(
 /// class and the popover shadow, no stroke.
 pub fn sheet() -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(|theme| Style {
-        background: Some(Background::Color(text_background(theme))),
-        border: Border {
-            radius: Corner::M.radius(theme),
-            ..Default::default()
-        },
         shadow: Shadow::Popover.iced(),
         snap: true,
-        ..Default::default()
+        ..text_background_style(theme, Corner::M)
     })
+}
+
+/// A sheet: `content` on the [`sheet`] card, `width` wide, inset 20 px
+/// (SwiftUI's sheet padding).
+pub fn sheet_card<'a, M: 'a>(content: impl Into<Element<'a, M>>, width: f32) -> Element<'a, M> {
+    container(content)
+        .padding(20)
+        .width(width)
+        .class(sheet())
+        .into()
 }
 
 /// The text background as a container class, rounded by `corner`.
 pub fn text_background_class(corner: Corner) -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(move |theme| Style {
+    cosmic::theme::Container::custom(move |theme| text_background_style(theme, corner))
+}
+
+fn text_background_style(theme: &cosmic::Theme, corner: Corner) -> Style {
+    Style {
         background: Some(Background::Color(text_background(theme))),
         border: Border {
             radius: corner.radius(theme),
             ..Default::default()
         },
         ..Default::default()
-    })
+    }
 }
 
 /// SwiftUI's `Divider()`: a 1 px separator line across the width.
@@ -244,6 +253,15 @@ pub enum Axis {
 /// A 1 px separator line along `axis`, at `scale` times the separator's
 /// alpha (a grouped form's row hairlines read lighter than a `Divider()`).
 pub fn divider_scaled<'a, M: 'a>(axis: Axis, scale: f32) -> Element<'a, M> {
+    divider_with(axis, fill(Tone::Separator, scale, Corner::None, None))
+}
+
+/// A 1 px line along `axis` drawn by `class`, for a hairline whose color
+/// rule is not the separator wash.
+pub fn divider_with<'a, M: 'a>(
+    axis: Axis,
+    class: cosmic::theme::Container<'static>,
+) -> Element<'a, M> {
     let (width, height) = match axis {
         Axis::Horizontal => (Length::Fill, Length::Fixed(1.0)),
         Axis::Vertical => (Length::Fixed(1.0), Length::Fill),
@@ -251,6 +269,6 @@ pub fn divider_scaled<'a, M: 'a>(axis: Axis, scale: f32) -> Element<'a, M> {
     container(Space::new().width(width).height(height))
         .width(width)
         .height(height)
-        .class(fill(Tone::Separator, scale, Corner::None, None))
+        .class(class)
         .into()
 }
