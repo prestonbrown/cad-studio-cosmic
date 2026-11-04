@@ -24,7 +24,7 @@ tree.rs:505) or an index panic when root `i` has more flat items than
 root 0. Items with a fixed or fill height never reach that `layout` call
 (the `Length::Fixed` arm, :1777), and `Item::Button`,
 `Item::ButtonDisabled`, `Item::CheckBox` and `Item::Folder` are all
-`menu_button`s, `Length::Fixed(36.0)` (menu_tree.rs:140). Every
+`menu_button`s, `Length::Fixed(36.0)` (menu_tree.rs:152). Every
 later layout, draw and hover indexes the correct root
 (`tree_children[data.active_root[0]]`, :491; :897; :1408). The version
 menu's leaves were `button::custom(Column(Text, Text))` with shrink
@@ -38,6 +38,11 @@ when the root opens. Items added while open stay invisible until the
 menu reopens; an item REMOVED while open makes `MenuState::layout` slice
 `menu_tree[start_index..=end_index]` past the shorter list (:331):
 "range end index 7 out of range for slice of length 7".
+
+Frozen bounds cannot bite label, enabled or check churn on a fixed set:
+kit items are a fixed 36 px tall (dividers are fixed too) and the app's
+bars use `ItemWidth::Static`, so the sizes and positions captured at open
+stay exact for every later rebuild of the same set.
 
 Tree reconciliation itself is sound: `MenuBar::diff` runs
 `menu_roots_diff` (menu_bar.rs:120-161), a positional `diff_children`

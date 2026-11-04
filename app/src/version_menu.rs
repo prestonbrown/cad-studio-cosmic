@@ -184,10 +184,11 @@ const CHEVRON_MARGIN: f32 = 2.2;
 /// bordered toolbar pill: `clock.arrow.circlepath`, the current version's
 /// "v<N>" (monospaced digits), and the menu's `chevron.down` indicator —
 /// 70×27, 8 px side insets, the measured 6/8 px gaps. Pressing opens the
-/// history card. NOT a menu-bar root — cosmic's menu overlay corrupts
-/// widget state when the item set changes between rebuilds
-/// (docs/research/libcosmic-menu-dynamic-items-bug.md); anything whose
-/// items change lives in a popover like this one.
+/// history card. NOT a menu-bar root: the history grows and shrinks, and
+/// its entries are custom shrink-height leaves, and cosmic's menu panics
+/// on both (an open menu whose items shrink; a shrink-height leaf in any
+/// root but the first) (docs/research/libcosmic-menu-dynamic-items-bug.md).
+/// Anything whose item set changes lives in a popover like this one.
 pub fn version_button<Message: Clone + 'static>(
     current: Option<i64>,
     open: bool,

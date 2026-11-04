@@ -21,6 +21,8 @@
 //!   DYN_MENU_ROOT=first    Sonda is root 0 instead of root 1
 //!   DYN_MENU_PHASE=<n>     the cycle counter starts at n (=6 opens the
 //!                          grow probe at 8 items, so it shrinks while open)
+//!   DYN_MENU_START_MS=<ms> delay before the first cycle (default 6000),
+//!                          the window for the driver to open the menu
 use cosmic::app::{self, Core, Settings};
 use cosmic::iced::Length;
 use cosmic::iced::Task;
@@ -44,7 +46,8 @@ struct Demo {
     probe: Probe,
     probe_first: bool,
     cycle: usize,
-    cycles: usize,
+    /// The last cycle: the starting phase plus `DYN_MENU_CYCLES`.
+    last: usize,
     tick: Duration,
 }
 
@@ -195,19 +198,21 @@ impl app::Application for Demo {
             _ => Probe::Static,
         };
         let probe_first = std::env::var("DYN_MENU_ROOT").as_deref() == Ok("first");
+        let phase = env_num("DYN_MENU_PHASE", 0) as usize;
+        let cycles = env_num("DYN_MENU_CYCLES", 200) as usize;
         let demo = Self {
             core,
             probe,
             probe_first,
-            cycle: env_num("DYN_MENU_PHASE", 0) as usize,
-            cycles: env_num("DYN_MENU_CYCLES", 200) as usize,
+            cycle: phase,
+            last: phase + cycles,
             tick: Duration::from_millis(env_num("DYN_MENU_TICK_MS", 75)),
         };
         eprintln!(
             "{} probe={probe:?} root={} cycles={} tick={:?}",
             stamp(),
             if probe_first { "first" } else { "second" },
-            demo.cycles,
+            cycles,
             demo.tick
         );
         let start = Duration::from_millis(env_num("DYN_MENU_START_MS", 6000));
@@ -218,7 +223,7 @@ impl app::Application for Demo {
         match message {
             Message::Nothing => Task::none(),
             Message::Cycle => {
-                if self.cycle >= self.cycles + env_num("DYN_MENU_PHASE", 0) as usize {
+                if self.cycle >= self.last {
                     eprintln!(
                         "{} PROBE {:?} SURVIVED {} cycles",
                         stamp(),

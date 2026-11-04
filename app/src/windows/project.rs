@@ -1864,8 +1864,9 @@ impl ProjectWindow {
 
     /// The Modello root's item list (Commands.swift:113-138): Compila,
     /// Stop, Esporta, Mostra nel Finder, Apri in slicer — each gate a
-    /// Button↔ButtonDisabled swap, so the item SET never changes (the
-    /// dynamic-items corruption family stays out of reach).
+    /// Button↔ButtonDisabled swap, so the item SET never changes (an open
+    /// cosmic menu panics when its items shrink:
+    /// docs/research/libcosmic-menu-dynamic-items-bug.md).
     fn model_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
         use cosmic::widget::menu::Item;
         let gate = |enabled: bool, label: String, command: Command| {
@@ -1895,9 +1896,10 @@ impl ProjectWindow {
     fn view_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
         use cosmic::widget::menu::Item;
 
-        // Button↔ButtonDisabled keeps every root's item SET and labels
-        // fixed (the Compila entry's busy gate is the running precedent),
-        // outside the dynamic-items corruption family
+        // Button↔ButtonDisabled keeps every root's item SET fixed (the
+        // Compila entry's busy gate is the running precedent): an open
+        // cosmic menu panics when its items shrink
+        // (docs/research/libcosmic-menu-dynamic-items-bug.md)
         let gate = |enabled: bool, label: String, command: Command| {
             if enabled {
                 Item::Button(label, None, command)
