@@ -15,7 +15,7 @@ render-spike:
 headless:
     cargo test -p viewer --test render_headless
 
-# ─── user-local install (freedesktop packaging, M8 T13) ────────────────────
+# ─── user-local install (freedesktop packaging) ────────────────────────────
 
 app-id := "net.brownhouse.CadStudio"
 # The workspace version (app's CARGO_PKG_VERSION) substituted into the

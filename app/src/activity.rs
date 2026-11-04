@@ -6,10 +6,10 @@
 //! the issue buttons.
 //!
 //! The build error rides the FIRST issue slot from the live pipeline
-//! (`Bridge::build_error`, wired M5 T8); the missing-output warning is
-//! the upstream home of output warnings. The motion-error and collision
-//! warnings joined at M7 (the pane-derived pair); the manifest warnings
-//! join through the pane's reload-fresh copy of the manifest.
+//! (`Bridge::build_error`); the missing-output warning is the upstream
+//! home of output warnings. The motion-error and collision warnings are
+//! the pane-derived pair; the manifest warnings join through the pane's
+//! reload-fresh copy of the manifest.
 
 use std::path::Path;
 
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);
         assert_eq!(warnings_only[0].message, "Missing output files: model.3mf");
 
-        // the drift pin (M5 branch review MINOR 2): the header's warning
+        // the drift pin: the header's warning
         // list IS the version-record gate's rule — one engine
         // implementation — so the two can never disagree
         assert_eq!(
@@ -361,8 +361,8 @@ mod tests {
         assert_eq!(both.len(), 2);
     }
 
-    /// The motion branches (Project.swift:123-127, appended after the two
-    /// M5 ones): the pane's already-substituted error text rides one
+    /// The motion branches (Project.swift:123-127, appended after the build
+    /// error and missing-output ones): the pane's already-substituted error text rides one
     /// warning; a colliding study rides one warning with the frame count
     /// substituted into the fl! text; a clean study stays silent.
     #[test]

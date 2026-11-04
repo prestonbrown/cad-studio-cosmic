@@ -184,7 +184,7 @@ mod tests {
         names
     }
 
-    /// The audit the plan's review MINOR 7 shapes: iterate the UNION of keys
+    /// The catalog audit: iterate the UNION of keys
     /// across all four catalogs and fail on any file missing a key —
     /// per-file iteration passes silently when it/de/fr lose keys. Placeholder
     /// name sets must agree too (call sites pass args by name against the en
@@ -417,7 +417,7 @@ mod tests {
         // restore EN no matter what the fallbacks above did: the loader is
         // GLOBAL and this test's overrides leak into unpinned catalog-text
         // tests in other modules under --test-threads=1 (a deterministic
-        // failure the Task 1 review caught — "Pagina 3" != "Page 3")
+        // failure otherwise — "Pagina 3" != "Page 3")
         select("en");
     }
 }

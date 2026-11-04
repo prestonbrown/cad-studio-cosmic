@@ -1,4 +1,4 @@
-//! parameters model tests (M5 T5): the upstream range heuristic, commit
+//! parameters model tests: the upstream range heuristic, commit
 //! rounding, no-op commits, external sync, and panel state.
 
 use app::parameters::{ParametersPanel, SliderState};

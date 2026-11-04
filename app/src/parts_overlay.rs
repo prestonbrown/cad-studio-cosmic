@@ -227,7 +227,7 @@ fn list_height(rows: usize) -> f32 {
 /// when hidden), `×N` for multi-member groups, then the attach button
 /// (exploded layout only) and the show/hide button. The name cluster
 /// reports [`Message::RowClicked`] on every press — the pane decodes the
-/// double-click (T8's `is_double_click`) and isolates the group.
+/// double-click (`viewer_tools::is_double_click`) and isolates the group.
 fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<'static, Message> {
     let is_hidden = tools.hidden.contains(&group.name);
     let is_attached = tools.attached.contains(&group.name);

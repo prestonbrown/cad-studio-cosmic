@@ -1,4 +1,4 @@
-//! setup sheet tests (M5 T8): event-to-state reduction and button model —
+//! setup sheet tests: event-to-state reduction and button model —
 //! synthetic EnvEvents, no processes.
 
 use app::sheets::{SetupButtons, SetupSheetState};
@@ -30,10 +30,10 @@ fn events_reduce_to_sheet_state() {
             build123d_version: "0.8.1".into()
         }
     );
-    // no versions_display() assertion here (MINOR 7): the shared cell is
-    // set by the T0 drivers, not by the sheet reducer — T0 pins it.
+    // no versions_display() assertion here: the shared cell is set by the
+    // python::env drivers, not by the sheet reducer — their tests pin it.
     let mut f = SetupSheetState::new();
-    // MAJOR 1 (shape (b)): typed failures — Missing is its own sheet state
+    // typed failures — Missing is its own sheet state
     f.apply(&EnvEvent::Finished(Err(
         engine::python::env::EnvFailure::Missing,
     )));
@@ -114,7 +114,7 @@ fn kicks_enter_checking_and_installing() {
     assert_eq!((sheet.progress, sheet.step.as_str()), (0.0, ""));
 }
 
-/// MINOR 8: `interactiveDismissDisabled(python.isInstalling)`
+/// `interactiveDismissDisabled(python.isInstalling)`
 /// (PythonSetupSheet.swift:58) — dismissal is blocked while an INSTALL
 /// runs only; a check and every terminal state stay dismissable.
 #[test]

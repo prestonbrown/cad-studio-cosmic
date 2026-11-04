@@ -7,7 +7,7 @@
 //! whether motion is offered, and the double-click decode for part rows.
 //!
 //! Pure: no cosmic/iced types, no I/O, part-name keyed (`BTreeSet<String>`)
-//! so the pane resolves T1's `groups` to names at the call site. Layout and
+//! so the pane resolves the parts tree's `groups` to names at the call site. Layout and
 //! collapse arrive as constructor arguments — the CALLER reads them from
 //! engine settings (`parts_layout`/`parts_collapsed`) and writes them back
 //! there per the settings-persistence law; this module never touches the

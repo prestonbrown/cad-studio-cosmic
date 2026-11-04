@@ -1,6 +1,6 @@
 //! The project window (upstream ProjectWindow.swift + ProjectWorkspace +
 //! ProjectToolbar): the header hosting the ActivityViewer port, the
-//! resizable chat/3D/schematic pane grid, and the M4 commands subset.
+//! resizable chat/3D/schematic pane grid, and the window's commands.
 //!
 //! The window owns no agent logic — the [`crate::bridge`] drives turns and
 //! the pure modules own behavior — it folds messages between them: pane
@@ -8,8 +8,8 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (the M4 subset plus Compila ⌘B, M7's parameters ⌥⌘I, and M8's
-//! export ⇧⌘E): show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout
+//! Commands (Compila ⌘B, parameters ⌥⌘I, export ⇧⌘E and the rest):
+//! show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout
 //! presets, viewer presets + fit, schematic zoom/fit, build, stop, export,
 //! reveal, open-in-slicer. The keyboard bindings are one pure
 //! table, [`project_shortcut`]; the header's menu renders the same
@@ -111,9 +111,9 @@ const VERSION_CARD_WIDTH: f32 = 461.0;
 /// with the viewer pane's own watch).
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// The commands the M4 project window exposes (upstream AppCommands +
-/// ProjectToolbar, M4 subset + M5's Compila + M7's parameters toggle +
-/// M8's export).
+/// The commands the project window exposes (a subset of upstream
+/// AppCommands + ProjectToolbar, including Compila, the parameters toggle
+/// and export).
 /// Doubles as the menu action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -761,7 +761,7 @@ impl ProjectWindow {
     /// A pane-grid divider drag.
     fn resize_split(&mut self, ResizeEvent { split, ratio }: ResizeEvent) {
         // EVERY drag goes through the clamp before State::resize —
-        // iced enforces only a global min (the banked review law)
+        // iced enforces only a global min, not per-pane ones
         let (width, height) = self.size;
         let clamped = panes::clamp_resize(&self.grid, &split, ratio, width, height, GRID_SPACING);
         self.grid.resize(split, clamped);
@@ -980,8 +980,8 @@ impl ProjectWindow {
             // the "Configura l'agente…" row action presents the
             // AGENT-MISSING SHEET — upstream ChatView.swift:101-102 sets
             // `AgentLocator.current.isMissingSheetPresented = true`; there
-            // is no settings route off the action or off that sheet
-            // (Ruling 6). The app layer owns the sheet.
+            // is no settings route off the action or off that sheet. The
+            // app layer owns the sheet.
             chat_view::Message::RowAction(_, Action::ConfigureClaude) => {
                 return CosmicTask::done(Message::App(AppRequest::PresentAgentSheet));
             }
@@ -1079,8 +1079,8 @@ impl ProjectWindow {
             // transcript fresh — keeping the input bar's draft — and the
             // activity folds from the pipeline, the same source that
             // classified the outcome. Both also sync the overlay's
-            // parameter rows from the pipeline's refreshed set (the M6
-            // carry-forward landed; restore's sync): BuildFinished re-read
+            // parameter rows from the pipeline's refreshed set (as
+            // restore does): BuildFinished re-read
             // the manifest, ParameterCommitted moved a row's value.
             bridge::Message::ParameterCommitted { .. } => {
                 let parameters = self.bridge.parameters();
@@ -1792,7 +1792,7 @@ impl ProjectWindow {
             .into()
     }
 
-    /// The commands menu bar (the M4 subset of upstream AppCommands plus M5's
+    /// The commands menu bar (a subset of upstream AppCommands plus the
     /// Model root and version menu): a "File" root bubbling the app-level
     /// commands, a "View" root over the pane/layout/viewer/schematic
     /// commands, a "Model" root (upstream "Modello": Compila + Stop +
@@ -1836,9 +1836,9 @@ impl ProjectWindow {
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
         // STATIC roots only: cosmic's menu overlay corrupts widget state
-        // when an item set changes between rebuilds (the version menu
-        // panicked "Downcast widget state" the moment a version landed
-        // mid-turn; version_menu's module doc carries the chain). Dynamic
+        // when an item set changes between rebuilds (a version menu that
+        // grows mid-turn panics with "Downcast widget state";
+        // version_menu's module doc carries the chain). Dynamic
         // dropdowns — the version history — live as popovers instead.
         cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
             .item_width(ItemWidth::Static(220))
@@ -1910,8 +1910,8 @@ impl ProjectWindow {
             // upstream orders it. STATIC label — upstream flips
             // "Mostra/Nascondi parametri" with areParametersVisible, but a
             // text-only flip is inside the menu-overlay corruption family
-            // the static-roots law rules out (Ruling 9's safe branch; the
-            // divergence is carried in docs/research/carry-forwards.md).
+            // the static-roots law rules out (the divergence is recorded in
+            // docs/research/carry-forwards.md).
             // The label is upstream's own tooltip phrasing
             // (ProjectWindow.swift:159), shortcut hint included.
             Item::Button(
@@ -2288,7 +2288,7 @@ mod tests {
     /// (Commands.swift:69-73, directly after the focus trio) under ONE
     /// unchanging label — upstream flips "Mostra/Nascondi parametri" with
     /// areParametersVisible; the port pins upstream's own tooltip phrasing
-    /// (Ruling 9's safe branch) because label churn between rebuilds sits
+    /// because label churn between rebuilds sits
     /// in the menu-overlay corruption family the static-roots law rules
     /// out. The item set survives the toggle's own rebuild identically.
     #[tokio::test]
@@ -2638,8 +2638,7 @@ mod tests {
         assert_eq!(window.viewer.parameters.sliders.len(), 1);
     }
 
-    /// The overlay-sync triggers the M6 review owed (carry-forwards M6):
-    /// the two terminal bridge events drive `sync_parameters` —
+    /// The overlay-sync triggers: the two terminal bridge events drive `sync_parameters` —
     /// `BuildFinished` because the build refreshed the manifest's parameter
     /// set, `ParameterCommitted` because a commit moved a row's value — so
     /// the overlay's rows follow the bridge without a restore (the only
@@ -2959,7 +2958,7 @@ mod tests {
         assert!(window.version_card.is_none() && window.recent_card.is_none());
     }
 
-    /// The metadata-clobber pin (T7 review F1): the window's save points
+    /// The metadata-clobber pin: the window's save points
     /// (turn end, bookkeeping) must write project.json THROUGH the disk
     /// copy. The engine writes the session id into the same file mid-turn
     /// and `record_version` the version pointer — both BEHIND the window's

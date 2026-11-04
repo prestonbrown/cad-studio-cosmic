@@ -69,7 +69,7 @@ pub struct ChatState {
     /// The engine this conversation's turns run under — the name the
     /// thinking/auth/error rows interpolate and the login command the auth
     /// row shows (AgentLocator.swift:11-30). Set at turn start from the
-    /// per-turn settings re-read (Ruling 1) so a flipped engine names its
+    /// per-turn settings re-read so a flipped engine names its
     /// own rows from its first turn; the window seeds it from the settings
     /// so the empty transcript's placeholder names the engine that will
     /// run the first turn. Defaults claude, like `AgentEngine(rawValue:)`.
@@ -350,9 +350,9 @@ impl ChatState {
     /// content-block-stop, AgentSession.swift:171-173): the title recomputes
     /// over the ACCUMULATED input, then output/state land and the preview
     /// CLEARS — upstream's block stop passes `preview: nil`, so the persisted
-    /// end state of a completed row is preview-less (controller ruling on
-    /// chat.json §3 parity). A tool whose input never streamed (a row the
-    /// engine opened at an assistant snapshot, title already `summarize`d
+    /// end state of a completed row is preview-less (chat.json §3 parity).
+    /// A tool whose input never streamed (a row the engine opened at an
+    /// assistant snapshot, title already `summarize`d
     /// over the full input) keeps that title: upstream's finalize only runs
     /// for stream-announced tools (`liveTools[index]`), and recomputing over
     /// an empty accumulation would clobber it with the generic fallback.

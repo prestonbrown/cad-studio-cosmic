@@ -118,7 +118,7 @@ fn percent_decode(text: &str) -> String {
 /// (Attachments.swift:21-32): `<tmp>/CAD Studio Attachments/Pasted image
 /// yyyy-MM-dd at HH.mm.ss.png`. Upstream formats LOCAL time; the port pins
 /// UTC like the engine's log names (a process-local offset is unavailable
-/// once threads exist — session.rs's LOG_TIMESTAMP ruling); the name only
+/// once threads exist — see `LOG_TIMESTAMP` in engine's agent/session.rs); the name only
 /// needs uniqueness and upstream's shape.
 pub fn saved_image(png: &[u8]) -> Option<PathBuf> {
     let folder = std::env::temp_dir().join("CAD Studio Attachments");
@@ -133,9 +133,9 @@ pub fn saved_image(png: &[u8]) -> Option<PathBuf> {
 
 /// Resolve a stored attachment string to the path a thumbnail opens
 /// (MessageView.swift:14-16 resolves each stored string against
-/// projectRoot): a RELATIVE name — every M8 row's `references/<stamp>-<n>-
+/// projectRoot): a RELATIVE name — a current row's `references/<stamp>-<n>-
 /// <name>` — joins the project root; an ABSOLUTE path stands as itself,
-/// which is exactly what every pre-M8 row carries (the original request
+/// which is exactly what a legacy row carries (the original request
 /// paths). The draft strip passes its staged originals through the same
 /// rule and they resolve as themselves.
 pub fn resolve_attachment(path: &str, root: &Path) -> PathBuf {
@@ -247,8 +247,8 @@ mod tests {
     }
 
     /// The read-side law: relative `references/…` names resolve against the
-    /// project root (MessageView.swift:14-16); absolute paths — every
-    /// pre-M8 row's originals, and the draft strip's staged files — stand
+    /// project root (MessageView.swift:14-16); absolute paths — a
+    /// legacy row's originals, and the draft strip's staged files — stand
     /// as themselves.
     #[test]
     fn stored_paths_resolve_by_absoluteness() {

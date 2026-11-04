@@ -351,7 +351,7 @@ menu-view = Visualizzazione
 version-not-in-history = La versione {$version} non è nella cronologia
 # Port addition (no upstream key).
 settings = Impostazioni
-# conv2-ifix: version timestamps (SwiftUI .relative(presentation: .named) and .abbreviated/.shortened)
+# Version timestamps (SwiftUI .relative(presentation: .named) and .abbreviated/.shortened)
 version-relative-now = ora
 version-relative-minute = 1 minuto fa
 version-relative-minutes = {$n} minuti fa
@@ -374,5 +374,5 @@ version-month-oct = ott
 version-month-nov = nov
 version-month-dec = dic
 
-# conv2-wave3-shell
+# About window
 about-copyright = © 2026 Filippo Finke · MIT License

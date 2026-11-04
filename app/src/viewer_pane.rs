@@ -23,7 +23,7 @@
 //! before the scene `Arc` (and its GPU residency) is touched, so a burst
 //! rebuilds once. 3MF is preferred, STL is the fallback.
 //!
-//! M5: the pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
+//! The pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
 //! `topTrailing` ParametersOverlay, ModelPane.swift:41-44) over the canvas
 //! through a `stack`, showing it only while a model exists, parameters
 //! exist, and `parameters_visible` holds (⌥⌘I toggles it — the app's key
@@ -40,7 +40,7 @@
 //! versions, compare selection — at view time via
 //! [`parameters_view::OverlayContext`].
 //!
-//! M6 measure (ModelPane's `onPick` flow): while the tool measures, a
+//! Measure (ModelPane's `onPick` flow): while the tool measures, a
 //! primary-button CLICK (release under 4 px of travel) casts
 //! [`camera::Orbit::pick_ray`] at the release cursor and runs
 //! [`picking::first_hit`] on a named std thread — click-driven and
@@ -53,9 +53,9 @@
 //! the measurement (ModelPane.swift:54-58 — ignored otherwise).
 //!
 //! The pane's user-visible strings go through [`crate::fl`] with the
-//! extracted ftl keys (live since the M6 overlay work).
+//! extracted ftl keys.
 //!
-//! M6: the pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
+//! The pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
 //! ModelViewerState port) drives `viewer::tools::arrangement`, and
 //! [`ViewerPane::apply_arrangement`] pushes the answer as per-part pose
 //! uniforms (explode offsets, hidden visibility) without touching staged
@@ -69,7 +69,7 @@
 //! pane's settings path — [`ViewerPane::new_with_settings`] is the test
 //! seam that keeps that off the developer's real config.
 //!
-//! M7: the pane owns motion PLAYBACK — the study reload
+//! The pane owns motion PLAYBACK — the study reload
 //! ([`ViewerPane::reload_motion`]: a missing file or single-frame snapshot
 //! is inert, a parse failure surfaces the localized error), the playback
 //! clock (a `time::every(TICK)` subscription mounted only while
@@ -183,7 +183,7 @@ pub enum Message {
     /// A trackpad pinch. No platform event reaches this today (iced's winit
     /// shell translates no magnify gesture); the variant exists so the
     /// parity formula in [`CameraInput::magnify`] is wired the day one
-    /// does — facts #116, this task's carry-forward.
+    /// does — facts #116.
     Magnified(f32),
     /// The keyboard modifier set changed (iced emits this on every change;
     /// mouse_area messages carry no modifiers of their own).
@@ -206,8 +206,8 @@ pub enum Message {
     ParameterCommit(String, f64),
     /// ⌥⌘I — toggles the parameters overlay's visibility
     /// (Commands.swift:69-73); the app's key router delivers it through the
-    /// window's command table (the app-wide binding, no longer this pane's
-    /// subscription).
+    /// window's command table (an app-wide binding, not a
+    /// subscription of this pane's).
     ToggleParameters,
     /// A measure pick settled (the viewer-pick thread → relay): the
     /// MODEL-space hit, or `None` when the ray missed everything.
@@ -215,14 +215,14 @@ pub enum Message {
     /// Esc — clears an in-flight measurement (ModelPane.swift:54-58);
     /// ignored when the tool is not measuring.
     Escape,
-    // ── M6 tool controls (the widgets land with the parts-overlay task;
-    // the pane arms the semantics) ────────────────────────────────────────
+    // ── tool controls (the parts overlay draws the widgets; the pane arms
+    // the semantics) ──────────────────────────────────────────────────────
     /// Upstream `showsGrid` (facts #38): the parity grid overlay.
     ToggleGrid,
     /// Upstream `showsWireframe` (facts #44).
     ToggleWireframe,
     /// The measure tool's mode toggle — points clear on any change
-    /// (ModelViewerState.swift:51-53); the click flow is the measure task's.
+    /// (ModelViewerState.swift:51-53); the click flow is [`Message::Released`]'s.
     ToggleMeasure,
     /// Upstream `sectioning`: on/off for the GPU section plane.
     ToggleSection,
@@ -246,7 +246,7 @@ pub enum Message {
     /// The parts drawer's collapse chevron (persisted as
     /// `Settings.parts_collapsed`).
     TogglePartsCollapsed,
-    // ── M7 motion playback ───────────────────────────────────────────────
+    // ── motion playback ──────────────────────────────────────────────────
     /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
     /// stops the study — the mutual exclusion with measuring/sectioning
     /// and the clock reset live in [`ViewerTools::set_animating`].
@@ -265,7 +265,7 @@ pub enum Message {
     /// subscription while [`ViewerPane::wants_tick`] holds.
     Tick(Instant),
     /// The ask-the-agent "create animation" button
-    /// (ModelPane.swift:138-146) — the SHELL intercepts it (T8: it sends
+    /// (ModelPane.swift:138-146) — the SHELL intercepts it (it sends
     /// the chat prompt); the pane's own arm is a no-op.
     RequestMotionStudy,
 }
@@ -352,9 +352,9 @@ pub struct ViewerPane {
     /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
     /// toggles).
     pub parameters_visible: bool,
-    // ── M6 arrangement state ──────────────────────────────────────────────
+    // ── arrangement state ─────────────────────────────────────────────────
     /// The toolbar/overlay state behind the pane (the ModelViewerState
-    /// port, T8).
+    /// port).
     pub tools: ViewerTools,
     /// The last cursor position the pane saw (iced top-down, canvas-local)
     /// — the aim a measure click casts its pick ray through. Hover moves
@@ -370,8 +370,8 @@ pub struct ViewerPane {
     /// in-flight: a click while this is set is dropped, and the flag
     /// clears when the pick reports back.
     pick_pending: bool,
-    // Comparison state (the compare-ghost task owns the full machinery;
-    // this is the window-facing surface project.rs calls)
+    // Comparison state (compare_pane owns the full machinery; this is the
+    // window-facing surface project.rs calls)
     pub(crate) ghost_version: Option<(i64, std::path::PathBuf)>,
     /// The parsed MODEL parts — the arrangement's input and the grouping
     /// source, kept so re-arranging never re-parses.
@@ -387,7 +387,7 @@ pub struct ViewerPane {
     /// The staged plate scene while it is (or was last) the drawn one —
     /// rebuilt only when its inputs move (plate reload, hidden filter).
     plate_scene_cache: Option<Arc<PartScene>>,
-    /// Compare mode (the shell/T12 owns the comparison): comparing forces
+    /// Compare mode (the shell owns the comparison): comparing forces
     /// the Assembled layout (ModelViewerState.swift:78-86).
     pub comparing: bool,
     /// The settings this pane reads and writes its persisted keys through
@@ -415,7 +415,7 @@ pub struct ViewerPane {
     grid_stamp: Option<(usize, PartsLayout, bool)>,
     /// The last parts-row click (Instant, group) — the double-click window.
     last_row_click: Option<(Instant, String)>,
-    // ── M7 motion playback state ─────────────────────────────────────────
+    // ── motion playback state ────────────────────────────────────────────
     /// The loaded motion study (`output/animation.json`), when it parsed to
     /// more than one frame — the controls and the clock read it.
     pub study: Option<MotionStudy>,
@@ -446,8 +446,8 @@ pub struct ViewerPane {
 }
 
 impl ViewerPane {
-    /// The pane over `project_root`'s outputs (`root/output`, the Task 7
-    /// `create_project` scaffolding guarantee): loads whatever model is
+    /// The pane over `project_root`'s outputs (`root/output`, which
+    /// `create_project`'s scaffolding guarantees): loads whatever model is
     /// already there, starts the 300 ms watcher, and computes the status
     /// bar's warning count. A missing output directory only means no watch
     /// (and no model) — the pane still works. Settings persist through the
@@ -891,7 +891,7 @@ impl ViewerPane {
         Subscription::batch([relay, modifiers].into_iter().chain(clock))
     }
 
-    // ── parameters overlay (M5) ──────────────────────────────────────────
+    // ── parameters overlay ───────────────────────────────────────────────
 
     /// Follow the bridge's parameter refresh: committed values update
     /// (clearing any draft whose value changed — upstream's bound field
@@ -1177,7 +1177,7 @@ impl ViewerPane {
         }
     }
 
-    // ── motion playback (M7) ─────────────────────────────────────────────
+    // ── motion playback ──────────────────────────────────────────────────
 
     /// Read `output/animation.json` (ProjectOutput.swift:122-136): missing
     /// → no study, no error; parsed to more than one frame → the study
@@ -1268,7 +1268,7 @@ impl ViewerPane {
             .collect()
     }
 
-    // ── arrangement wiring (M6) ───────────────────────────────────────────
+    // ── arrangement wiring ────────────────────────────────────────────────
 
     /// THE pose push (ModelPane.swift:70-85's port): recompute the
     /// arrangement for the current tools state, select the drawn scene
@@ -1367,8 +1367,8 @@ impl ViewerPane {
             arrangement::effective_model_aabb(&self.model_parts, &arranged)
         };
         // The FRAMING box instead takes effective_model_aabb's own answer:
-        // at all-hidden that KEEPS the arrangement offsets (T1's caller
-        // contract — the degrade feeds framing only, so the all-hidden
+        // at all-hidden that KEEPS the arrangement offsets (the
+        // arrangement module's caller contract — the degrade feeds framing only, so the all-hidden
         // frame matches the layout the user lands in on unhiding).
         let framing_eff = if draw_plate {
             eff
@@ -1465,7 +1465,7 @@ impl ViewerPane {
         self.sync_pose();
     }
 
-    /// The parts tree's groups (T1) — the parts panel and the row-click
+    /// The parts tree's groups — the parts panel and the row-click
     /// isolate consume them.
     pub fn groups(&self) -> Vec<PartGroup> {
         arrangement::groups(&self.model_parts)
@@ -1501,8 +1501,8 @@ impl ViewerPane {
     }
 
     /// Whether the output watcher is running (false when the output
-    /// directory was missing at construction — the Task 7 scaffolding
-    /// guarantee makes that the exception).
+    /// directory was missing at construction — `create_project`'s
+    /// scaffolding makes that the exception).
     pub fn is_watching(&self) -> bool {
         self.watch.is_some()
     }
@@ -1512,7 +1512,7 @@ impl ViewerPane {
         self.scene.orbit = self.input.orbit;
     }
 
-    // ── measure (M6) ────────────────────────────────────────────────────
+    // ── measure ─────────────────────────────────────────────────────────
 
     /// Fire the measure pick: click-driven and OFF-THREAD per spec §5 — a
     /// named std thread runs [`picking::first_hit`] over an immutable
@@ -1560,8 +1560,8 @@ impl ViewerPane {
     /// nothing. Radius rides the assembled scene's framing radius
     /// (ModelViewer.swift:383: `max(radius · 0.03, 0.4)`); upstream's
     /// `modelRadius` is the last-REFRAMED size, so marker size carries a
-    /// bounded cosmetic drift across layouts — the plan's recorded
-    /// acceptance.
+    /// bounded cosmetic drift across layouts, an accepted
+    /// divergence.
     fn rebuild_markers(&mut self) {
         let radius = markers::marker_radius(camera::framing_radius(
             self.scene.scene.aabb_min,
@@ -1802,8 +1802,7 @@ pub fn model_size(scene: &PartScene) -> [f64; 3] {
 /// The status bar's info label (upstream ModelPane.info,
 /// ModelPane.swift:215-219): the model size `X × Y × Z unit` when a model
 /// shows — the size string ONLY (issues live in the header's
-/// ActivityViewer, and M4's interim " · N warnings" suffix is dropped
-/// rather than recorded as a divergence). Empty when no model shows.
+/// ActivityViewer; no " · N warnings" suffix). Empty when no model shows.
 pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit) -> String {
     match size {
         // upstream puts the symbol on the last term only
@@ -2243,8 +2242,8 @@ mod tests {
     #[test]
     fn status_info_is_the_size_string_only() {
         // Upstream's info is the size alone (ModelPane.swift:215-219);
-        // M4's " · N warnings" suffix is dropped — issues live in the
-        // header's ActivityViewer, not the status bar.
+        // no " · N warnings" suffix — issues live in the header's
+        // ActivityViewer, not the status bar.
         let unit = MeasurementUnit::Millimeters;
         assert_eq!(
             status_info(Some([30.0, 15.5, 15.5]), unit),
@@ -2742,7 +2741,7 @@ mod tests {
         let _ = pane.view_model_3d(Some(ctx));
     }
 
-    // ── M6 T10: arrangement wiring (layouts, explode, hidden, plate, bed,
+    // ── arrangement wiring (layouts, explode, hidden, plate, bed,
     // section) — the tests below drive the pane's messages end to end ──────
 
     /// A minimal manifest carrying only a bed rectangle.
@@ -3029,7 +3028,7 @@ mod tests {
         assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
     }
 
-    // ── M7 T6: the playback clock and pose application ────────────────────
+    // ── the playback clock and pose application ───────────────────────────
 
     fn load_golden_animation(root: &std::path::Path) {
         std::fs::copy(
@@ -3167,7 +3166,7 @@ mod tests {
         );
     }
 
-    // ── M6 T11: the measure click flow ────────────────────────────────────
+    // ── the measure click flow ────────────────────────────────────────────
 
     impl ViewerPane {
         /// Drain the pane's relay until `done` holds or `timeout` elapses,
@@ -3230,7 +3229,7 @@ mod tests {
         assert!(!pane.pick_pending, "single in-flight cleared on the report");
         // second click completes the pair; the pair stages the link box
         // (the badge's ΔX/ΔY/ΔZ delta form over the pair is parts_overlay's
-        // own pinned test — T9's badge mounts over exactly this state)
+        // own pinned test — the badge mounts over exactly this state)
         let _ = pane.update(Message::Moved(Point::new(430.0, 300.0)));
         let _ = pane.update(Message::Pressed);
         let _ = pane.update(Message::Released);
@@ -3347,7 +3346,7 @@ mod tests {
         assert!(pane.scene.markers.is_none());
     }
 
-    // ── M6 T12: the compare ghost ─────────────────────────────────────────
+    // ── the compare ghost ─────────────────────────────────────────────────
 
     /// A version-store snapshot for the compare tests:
     /// `.cadstudio/versions/<n>/output/model.stl` holding one box, returning

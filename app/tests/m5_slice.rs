@@ -1,4 +1,4 @@
-//! The M5 wrap slice: the milestone end to end, headless — T8's startup
+//! The parameters-and-versions slice end to end, headless — the startup
 //! path (a REAL `python::env::check` over a scripted venv, every event
 //! folded into the sheet state, the Ready terminal mirrored into the
 //! bridge's readiness guards), one fake-agent turn landing the golden
@@ -207,7 +207,7 @@ async fn startup_check_through_slider_to_restore() {
         std::env::set_var("CAD_FAKE_PY_FIXTURES", fixture_golden());
     }
 
-    // ── T8's startup path through its real surfaces: the check verifies
+    // ── the startup path through its real surfaces: the check verifies
     // the scripted venv, the sheet state reduces its terminal, and the
     // mirror flips the bridge's readiness guards (what CadStudio::init +
     // update_python_sheet do, minus the iced runtime)
@@ -298,7 +298,7 @@ async fn startup_check_through_slider_to_restore() {
     // skips EXISTING files, so model.3mf comes out first to make the
     // rebuild observable: a corrupt 3MF (fresh mtime — the watch's
     // change-detection boundary) reloads the scene to the STL's
-    // single-part fallback (the M0 carry-forward's documented shape), and
+    // single-part fallback (the documented corrupt-3MF shape), and
     // the rebuild's re-copy brings the 2-part model back through a real
     // watcher event. Deletes emit nothing (watch.rs: a vanished file has
     // nothing to reload from), which is why the removal below needs no
@@ -433,7 +433,7 @@ async fn startup_check_through_slider_to_restore() {
     drop(guard);
 }
 
-/// The failure path (M4 whole-branch review MAJOR 2, fix round): a failed
+/// The failure path: a failed
 /// Compila renders the build-failure row with its AskClaudeToFix action
 /// live in the window's chat, the failed activity and `build_error`
 /// reach the header's sources, and the row's action button drives
@@ -533,8 +533,8 @@ async fn failed_build_renders_row_activity_and_fix_action() {
     drop(guard);
 }
 
-/// A refused send keeps the draft in the input bar (M5 branch review
-/// MAJOR 1): python not verified, the user types and sends — the text
+/// A refused send keeps the draft in the input bar: python not verified,
+/// the user types and sends — the text
 /// STAYS in the pane (and the attachments with it), the bridge's parked
 /// copy clears, and once the environment verifies, the same text sends
 /// and the bar empties.
@@ -630,7 +630,7 @@ async fn refused_send_keeps_the_draft_in_the_input_bar() {
 }
 
 /// The parameters overlay's collapse state persists through the engine
-/// settings (M5 branch review MINOR 1): the seed comes from
+/// settings: the seed comes from
 /// `Settings.parameters_collapsed` at open, and the toggle writes back
 /// through the window's settings store (the single-writer law).
 #[tokio::test(flavor = "multi_thread")]

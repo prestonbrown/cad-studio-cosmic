@@ -1,4 +1,4 @@
-//! The M4 vertical slice: one prompt driven end to end through the whole
+//! The vertical slice: one prompt driven end to end through the whole
 //! shell — `create_project` scaffolds a real project, the bridge runs a
 //! turn against the fake agent (scenario `slice.jsonl`: thinking, a Write,
 //! a Bash whose `#copy-outputs` directive lands the golden outputs
@@ -117,10 +117,9 @@ async fn run_slice() -> SliceRun {
     let (bridge, mut messages) = Bridge::launch(settings.clone(), root.clone());
     let mut window =
         ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
-    // the send gate refuses until python is verified (the m5 build
+    // the send gate refuses until python is verified (the build
     // pipeline's guard); the app's startup check is the real transition and
-    // is not this milestone's wiring — the seam m5 left "for T8's startup
-    // check" stands in for it
+    // is outside this test — the bridge's test seam for it stands in
     window.bridge.mark_python_ready_for_test();
 
     // the empty-project frame builds (the viewer pane's pure-construction

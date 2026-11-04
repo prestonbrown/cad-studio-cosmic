@@ -393,7 +393,7 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
 /// its staged originals at 52px (ChatInputView.swift:82-104) and sent rows
 /// the `references/…` copies at 64px (MessageView.swift:10-23) — the
 /// resolution rule ([`attachments::resolve_attachment`]) treats an
-/// absolute path (every pre-M8 row's original) as itself.
+/// absolute path (a legacy row's original request path) as itself.
 fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, Message> {
     let resolved = attachments::resolve_attachment(path, root);
     let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
@@ -1561,11 +1561,11 @@ mod tests {
     /// The pane builds in every shape: empty (the suggestion-button empty
     /// state), populated, busy, with a queue, with a staged draft strip,
     /// and with sent-row attachment thumbnails over both storage forms —
-    /// relative `references/…` copy names and the absolute originals the
-    /// pre-M8 rows carry. Element construction is pure — but it
+    /// relative `references/…` copy names and the absolute originals
+    /// legacy rows carry. Element construction is pure — but it
     /// instantiates every widget class the runtime would (scrollables,
     /// tooltips, image widgets), which is where tree-shape regressions
-    /// surface first (the always-scrollable hardening's lesson).
+    /// surface first.
     #[test]
     fn view_chat_builds_in_every_shape() {
         let root = std::env::temp_dir().join(format!("cad-chatview-{}", Uuid::new_v4()));
@@ -1583,7 +1583,7 @@ mod tests {
         let _ = view_chat(&pane, &empty, true, &[], false, &root);
 
         // a user row with both attachment forms: the relative copy names
-        // M8 rows carry, and an absolute original (the pre-M8 shape)
+        // current rows carry, and an absolute original (the legacy shape)
         let mut with_attachments = user_row("model this");
         with_attachments.attachments = vec![
             "references/1790000000-1-sketch.png".into(),

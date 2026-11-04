@@ -1,5 +1,5 @@
 //! The settings window (upstream SettingsView.swift): four tabs — Generale,
-//! Agente, Python, Avanzate — in a NEW non-modal window (Ruling 6: the
+//! Agente, Python, Avanzate — in a separate non-modal window (the
 //! sheets' body-replacement pattern is for modal gates; settings must not
 //! block the app). Every field writes through the ONE-writer law: the
 //! engine settings.json via load-modify-save (the app layer owns the
@@ -16,10 +16,9 @@
 //! Verifica + Reinstalla…, packages footer), Avanzate :217-242 (streaming
 //! picker, isolate toggle + apiKeyHelper footer). About
 //! (Commands.swift:141-152): the credits paragraph is the catalog's
-//! literal-\n key (one of the two; Task 1 preserved it through the
-//! placeable migration), the version the crate's own.
+//! literal-\n key (one of the two), the version the crate's own.
 //!
-//! Ruling 1's quirk note: upstream's engine-picker footer says existing
+//! A quirk note: upstream's engine-picker footer says existing
 //! projects "continue with the agent chosen here", but the code re-reads
 //! the setting per turn — a mid-conversation flip redirects the very next
 //! turn of every open project. The footer text is upstream's verbatim;

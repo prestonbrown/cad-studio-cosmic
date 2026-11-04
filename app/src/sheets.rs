@@ -802,8 +802,8 @@ mod tests {
     /// The install command blocks per engine (AgentMissingSheet.swift:14-19)
     /// — the Claude pair verbatim; the codex arm upstream pairs
     /// `npm install -g @openai/codex` with `brew install --cask codex`,
-    /// which is macOS-only and does not port (the LINUX ruling leaves npm
-    /// as the one codex command).
+    /// which is macOS-only and does not port (on Linux npm is the one
+    /// codex command).
     #[test]
     fn install_commands_per_engine() {
         assert_eq!(

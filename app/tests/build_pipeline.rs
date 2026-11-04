@@ -1,4 +1,4 @@
-//! build pipeline tests (M5 T6): parameter rebuild end-to-end with the
+//! build pipeline tests: parameter rebuild end-to-end with the
 //! fake interpreter, refusal guards, failure rows, and the version-record
 //! gates split by path (turn vs build). No network; the interpreter is
 //! the fake_python.py wrapper, the agent (one test) is fake_claude.py.
@@ -15,8 +15,8 @@ use std::time::Duration;
 
 /// The fakes read their env at spawn time and parallel #[tokio::test]s
 /// share one process: every setter/clearer of a CAD_FAKE_* or
-/// CAD_TEST_CLAUDE var holds this lock for the whole test (MAJOR 4;
-/// house pattern — engine/tests/session_lifecycle.rs, M4 bridge_e2e.rs).
+/// CAD_TEST_CLAUDE var holds this lock for the whole test (the
+/// house pattern — engine/tests/session_lifecycle.rs, bridge_e2e.rs).
 static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -46,8 +46,8 @@ fn project() -> PathBuf {
     root
 }
 
-/// A directory-mode scenario: run n replays `sources[n-1]` (M4
-/// bridge_e2e.rs's scenario_dir, inlined for this suite's binary).
+/// A directory-mode scenario: run n replays `sources[n-1]`
+/// (bridge_e2e.rs's scenario_dir, inlined for this suite's binary).
 fn scenario_dir(sources: &[&str]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("cad-pipe-scenario-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -57,7 +57,7 @@ fn scenario_dir(sources: &[&str]) -> PathBuf {
     dir
 }
 
-/// The tool-use scenario parked mid-tool (M4 bridge_e2e.rs's
+/// The tool-use scenario parked mid-tool (bridge_e2e.rs's
 /// scenario_dir_mid_tool): the fake sleeps 5 s after the tool rows open,
 /// before any tool result arrives — a deterministic window a busy-guard
 /// assert can land inside.
@@ -81,7 +81,7 @@ fn parked_tool_use() -> String {
 }
 
 /// Drains bridge messages until `pred`, bounded (5 s) — never a fixed
-/// sleep; M4 bridge_e2e.rs's `recv` loop inlined as a predicate (MINOR 12).
+/// sleep; bridge_e2e.rs's `recv` loop inlined as a predicate.
 async fn run_until(messages: &mut UnboundedReceiver<Message>, pred: impl Fn(&Message) -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -164,7 +164,7 @@ async fn set_parameter_and_build_refused_while_busy() {
 
 #[tokio::test]
 async fn set_parameter_without_ready_python_still_rewrites_model_py() {
-    // MINOR 1: setParameter guards isBusy ONLY (Project.swift:343-362) —
+    // setParameter guards isBusy ONLY (Project.swift:343-362) —
     // the file is rewritten first; build()'s ready-guard refuses and
     // presents the sheet, leaving the rewrite in place.
     let root = project();
@@ -220,7 +220,7 @@ async fn turn_success_without_outputs_records_no_version() {
     // turn that writes no output files records nothing.
     let _guard = ENV_LOCK.lock().await;
     let root = project();
-    // SAFETY: agent-fake env holds this suite's ENV_LOCK (M4 bridge_e2e
+    // SAFETY: agent-fake env holds this suite's ENV_LOCK (bridge_e2e's
     // set_env pattern: fake agent, scenario, per-test registry).
     unsafe {
         std::env::set_var("CAD_TEST_CLAUDE", fake_agent());
@@ -352,7 +352,7 @@ fn parameter_list_refreshes_from_manifest_in_model_py_order() {
     );
 }
 
-/// Review fix-round pin (finding 1a): the 1 s auto-run starts its turn
+/// The 1 s auto-run starts its turn
 /// DRIVER-side — busy must cover a queue-started turn exactly like a
 /// handle-issued send (upstream sendNextQueued → send sets
 /// activity = .working, Project.swift:302-306 → 203).
@@ -397,7 +397,7 @@ async fn set_parameter_refused_busy_during_auto_run_turn() {
     }
 }
 
-/// Review fix-round pin (finding 1b): the resume path (`resume_queue`,
+/// The resume path (`resume_queue`,
 /// upstream sendQueuedNow → sendNextQueued → send) raises busy the same
 /// way — a build issued during a resumed turn refuses.
 #[tokio::test]
@@ -446,7 +446,7 @@ async fn start_build_refused_busy_during_resumed_turn() {
     }
 }
 
-/// Review fix-round pin (finding 3): upstream's `try? String(contentsOf:)`
+/// Upstream's `try? String(contentsOf:)`
 /// guard (Project.swift:344) — ANY read failure of model.py returns
 /// silently, before anything happens: no rewrite, no failed activity.
 #[tokio::test]
@@ -459,13 +459,13 @@ async fn set_parameter_with_unreadable_script_returns_silently() {
     assert_eq!(bridge.activity(), Activity::Idle);
 }
 
-/// Restore (M5 T7, Project.swift:308-321): the snapshot's files come back
+/// Restore (Project.swift:308-321): the snapshot's files come back
 /// (model.py, chat.json), metadata points at the restored version with the
 /// snapshot's session id, and the compare picker's parameters parse from a
 /// version's stored model.py copy.
 #[tokio::test]
 async fn restore_returns_project_to_the_snapshot() {
-    let _guard = ENV_LOCK.lock().await; // sets CAD_FAKE_PY_* (MAJOR 4)
+    let _guard = ENV_LOCK.lock().await; // sets CAD_FAKE_PY_*
     let root = project();
     // SAFETY: fake-python env holds this suite's ENV_LOCK.
     unsafe {

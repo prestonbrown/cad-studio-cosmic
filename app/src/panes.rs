@@ -1,7 +1,7 @@
 //! Pane-grid ↔ layout-tree conversion, resize clamping, and the layout
 //! persistence policy. Everything except the [`pane_grid::State`] conversion
 //! is plain functions over engine types, so the behavior is testable without a
-//! window; Task 7's window assembly is a thin caller of this module.
+//! window; the project window's assembly is a thin caller of this module.
 
 use cosmic::widget::pane_grid::{self, Configuration, Node, Split, State};
 use engine::project::layout::{self, Axis, LayoutNode, PaneKind};

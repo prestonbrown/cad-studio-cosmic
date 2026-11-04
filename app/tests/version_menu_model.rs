@@ -1,4 +1,4 @@
-//! version menu model tests (M5 T7): the pure entry projection the toolbar
+//! version menu model tests: the pure entry projection the toolbar
 //! menu renders — prompt summaries, newest-first order, the current
 //! checkmark, and the subtitle's relative + abbreviated date formatting.
 

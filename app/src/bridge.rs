@@ -26,7 +26,7 @@
 //! `Working` synchronously before the command leaves, so no window exists
 //! where a `set_parameter` can slip past a turn that is already starting).
 //!
-//! The drain law (plan Review Focus 1): commands are absorbed between EVERY
+//! The drain law: commands are absorbed between EVERY
 //! pair of event translations and selected against while waiting for the next
 //! event, and the forward channel is unbounded — a slow consumer (or the
 //! engine's 256-deep backpressure) can never wedge a cancel.
@@ -223,7 +223,7 @@ pub enum Message {
     /// has landed on disk (upstream `agentDidFinish`, Project.swift:262-278).
     TurnSuccessBookkeeping,
     /// A command refused on python readiness: present the setup sheet
-    /// (the bridge never touches windows; the app maps this to T8's sheet).
+    /// (the bridge never touches windows; the app maps this to the python setup sheet).
     PythonSheetRequested,
 }
 
@@ -341,8 +341,8 @@ impl Bridge {
 
     /// [`Bridge::new`] without the `cosmic::Task` wrapper: spawns the driver
     /// and returns its message stream raw. A `cosmic::Task`'s stream is
-    /// private to the iced runtime, so headless drivers (tests, the Task 8
-    /// slice) tap here — the same seam pattern as the engine's
+    /// private to the iced runtime, so headless drivers (tests, the
+    /// wrap slice) tap here — the same seam pattern as the engine's
     /// `CAD_TEST_CLAUDE` override.
     pub fn launch(
         settings: Settings,
@@ -366,7 +366,7 @@ impl Bridge {
         let pipeline = Arc::new(Mutex::new(Pipeline::load(&root)));
         let mut session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
         // the per-turn settings re-read (the engine picker flips the runner
-        // mid-conversation, Ruling 1)
+        // mid-conversation)
         if std::env::var_os(TEST_CLAUDE_ENV).is_none() {
             session = session.with_settings_file(settings_file);
         }
@@ -608,7 +608,7 @@ impl Bridge {
     /// version's stored model.py copy — a slider rewrite never regenerates
     /// the manifest, so the model source is the only value that stays
     /// truthful. `None` ("Nessuna") empties them. The ghost MESH the
-    /// orange values annotate is M6's, documented out of scope here.
+    /// orange values annotate is staged by `compare_pane`, not here.
     pub fn compare_with(&mut self, number: Option<i64>) {
         let mut pipeline = self.pipeline();
         pipeline.comparison_parameters = versions::comparison_parameters(&self.root, number);
@@ -685,7 +685,7 @@ impl Bridge {
         self.pipeline().python_state = state;
     }
 
-    /// Test seam for T8's startup check / sheet completion: mark the
+    /// Test seam for the startup check / sheet completion: mark the
     /// environment verified so guards pass without a real venv (production
     /// goes through [`Bridge::set_python_state`] with the sheet's state).
     pub fn mark_python_ready_for_test(&self) {
@@ -1148,7 +1148,7 @@ impl Drive {
         }
     }
 
-    /// The channel-close turn end (plan Review Focus 4): running tools fail
+    /// The channel-close turn end: running tools fail
     /// open, the partial transcript saves, the app layer hears
     /// [`Message::Closed`].
     fn close_open_turn(&mut self, transcript: &mut ChatState) {
@@ -1834,7 +1834,7 @@ mod tests {
     /// The event channel closing without a TurnFinished (the engine task
     /// dying) ends the turn cleanly: the open tool row fails open and
     /// persists, the app layer hears `Closed`, and the queue treats it as a
-    /// failure (plan Review Focus 4).
+    /// failure.
     #[tokio::test(flavor = "multi_thread")]
     async fn channel_close_without_turn_finished() {
         let root = std::env::temp_dir().join(format!("cad-bridge-close-{}", Uuid::new_v4()));
@@ -2122,8 +2122,8 @@ mod tests {
         );
     }
 
-    /// A QUEUED send copies when it STARTS, not when it is queued (Ruling 4:
-    /// upstream's queue holds pre-copy urls — Project.swift:177-190 — and
+    /// A QUEUED send copies when it STARTS, not when it is queued
+    /// (upstream's queue holds pre-copy urls — Project.swift:177-190 — and
     /// `sendNextQueued` runs the same copy-on-send path as a direct send).
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_send_copies_when_it_starts_not_when_queued() {

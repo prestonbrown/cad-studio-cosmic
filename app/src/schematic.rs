@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix round 1: the relay stream and the pane's message core, driven
+    // The relay stream and the pane's message core, driven
     // headlessly (no widgets, no runtime)
     // ------------------------------------------------------------------
 
@@ -1761,8 +1761,8 @@ mod tests {
 
     #[test]
     fn relay_maps_resize_and_raster_events() {
-        // the round-1 bug this pins: PaneEvent::Resized must surface as
-        // Message::Resized (it used to be swallowed by a FromPane arm)
+        // PaneEvent::Resized must surface as Message::Resized, not be
+        // swallowed by a FromPane arm
         let (events, relay) = test_relay();
         let mut stream = relay_stream(&relay);
         events
@@ -1803,8 +1803,7 @@ mod tests {
     #[test]
     fn relay_survives_a_full_channel() {
         // a burst larger than the stream channel's 64 slots must not kill
-        // the relay for the session (it used to exit on the first failed
-        // try_send)
+        // the relay for the session (a failed try_send is not an exit)
         let (events, relay) = test_relay();
         let mut stream = relay_stream(&relay);
         const BURST: u32 = 200;
@@ -1834,7 +1833,7 @@ mod tests {
 
     #[test]
     fn pane_re_arms_raster_when_load_fit_changes_bucket() {
-        // the round-1 bug this pins: a raster arrives, sheet_loaded's fit
+        // a raster arrives, sheet_loaded's fit
         // moves the scale into another bucket, and the pane must arm that
         // bucket's raster instead of staying blank
         let mut pane = SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);
@@ -1892,7 +1891,7 @@ mod tests {
 
     #[test]
     fn stale_revision_raster_is_ignored() {
-        // the revision contract: T7 bumps set_revision when a page's SVG
+        // the revision contract: the pane bumps set_revision when a page's SVG
         // changes on disk; rasters requested under the old revision must
         // not display
         let mut pane = SchematicPane::new(&[PathBuf::from("/tmp/missing-page.svg")], None);

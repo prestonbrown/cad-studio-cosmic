@@ -1,7 +1,7 @@
 //! The application shell (upstream CADStudioApp.swift): one
 //! `cosmic::Application` over a welcome window and one window per open
 //! project, the recents store, the first-run and agent-missing sheets, the
-//! M4 command subset, and the platform integrations — startup orphan reap
+//! command set, and the platform integrations — startup orphan reap
 //! + SIGTERM child cleanup, the xdg-desktop-portal file/folder choosers,
 //! and reveal via DBus `FileManager1.ShowItems` with an `xdg-open`
 //! fallback.
@@ -43,8 +43,8 @@ use crate::windows::welcome::{self, Welcome};
 pub enum WindowKind {
     Welcome,
     Project(ProjectWindow),
-    /// The settings window (upstream's `Settings` scene — Ruling 6: a new
-    /// non-modal window, not a body-replacing sheet).
+    /// The settings window (upstream's `Settings` scene, here a
+    /// separate non-modal window, not a body-replacing sheet).
     Settings(SettingsState),
     /// The About window (upstream `orderFrontStandardAboutPanel`).
     About,
@@ -120,7 +120,7 @@ pub enum Message {
     SettingsLocationChosen(Result<Vec<PathBuf>, String>),
     /// A chat row's "Configura l'agente…" action: present the
     /// agent-missing sheet (ChatView.swift:101-102 — upstream routes to
-    /// the sheet, NOT to settings; Ruling 6).
+    /// the sheet, NOT to settings).
     PresentAgentSheet,
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),

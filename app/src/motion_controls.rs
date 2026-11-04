@@ -16,19 +16,17 @@
 //!   `mm³`, and separators are upstream's literals (no catalog key backs
 //!   them).
 //!
-//! The pane floats the capsule bottom-center while animating (T7's
-//! mount, where the section controls mount); this module returns the
+//! The pane floats the capsule bottom-center while animating (the
+//! pane's mount, where the section controls mount); this module returns the
 //! capsule itself. Divergences from upstream, all cosmetic or
-//! plan-ruled:
+//! deliberate:
 //!
 //! - Upstream nests the speed picker and the Ripeti toggle in ONE menu
 //!   (:35-49); the port shows the speed dropdown with an adjacent loop
-//!   button — RULED at M8 plan review (Ruling 12's safe branch): cosmic's
-//!   menu overlay corrupts widget state on dynamic-ish content while the
-//!   corruption boundary is unpinned (docs/research/
-//!   libcosmic-menu-dynamic-items-bug.md, struck plan Task 2), so the
-//!   single-menu shape is unreachable evidence-wise. Revisit only if M9
-//!   pins the boundary.
+//!   button: cosmic's menu overlay corrupts widget state on dynamic-ish
+//!   content while the corruption boundary is unpinned (docs/research/
+//!   libcosmic-menu-dynamic-items-bug.md), so the single-menu shape is
+//!   out of reach until that boundary is pinned.
 //! - iced sliders and cosmic dropdowns carry no accessibility text at the
 //!   pinned rev, so their descriptions render as tooltips (the parts
 //!   overlay's slider pattern); buttons get real descriptions.
@@ -36,7 +34,7 @@
 //!   `exclamationmark.triangle.fill`; the icon theme decides its tint —
 //!   the text beside it carries the red.
 //!
-//! Ordering law for the values row (the milestone's sixth review focus):
+//! Ordering law for the values row:
 //! `StudyState.values` is a `BTreeMap` and iterates sorted, while
 //! upstream's row order is first-frame appearance — the view must iterate
 //! [`MotionStudy::value_names`] and read the map by key
