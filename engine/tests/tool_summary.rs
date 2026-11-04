@@ -327,7 +327,7 @@ fn short_command_normalizes_venv_and_cd() {
 
 #[test]
 fn short_command_empty_root_strips_any_cd() {
-    // Carry-forward divergence: upstream requires the cd target to contain
+    // Divergence: upstream requires the cd target to contain
     // the project root; the port's root-free classification (summarize's
     // Bash path) strips ANY leading cd, so a foreign-cd command classifies
     // one class up from upstream. Preserved deliberately.

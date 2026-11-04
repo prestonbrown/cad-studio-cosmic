@@ -1,12 +1,14 @@
 //! Pane-grid ↔ layout-tree conversion, resize clamping, and the layout
 //! persistence policy. Everything except the [`pane_grid::State`] conversion
 //! is plain functions over engine types, so the behavior is testable without a
-//! window; Task 7's window assembly is a thin caller of this module.
+//! window; the project window's assembly is a thin caller of this module.
 
 use cosmic::widget::pane_grid::{self, Configuration, Node, Split, State};
 use engine::project::layout::{self, Axis, LayoutNode, PaneKind};
 use engine::project::store::{ProjectMetadata, ProjectStoreError, load_metadata, save_metadata};
 use engine::settings::{Settings, SettingsError};
+
+use crate::settings_store::SettingsStore;
 use std::path::Path;
 
 /// Convert a persisted layout tree into PaneGrid state.
@@ -207,15 +209,14 @@ pub fn set_fraction(metadata: &mut ProjectMetadata, node: &LayoutNode) {
 /// immediately.
 pub fn persist_layout(
     project_root: &Path,
-    settings_path: &Path,
+    settings: &SettingsStore,
     node: &LayoutNode,
 ) -> Result<(), PersistLayoutError> {
     let mut metadata = load_metadata(project_root)?;
     metadata.layout = Some(node.clone());
     save_metadata(project_root, &metadata)?;
-    let mut settings = Settings::load(settings_path)?;
-    settings.default_layout = Some(serde_json::to_value(node)?);
-    settings.save(settings_path)?;
+    let layout = serde_json::to_value(node)?;
+    settings.update(|settings| settings.default_layout = Some(layout))?;
     Ok(())
 }
 
@@ -682,7 +683,7 @@ mod tests {
             LayoutNode::three_columns(),
             LayoutNode::chat_bottom(),
         ] {
-            persist_layout(&root, &settings_path, &node).unwrap();
+            persist_layout(&root, &SettingsStore::at(&settings_path), &node).unwrap();
 
             let reloaded = load_metadata(&root).unwrap();
             assert_eq!(

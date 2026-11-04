@@ -1,4 +1,4 @@
-//! viewer tools model tests (M6 T8, M7 T4): the ModelViewerState port —
+//! viewer tools model tests: the ModelViewerState port —
 //! measure-point lifecycle, layout effects, isolate, the double-click
 //! window, and the isAnimating semantics (mutual exclusion with the
 //! section/measure tools, assembled-forced layout, motion gate).

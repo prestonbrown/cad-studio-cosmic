@@ -1,4 +1,4 @@
-//! python::env tests (M5 T0): the install planner, version parsing, the
+//! python::env tests: the install planner, version parsing, the
 //! verification contract, progress nudging, the shared versions cell, and
 //! the check/install drivers against an injected fake spawn.
 

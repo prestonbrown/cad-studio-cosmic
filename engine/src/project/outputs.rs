@@ -5,18 +5,22 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::project::folder::{
+    MANIFEST, MODEL_3MF, MODEL_STEP, MODEL_STL, PLATE_3MF, SCHEMATIC_PDF, SCHEMATIC_PNG,
+    SCHEMATIC_SVG,
+};
 use crate::project::manifest::Manifest;
 
 /// The outputs model.py must produce, in upstream report order.
 pub fn expected_outputs() -> [&'static str; 7] {
     [
-        "model.3mf",
-        "model.stl",
-        "model.step",
-        "schematic.svg",
-        "schematic.png",
-        "schematic.pdf",
-        "manifest.json",
+        MODEL_3MF,
+        MODEL_STL,
+        MODEL_STEP,
+        SCHEMATIC_SVG,
+        SCHEMATIC_PNG,
+        SCHEMATIC_PDF,
+        MANIFEST,
     ]
 }
 
@@ -78,7 +82,7 @@ fn drawing_pages_on_disk(root: &Path) -> Vec<PathBuf> {
         .collect();
     numbered.sort_by_key(|&(number, _)| number);
     let mut pages: Vec<PathBuf> = numbered.into_iter().map(|(_, path)| path).collect();
-    let first = root.join("schematic.svg");
+    let first = root.join(SCHEMATIC_SVG);
     if first.exists() {
         pages.insert(0, first);
     }
@@ -87,16 +91,12 @@ fn drawing_pages_on_disk(root: &Path) -> Vec<PathBuf> {
 
 /// The missing-output notes, in upstream append order.
 pub fn missing_requirements(ctx: &MissingCtx) -> Vec<String> {
-    if !ctx.project_root.join("model.py").exists() {
+    if !crate::project::folder::model_script(ctx.project_root).exists() {
         return Vec::new();
     }
-    let mut missing: Vec<String> = expected_outputs()
-        .into_iter()
-        .filter(|name| !ctx.output_dir.join(name).exists())
-        .map(str::to_string)
-        .collect();
+    let mut missing = missing_files(ctx.output_dir);
     // the plate is demanded even for single-piece objects
-    if !ctx.output_dir.join("plate.3mf").exists() {
+    if !ctx.output_dir.join(PLATE_3MF).exists() {
         missing.push("plate.3mf (print plate)".to_string());
     }
     // page 2 only: further pages surface through the drawing-page count below
@@ -119,7 +119,7 @@ pub fn missing_requirements(ctx: &MissingCtx) -> Vec<String> {
     // an unreadable or absent pdf counts as 0 pages (upstream `?? 0`); this
     // branch is outside `if let manifest` and fires without one too
     if drawing_pages.len() > 1
-        && (pdf_page_count(&ctx.output_dir.join("schematic.pdf")).unwrap_or(0) as usize)
+        && (pdf_page_count(&ctx.output_dir.join(SCHEMATIC_PDF)).unwrap_or(0) as usize)
             < drawing_pages.len()
     {
         missing.push("schematic.pdf with all drawing pages in one file (PdfPages)".to_string());

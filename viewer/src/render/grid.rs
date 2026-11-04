@@ -17,11 +17,10 @@
 //! (both absolute, facts #34/#37); the tripod's corner sits at y = 0.05
 //! (facts #36), its axis boxes centering their thickness there.
 //!
-//! The bed outline is M6 scope pulled in early: the geometry primitive
-//! lives here with the grid, while its plate-view integration — feeding
-//! the real bed rectangle from project state instead of the `bed:
-//! Option<[f64; 2]>` argument the adapter currently passes as `None` —
-//! is M6's to wire.
+//! The bed outline is built here with the grid from the `bed:
+//! Option<[f64; 2]>` argument: the app pane passes the manifest's bed in
+//! the plate layout (through `ModelScene::set_overlay_frame`) and `None`
+//! otherwise.
 //!
 //! Colors are LINEAR rgb + straight alpha in [`GridVertex`] — the same
 //! recorded assumption as [`crate::render::parts::NEUTRAL`]. The line and

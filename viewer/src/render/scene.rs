@@ -12,7 +12,7 @@ use iced::{Rectangle, mouse};
 
 use super::{
     Camera, Frame, GridMesh, MarkerMesh, MeshPipeline, Options, PartAppearance, PartPose,
-    PartScene, camera, grid,
+    PartScene, SectionPlane, camera, grid,
 };
 
 /// Identity poses for every slot of an n-part scene — the assembled
@@ -28,20 +28,12 @@ fn opaque_appearances(n: usize) -> Arc<[PartAppearance]> {
     Arc::from(vec![PartAppearance::default(); n])
 }
 
-/// The interactive model scene: part scene, orbit camera state.
-/// Framing (target + distance) comes from [`camera::frame`] at
-/// construction — aspect-free, against the pinned scene aabb — and the
-/// input methods ([`ModelScene::orbit`], [`ModelScene::zoom`],
-/// [`ModelScene::pan`]) are the parity formulas over that state. The
-/// overlay ([`grid::geometry`]) is built once alongside: it depends only
-/// on the scene aabb, never on the camera.
-///
-/// Two owners drive the pose: the example mutates it through those input
-/// methods directly, while the app's pane keeps its own pure state machine
-/// (`app::camera_input::CameraInput`, which calls the same [`camera`]
-/// formulas) and pushes the settled pose in through [`ModelScene::set_pose`]
-/// after every event. The framing-derived fields stay private so both paths
-/// read one consistent camera.
+/// The interactive model scene: part scene plus the [`camera::Orbit`] it
+/// is drawn from. The pose starts at the iso framing of the pinned scene
+/// aabb; the gesture owner ([`crate::camera_input::CameraInput`]) writes
+/// [`ModelScene::orbit`] after every event, so this struct never decodes
+/// input itself. The overlay ([`grid::geometry`]) is built alongside: it
+/// depends only on the scene aabb, never on the camera.
 pub struct ModelScene {
     pub scene: Arc<PartScene>,
     /// Per-part poses for the next frame — `Some(matrix)` draws the part
@@ -51,7 +43,7 @@ pub struct ModelScene {
     /// update costs one refcount bump, never a mesh copy or re-stage.
     pub poses: Arc<[PartPose]>,
     /// Per-part motion appearance flags for the next frame — opaque
-    /// defaults until the animation pane's playback (T6) writes per-frame
+    /// defaults until the animation pane's playback writes per-frame
     /// translucent static parts and flat-red colliding ones. Arc-shared
     /// like `poses`, so an appearance update is a refcount bump too.
     pub appearances: Arc<[PartAppearance]>,
@@ -65,7 +57,7 @@ pub struct ModelScene {
     /// `PartScene` built from the comparison version WITH THIS SCENE'S
     /// PIN (`PartScene::from_parts_with_pin(.., self.scene.pin)`,
     /// ModelViewer.swift:135: ghostEntity under `content`). The app layer
-    /// owns the comparison state (M5's `comparison_parameters`) and swaps
+    /// owns the comparison state (`comparison_parameters`) and swaps
     /// the scene here on a version change; `None` draws none.
     pub ghost: Option<Arc<PartScene>>,
     /// Grid visibility (upstream `showsGrid`, default on — facts #38).
@@ -75,30 +67,21 @@ pub struct ModelScene {
     /// Samples per pixel, 1 or 4 (the example's `m` toggle): flows into
     /// `Options::msaa`, whose flip rebuilds the pipeline in place.
     pub msaa: u32,
-    pub yaw: f32,
-    /// keep within ±[`camera::MAX_PITCH`]: the orbit formula uses Y as up
-    pub pitch: f32,
-    /// Camera distance from `target` — scroll zooms this itself, not a
-    /// multiplier, so the clamp is the radius-relative parity one.
-    pub distance: f32,
-    /// The aspect-free framing of `scene`: look-at target and the framing
-    /// radius the zoom clamp scales.
-    target: [f32; 3],
-    radius: f32,
+    /// The camera pose the next frame draws from.
+    pub orbit: camera::Orbit,
     /// The manifest bed the overlay was last built with — kept across
     /// [`ModelScene::replace_scene`] so a reload's grid derives from it
     /// (upstream's pane re-sends the bed every update; a mesh swap alone
     /// never clears it).
     pub bed: Option<[f64; 2]>,
-    /// The section plane the drawn camera carries: `Some((scene axis, scene
-    /// position))` turns the mesh shader's discard and the cap quad on;
-    /// `None` draws whole. The pane's arrangement wiring (M6 T10) computes
-    /// it from the effective aabb and the live scene pin; the adapter only
+    /// The section plane the frame carries: `Some` turns the mesh shader's
+    /// discard and the cap quad on; `None` draws whole. The pane builds it
+    /// with [`crate::tools::section::pinned_plane`]; the adapter only
     /// carries it.
-    section: Option<(u32, f32)>,
+    section: Option<SectionPlane>,
     /// The aabb [`ModelScene::grid`] was last built against — the change
     /// check [`ModelScene::set_overlay_frame`] compares against. Normally
-    /// the staged scene's own; the pane's frozen stamp (T10) writes
+    /// the staged scene's own; the pane's frozen stamp writes
     /// layout-switch-time values here instead.
     grid_aabb: ([f32; 3], [f32; 3]),
     /// The overlay rebuilt for the last non-default palette a [`Themed`]
@@ -118,9 +101,7 @@ pub struct Themed<'a> {
 
 impl ModelScene {
     pub fn new(scene: Arc<PartScene>) -> Self {
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
-        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
+        let orbit = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
         let grid_aabb = (scene.aabb_min, scene.aabb_max);
         let grid = Arc::new(grid::geometry(grid_aabb, None));
         Self {
@@ -133,11 +114,7 @@ impl ModelScene {
             show_grid: true,
             wireframe: false,
             msaa: 1,
-            yaw,
-            pitch,
-            distance,
-            target,
-            radius,
+            orbit,
             bed: None,
             section: None,
             grid_aabb,
@@ -187,55 +164,13 @@ impl ModelScene {
             grid: self.show_grid.then(grid),
             markers: self.markers.clone(),
             ghost: self.ghost.clone(),
-            camera: self.camera(aspect),
+            camera: self.orbit.camera(aspect),
+            section: self.section,
             options: Options {
                 wireframe: self.wireframe,
                 msaa: self.msaa,
             },
         }
-    }
-
-    /// orbit(by:) (facts #18): yaw −= dx·0.008, pitch += dy·0.008 clamped
-    /// to ±[`camera::MAX_PITCH`]. `dx`/`dy` are AppKit-convention deltas
-    /// (dy bottom-up) — iced's top-down cursor y must be negated by the
-    /// caller.
-    pub fn orbit(&mut self, dx: f32, dy: f32) {
-        (self.yaw, self.pitch) = camera::orbit_drag(self.yaw, self.pitch, dx, dy);
-    }
-
-    /// zoom(by:) (facts #19): distance × factor clamped to
-    /// [0.1·radius, 200·radius].
-    pub fn zoom(&mut self, factor: f32) {
-        self.distance = camera::zoomed(self.distance, factor, self.radius);
-    }
-
-    /// pan(by:viewHeight:) (facts #22) — the parity formula. The app's
-    /// input wiring lives in its own state machine
-    /// (`app::camera_input::CameraInput`), which calls [`camera::panned`]
-    /// directly; this method stays the adapter-local convenience for the
-    /// example.
-    pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
-        self.target = camera::panned(
-            self.target,
-            self.yaw,
-            self.pitch,
-            self.distance,
-            view_height,
-            dx,
-            dy,
-        );
-    }
-
-    /// Adopt a pose computed by an external owner (the app pane's
-    /// `CameraInput`): every field the draw reads, set atomically. The
-    /// framing-derived private fields are NOT touched — a re-frame arrives
-    /// through [`ModelScene::replace_scene`] or construction, and the
-    /// external state machine tracks its own framing radius.
-    pub fn set_pose(&mut self, yaw: f32, pitch: f32, distance: f32, target: [f32; 3]) {
-        self.yaw = yaw;
-        self.pitch = pitch;
-        self.distance = distance;
-        self.target = target;
     }
 
     /// Store the overlay frame — the aabb the grid/bed/tripod derive from
@@ -246,7 +181,7 @@ impl ModelScene {
     /// scene/layout/plate-identity changes and hands its FROZEN `grid_aabb`
     /// — upstream rebuilds the grid on sceneID, never on explode/hidden
     /// sweeps, so the grid's size freezes at layout-switch-time explode and
-    /// the pane's stamp is what reproduces that quirk (T10 owns the
+    /// the pane's stamp is what reproduces that quirk (the pane owns the
     /// freezing; this method only obeys the inputs it is given).
     pub fn set_overlay_frame(&mut self, aabb: ([f32; 3], [f32; 3]), bed: Option<[f64; 2]>) {
         if aabb == self.grid_aabb && bed == self.bed {
@@ -261,10 +196,9 @@ impl ModelScene {
     /// against the new pinned aabb (deriving from the STORED bed — the pane
     /// re-sends it on its next stamp), resets the poses to the new scene's
     /// assembled identities (a new model has no carried explode offsets),
-    /// and re-derives the framing fields so the struct stays
-    /// self-consistent; the caller decides whether the camera actually
-    /// re-frames (the > 50 % diagonal rule) and pushes the settled pose
-    /// through [`ModelScene::set_pose`].
+    /// and re-frames the orbit's target and distance on the new scene; a
+    /// gesture owner that keeps its own pose (the > 50 % diagonal rule)
+    /// writes [`ModelScene::orbit`] back afterwards.
     pub fn replace_scene(&mut self, scene: Arc<PartScene>) {
         self.grid_aabb = (scene.aabb_min, scene.aabb_max);
         self.grid = Arc::new(grid::geometry(self.grid_aabb, self.bed));
@@ -275,50 +209,30 @@ impl ModelScene {
         // of from_parts_with_pin), so it cannot survive the pin change —
         // the app re-stages it if the comparison is still active
         self.ghost = None;
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        self.radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        let (target, distance) = camera::frame(scene.aabb());
+        self.orbit.target = target;
+        self.orbit.distance = distance;
         self.poses = identity_poses(scene.parts.len());
         self.appearances = opaque_appearances(scene.parts.len());
         self.scene = scene;
-        self.target = target;
-        self.distance = distance;
     }
 
-    /// Store the section plane the camera uniform carries (the pane's M6
-    /// seam): `Some((axis, pos))` in THIS scene's pinned coordinates — the
-    /// caller adds the pin, `section::scene_plane`'s value is raw — enables
-    /// the mesh discard and the cap; `None` draws whole.
-    pub fn set_section(&mut self, section: Option<(u32, f32)>) {
+    /// Store the section plane the frame carries, in THIS scene's pinned
+    /// coordinates (build it with [`crate::tools::section::pinned_plane`]);
+    /// `None` draws whole.
+    pub fn set_section(&mut self, section: Option<SectionPlane>) {
         self.section = section;
     }
 
-    fn camera(&self, aspect: f32) -> Camera {
-        let mut camera = Camera::orbiting(self.distance, self.yaw, self.pitch, self.target, aspect);
-        if let Some((axis, pos)) = self.section {
-            camera.section_axis = axis;
-            camera.section_pos = pos;
-            camera.section_enable = 1.0;
-        }
-        camera
-    }
-
-    /// The last-set section tuple — the discard plane the camera uniform
-    /// carries. Production read: the app's measure pick honors the same
+    /// The last-set section plane. The app's measure pick honors the same
     /// plane so a click never answers through cut-away geometry.
-    pub fn section(&self) -> Option<(u32, f32)> {
+    pub fn section(&self) -> Option<SectionPlane> {
         self.section
-    }
-
-    /// The last-set section tuple (test observation — the app's pane tests
-    /// read the uniform input through this seam; kept `pub`, not
-    /// `#[cfg(test)]`, because those tests sit in the app crate).
-    pub fn section_for_tests(&self) -> Option<(u32, f32)> {
-        self.section()
     }
 
     /// The grid's content identity: its content hash and build half-extent
     /// (test observation — an explode/hidden sweep must leave both alone;
-    /// same cross-crate seam note as [`ModelScene::section_for_tests`]).
+    /// kept `pub` because those tests sit in the app crate).
     pub fn grid_identity_for_tests(&self) -> (u64, f32) {
         (self.grid.content_hash, self.grid.half_extent)
     }
@@ -362,6 +276,7 @@ pub struct ModelPrimitive {
     markers: Option<Arc<MarkerMesh>>,
     ghost: Option<Arc<PartScene>>,
     camera: Camera,
+    section: Option<SectionPlane>,
     options: Options,
 }
 
@@ -377,14 +292,12 @@ impl shader::Primitive for ModelPrimitive {
         viewport: &Viewport,
     ) {
         let size = viewport.physical_size();
-        // effective_aabb defaults to the staged scene's own — the
-        // arrangement wiring replaces it with the arranged/plate-aware box
         let frame = Frame {
             camera: &self.camera,
             scene: &self.scene,
             poses: &self.poses,
             appearances: &self.appearances,
-            effective_aabb: (self.scene.aabb_min, self.scene.aabb_max),
+            section: self.section,
             grid: self.grid.as_deref(),
             markers: self.markers.as_deref(),
             ghost: self.ghost.as_deref(),
@@ -449,7 +362,7 @@ mod tests {
     /// rebuildGrid/showBed guards, ModelViewer.swift:165-190): the
     /// constructor's own (aabb, None) rebuilds nothing, a bed change
     /// rebuilds with the outline in the mesh, and an aabb change rebuilds
-    /// at the new extents — the seam T10 stamps on scene/layout/plate
+    /// at the new extents — the seam the pane stamps on scene/layout/plate
     /// identity changes, reproducing upstream's grid freeze through
     /// explode/hidden sweeps (those never reach this method).
     #[test]
@@ -522,11 +435,11 @@ mod tests {
         );
     }
 
-    /// `set_section` is the pane's seam onto the camera uniform: the tuple
-    /// lands on the drawn camera's section fields (enable included), and
-    /// `None` restores sectioning-off.
+    /// `set_section` is the pane's seam onto the frame: the plane lands on
+    /// the drawn primitive verbatim (cap box included), and `None` restores
+    /// sectioning-off.
     #[test]
-    fn set_section_drives_the_camera_uniform() {
+    fn set_section_drives_the_primitive() {
         let scene = tri_scene(1.0);
         let mut model = ModelScene::new(scene);
         let bounds = Rectangle {
@@ -535,18 +448,19 @@ mod tests {
             width: 800.0,
             height: 600.0,
         };
-        let camera = |m: &ModelScene| {
-            shader::Program::<()>::draw(m, &(), mouse::Cursor::Unavailable, bounds).camera
+        let drawn = |m: &ModelScene| {
+            shader::Program::<()>::draw(m, &(), mouse::Cursor::Unavailable, bounds).section
         };
-        assert_eq!(camera(&model).section_enable, 0.0, "off by default");
-        model.set_section(Some((1, 7.5)));
-        assert_eq!(model.section_for_tests(), Some((1, 7.5)));
-        let drawn = camera(&model);
-        assert_eq!(drawn.section_axis, 1);
-        assert!((drawn.section_pos - 7.5).abs() < 1e-6);
-        assert!(drawn.section_enable > 0.5);
+        assert_eq!(drawn(&model), None, "off by default");
+        let plane = SectionPlane {
+            axis: crate::render::SceneAxis::Y,
+            pos: 7.5,
+            cap: crate::render::Box3::new([-9.0, 0.0, -9.0], [9.0, 40.0, 9.0]),
+        };
+        model.set_section(Some(plane));
+        assert_eq!(model.section(), Some(plane));
+        assert_eq!(drawn(&model), Some(plane));
         model.set_section(None);
-        assert_eq!(model.section_for_tests(), None);
-        assert_eq!(camera(&model).section_enable, 0.0, "None disables");
+        assert_eq!(drawn(&model), None, "None disables");
     }
 }

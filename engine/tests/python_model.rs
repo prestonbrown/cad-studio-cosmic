@@ -1,4 +1,4 @@
-//! python::model tests (M5 T2): run_model against the fake interpreter —
+//! python::model tests: run_model against the fake interpreter —
 //! argv/cwd/env contract, success, stderr/stdout failure text, output
 //! materialization, interruption.
 
@@ -11,7 +11,7 @@ fn fake_python() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/fake-agent/fake_python.py")
 }
 
-/// The M0 build123d-generated outputs the fake interpreter copies in copy
+/// The build123d-generated golden outputs the fake interpreter copies in copy
 /// mode — the same files a real model.py run must materialize.
 fn golden_fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden")

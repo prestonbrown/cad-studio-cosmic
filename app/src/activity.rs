@@ -1,34 +1,28 @@
 //! The project activity model behind the header's ActivityViewer port
 //! (upstream `Activity` + `issues`, Project.swift:21-30 and 113-130, and
-//! AgentSession's `show`/`agentDidFinish` transitions). Pure: the window
-//! folds bridge messages into an [`Activity`] through [`next`] and renders
-//! [`issues`] in the issue buttons.
+//! AgentSession's `show`/`agentDidFinish` transitions). Pure: the bridge
+//! classifies every turn transition through [`next`] into the one
+//! [`Activity`] it holds, the window mirrors it, and renders [`issues`] in
+//! the issue buttons.
 //!
 //! The build error rides the FIRST issue slot from the live pipeline
-//! (`Bridge::build_error`, wired M5 T8); the missing-output warning is
-//! the upstream home of output warnings. The motion-error and collision
-//! warnings joined at M7 (the pane-derived pair); the manifest warnings
-//! join through the pane's reload-fresh copy of the manifest.
+//! (`Bridge::build_error`); the missing-output warning is the upstream
+//! home of output warnings. The motion-error and collision warnings are
+//! the pane-derived pair; the manifest warnings join through the pane's
+//! reload-fresh copy of the manifest.
 
 use std::path::Path;
 
+use engine::agent::locator::AgentKind;
 use engine::agent::session::TurnOutcome;
 #[cfg(test)]
 use engine::project::outputs::expected_outputs;
-use engine::settings::Settings;
 
 use crate::fl;
 
-/// The engine display name the activity strings interpolate
-/// (AgentLocator.swift:11-16: "Claude Code" / "Codex"), read from the
-/// agent_engine setting so a mid-conversation engine flip renames the next
-/// turn's rows. Callers resolve it fresh from the settings file — the
-/// settings window's picker is a live preference.
-pub fn engine_name(settings: &Settings) -> &'static str {
-    settings.agent_kind().display_name()
-}
-
-/// What the header shows the project is doing (upstream `Activity`).
+/// What the header shows the project is doing (upstream `Activity`,
+/// Project.swift:19-26), and the pipeline's sole busy flag: upstream's
+/// `isBusy` is `activity.isWorking`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activity {
     Idle,
@@ -149,11 +143,13 @@ pub enum Signal<'a> {
     Closed,
 }
 
-/// The next activity for a signal. `agent` is the engine display name
-/// ([`engine_name`]). `missing_outputs_empty` is the missing-files state
-/// AFTER the turn (upstream recomputes before classifying,
-/// Project.swift:266-274).
-pub fn next(signal: Signal<'_>, missing_outputs_empty: bool, agent: &str) -> Activity {
+/// The next activity for a signal. `engine` is the engine the turn runs
+/// (the engine's own pick, `TurnHandle::engine`); the strings interpolate
+/// its display name (AgentLocator.swift:11-16: "Claude Code" / "Codex").
+/// `missing_outputs_empty` is the missing-files state AFTER the turn
+/// (upstream recomputes before classifying, Project.swift:266-274).
+pub fn next(signal: Signal<'_>, missing_outputs_empty: bool, engine: AgentKind) -> Activity {
+    let agent = engine.display_name();
     match signal {
         Signal::TurnStarted => Activity::Working(fl!("sta-lavorando", agent = agent)),
         Signal::ToolOpened(title) => {
@@ -206,17 +202,20 @@ mod tests {
 
     /// The activity transitions match AgentSession's: working on start,
     /// working·title on each tool, and every end classification. The engine
-    /// display name is the caller's input — the claude rows here, the codex
-    /// pair in the engine_name test below.
+    /// is the caller's input — the claude rows here, the codex pair below.
     #[test]
     fn activity_transitions_match_upstream() {
         let _lang = crate::localize::pin_en();
         assert_eq!(
-            next(Signal::TurnStarted, false, "Claude Code"),
+            next(Signal::TurnStarted, false, AgentKind::Claude),
             Activity::Working("Claude Code is working…".into())
         );
         assert_eq!(
-            next(Signal::ToolOpened("Writing model.py"), false, "Claude Code"),
+            next(
+                Signal::ToolOpened("Writing model.py"),
+                false,
+                AgentKind::Claude
+            ),
             Activity::Working("Claude Code is working… · Writing model.py".into())
         );
         assert_eq!(
@@ -226,7 +225,7 @@ mod tests {
                     text: String::new()
                 }),
                 true,
-                "Claude Code"
+                AgentKind::Claude
             ),
             Activity::Succeeded("Model generated".into())
         );
@@ -237,7 +236,7 @@ mod tests {
                     text: String::new()
                 }),
                 false,
-                "Claude Code"
+                AgentKind::Claude
             ),
             Activity::Succeeded("Response completed".into())
         );
@@ -249,7 +248,7 @@ mod tests {
                     exit_code: Some(1)
                 }),
                 true,
-                "Claude Code"
+                AgentKind::Claude
             ),
             Activity::Failed("Sign-in to Claude Code required".into())
         );
@@ -261,37 +260,32 @@ mod tests {
                     exit_code: Some(2)
                 }),
                 true,
-                "Claude Code"
+                AgentKind::Claude
             ),
             Activity::Failed("Claude Code error".into())
         );
         assert_eq!(
-            next(Signal::TurnFinished(&TurnOutcome::Cancelled), true, "Claude Code"),
+            next(
+                Signal::TurnFinished(&TurnOutcome::Cancelled),
+                true,
+                AgentKind::Claude
+            ),
             Activity::Failed("Stopped".into())
         );
         assert_eq!(
-            next(Signal::Closed, true, "Claude Code"),
+            next(Signal::Closed, true, AgentKind::Claude),
             Activity::Failed("Claude Code error".into())
         );
     }
 
-    /// The engine display name follows the agent_engine setting
-    /// (AgentLocator.swift:11-16), and every activity string interpolates
-    /// whatever engine the setting names.
+    /// Every activity string names the engine it is given, and the engine's
+    /// absorbed outcomes (Busy/MissingSession, which `Session::send` never
+    /// emits) still end failed rather than stuck working.
     #[test]
-    fn engine_name_follows_the_setting() {
+    fn activities_name_the_given_engine() {
         let _lang = crate::localize::pin_en();
-        let mut s = engine::settings::Settings::default();
-        assert_eq!(engine_name(&s), "Claude Code");
-        s.agent_engine = "codex".into();
-        assert_eq!(engine_name(&s), "Codex");
-        s.agent_engine = "bogus".into();
-        assert_eq!(engine_name(&s), "Claude Code", "unknown engines read claude");
-
-        let mut codex = engine::settings::Settings::default();
-        codex.agent_engine = "codex".into();
         assert_eq!(
-            next(Signal::TurnStarted, false, engine_name(&codex)),
+            next(Signal::TurnStarted, false, AgentKind::Codex),
             Activity::Working("Codex is working…".into())
         );
         assert_eq!(
@@ -302,9 +296,23 @@ mod tests {
                     exit_code: None
                 }),
                 true,
-                engine_name(&codex)
+                AgentKind::Codex
             ),
             Activity::Failed("Codex error".into())
+        );
+        for absorbed in [TurnOutcome::Busy, TurnOutcome::MissingSession] {
+            assert_eq!(
+                next(Signal::TurnFinished(&absorbed), true, AgentKind::Codex),
+                Activity::Failed("Codex error".into())
+            );
+        }
+        assert_eq!(
+            next(
+                Signal::TurnFinished(&TurnOutcome::AgentMissing),
+                true,
+                AgentKind::Codex
+            ),
+            Activity::Failed(fl!("non-trovato", agent = "Codex"))
         );
     }
 
@@ -339,7 +347,7 @@ mod tests {
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);
         assert_eq!(warnings_only[0].message, "Missing output files: model.3mf");
 
-        // the drift pin (M5 branch review MINOR 2): the header's warning
+        // the drift pin: the header's warning
         // list IS the version-record gate's rule — one engine
         // implementation — so the two can never disagree
         assert_eq!(
@@ -353,14 +361,20 @@ mod tests {
         assert_eq!(both.len(), 2);
     }
 
-    /// The motion branches (Project.swift:123-127, appended after the two
-    /// M5 ones): the pane's already-substituted error text rides one
+    /// The motion branches (Project.swift:123-127, appended after the build
+    /// error and missing-output ones): the pane's already-substituted error text rides one
     /// warning; a colliding study rides one warning with the frame count
     /// substituted into the fl! text; a clean study stays silent.
     #[test]
     fn motion_issues_render_both_upstream_branches() {
         let _lang = crate::localize::pin_en();
-        let issues = crate::activity::issues(None, &[], &[], Some("animation.json is not valid: expected a comma"), 0);
+        let issues = crate::activity::issues(
+            None,
+            &[],
+            &[],
+            Some("animation.json is not valid: expected a comma"),
+            0,
+        );
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, IssueKind::Warning);
         assert_eq!(
@@ -404,7 +418,9 @@ mod tests {
         assert!(all[4].message.contains("not valid"), "motion error follows");
         assert!(all[5].message.contains("3 frames"), "collision count last");
         assert!(
-            all[1..].iter().all(|issue| issue.kind == IssueKind::Warning),
+            all[1..]
+                .iter()
+                .all(|issue| issue.kind == IssueKind::Warning),
             "everything but the build error is a warning"
         );
     }

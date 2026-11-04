@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::locator::AgentPath;
+use crate::project::folder;
 use crate::project::outputs::{MissingCtx, missing_requirements};
 use crate::settings::Settings;
 
@@ -30,7 +31,7 @@ pub struct TurnRequest {
     /// `ClaudeRequest.images`, Project.swift:206: the `references/` copies,
     /// root-resolved; the argv filters them to images). Claude's argv
     /// consumes none — upstream ClaudeRunner.swift:28-51 never reads the
-    /// field (Ruling 2, M8 plan).
+    /// field.
     pub images: Vec<PathBuf>,
 }
 
@@ -153,7 +154,7 @@ pub fn render_system_prompt(tpl: &str, ctx: &PromptCtx) -> String {
 /// cell), not derivable from the project root.
 pub fn environment_bullets(root: &Path, python_display: &str) -> Vec<String> {
     let mut lines = vec![format!("- Python packages: {python_display}")];
-    match std::fs::read_to_string(root.join("model.py")) {
+    match std::fs::read_to_string(folder::model_script(root)) {
         // Swift's split(omittingEmptySubsequences: false) keeps the empty
         // tail, so a trailing newline still counts as a line
         Ok(script) => {
@@ -164,12 +165,10 @@ pub fn environment_bullets(root: &Path, python_display: &str) -> Vec<String> {
         }
         Err(_) => lines.push("- model.py does not exist yet: create it".to_string()),
     }
-    lines.push(format!("- output/: {}", listing(&root.join("output"))));
-    if root.join("references").exists() {
-        lines.push(format!(
-            "- references/: {}",
-            listing(&root.join("references"))
-        ));
+    lines.push(format!("- output/: {}", listing(&folder::output_dir(root))));
+    let references = folder::references_dir(root);
+    if references.exists() {
+        lines.push(format!("- references/: {}", listing(&references)));
     }
     lines
 }

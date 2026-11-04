@@ -100,23 +100,24 @@ impl<'de> Deserialize<'de> for PrinterType {
     }
 }
 
-/// Verbatim from fixtures/upstream-source/PrintPreferences.swift:73-107,
-/// indexed by [`PrinterType`].
-pub const PRINT_GUIDELINES: [&str; 4] = [
-    "Single-filament FDM. Unless told otherwise: walls ≥ 1.2 mm, fit clearance 0.2 mm, overhangs ≤ 45°, short bridges, fillets or chamfers on sharp edges where they do not affect function, a flat base for bed adhesion, teardrop or controlled-overhang horizontal holes. Multiple colors need manual filament changes.",
-    "Multi-material FDM (AMS, MMU): several colors or materials are possible, one per 3MF part. Unless told otherwise: walls ≥ 1.2 mm, fit clearance 0.2 mm, overhangs ≤ 45°, fillets or chamfers on sharp edges, a flat base for bed adhesion. Keep color changes per layer low when possible.",
-    "Resin printing (SLA, DLP, MSLA). Unless told otherwise: walls ≥ 0.8 mm (≥ 1.5 mm for load-bearing parts), fit clearance 0.1-0.15 mm, fine details down to 0.2 mm, hollow parts with drain holes ≥ 3 mm, avoid large flat areas parallel to the plate, plan for a tilted orientation and supports. The build volume is usually small: flag large parts.",
-    "SLS powder printing: no supports needed and overhangs are free. Unless told otherwise: walls ≥ 0.8 mm, fit clearance 0.3-0.5 mm, closed cavities with powder escape holes ≥ 5 mm, avoid strongly varying thicknesses that warp. Colors cannot be printed: use them only to tell parts apart.",
-];
-
 impl PrinterType {
+    /// The prompt's printing guidelines, verbatim from
+    /// fixtures/upstream-source/PrintPreferences.swift:73-107.
     pub fn prompt_guidelines(self) -> &'static str {
-        PRINT_GUIDELINES[match self {
-            PrinterType::Fdm => 0,
-            PrinterType::FdmMultiMaterial => 1,
-            PrinterType::Resin => 2,
-            PrinterType::Sls => 3,
-        }]
+        match self {
+            PrinterType::Fdm => {
+                "Single-filament FDM. Unless told otherwise: walls ≥ 1.2 mm, fit clearance 0.2 mm, overhangs ≤ 45°, short bridges, fillets or chamfers on sharp edges where they do not affect function, a flat base for bed adhesion, teardrop or controlled-overhang horizontal holes. Multiple colors need manual filament changes."
+            }
+            PrinterType::FdmMultiMaterial => {
+                "Multi-material FDM (AMS, MMU): several colors or materials are possible, one per 3MF part. Unless told otherwise: walls ≥ 1.2 mm, fit clearance 0.2 mm, overhangs ≤ 45°, fillets or chamfers on sharp edges, a flat base for bed adhesion. Keep color changes per layer low when possible."
+            }
+            PrinterType::Resin => {
+                "Resin printing (SLA, DLP, MSLA). Unless told otherwise: walls ≥ 0.8 mm (≥ 1.5 mm for load-bearing parts), fit clearance 0.1-0.15 mm, fine details down to 0.2 mm, hollow parts with drain holes ≥ 3 mm, avoid large flat areas parallel to the plate, plan for a tilted orientation and supports. The build volume is usually small: flag large parts."
+            }
+            PrinterType::Sls => {
+                "SLS powder printing: no supports needed and overhangs are free. Unless told otherwise: walls ≥ 0.8 mm, fit clearance 0.3-0.5 mm, closed cavities with powder escape holes ≥ 5 mm, avoid strongly varying thicknesses that warp. Colors cannot be printed: use them only to tell parts apart."
+            }
+        }
     }
 }
 
@@ -163,8 +164,8 @@ pub struct Settings {
     pub printer_type: PrinterType,
     pub printer_model: Option<String>,
     pub has_completed_setup: bool,
-    /// Upstream stores a JSON-encoded LayoutNode here; kept opaque until the
-    /// layout tree exists (M2+).
+    /// Upstream stores a JSON-encoded LayoutNode here; it stays opaque JSON
+    /// and the app decodes it (`panes::stored_layout`).
     pub default_layout: Option<serde_json::Value>,
     pub recent_projects: Vec<String>,
     pub parts_layout: PartsLayout,
@@ -270,24 +271,12 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
-        {
-            let mut file = std::fs::File::create(&tmp)?;
-            std::io::Write::write_all(&mut file, json.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
+        crate::storage::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 }
 
 pub fn settings_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", "cad-studio")
-        .expect("no home directory: cannot locate settings")
-        .config_dir()
-        .join("settings.json")
+    crate::storage::config_dir().join("settings.json")
 }

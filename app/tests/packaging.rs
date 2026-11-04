@@ -1,4 +1,4 @@
-//! packaging tests (M8 T13): the freedesktop metadata under
+//! packaging tests: the freedesktop metadata under
 //! `resources/packaging/` pins to the app's identity. The desktop entry
 //! must parse as a keyfile whose Icon and StartupWMClass equal the
 //! icon-name law's APP_ID alias (hicolor lookup by APP_ID), with Exec a

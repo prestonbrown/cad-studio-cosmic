@@ -458,7 +458,7 @@ async fn cancel_mid_turn_pauses_queue_fails_open() {
 /// A ~5k-event flood with a slow consumer cannot wedge cancel: the command
 /// channel is absorbed between translations, so the interrupted terminal
 /// arrives within a bounded poll while thousands of events are still in
-/// flight (plan Review Focus 1).
+/// flight (the drain law).
 #[tokio::test(flavor = "multi_thread")]
 async fn flood_does_not_wedge_cancel() {
     let root = mk_project();

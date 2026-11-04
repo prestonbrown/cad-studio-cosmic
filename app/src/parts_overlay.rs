@@ -23,7 +23,7 @@ use viewer::tools::section;
 
 use crate::fl;
 use crate::typography;
-use crate::ui::segmented::{Look, segmented};
+use crate::ui::segmented::{Look, Size, segmented};
 use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::tone::wash;
@@ -101,7 +101,9 @@ fn header(tools: &ViewerTools, groups: &[PartGroup]) -> Element<'static, Message
         .push(
             text(fl!("parti"))
                 .size(typography::CALLOUT)
-                .font(cosmic::font::semibold())
+                .font(crate::typography::font(
+                    cosmic::iced::font::Weight::Semibold,
+                ))
                 .class(Tone::Primary.text(BACKDROP)),
         );
     if groups.len() > 1 {
@@ -145,7 +147,7 @@ fn layout_picker(
         })
         .collect();
     tooltip(
-        segmented(items, selected, Look::Filled, Length::Fill),
+        segmented(items, selected, Look::Filled, Size::Small, Length::Fill),
         text(fl!("vista-delle-parti")),
         cosmic::widget::tooltip::Position::Bottom,
     )
@@ -225,7 +227,7 @@ fn list_height(rows: usize) -> f32 {
 /// when hidden), `×N` for multi-member groups, then the attach button
 /// (exploded layout only) and the show/hide button. The name cluster
 /// reports [`Message::RowClicked`] on every press — the pane decodes the
-/// double-click (T8's `is_double_click`) and isolates the group.
+/// double-click (`viewer_tools::is_double_click`) and isolates the group.
 fn group_row(tools: &ViewerTools, group: &PartGroup, exploded: bool) -> Element<'static, Message> {
     let is_hidden = tools.hidden.contains(&group.name);
     let is_attached = tools.attached.contains(&group.name);
@@ -402,6 +404,7 @@ pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
             .collect(),
         selected,
         Look::Filled,
+        Size::Small,
         Length::Shrink,
     );
     let width = Length::Fixed(220.0);

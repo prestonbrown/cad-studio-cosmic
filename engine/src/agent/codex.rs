@@ -53,7 +53,10 @@ pub fn build_args(
     args.push("-c".to_string());
     args.push("approval_policy=\"never\"".to_string());
     args.push("-c".to_string());
-    args.push(format!("developer_instructions={}", toml_string(system_prompt)));
+    args.push(format!(
+        "developer_instructions={}",
+        toml_string(system_prompt)
+    ));
     if s.isolates_claude {
         args.push("--ignore-user-config".to_string());
     }
@@ -154,7 +157,10 @@ impl CodexTranslator {
                 vec![self.turn_result(true, message)]
             }
             "error" => {
-                self.error_message = event.get("message").and_then(Value::as_str).map(str::to_string);
+                self.error_message = event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -256,7 +262,10 @@ impl CodexTranslator {
                 let mut events = Vec::new();
                 for (offset, change) in changes.iter().enumerate() {
                     let tool_id = format!("{id}-{offset}");
-                    let path = change.get("path").and_then(Value::as_str).unwrap_or_default();
+                    let path = change
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let name = if change.get("kind").and_then(Value::as_str) == Some("add") {
                         "Write"
                     } else {
@@ -292,13 +301,17 @@ impl CodexTranslator {
                             session_id: None,
                             event: InnerEvent::ContentStart {
                                 index: self.index_for(id),
-                                block: ContentBlock::Text { text: String::new() },
+                                block: ContentBlock::Text {
+                                    text: String::new(),
+                                },
                             },
                         },
                     },
                     StreamEvent::Assistant(AssistantEvent {
                         session_id: None,
-                        block: ContentBlock::Text { text: text.to_string() },
+                        block: ContentBlock::Text {
+                            text: text.to_string(),
+                        },
                     }),
                 ]
             }
@@ -311,8 +324,10 @@ impl CodexTranslator {
                 },
             }],
             "error" => {
-                self.error_message =
-                    item.get("message").and_then(Value::as_str).map(str::to_string);
+                self.error_message = item
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -324,7 +339,11 @@ impl CodexTranslator {
 /// (CodexRunner.swift:154-156): the command unwrapped from its shell
 /// wrapper, as the row's input JSON.
 fn command_event(id: &str, item: &Value) -> StreamEvent {
-    let command = unwrapped(item.get("command").and_then(Value::as_str).unwrap_or_default());
+    let command = unwrapped(
+        item.get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
     StreamEvent::Assistant(AssistantEvent {
         session_id: None,
         block: ContentBlock::ToolUse {
@@ -479,7 +498,9 @@ mod tests {
                 session_id: None,
                 event: InnerEvent::ContentStart {
                     index,
-                    block: ContentBlock::Text { text: String::new() },
+                    block: ContentBlock::Text {
+                        text: String::new(),
+                    },
                 },
             },
         }
@@ -517,9 +538,7 @@ mod tests {
             })]
         );
         // no thread_id → nothing (the guard)
-        assert!(t
-            .events(r#"{"type":"thread.started"}"#)
-            .is_empty());
+        assert!(t.events(r#"{"type":"thread.started"}"#).is_empty());
     }
 
     /// item.started command_execution opens the Bash row with the command
@@ -544,9 +563,10 @@ mod tests {
             vec![thinking_started(1)]
         );
         // unknown item types are dropped silently
-        assert!(t
-            .events(r#"{"type":"item.started","item":{"id":"x","type":"web_search"}}"#)
-            .is_empty());
+        assert!(
+            t.events(r#"{"type":"item.started","item":{"id":"x","type":"web_search"}}"#)
+                .is_empty()
+        );
     }
 
     /// item.completed command_execution closes the row: output from
@@ -658,7 +678,9 @@ mod tests {
     fn turn_completed_finishes_with_last_message() {
         let mut t = CodexTranslator::default();
         t.events(r#"{"type":"thread.started","thread_id":"th_9"}"#);
-        t.events(r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"first"}}"#);
+        t.events(
+            r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"first"}}"#,
+        );
         t.events(r#"{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":"final answer"}}"#);
         assert_eq!(
             t.events(r#"{"type":"turn.completed","usage":{"tokens":5}}"#),
@@ -703,9 +725,12 @@ mod tests {
     fn error_lines_only_stash_and_noise_yields_nothing() {
         let mut t = CodexTranslator::default();
         assert!(t.events(r#"{"type":"error","message":"m1"}"#).is_empty());
-        assert!(t
-            .events(r#"{"type":"item.completed","item":{"id":"e","type":"error","message":"m2"}}"#)
-            .is_empty());
+        assert!(
+            t.events(
+                r#"{"type":"item.completed","item":{"id":"e","type":"error","message":"m2"}}"#
+            )
+            .is_empty()
+        );
         // both stashes are visible through a later bare turn.failed — the
         // LAST stash wins (it overwrote m1)
         assert_eq!(
@@ -729,7 +754,14 @@ mod tests {
     #[test]
     fn argv_default_full_vector() {
         let s = Settings::default(); // isolates_claude = true
-        let args = build_args(&s, "make a box", &images(&[]), Path::new("/proj"), "SYS", None);
+        let args = build_args(
+            &s,
+            "make a box",
+            &images(&[]),
+            Path::new("/proj"),
+            "SYS",
+            None,
+        );
         assert_eq!(
             args,
             [
@@ -791,7 +823,7 @@ mod tests {
         );
     }
 
-    /// Claude's argv consumes NO images (Ruling 2 / upstream parity) — the
+    /// Claude's argv consumes NO images (upstream parity) — the
     /// filter is codex's `-i` arm alone, and it skips non-image attachments.
     #[test]
     fn argv_images_filter_is_image_only() {

@@ -1,4 +1,4 @@
-//! versions.rs tests (M5 T3): version.json on-disk shape, record's copy
+//! versions.rs tests: version.json on-disk shape, record's copy
 //! set, restore's swap semantics, change detection, comparison parameters,
 //! and the missing-files record gate.
 
@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 
 use engine::project::outputs::missing_files;
 use engine::project::versions::{
-    ProjectVersion, comparison_parameters, has_changes, load_versions, next_number, record,
-    restore, versions_root,
+    ProjectVersion, comparison_parameters, has_changes, load_versions, next_number, record, restore,
 };
 
 fn project() -> std::path::PathBuf {
@@ -46,7 +45,10 @@ fn version_json_round_trips_upstream_keys() {
     )
     .unwrap();
     assert_eq!(v.number, 1);
-    let json = std::fs::read_to_string(versions_root(&root).join("1/version.json")).unwrap();
+    let json = std::fs::read_to_string(
+        engine::project::folder::versions_dir(&root).join("1/version.json"),
+    )
+    .unwrap();
     for key in [
         "\"number\"",
         "\"created_at\"",
@@ -73,7 +75,7 @@ fn record_copies_the_full_snapshot_set() {
         time::OffsetDateTime::now_utc(),
     )
     .unwrap();
-    let dir = versions_root(&root).join("1");
+    let dir = engine::project::folder::versions_dir(&root).join("1");
     assert_eq!(
         std::fs::read_to_string(dir.join("model.py")).unwrap(),
         "wall = 2\n"
@@ -103,9 +105,21 @@ fn record_without_model_or_chat_skips_those_files() {
         time::OffsetDateTime::now_utc(),
     )
     .unwrap();
-    assert!(!versions_root(&root).join("1/model.py").exists());
-    assert!(!versions_root(&root).join("1/chat.json").exists());
-    assert!(versions_root(&root).join("1/version.json").exists());
+    assert!(
+        !engine::project::folder::versions_dir(&root)
+            .join("1/model.py")
+            .exists()
+    );
+    assert!(
+        !engine::project::folder::versions_dir(&root)
+            .join("1/chat.json")
+            .exists()
+    );
+    assert!(
+        engine::project::folder::versions_dir(&root)
+            .join("1/version.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -143,9 +157,9 @@ fn restore_swaps_everything_and_clears_output() {
     assert!(root.join(".cadstudio/chat.json").exists());
     // missing version output dir: tolerated, output/ simply emptied
     let orphan = at(9);
-    std::fs::create_dir_all(versions_root(&root).join("9")).unwrap();
+    std::fs::create_dir_all(engine::project::folder::versions_dir(&root).join("9")).unwrap();
     std::fs::write(
-        versions_root(&root).join("9/version.json"),
+        engine::project::folder::versions_dir(&root).join("9/version.json"),
         serde_json::to_string(&orphan).unwrap(),
     )
     .unwrap();

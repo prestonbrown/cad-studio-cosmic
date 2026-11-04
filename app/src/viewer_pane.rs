@@ -1,6 +1,6 @@
 //! 3D pane — the embedded viewer: [`ViewerPane`] owns the viewer crate's
 //! `ModelScene` behind a `mouse_area`, drives it through the pure
-//! [`crate::camera_input`] state machine, and reloads the model from the
+//! [`viewer::camera_input`] state machine, and reloads the model from the
 //! project's `output/` directory through the engine's watcher.
 //!
 //! Upstream shape (fixtures/upstream-source/Viewer3D/ModelPane.swift): the
@@ -23,7 +23,7 @@
 //! before the scene `Arc` (and its GPU residency) is touched, so a burst
 //! rebuilds once. 3MF is preferred, STL is the fallback.
 //!
-//! M5: the pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
+//! The pane mounts the PARAMETERS OVERLAY (upstream ModelPane's
 //! `topTrailing` ParametersOverlay, ModelPane.swift:41-44) over the canvas
 //! through a `stack`, showing it only while a model exists, parameters
 //! exist, and `parameters_visible` holds (⌥⌘I toggles it — the app's key
@@ -40,9 +40,9 @@
 //! versions, compare selection — at view time via
 //! [`parameters_view::OverlayContext`].
 //!
-//! M6 measure (ModelPane's `onPick` flow): while the tool measures, a
+//! Measure (ModelPane's `onPick` flow): while the tool measures, a
 //! primary-button CLICK (release under 4 px of travel) casts
-//! [`camera::pick_ray`] at the release cursor and runs
+//! [`camera::Orbit::pick_ray`] at the release cursor and runs
 //! [`picking::first_hit`] on a named std thread — click-driven and
 //! off-thread per spec §5, never the cosmic executor — with the answer
 //! returning as [`Message::Picked`] through the pane's relay, the same
@@ -53,9 +53,9 @@
 //! the measurement (ModelPane.swift:54-58 — ignored otherwise).
 //!
 //! The pane's user-visible strings go through [`crate::fl`] with the
-//! extracted ftl keys (live since the M6 overlay work).
+//! extracted ftl keys.
 //!
-//! M6: the pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
+//! The pane owns the ARRANGEMENT wiring — [`ViewerTools`] (the
 //! ModelViewerState port) drives `viewer::tools::arrangement`, and
 //! [`ViewerPane::apply_arrangement`] pushes the answer as per-part pose
 //! uniforms (explode offsets, hidden visibility) without touching staged
@@ -69,7 +69,7 @@
 //! pane's settings path — [`ViewerPane::new_with_settings`] is the test
 //! seam that keeps that off the developer's real config.
 //!
-//! M7: the pane owns motion PLAYBACK — the study reload
+//! The pane owns motion PLAYBACK — the study reload
 //! ([`ViewerPane::reload_motion`]: a missing file or single-frame snapshot
 //! is inert, a parse failure surfaces the localized error), the playback
 //! clock (a `time::every(TICK)` subscription mounted only while
@@ -119,31 +119,35 @@ use cosmic::iced::stream;
 use cosmic::iced::widget::{Stack, responsive, shader};
 use cosmic::iced::{Length, Point, Size, Subscription, Task};
 use cosmic::widget::{Column, Row, Space, container, mouse_area, text};
-use engine::parsing::Part;
 use engine::parsing::animation::MotionStudy;
 use engine::parsing::stl::parse_stl;
 use engine::parsing::threemf::parse_3mf;
+use engine::parsing::{Box3, Part};
+use engine::project::folder;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::{self, MissingCtx};
 use engine::project::parameters::ModelParameter;
 use engine::settings::{MeasurementUnit, PartsLayout, Settings};
 use engine::watch::{ReloadKind, WatchHandle, watch_directory};
+use viewer::camera_input::CameraInput;
 use viewer::render::markers;
-use viewer::render::{ModelScene, PartAppearance, PartPose, PartScene, camera, camera::Preset};
+use viewer::render::{
+    ModelScene, PartAppearance, PartPose, PartScene, SectionPlane, camera, camera::Preset,
+};
 use viewer::tools::arrangement::{self, PartGroup};
 use viewer::tools::picking;
 use viewer::tools::section::{self, SectionAxis};
 
-use crate::camera_input::CameraInput;
 use crate::fl;
 use crate::motion_controls::view_motion_controls;
 use crate::parameters::ParametersPanel;
 use crate::parameters_view::{self, OverlayContext};
 use crate::parts_overlay;
+use crate::settings_store::SettingsStore;
 use crate::ui::{
     self, Backdrop, Symbol, Tone,
     icon::icon,
-    segmented::{Look, segmented},
+    segmented::{self, Look, segmented},
 };
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
@@ -179,7 +183,7 @@ pub enum Message {
     /// A trackpad pinch. No platform event reaches this today (iced's winit
     /// shell translates no magnify gesture); the variant exists so the
     /// parity formula in [`CameraInput::magnify`] is wired the day one
-    /// does — facts #116, this task's carry-forward.
+    /// does — facts #116.
     Magnified(f32),
     /// The keyboard modifier set changed (iced emits this on every change;
     /// mouse_area messages carry no modifiers of their own).
@@ -202,8 +206,8 @@ pub enum Message {
     ParameterCommit(String, f64),
     /// ⌥⌘I — toggles the parameters overlay's visibility
     /// (Commands.swift:69-73); the app's key router delivers it through the
-    /// window's command table (the app-wide binding, no longer this pane's
-    /// subscription).
+    /// window's command table (an app-wide binding, not a
+    /// subscription of this pane's).
     ToggleParameters,
     /// A measure pick settled (the viewer-pick thread → relay): the
     /// MODEL-space hit, or `None` when the ray missed everything.
@@ -211,14 +215,14 @@ pub enum Message {
     /// Esc — clears an in-flight measurement (ModelPane.swift:54-58);
     /// ignored when the tool is not measuring.
     Escape,
-    // ── M6 tool controls (the widgets land with the parts-overlay task;
-    // the pane arms the semantics) ────────────────────────────────────────
+    // ── tool controls (the parts overlay draws the widgets; the pane arms
+    // the semantics) ──────────────────────────────────────────────────────
     /// Upstream `showsGrid` (facts #38): the parity grid overlay.
     ToggleGrid,
     /// Upstream `showsWireframe` (facts #44).
     ToggleWireframe,
     /// The measure tool's mode toggle — points clear on any change
-    /// (ModelViewerState.swift:51-53); the click flow is the measure task's.
+    /// (ModelViewerState.swift:51-53); the click flow is [`Message::Released`]'s.
     ToggleMeasure,
     /// Upstream `sectioning`: on/off for the GPU section plane.
     ToggleSection,
@@ -242,7 +246,7 @@ pub enum Message {
     /// The parts drawer's collapse chevron (persisted as
     /// `Settings.parts_collapsed`).
     TogglePartsCollapsed,
-    // ── M7 motion playback ───────────────────────────────────────────────
+    // ── motion playback ──────────────────────────────────────────────────
     /// The Animazione toolbar toggle (ModelPane.swift:136-137): starts or
     /// stops the study — the mutual exclusion with measuring/sectioning
     /// and the clock reset live in [`ViewerTools::set_animating`].
@@ -261,7 +265,7 @@ pub enum Message {
     /// subscription while [`ViewerPane::wants_tick`] holds.
     Tick(Instant),
     /// The ask-the-agent "create animation" button
-    /// (ModelPane.swift:138-146) — the SHELL intercepts it (T8: it sends
+    /// (ModelPane.swift:138-146) — the SHELL intercepts it (it sends
     /// the chat prompt); the pane's own arm is a no-op.
     RequestMotionStudy,
 }
@@ -348,9 +352,9 @@ pub struct ViewerPane {
     /// `areParametersVisible`, Project.swift:71 — default true; ⌥⌘I
     /// toggles).
     pub parameters_visible: bool,
-    // ── M6 arrangement state ──────────────────────────────────────────────
+    // ── arrangement state ─────────────────────────────────────────────────
     /// The toolbar/overlay state behind the pane (the ModelViewerState
-    /// port, T8).
+    /// port).
     pub tools: ViewerTools,
     /// The last cursor position the pane saw (iced top-down, canvas-local)
     /// — the aim a measure click casts its pick ray through. Hover moves
@@ -366,8 +370,8 @@ pub struct ViewerPane {
     /// in-flight: a click while this is set is dropped, and the flag
     /// clears when the pick reports back.
     pick_pending: bool,
-    // Comparison state (the compare-ghost task owns the full machinery;
-    // this is the window-facing surface project.rs calls)
+    // Comparison state (compare_pane owns the full machinery; this is the
+    // window-facing surface project.rs calls)
     pub(crate) ghost_version: Option<(i64, std::path::PathBuf)>,
     /// The parsed MODEL parts — the arrangement's input and the grouping
     /// source, kept so re-arranging never re-parses.
@@ -383,27 +387,27 @@ pub struct ViewerPane {
     /// The staged plate scene while it is (or was last) the drawn one —
     /// rebuilt only when its inputs move (plate reload, hidden filter).
     plate_scene_cache: Option<Arc<PartScene>>,
-    /// Compare mode (the shell/T12 owns the comparison): comparing forces
+    /// Compare mode (the shell owns the comparison): comparing forces
     /// the Assembled layout (ModelViewerState.swift:78-86).
     pub comparing: bool,
-    /// The settings file this pane reads and writes its persisted keys
-    /// through (`parts_layout`, `parts_collapsed`) — the real global path
-    /// in production; tests inject a temp path
+    /// The settings this pane reads and writes its persisted keys through
+    /// (`parts_layout`, `parts_collapsed`) — the project window's store in
+    /// production; tests inject a temp one
     /// ([`ViewerPane::new_with_settings`]) so parallel pane tests never
     /// race the developer's config.
-    pub settings_path: PathBuf,
+    pub settings: SettingsStore,
     /// The effective MODEL aabb of the drawn arrangement (the section
     /// plane's domain; plate-derived in plate view, zero-offset at the
     /// all-hidden fallback).
-    pub effective_aabb: ([f32; 3], [f32; 3]),
+    pub effective_aabb: Box3,
     /// The scene-space aabb of what is drawn — the re-frame input
     /// ([`ViewerPane::set_layout`] pushes it as the forced framing
     /// reference).
-    pub frame_aabb: ([f32; 3], [f32; 3]),
+    pub frame_aabb: Box3,
     /// The FROZEN grid box (MODEL): captured only when `grid_stamp` moves,
     /// re-fed verbatim afterwards — upstream rebuilds the grid on sceneID,
     /// never on explode/hidden (ModelViewer.swift:165-170).
-    pub grid_aabb: ([f32; 3], [f32; 3]),
+    pub grid_aabb: Box3,
     /// The bed the overlay was last stamped with (plate layout only).
     pub grid_bed: Option<[f64; 2]>,
     /// (scene Arc identity, effective layout, plate_loaded) — the
@@ -411,7 +415,7 @@ pub struct ViewerPane {
     grid_stamp: Option<(usize, PartsLayout, bool)>,
     /// The last parts-row click (Instant, group) — the double-click window.
     last_row_click: Option<(Instant, String)>,
-    // ── M7 motion playback state ─────────────────────────────────────────
+    // ── motion playback state ────────────────────────────────────────────
     /// The loaded motion study (`output/animation.json`), when it parsed to
     /// more than one frame — the controls and the clock read it.
     pub study: Option<MotionStudy>,
@@ -442,34 +446,28 @@ pub struct ViewerPane {
 }
 
 impl ViewerPane {
-    /// The pane over `project_root`'s outputs (`root/output`, the Task 7
-    /// `create_project` scaffolding guarantee): loads whatever model is
+    /// The pane over `project_root`'s outputs (`root/output`, which
+    /// `create_project`'s scaffolding guarantees): loads whatever model is
     /// already there, starts the 300 ms watcher, and computes the status
     /// bar's warning count. A missing output directory only means no watch
     /// (and no model) — the pane still works. Settings persist through the
     /// global settings file.
     pub fn new(project_root: &Path, unit: MeasurementUnit, printer_model: Option<String>) -> Self {
-        Self::new_with_settings(
-            project_root,
-            unit,
-            printer_model,
-            engine::settings::settings_path(),
-        )
+        Self::new_with_settings(project_root, unit, printer_model, SettingsStore::global())
     }
 
-    /// [`ViewerPane::new`] with an explicit settings path — the pane's
+    /// [`ViewerPane::new`] over an explicit settings store — the pane's
     /// persisted keys (`parts_layout`, `parts_collapsed`) load from it at
-    /// construction and save back through it on change (the ONE-writer
-    /// rule's path half). Tests inject a per-project temp file; production
-    /// goes through [`ViewerPane::new`]'s global default.
+    /// construction and save back through it on change. The project window
+    /// hands in its own store; tests inject a per-project temp file.
     pub fn new_with_settings(
         project_root: &Path,
         unit: MeasurementUnit,
         printer_model: Option<String>,
-        settings_path: PathBuf,
+        settings: SettingsStore,
     ) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let output_dir = project_root.join("output");
+        let output_dir = folder::output_dir(&project_root);
         let (events, receiver) = channel::<PaneEvent>();
         // The engine watcher delivers into its own channel; a bridge thread
         // folds it into the pane's single event channel so the relay below
@@ -492,10 +490,10 @@ impl ViewerPane {
                 handle
             });
         let empty = Arc::new(PartScene::from_parts(&[], neutral()));
-        let settings = Settings::load(&settings_path).unwrap_or_default();
+        let stored = settings.load();
         let mut pane = ViewerPane {
             scene: ModelScene::new(empty.clone()),
-            input: CameraInput::new([0.0; 3], [0.0; 3]),
+            input: CameraInput::new(Box3::ZERO),
             preset: Preset::Iso,
             unit,
             mesh_error: None,
@@ -504,7 +502,7 @@ impl ViewerPane {
             parameter_drafts: HashMap::new(),
             committed_parameters: BTreeMap::new(),
             parameters_visible: true,
-            tools: ViewerTools::new(settings.parts_layout, settings.parts_collapsed),
+            tools: ViewerTools::new(stored.parts_layout, stored.parts_collapsed),
             last_cursor: Point::ORIGIN,
             last_press_primary: false,
             pick_pending: false,
@@ -515,10 +513,10 @@ impl ViewerPane {
             plate_parts: Vec::new(),
             plate_loaded: false,
             plate_scene_cache: None,
-            settings_path,
-            effective_aabb: ([0.0; 3], [0.0; 3]),
-            frame_aabb: ([0.0; 3], [0.0; 3]),
-            grid_aabb: ([0.0; 3], [0.0; 3]),
+            settings,
+            effective_aabb: Box3::ZERO,
+            frame_aabb: Box3::ZERO,
+            grid_aabb: Box3::ZERO,
             grid_bed: None,
             grid_stamp: None,
             last_row_click: None,
@@ -578,21 +576,7 @@ impl ViewerPane {
                 self.input.press(true);
                 self.sync_pose();
             }
-            Message::Released => {
-                // a click (< 4 px travel) while measuring fires the pick;
-                // the pane funnels right/middle releases here too, so the
-                // PRESS kind gates (upstream picks on left mouseUp only,
-                // CameraInputView.swift:50-53), and one pick at a time —
-                // a click during a pending pick is dropped
-                let was_click = self.input.release();
-                if was_click
-                    && self.last_press_primary
-                    && self.tools.measuring
-                    && !self.pick_pending
-                {
-                    self.spawn_pick();
-                }
-            }
+            Message::Released => self.released(),
             Message::Moved(point) => {
                 self.last_cursor = point;
                 self.input.move_to(point.x, point.y);
@@ -626,23 +610,7 @@ impl ViewerPane {
                 self.input.fit();
                 self.sync_pose();
             }
-            Message::Reload(kind) => match kind {
-                // model-shaped outputs rebuild the scene; the manifest
-                // feeds the status bar's warning count and the plate-view
-                // bed. Schematic reloads are the schematic pane's (its own
-                // watcher wiring).
-                ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
-                ReloadKind::Plate => self.reload_plate(),
-                // a CHANGED study keeps playing — upstream has no stop on
-                // change, only on disappearance (ModelPane.swift:69-73)
-                ReloadKind::Motion => {
-                    self.reload_motion();
-                    if self.tools.animating {
-                        self.apply_poses();
-                    }
-                }
-                ReloadKind::Schematic => {}
-            },
+            Message::Reload(kind) => self.reload(kind),
             Message::Resized(size) => {
                 // the relay delivers what report_size already deduped
                 // through last_size; recording it here keeps the message
@@ -654,15 +622,7 @@ impl ViewerPane {
             Message::ToggleParameters => {
                 self.parameters_visible = !self.parameters_visible;
             }
-            Message::Picked(hit) => {
-                self.pick_pending = false;
-                // the flight can outlive the mode it was fired under (Esc,
-                // a toggle mid-pick): a stale pick never lands
-                if let (true, Some(p)) = (self.tools.measuring, hit) {
-                    self.tools.add_measure_point(p);
-                    self.rebuild_markers();
-                }
-            }
+            Message::Picked(hit) => self.picked(hit),
             Message::Escape => {
                 if self.tools.measuring {
                     self.tools.clear_measurement();
@@ -716,80 +676,17 @@ impl ViewerPane {
                 self.tools.toggle_attached(&group);
                 self.apply_arrangement();
             }
-            Message::RowClicked(group) => {
-                let now = Instant::now();
-                let double = is_double_click(self.last_row_click.take(), now, &group);
-                self.last_row_click = Some((now, group.clone()));
-                if double {
-                    let names = self
-                        .groups()
-                        .into_iter()
-                        .map(|g| g.name)
-                        .collect::<Vec<_>>();
-                    self.tools.isolate(&group, &names);
-                    self.plate_scene_cache = None;
-                    self.apply_arrangement();
-                }
-            }
+            Message::RowClicked(group) => self.row_clicked(group),
             Message::TogglePartsCollapsed => {
                 self.tools.collapsed = !self.tools.collapsed;
                 self.persist_setting(|s| s.parts_collapsed = self.tools.collapsed);
             }
-            Message::ToggleAnimation => {
-                // no re-frame: upstream's isAnimating didSet bumps no
-                // cameraID; set_animating owns the player reset and the
-                // measuring/sectioning exclusion; the exclusion clears the
-                // points through isMeasuring's didSet chain
-                // (ModelViewerState.swift:28-38, 51-53) — the markers go
-                // with them or they'd render through playback
-                let was_measuring = self.tools.measuring;
-                self.tools.set_animating(!self.tools.animating);
-                if was_measuring && self.tools.animating {
-                    self.tools.measure_points.clear();
-                    self.rebuild_markers();
-                }
-                self.last_tick = None;
-                self.apply_poses();
-            }
-            Message::TogglePlayback => {
-                if self.tools.animating {
-                    if let Some(study) = self.study.as_ref() {
-                        let duration = study.duration();
-                        self.tools.player.toggle_playback(duration);
-                        // the subscription re-mounts on resume; its first
-                        // tick baselines instead of leaping across the gap
-                        self.last_tick = None;
-                    }
-                }
-            }
-            Message::Scrub(time) => {
-                if self.tools.animating {
-                    if let Some(study) = self.study.as_ref() {
-                        let duration = study.duration();
-                        self.tools.player.time = time.min(duration);
-                        self.tools.player.is_playing = false;
-                        self.posed_time = Some(self.tools.player.time);
-                        self.apply_poses();
-                    }
-                }
-            }
+            Message::ToggleAnimation => self.toggle_animation(),
+            Message::TogglePlayback => self.toggle_playback(),
+            Message::Scrub(time) => self.scrub(time),
             Message::SetSpeed(speed) => self.tools.player.speed = speed,
             Message::ToggleLoops => self.tools.player.loops = !self.tools.player.loops,
-            Message::Tick(now) => {
-                if !self.wants_tick() {
-                    // a straggler tick after pause/stop: baseline afresh
-                    self.last_tick = None;
-                } else if let Some(last) = self.last_tick.replace(now) {
-                    let duration = self.study.as_ref().map_or(0.0, MotionStudy::duration);
-                    self.tools
-                        .player
-                        .advance(now.duration_since(last).as_secs_f64(), duration);
-                    if self.posed_time != Some(self.tools.player.time) {
-                        self.posed_time = Some(self.tools.player.time);
-                        self.apply_poses();
-                    }
-                }
-            }
+            Message::Tick(now) => self.tick(now),
             Message::RequestMotionStudy => {}
             // The shell acts on commits; the pane's local half (value snap,
             // draft clear) was applied when the message was emitted.
@@ -797,6 +694,125 @@ impl ViewerPane {
             Message::Parameters(message) => return self.update_parameters(message),
         }
         Task::none()
+    }
+
+    /// A button came up. A click (< 4 px travel) while measuring fires the
+    /// pick; the pane funnels right/middle releases here too, so the PRESS
+    /// kind gates (upstream picks on left mouseUp only,
+    /// CameraInputView.swift:50-53), and one pick at a time — a click
+    /// during a pending pick is dropped.
+    fn released(&mut self) {
+        let was_click = self.input.release();
+        if was_click && self.last_press_primary && self.tools.measuring && !self.pick_pending {
+            self.spawn_pick();
+        }
+    }
+
+    /// The pane's output watch saw a settled change.
+    fn reload(&mut self, kind: ReloadKind) {
+        match kind {
+            // model-shaped outputs rebuild the scene; the manifest
+            // feeds the status bar's warning count and the plate-view
+            // bed. Schematic reloads are the schematic pane's (its own
+            // watcher wiring).
+            ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
+            ReloadKind::Plate => self.reload_plate(),
+            // a CHANGED study keeps playing — upstream has no stop on
+            // change, only on disappearance (ModelPane.swift:69-73)
+            ReloadKind::Motion => {
+                self.reload_motion();
+                if self.tools.animating {
+                    self.apply_poses();
+                }
+            }
+            ReloadKind::Schematic => {}
+        }
+    }
+
+    /// A parts-panel row click; the second of a double click isolates
+    /// that group.
+    fn row_clicked(&mut self, group: String) {
+        let now = Instant::now();
+        let double = is_double_click(self.last_row_click.take(), now, &group);
+        self.last_row_click = Some((now, group.clone()));
+        if double {
+            let names = self
+                .groups()
+                .into_iter()
+                .map(|g| g.name)
+                .collect::<Vec<_>>();
+            self.tools.isolate(&group, &names);
+            self.plate_scene_cache = None;
+            self.apply_arrangement();
+        }
+    }
+
+    /// A measure pick came back from the GPU readback.
+    fn picked(&mut self, hit: Option<[f32; 3]>) {
+        self.pick_pending = false;
+        // the flight can outlive the mode it was fired under (Esc, a
+        // toggle mid-pick): a stale pick never lands
+        if let (true, Some(p)) = (self.tools.measuring, hit) {
+            self.tools.add_measure_point(p);
+            self.rebuild_markers();
+        }
+    }
+
+    /// The motion-study toggle. No re-frame: upstream's isAnimating didSet
+    /// bumps no cameraID; set_animating owns the player reset and the
+    /// measuring/sectioning exclusion; the exclusion clears the points
+    /// through isMeasuring's didSet chain (ModelViewerState.swift:28-38,
+    /// 51-53) — the markers go with them or they'd render through playback.
+    fn toggle_animation(&mut self) {
+        let was_measuring = self.tools.measuring;
+        self.tools.set_animating(!self.tools.animating);
+        if was_measuring && self.tools.animating {
+            self.tools.measure_points.clear();
+            self.rebuild_markers();
+        }
+        self.last_tick = None;
+        self.apply_poses();
+    }
+
+    fn toggle_playback(&mut self) {
+        if self.tools.animating {
+            if let Some(study) = self.study.as_ref() {
+                let duration = study.duration();
+                self.tools.player.toggle_playback(duration);
+                // the subscription re-mounts on resume; its first tick
+                // baselines instead of leaping across the gap
+                self.last_tick = None;
+            }
+        }
+    }
+
+    fn scrub(&mut self, time: f64) {
+        if self.tools.animating {
+            if let Some(study) = self.study.as_ref() {
+                let duration = study.duration();
+                self.tools.player.time = time.min(duration);
+                self.tools.player.is_playing = false;
+                self.posed_time = Some(self.tools.player.time);
+                self.apply_poses();
+            }
+        }
+    }
+
+    /// The playback clock: advance the player and re-pose on a new time.
+    fn tick(&mut self, now: Instant) {
+        if !self.wants_tick() {
+            // a straggler tick after pause/stop: baseline afresh
+            self.last_tick = None;
+        } else if let Some(last) = self.last_tick.replace(now) {
+            let duration = self.study.as_ref().map_or(0.0, MotionStudy::duration);
+            self.tools
+                .player
+                .advance(now.duration_since(last).as_secs_f64(), duration);
+            if self.posed_time != Some(self.tools.player.time) {
+                self.posed_time = Some(self.tools.player.time);
+                self.apply_poses();
+            }
+        }
     }
 
     /// Whether the playback clock should run: animation on, the player
@@ -875,7 +891,7 @@ impl ViewerPane {
         Subscription::batch([relay, modifiers].into_iter().chain(clock))
     }
 
-    // ── parameters overlay (M5) ──────────────────────────────────────────
+    // ── parameters overlay ───────────────────────────────────────────────
 
     /// Follow the bridge's parameter refresh: committed values update
     /// (clearing any draft whose value changed — upstream's bound field
@@ -1098,7 +1114,7 @@ impl ViewerPane {
     /// the manifest, the status bar's warning count, and drops measure
     /// points collected against the old geometry.
     fn reload_outputs(&mut self) {
-        self.manifest = Manifest::load(&self.output_dir.join("manifest.json")).ok();
+        self.manifest = Manifest::load(&self.output_dir.join(folder::MANIFEST)).ok();
         let loaded = match load_model(&self.output_dir) {
             ModelLoad::Loaded(parts) => {
                 self.mesh_error = None;
@@ -1117,7 +1133,7 @@ impl ViewerPane {
             let next = Arc::new(PartScene::from_parts(&parts, neutral()));
             if scenes_differ(&self.model_scene, &next) {
                 self.model_parts = parts;
-                self.input.mesh_changed(next.aabb_min, next.aabb_max);
+                self.input.mesh_changed(next.aabb());
                 self.tools.mesh_changed();
                 // points collected against the old geometry are gone
                 // (ModelViewerState.swift:128) — their markers go with them
@@ -1151,7 +1167,7 @@ impl ViewerPane {
     /// fallback lays the model out instead. An unreadable or unparseable
     /// file keeps the LAST GOOD plate (the pane's established model law).
     fn reload_plate(&mut self) {
-        if let Ok(bytes) = std::fs::read(self.output_dir.join("plate.3mf")) {
+        if let Ok(bytes) = std::fs::read(self.output_dir.join(folder::PLATE_3MF)) {
             if let Ok(parts) = parse_3mf(&bytes) {
                 self.plate_loaded = !parts.is_empty();
                 self.plate_parts = parts;
@@ -1161,7 +1177,7 @@ impl ViewerPane {
         }
     }
 
-    // ── motion playback (M7) ─────────────────────────────────────────────
+    // ── motion playback ──────────────────────────────────────────────────
 
     /// Read `output/animation.json` (ProjectOutput.swift:122-136): missing
     /// → no study, no error; parsed to more than one frame → the study
@@ -1252,7 +1268,7 @@ impl ViewerPane {
             .collect()
     }
 
-    // ── arrangement wiring (M6) ───────────────────────────────────────────
+    // ── arrangement wiring ────────────────────────────────────────────────
 
     /// THE pose push (ModelPane.swift:70-85's port): recompute the
     /// arrangement for the current tools state, select the drawn scene
@@ -1303,9 +1319,8 @@ impl ViewerPane {
             swapped = true;
         }
 
-        // Poses: MODEL offsets through the staging remap (x, z, -y) —
-        // parts.rs' `remap`, restated at the app boundary (crate-private in
-        // the viewer) — as translations; hidden slots drop out of the draw.
+        // Poses: MODEL offsets as scene translations; hidden slots drop out
+        // of the draw.
         let identity = || Some(glam::Mat4::IDENTITY.to_cols_array_2d());
         let poses: Vec<PartPose> = if draw_plate {
             // the plate scene stages pre-arranged geometry
@@ -1319,12 +1334,12 @@ impl ViewerPane {
                 .offsets
                 .iter()
                 .zip(&arranged.visible)
-                .map(|(offset, visible)| {
-                    visible.then(|| {
-                        let scene_offset = [offset[0], offset[2], -offset[1]];
-                        glam::Mat4::from_translation(glam::Vec3::from_array(scene_offset))
-                            .to_cols_array_2d()
-                    })
+                .map(|(&offset, visible)| {
+                    if *visible {
+                        PartScene::model_offset_pose(offset)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -1337,7 +1352,8 @@ impl ViewerPane {
         // assembled model — the plane must not keep the exploded aabb);
         // the visible-only arrangement otherwise.
         let eff = if draw_plate {
-            self.plate_scene_aabb_as_model()
+            let scene = &self.scene.scene;
+            scene.scene_box_to_model(scene.aabb())
         } else if all_hidden {
             arrangement::effective_model_aabb(
                 &self.model_parts,
@@ -1351,8 +1367,8 @@ impl ViewerPane {
             arrangement::effective_model_aabb(&self.model_parts, &arranged)
         };
         // The FRAMING box instead takes effective_model_aabb's own answer:
-        // at all-hidden that KEEPS the arrangement offsets (T1's caller
-        // contract — the degrade feeds framing only, so the all-hidden
+        // at all-hidden that KEEPS the arrangement offsets (the
+        // arrangement module's caller contract — the degrade feeds framing only, so the all-hidden
         // frame matches the layout the user lands in on unhiding).
         let framing_eff = if draw_plate {
             eff
@@ -1361,9 +1377,9 @@ impl ViewerPane {
         };
         self.effective_aabb = eff;
         self.frame_aabb = if draw_plate {
-            (self.scene.scene.aabb_min, self.scene.scene.aabb_max)
+            self.scene.scene.aabb()
         } else {
-            self.scene_aabb_of(framing_eff)
+            self.scene.scene.model_box_to_scene(framing_eff)
         };
         if swapped {
             // replace_scene re-derived the framing fields against the new
@@ -1393,26 +1409,20 @@ impl ViewerPane {
         self.grid_bed = (layout == PartsLayout::Plate)
             .then_some(self.manifest.as_ref().and_then(|m| m.bed))
             .flatten();
-        self.scene
-            .set_overlay_frame(self.scene_aabb_of(self.grid_aabb), self.grid_bed);
+        self.scene.set_overlay_frame(
+            self.scene.scene.model_box_to_scene(self.grid_aabb).pair(),
+            self.grid_bed,
+        );
 
-        // The section uniform: the raw plane over the effective MODEL aabb,
-        // then the LIVE scene pin added by mapping a plane point through
-        // to_scene (scene_plane's value is pre-pin — exact only for
-        // pin-symmetric scenes; the golden fixture is not).
+        // The section: the plane over the effective MODEL box in the live
+        // scene's pinned frame, its cap spanning that box.
         let section_plane = self.tools.sectioning.then(|| {
-            let (axis, raw) =
-                section::scene_plane(self.tools.section_axis, self.tools.section_position, eff);
-            // a MODEL point whose pinned scene coordinate along `axis` is
-            // exactly raw + the pin's component on that axis (scene x =
-            // model x, scene y = model z, scene z = -model y)
-            let model_point = match axis {
-                0 => [raw, 0.0, 0.0],
-                1 => [0.0, 0.0, raw],
-                _ => [0.0, -raw, 0.0],
-            };
-            let pinned = self.scene.scene.to_scene(model_point)[axis as usize];
-            (axis, pinned)
+            section::pinned_plane(
+                self.tools.section_axis,
+                self.tools.section_position,
+                eff,
+                &self.scene.scene,
+            )
         });
         self.scene.set_section(section_plane);
     }
@@ -1439,32 +1449,6 @@ impl ViewerPane {
             .collect()
     }
 
-    /// The plate scene's staged aabb mapped back to MODEL (`to_model`): the
-    /// effective box while the plate is the drawn geometry. The y axis
-    /// negates under the inverse remap, so min/max re-fold per axis.
-    fn plate_scene_aabb_as_model(&self) -> ([f32; 3], [f32; 3]) {
-        let scene = &self.scene.scene;
-        let a = scene.to_model(scene.aabb_min);
-        let b = scene.to_model(scene.aabb_max);
-        (
-            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
-            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
-        )
-    }
-
-    /// A MODEL-space box as this scene's pinned SCENE box — the
-    /// [`model_size`] inverse: the remap permutes extents (scene x = model
-    /// x span, scene y = model z span, scene z = model y span, y negated)
-    /// and the pin translates every axis.
-    fn scene_aabb_of(&self, model: ([f32; 3], [f32; 3])) -> ([f32; 3], [f32; 3]) {
-        let pin = self.scene.scene.pin;
-        let (mn, mx) = model;
-        (
-            [mn[0] + pin[0], mn[2] + pin[1], -mx[1] + pin[2]],
-            [mx[0] + pin[0], mx[2] + pin[1], -mn[1] + pin[2]],
-        )
-    }
-
     /// Layout change (ModelViewerState.swift:42, `layout` didSet): the
     /// tools state, persistence, the re-arrangement — then ALWAYS re-frame
     /// at the current preset against the CURRENT arranged aabb, pushed as a
@@ -1481,7 +1465,7 @@ impl ViewerPane {
         self.sync_pose();
     }
 
-    /// The parts tree's groups (T1) — the parts panel and the row-click
+    /// The parts tree's groups — the parts panel and the row-click
     /// isolate consume them.
     pub fn groups(&self) -> Vec<PartGroup> {
         arrangement::groups(&self.model_parts)
@@ -1497,16 +1481,11 @@ impl ViewerPane {
         }
     }
 
-    /// Load-modify-save the pane's settings keys through
-    /// [`Self::settings_path`], preserving every other field (the
-    /// ONE-writer rule: this pane owns `parts_layout`/`parts_collapsed`
-    /// only) — the project window's established persist pattern.
+    /// Persist the pane's settings keys through its store (this pane owns
+    /// `parts_layout`/`parts_collapsed` only; the store keeps every other
+    /// field and reports a failed save).
     fn persist_setting(&self, edit: impl FnOnce(&mut Settings)) {
-        let mut settings = Settings::load(&self.settings_path).unwrap_or_default();
-        edit(&mut settings);
-        if let Err(why) = settings.save(&self.settings_path) {
-            eprintln!("cad-studio: settings save failed: {why}");
-        }
+        let _ = self.settings.update(edit);
     }
 
     /// Recompute the missing-output count from the outputs on disk.
@@ -1522,27 +1501,22 @@ impl ViewerPane {
     }
 
     /// Whether the output watcher is running (false when the output
-    /// directory was missing at construction — the Task 7 scaffolding
-    /// guarantee makes that the exception).
+    /// directory was missing at construction — `create_project`'s
+    /// scaffolding makes that the exception).
     pub fn is_watching(&self) -> bool {
         self.watch.is_some()
     }
 
     /// Push the state machine's settled pose into the scene.
     fn sync_pose(&mut self) {
-        self.scene.set_pose(
-            self.input.yaw,
-            self.input.pitch,
-            self.input.distance,
-            self.input.target,
-        );
+        self.scene.orbit = self.input.orbit;
     }
 
-    // ── measure (M6) ────────────────────────────────────────────────────
+    // ── measure ─────────────────────────────────────────────────────────
 
     /// Fire the measure pick: click-driven and OFF-THREAD per spec §5 — a
     /// named std thread runs [`picking::first_hit`] over an immutable
-    /// snapshot (the scene `Arc`, the poses, the section tuple, the ray),
+    /// snapshot (the scene `Arc`, the poses, the section plane, the ray),
     /// never the cosmic executor — and the answer returns as
     /// [`PaneEvent::Picked`] through the pane's relay. The caller gates:
     /// primary click, measuring, no pick in flight.
@@ -1551,12 +1525,7 @@ impl ViewerPane {
         if size.width <= 0.0 || size.height <= 0.0 {
             return; // no layout pass yet: nothing to aim at
         }
-        let (origin, dir) = camera::pick_ray(
-            self.input.distance,
-            self.input.yaw,
-            self.input.pitch,
-            self.input.target,
-            size.width / size.height,
+        let (origin, dir) = self.input.orbit.pick_ray(
             (self.last_cursor.x, self.last_cursor.y),
             (size.width, size.height),
         );
@@ -1568,7 +1537,7 @@ impl ViewerPane {
         let spawned = thread::Builder::new()
             .name("viewer-pick".into())
             .spawn(move || {
-                let hit = picking::first_hit(&scene, &poses, section, origin, dir);
+                let hit = picking::first_hit(&scene, &poses, section.as_ref(), origin, dir);
                 let _ = events.send(PaneEvent::Picked(hit));
             });
         if spawned.is_err() {
@@ -1577,11 +1546,11 @@ impl ViewerPane {
         }
     }
 
-    /// The section tuple a pick honors — the same discard plane the mesh
+    /// The section plane a pick honors — the same discard plane the mesh
     /// pass is running (what [`ModelScene::set_section`] last stored), so
     /// a click never answers through geometry the user cannot see; with
     /// sectioning off every pick runs the whole scene.
-    fn pick_section(&self) -> Option<(u32, f32)> {
+    fn pick_section(&self) -> Option<SectionPlane> {
         self.scene.section()
     }
 
@@ -1591,13 +1560,10 @@ impl ViewerPane {
     /// nothing. Radius rides the assembled scene's framing radius
     /// (ModelViewer.swift:383: `max(radius · 0.03, 0.4)`); upstream's
     /// `modelRadius` is the last-REFRAMED size, so marker size carries a
-    /// bounded cosmetic drift across layouts — the plan's recorded
-    /// acceptance.
+    /// bounded cosmetic drift across layouts, an accepted
+    /// divergence.
     fn rebuild_markers(&mut self) {
-        let radius = markers::marker_radius(camera::framing_radius(
-            self.scene.scene.aabb_min,
-            self.scene.scene.aabb_max,
-        ));
+        let radius = markers::marker_radius(camera::framing_radius(self.scene.scene.aabb()));
         let points = self
             .tools
             .measure_points
@@ -1765,7 +1731,9 @@ impl ViewerPane {
                 .width(Length::Fill),
         )
         .width(Length::Fill)
-        .class(ui::surface::text_background_class())
+        .class(ui::surface::text_background_class(
+            ui::surface::Corner::None,
+        ))
         .into()
     }
 
@@ -1774,10 +1742,7 @@ impl ViewerPane {
     /// ModelPane.swift:215-219); empty with no model.
     fn status_text(&self) -> String {
         let shown = !self.scene.scene.parts.is_empty();
-        status_info(
-            shown.then(|| model_size(self.model_scene.aabb_min, self.model_scene.aabb_max)),
-            self.unit,
-        )
+        status_info(shown.then(|| model_size(&self.model_scene)), self.unit)
     }
 
     /// The iso/front/top/right preset picker (upstream's segmented
@@ -1795,7 +1760,13 @@ impl ViewerPane {
             })
             .collect();
         let selected = PRESETS.iter().position(|preset| *preset == self.preset);
-        segmented(items, selected, Look::Raised, Length::Shrink)
+        segmented(
+            items,
+            selected,
+            Look::Raised,
+            segmented::Size::Small,
+            Length::Shrink,
+        )
     }
 }
 
@@ -1828,23 +1799,15 @@ pub fn format_length(millimeters: f64, unit: MeasurementUnit, symbol: bool) -> S
     }
 }
 
-/// The MODEL-space size of a scene aabb: the viewer stages MODEL Z-up as
-/// SCENE Y-up via `(x, z, -y)`, so the scene extents permute back as
-/// `(sx, sz, sy)`.
-pub fn model_size(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> [f64; 3] {
-    let scene = [
-        (aabb_max[0] - aabb_min[0]) as f64,
-        (aabb_max[1] - aabb_min[1]) as f64,
-        (aabb_max[2] - aabb_min[2]) as f64,
-    ];
-    [scene[0], scene[2], scene[1]]
+/// The MODEL size (Z up) of a staged scene: its box crossed back to MODEL.
+pub fn model_size(scene: &PartScene) -> [f64; 3] {
+    scene.scene_box_to_model(scene.aabb()).size().map(f64::from)
 }
 
 /// The status bar's info label (upstream ModelPane.info,
 /// ModelPane.swift:215-219): the model size `X × Y × Z unit` when a model
 /// shows — the size string ONLY (issues live in the header's
-/// ActivityViewer, and M4's interim " · N warnings" suffix is dropped
-/// rather than recorded as a divergence). Empty when no model shows.
+/// ActivityViewer; no " · N warnings" suffix). Empty when no model shows.
 pub fn status_info(size: Option<[f64; 3]>, unit: MeasurementUnit) -> String {
     match size {
         // upstream puts the symbol on the last term only
@@ -1890,8 +1853,8 @@ pub enum ModelLoad {
 /// the fallback — including when the 3MF parses but yields ZERO parts (a
 /// well-formed-but-empty file is not a model).
 pub fn load_model(output_dir: &Path) -> ModelLoad {
-    let three_mf = output_dir.join("model.3mf");
-    let stl = output_dir.join("model.stl");
+    let three_mf = output_dir.join(folder::MODEL_3MF);
+    let stl = output_dir.join(folder::MODEL_STL);
     if !three_mf.exists() && !stl.exists() {
         return ModelLoad::Absent;
     }
@@ -2152,7 +2115,7 @@ fn content_unavailable<'a>(
             .push(
                 text(title)
                     .size(crate::typography::TITLE)
-                    .font(cosmic::font::bold())
+                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold))
                     .class(Tone::Secondary.text(BACKDROP)),
             )
             .push(Space::new().height(Length::Fixed(6.0)))
@@ -2169,7 +2132,9 @@ fn content_unavailable<'a>(
     .height(Length::Fill)
     .align_x(cosmic::iced::alignment::Horizontal::Center)
     .align_y(cosmic::iced::alignment::Vertical::Center)
-    .class(ui::surface::text_background_class())
+    .class(ui::surface::text_background_class(
+        ui::surface::Corner::None,
+    ))
     .into()
 }
 
@@ -2177,6 +2142,7 @@ fn content_unavailable<'a>(
 mod tests {
     use super::*;
     use engine::project::versions::ProjectVersion;
+    use viewer::render::SceneAxis;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d =
@@ -2220,7 +2186,7 @@ mod tests {
             &root,
             MeasurementUnit::Millimeters,
             None,
-            root.join("settings.json"),
+            SettingsStore::at(root.join("settings.json")),
         );
         (root, pane)
     }
@@ -2263,15 +2229,28 @@ mod tests {
     fn model_size_permutes_scene_yup_back_to_model_zup() {
         // The (x, z, -y) remap stages MODEL (x, y, z) as SCENE (x, z, y):
         // the MODEL size is the staged extents permuted (sx, sz, sy).
-        let size = model_size([0.0; 3], [10.0, 20.0, 30.0]);
-        assert_eq!(size, [10.0, 30.0, 20.0]);
+        let part = Part {
+            name: "p".into(),
+            positions: vec![[0.0; 3], [10.0, 20.0, 30.0], [5.0, 5.0, 5.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(&[part], viewer::render::NEUTRAL);
+        assert_eq!(
+            [
+                scene.aabb_max[0],
+                scene.aabb_max[1],
+                scene.aabb_max[2] - scene.aabb_min[2]
+            ],
+            [5.0, 30.0, 20.0]
+        );
+        assert_eq!(model_size(&scene), [10.0, 20.0, 30.0]);
     }
 
     #[test]
     fn status_info_is_the_size_string_only() {
         // Upstream's info is the size alone (ModelPane.swift:215-219);
-        // M4's " · N warnings" suffix is dropped — issues live in the
-        // header's ActivityViewer, not the status bar.
+        // no " · N warnings" suffix — issues live in the header's
+        // ActivityViewer, not the status bar.
         let unit = MeasurementUnit::Millimeters;
         assert_eq!(
             status_info(Some([30.0, 15.5, 15.5]), unit),
@@ -2314,7 +2293,7 @@ mod tests {
             &root,
             MeasurementUnit::Millimeters,
             None,
-            root.join("settings.json"),
+            SettingsStore::at(root.join("settings.json")),
         );
         assert!(
             pane.study.is_some(),
@@ -2397,9 +2376,9 @@ mod tests {
     #[test]
     fn size_label_reports_the_assembled_model_in_every_layout() {
         let (_root, mut pane) = pane("info-plate", &[], &["golden/model.3mf", "golden/plate.3mf"]);
-        let assembled = model_size(pane.model_scene.aabb_min, pane.model_scene.aabb_max);
+        let assembled = model_size(&pane.model_scene);
         pane.set_layout(PartsLayout::Plate);
-        let drawn = model_size(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
+        let drawn = model_size(&pane.scene.scene);
         assert_ne!(
             drawn, assembled,
             "fixture truth: the plate lays the parts out wider"
@@ -2524,10 +2503,10 @@ mod tests {
     fn preset_message_drives_the_scene_pose() {
         let (_, mut pane) = pane("preset", &[], &["golden/model.3mf"]);
         let _ = pane.update(Message::Preset(Preset::Top));
-        assert!((pane.scene.pitch - 1.5607).abs() < 1e-4);
-        assert!((pane.scene.yaw - 0.0).abs() < 1e-4);
-        assert!((pane.scene.pitch - pane.input.pitch).abs() < 1e-6);
-        assert!((pane.scene.yaw - pane.input.yaw).abs() < 1e-6);
+        assert!((pane.scene.orbit.pitch - 1.5607).abs() < 1e-4);
+        assert!((pane.scene.orbit.yaw - 0.0).abs() < 1e-4);
+        assert!((pane.scene.orbit.pitch - pane.input.orbit.pitch).abs() < 1e-6);
+        assert!((pane.scene.orbit.yaw - pane.input.orbit.yaw).abs() < 1e-6);
 
         // Fit frames the CURRENT arranged box (upstream fitToView,
         // ModelViewer.swift:322-337): an explode change moves the arranged
@@ -2537,15 +2516,12 @@ mod tests {
         // spread model frames at its pre-explode size
         let _ = pane.update(Message::SetExplode(2.0));
         let _ = pane.update(Message::Fit);
-        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.0, pane.frame_aabb.1);
+        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb);
         assert!(
-            (pane.scene.distance - spread).abs() < 1e-4,
+            (pane.scene.orbit.distance - spread).abs() < 1e-4,
             "Fit frames the exploded arrangement, not the pre-explode reference"
         );
-        let (_, staged) = viewer::render::camera::frame(
-            pane.scene.scene.aabb_min,
-            pane.scene.scene.aabb_max,
-        );
+        let (_, staged) = viewer::render::camera::frame(pane.scene.scene.aabb());
         assert!(
             (spread - staged).abs() > 1e-4,
             "this fixture's spread and staged boxes differ (else the pin is void)"
@@ -2559,21 +2535,21 @@ mod tests {
         // the pan formula scales by the viewport height, normally reported
         // from the first layout pass
         pane.input.set_view_height(600.0);
-        let d0 = pane.scene.distance;
-        let t0 = pane.input.target;
+        let d0 = pane.scene.orbit.distance;
+        let t0 = pane.input.orbit.target;
 
         // plain scroll zooms (facts #20)
         let _ = pane.update(Message::Scrolled(ScrollDelta::Pixels { x: 0.0, y: 24.0 }));
-        assert!((pane.scene.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3);
+        assert!((pane.scene.orbit.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3);
 
         // shift+scroll pans without zooming (CameraInputView.swift:63-66)
         let _ = pane.update(Message::ModifiersChanged(Modifiers::SHIFT));
         let _ = pane.update(Message::Scrolled(ScrollDelta::Pixels { x: 0.0, y: -24.0 }));
         assert!(
-            (pane.scene.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3,
+            (pane.scene.orbit.distance - d0 * 0.9f32.powf(2.0)).abs() < 1e-3,
             "modifier scroll never zooms"
         );
-        assert!(pane.input.target != t0, "the target moved");
+        assert!(pane.input.orbit.target != t0, "the target moved");
     }
 
     #[test]
@@ -2771,7 +2747,7 @@ mod tests {
         let _ = pane.view_model_3d(Some(ctx));
     }
 
-    // ── M6 T10: arrangement wiring (layouts, explode, hidden, plate, bed,
+    // ── arrangement wiring (layouts, explode, hidden, plate, bed,
     // section) — the tests below drive the pane's messages end to end ──────
 
     /// A minimal manifest carrying only a bed rectangle.
@@ -2789,23 +2765,23 @@ mod tests {
         let _ = pane.update(Message::Pressed);
         let _ = pane.update(Message::Moved(Point::new(300.0, 300.0)));
         let _ = pane.update(Message::Moved(Point::new(340.0, 300.0)));
-        let yaw_before = pane.input.yaw;
+        let yaw_before = pane.input.orbit.yaw;
         assert!(yaw_before.abs() > 1e-3);
-        let dist_before = pane.input.distance;
+        let dist_before = pane.input.orbit.distance;
         let _ = pane.update(Message::SetLayout(PartsLayout::Plate));
         assert!(
-            (pane.input.yaw - 0.0).abs() < 1e-4,
+            (pane.input.orbit.yaw - 0.0).abs() < 1e-4,
             "front preset yaw restored"
         );
-        assert!((pane.input.pitch - 0.0).abs() < 1e-4);
+        assert!((pane.input.orbit.pitch - 0.0).abs() < 1e-4);
         assert!(
-            pane.input.distance > dist_before,
+            pane.input.orbit.distance > dist_before,
             "re-frame used the CURRENT arranged aabb: the plate fallback lays parts side by side (wider than assembled), so the camera pulls BACK"
         );
         assert_eq!(pane.tools.layout, PartsLayout::Plate);
         // persisted — through the pane's injected TEMP settings path, never the
         // developer's real global file (parallel pane tests would race it)
-        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        let s = pane.settings.load();
         assert_eq!(
             s.parts_layout,
             PartsLayout::Plate,
@@ -2942,16 +2918,11 @@ mod tests {
         // the effective box is the assembled MODEL's (the whole staged
         // scene mapped back), not the plate's
         let scene = &pane.scene.scene;
-        let a = scene.to_model(scene.aabb_min);
-        let b = scene.to_model(scene.aabb_max);
-        let want = (
-            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
-            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
-        );
+        let want = scene.scene_box_to_model(scene.aabb());
         for axis in 0..3 {
             assert!(
-                (pane.effective_aabb.0[axis] - want.0[axis]).abs() < 1e-3
-                    && (pane.effective_aabb.1[axis] - want.1[axis]).abs() < 1e-3,
+                (pane.effective_aabb.min[axis] - want.min[axis]).abs() < 1e-3
+                    && (pane.effective_aabb.max[axis] - want.max[axis]).abs() < 1e-3,
                 "axis {axis}: effective {:?} vs the assembled model {:?}",
                 pane.effective_aabb,
                 want
@@ -2968,12 +2939,13 @@ mod tests {
         let _ = pane.update(Message::ToggleSection);
         let _ = pane.update(Message::SetSectionAxis(SectionAxis::Z));
         let _ = pane.update(Message::SetSectionPosition(0.5));
-        let (axis, pos) = pane.scene.section_for_tests().expect("sectioning on");
-        assert_eq!(axis, 1, "MODEL Z -> scene y");
-        // golden: model z in [-4, 22]; assembled aabb mid = 9. The uniform
-        // carries the STAGED plane, so the live scene pin rides along
-        // (d944b65: scene_plane's value is pre-pin; the golden pin is +4
-        // along scene y — floor z=-4 pins to y=0) — 9 + 4, not the raw 9.
+        let plane = pane.scene.section().expect("sectioning on");
+        let (axis, pos) = (plane.axis, plane.pos);
+        assert_eq!(axis, SceneAxis::Y, "MODEL Z -> scene y");
+        // golden: model z in [-4, 22]; assembled aabb mid = 9. The frame
+        // carries the STAGED plane, so the live scene pin rides along (the
+        // golden pin is +4 along scene y — floor z=-4 pins to y=0) — 9 + 4,
+        // not the raw 9.
         let pin_y = pane.scene.scene.pin[1];
         assert!((pin_y - 4.0).abs() < 1e-4, "golden's scene pin: {pin_y}");
         assert!(
@@ -2984,8 +2956,22 @@ mod tests {
         // quirk): the lid pushes +z while the lift holds min z at -4, so the
         // mid rises
         let _ = pane.update(Message::SetLayout(PartsLayout::Exploded));
-        let (_, pos2) = pane.scene.section_for_tests().expect("still sectioning");
-        assert!(pos2 > pos, "same t, moved plane: {pos} -> {pos2}");
+        let exploded = pane.scene.section().expect("still sectioning");
+        assert!(
+            exploded.pos > pos,
+            "same t, moved plane: {pos} -> {}",
+            exploded.pos
+        );
+        // and the cap spans the exploded box, not the assembled one
+        assert_eq!(
+            exploded.cap,
+            pane.scene.scene.model_box_to_scene(pane.effective_aabb)
+        );
+        assert!(
+            exploded.cap.max[1] > pane.scene.scene.aabb_max[1] + 1.0,
+            "the pushed lid rises past the assembled box: {:?}",
+            exploded.cap
+        );
     }
 
     #[test]
@@ -2995,8 +2981,8 @@ mod tests {
         let _ = pane.update(Message::ToggleSection);
         let _ = pane.update(Message::SetSectionAxis(SectionAxis::Y));
         let _ = pane.update(Message::SetSectionPosition(0.5));
-        let (axis, _) = pane.scene.section_for_tests().expect("sectioning on");
-        assert_eq!(axis, 2, "MODEL Y -> scene z");
+        let plane = pane.scene.section().expect("sectioning on");
+        assert_eq!(plane.axis, SceneAxis::Z, "MODEL Y -> scene z");
     }
 
     #[test]
@@ -3044,11 +3030,11 @@ mod tests {
         );
         // the parts drawer's chevron persists through the pane's path
         let _ = pane.update(Message::TogglePartsCollapsed);
-        let s = engine::settings::Settings::load(&pane.settings_path).unwrap_or_default();
+        let s = pane.settings.load();
         assert!(s.parts_collapsed, "ONE writer: the pane's settings path");
     }
 
-    // ── M7 T6: the playback clock and pose application ────────────────────
+    // ── the playback clock and pose application ───────────────────────────
 
     fn load_golden_animation(root: &std::path::Path) {
         std::fs::copy(
@@ -3186,7 +3172,7 @@ mod tests {
         );
     }
 
-    // ── M6 T11: the measure click flow ────────────────────────────────────
+    // ── the measure click flow ────────────────────────────────────────────
 
     impl ViewerPane {
         /// Drain the pane's relay until `done` holds or `timeout` elapses,
@@ -3249,7 +3235,7 @@ mod tests {
         assert!(!pane.pick_pending, "single in-flight cleared on the report");
         // second click completes the pair; the pair stages the link box
         // (the badge's ΔX/ΔY/ΔZ delta form over the pair is parts_overlay's
-        // own pinned test — T9's badge mounts over exactly this state)
+        // own pinned test — the badge mounts over exactly this state)
         let _ = pane.update(Message::Moved(Point::new(430.0, 300.0)));
         let _ = pane.update(Message::Pressed);
         let _ = pane.update(Message::Released);
@@ -3366,7 +3352,7 @@ mod tests {
         assert!(pane.scene.markers.is_none());
     }
 
-    // ── M6 T12: the compare ghost ─────────────────────────────────────────
+    // ── the compare ghost ─────────────────────────────────────────────────
 
     /// A version-store snapshot for the compare tests:
     /// `.cadstudio/versions/<n>/output/model.stl` holding one box, returning
@@ -3638,9 +3624,7 @@ mod tests {
         // focused: an insert binding — the editor captures the press and
         // listen() drops it; Space in the chat draft cannot toggle playback
         assert!(matches!(
-            Binding::<Message>::from_key_press(space_press(Status::Focused {
-                is_hovered: false
-            })),
+            Binding::<Message>::from_key_press(space_press(Status::Focused { is_hovered: false })),
             Some(Binding::Insert(' '))
         ));
         // unfocused: no binding — the press stays ignored and reaches the

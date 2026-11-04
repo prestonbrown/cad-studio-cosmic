@@ -1,7 +1,7 @@
 //! The application shell (upstream CADStudioApp.swift): one
 //! `cosmic::Application` over a welcome window and one window per open
 //! project, the recents store, the first-run and agent-missing sheets, the
-//! M4 command subset, and the platform integrations — startup orphan reap
+//! command set, and the platform integrations — startup orphan reap
 //! + SIGTERM child cleanup, the xdg-desktop-portal file/folder choosers,
 //! and reveal via DBus `FileManager1.ShowItems` with an `xdg-open`
 //! fallback.
@@ -21,7 +21,7 @@ use cosmic::cosmic_config::Config;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::window;
 use cosmic::iced::{Length, Subscription, Task};
-use cosmic::widget::{Column, container, popover, text};
+use cosmic::widget::{Column, container, text};
 use cosmic::{Action, Application, Element};
 use engine::agent::locator::{self, AgentKind};
 use engine::agent::session::{EngineEvent, TurnOutcome};
@@ -29,10 +29,10 @@ use engine::project::store;
 use engine::python::env::{
     EnvEvent, EnvHandle, EnvState, check, command_probe, reinstall, streaming_spawn, venv_dir,
 };
-use engine::settings::{Settings as EngineSettings, settings_path};
 
 use crate::fl;
 use crate::recents::{self, Recents};
+use crate::settings_store::SettingsStore;
 use crate::sheets;
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
@@ -42,8 +42,8 @@ use crate::windows::welcome::{self, Welcome};
 pub enum WindowKind {
     Welcome,
     Project(ProjectWindow),
-    /// The settings window (upstream's `Settings` scene — Ruling 6: a new
-    /// non-modal window, not a body-replacing sheet).
+    /// The settings window (upstream's `Settings` scene, here a
+    /// separate non-modal window, not a body-replacing sheet).
     Settings(SettingsState),
     /// The About window (upstream `orderFrontStandardAboutPanel`).
     About,
@@ -59,15 +59,23 @@ const LOAD_ERROR_SIZE: (f32, f32) = (480.0, 320.0);
 /// The load-error view's glyph (upstream `exclamationmark.triangle`).
 const ICON_WARNING: &[u8] = include_bytes!("../resources/icons/exclamationmark.triangle.svg");
 
-/// App-level commands reachable from any window (upstream's global
-/// CommandGroups; ⌘→Ctrl, ⇧⌘1 keeps upstream's Welcome binding, ⌘, the
-/// standard Settings scene's).
+/// App-level commands reachable from any window: the global shortcuts and
+/// the project window's File menu (upstream's global CommandGroups; ⌘→Ctrl,
+/// ⇧⌘1 keeps upstream's Welcome binding, ⌘, the standard Settings scene's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppShortcut {
+pub enum AppCommand {
     NewProject,
     OpenProject,
+    /// The recents list lives in the welcome window; from a project window
+    /// it drops the Open Recent card from the File root.
+    OpenRecent,
     Welcome,
+    /// Open the settings window (upstream's Settings scene; the port's
+    /// placement is the File root — there is no app menu to hold it).
     Settings,
+    /// Open the About window (upstream's app-info command group,
+    /// Commands.swift:10-14; same placement note as Settings).
+    About,
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +119,7 @@ pub enum Message {
     SettingsLocationChosen(Result<Vec<PathBuf>, String>),
     /// A chat row's "Configura l'agente…" action: present the
     /// agent-missing sheet (ChatView.swift:101-102 — upstream routes to
-    /// the sheet, NOT to settings; Ruling 6).
+    /// the sheet, NOT to settings).
     PresentAgentSheet,
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),
@@ -135,8 +143,6 @@ pub enum Message {
     OpenFolderChosen(Result<Vec<PathBuf>, String>),
     /// `create_project` finished for the new-project sheet.
     ProjectCreated(Result<PathBuf, String>),
-    /// The file portal answered for the chat attach button.
-    AttachChosen(window::Id, Result<Vec<PathBuf>, String>),
     /// Files were dropped onto `id`'s window (winit's window-level drop
     /// surface — X11 Xdnd and macOS; winit's Wayland backend has no file
     /// drops, the chat pane's dnd_destination covers it there).
@@ -160,8 +166,9 @@ pub struct CadStudio {
     welcome: Welcome,
     recents: Recents,
     config: Config,
-    settings: EngineSettings,
-    settings_file: PathBuf,
+    /// The engine settings, read fresh at every use and written only
+    /// through [`SettingsStore::update`]; every project window shares it.
+    settings: SettingsStore,
     /// The agent-missing sheet, when presented (upstream
     /// `AgentLocator.isMissingSheetPresented`).
     agent_missing: Option<sheets::AgentMissing>,
@@ -200,10 +207,10 @@ impl Application for CadStudio {
         engine::processes::reap_orphans();
 
         let config = Config::new(Self::APP_ID, 1).expect("cosmic-config for app UI state");
-        let settings_file = settings_path();
-        let settings = EngineSettings::load(&settings_file).unwrap_or_default();
+        let settings = SettingsStore::global();
         let recents = Recents::load(config.clone());
-        let setup = recents::needs_setup(&config).then(|| sheets::Setup::from_settings(&settings));
+        let setup =
+            recents::needs_setup(&config).then(|| sheets::Setup::from_settings(&settings.load()));
         let mut python = sheets::PythonSetup::default();
         // the sheet state the check reduces from — the drivers emit only
         // their events, so Checking is the app's own preset
@@ -220,17 +227,17 @@ impl Application for CadStudio {
             recents,
             config,
             settings,
-            settings_file,
             agent_missing: None,
             setup,
             python,
         };
 
         // locate the agent off the UI thread; a miss presents the sheet
-        let engine = app.settings.agent_kind();
+        let settings = app.settings.load();
+        let engine = settings.agent_kind();
         let locate = Task::future(locate_agent(
             engine,
-            app.settings.agent_path(engine).map(str::to_string),
+            settings.agent_path(engine).map(str::to_string),
         ))
         .map(|found| Action::App(Message::AgentLocated(found)));
         let sigterm = Task::stream(sigterm_stream()).map(Action::App);
@@ -320,14 +327,11 @@ impl Application for CadStudio {
                 // rides an auth-failed row, whose engine by definition
                 // ran.
                 if self.agent_missing.is_none() {
-                    let kind = self.settings.agent_kind();
+                    let settings = self.settings.load();
+                    let kind = settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
                         kind,
-                        custom_path: self
-                            .settings
-                            .agent_path(kind)
-                            .unwrap_or_default()
-                            .to_string(),
+                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
                         ..sheets::AgentMissing::default()
                     });
                 }
@@ -346,17 +350,14 @@ impl Application for CadStudio {
                     // the missing line shows from first presentation
                     // (AgentMissingSheet.swift:42 gates on
                     // `locator.state == .missing`, not on a Verify)
-                    let kind = self.settings.agent_kind();
+                    let settings = self.settings.load();
+                    let kind = settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
                         kind,
                         // the field opens on the persisted custom path
                         // (upstream's @AppStorage binding), so an untouched
                         // Verify cannot clear a stored path
-                        custom_path: self
-                            .settings
-                            .agent_path(kind)
-                            .unwrap_or_default()
-                            .to_string(),
+                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
                         last_verified_missing: true,
                         ..sheets::AgentMissing::default()
                     });
@@ -401,16 +402,11 @@ impl Application for CadStudio {
                     self.open_project(root)
                 }
                 Err(why) => {
-                    let _ = self.welcome.update(welcome::Message::NewSheet(
-                        welcome::new_project::Message::Created(Err(why)),
-                    ));
+                    self.welcome
+                        .update_sheet(&welcome::new_project::Message::Created(Err(why)));
                     Task::none()
                 }
             },
-            Message::AttachChosen(id, result) => {
-                let msg = project::Message::AttachChosen(result);
-                self.update_project(id, msg)
-            }
             Message::FilesDropped(id, paths) => {
                 // the drop lands in the chat's draft attachments wherever
                 // on the window it fell — window-level is this surface's
@@ -429,7 +425,7 @@ impl Application for CadStudio {
             Message::Noop => Task::none(),
         };
         // a sheet coming up over a project releases the focused text
-        // widget: a modal popover blocks only the pointer, and a focused
+        // widget: the sheet's shade blocks only the pointer, and a focused
         // chat editor would otherwise eat the sheet's Return/Esc
         if !sheet_was_up && self.modal_sheet_up() {
             Task::batch([task, release_focus()])
@@ -448,41 +444,26 @@ impl Application for CadStudio {
         let focused = self.core.focused_window() == Some(id);
         match self.windows.get(&id) {
             Some(WindowKind::Welcome) => {
-                // The first-run setup sheet REPLACES the welcome body.
-                // Presented as a popover it had to be modal (upstream is
-                // dismiss-blocked), and libcosmic's modal popovers capture
-                // mouse events window-wide — killing the header bar's
-                // drag/close. As the body, the card centers in the window
-                // and the chrome stays live.
-                if let Some(setup) = &self.setup {
-                    let card: Element<'_, Message> =
-                        sheets::view_setup(setup).map(Message::SetupSheet);
-                    let centered = container(card)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(cosmic::iced::alignment::Horizontal::Center)
-                        .align_y(cosmic::iced::alignment::Vertical::Center)
-                        .into();
-                    return self.decorate_borderless(id, focused, centered);
-                }
+                // The first-run and new-project sheets present over the
+                // dimmed welcome body (WelcomeWindow.swift:23-31) as a
+                // layer of the window's own view, not a modal popover:
+                // libcosmic's modal popovers capture mouse events
+                // window-wide, killing the header's drag and close.
                 let body = self
                     .welcome
                     .view(self.recents.paths())
                     .map(Message::Welcome);
-                // The new-project sheet presents over the welcome window
-                // (NewProjectSheet.swift attaches there). It also replaces
-                // the body — a modal popover would kill the window chrome
-                // (see the setup branch above).
+                if let Some(setup) = &self.setup {
+                    let card: Element<'_, Message> =
+                        sheets::view_setup(setup).map(Message::SetupSheet);
+                    let presented = sheets::present(body, card, Message::Noop);
+                    return self.decorate_borderless(id, focused, presented);
+                }
                 let body = match self.welcome.creating.as_ref() {
                     Some(sheet) => {
                         let card: Element<'_, Message> = welcome::new_project::view(sheet)
                             .map(|m| Message::Welcome(welcome::Message::NewSheet(m)));
-                        container(card)
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .align_x(cosmic::iced::alignment::Horizontal::Center)
-                            .align_y(cosmic::iced::alignment::Vertical::Center)
-                            .into()
+                        sheets::present(body, card, Message::Noop)
                     }
                     None => body,
                 };
@@ -514,7 +495,9 @@ impl Application for CadStudio {
             Some(WindowKind::Settings(state)) => {
                 let body = settings::view(state, &self.python.state.state)
                     .map(move |m| Message::Settings(id, m));
-                self.decorate(id, focused, body, &fl!("settings"))
+                // the window title names the selected tab, as upstream's
+                // Settings scene does
+                self.decorate(id, focused, body, &state.tab.title())
             }
             Some(WindowKind::About) => {
                 let body: cosmic::Element<'_, Message> = settings::view_about();
@@ -579,94 +562,88 @@ impl CadStudio {
     }
 
     fn update_welcome(&mut self, msg: welcome::Message) -> Task<Action<Message>> {
-        // the new-project command presents the sheet AND makes sure the
-        // welcome window carrying it is on screen (upstream ⌘N:
-        // openWindow(id: WelcomeWindow.id) + isCreatingProject = true)
-        if matches!(msg, welcome::Message::NewProject) {
-            if self.welcome.creating.is_none() {
-                self.welcome.creating = Some(welcome::new_project::NewProject::default());
+        match msg {
+            welcome::Message::NewProject => self.new_project(),
+            welcome::Message::OpenExisting => choose_existing(),
+            welcome::Message::OpenRecent(path) => self.open_project(path),
+            welcome::Message::RevealRecent(path) => Task::future(async move {
+                reveal_path(path).await;
+                Message::Noop
+            })
+            .map(Action::App),
+            welcome::Message::RemoveRecent(path) => {
+                self.recents.remove(path);
+                Task::none()
             }
-            return self.show_welcome();
-        }
-        // a context-menu entry resolves against the recents store first
-        if let welcome::Message::RecentMenu(index, kind) = &msg {
-            let path = self.recents.paths().get(*index).cloned();
-            if let Some(path) = path {
-                let translated = match kind {
+            // a context-menu entry resolves against the recents store first
+            welcome::Message::RecentMenu(index, kind) => {
+                let Some(path) = self.recents.paths().get(index).cloned() else {
+                    return Task::none();
+                };
+                self.update_welcome(match kind {
                     welcome::RecentMenuKind::Open => welcome::Message::OpenRecent(path),
                     welcome::RecentMenuKind::Reveal => welcome::Message::RevealRecent(path),
                     welcome::RecentMenuKind::Remove => welcome::Message::RemoveRecent(path),
+                })
+            }
+            welcome::Message::NewSheet(msg) => self.update_new_project_sheet(msg),
+        }
+    }
+
+    /// The new-project command presents the sheet AND makes sure the
+    /// welcome window carrying it is on screen (upstream ⌘N:
+    /// openWindow(id: WelcomeWindow.id) + isCreatingProject = true).
+    fn new_project(&mut self) -> Task<Action<Message>> {
+        if self.welcome.creating.is_none() {
+            self.welcome.creating = Some(welcome::new_project::NewProject::default());
+        }
+        self.show_welcome()
+    }
+
+    fn update_new_project_sheet(
+        &mut self,
+        msg: welcome::new_project::Message,
+    ) -> Task<Action<Message>> {
+        match msg {
+            welcome::new_project::Message::Cancel => {
+                self.welcome.creating = None;
+                Task::none()
+            }
+            welcome::new_project::Message::Advance => {
+                // fold the sheet state: the fold sets awaiting_parent
+                // only for a valid name (upstream create()'s
+                // `guard isNameValid`, NewProjectSheet.swift:57) — an
+                // invalid Return asks nothing, and a pick already in
+                // flight is not asked twice (upstream's panel is modal)
+                if self
+                    .welcome
+                    .creating
+                    .as_ref()
+                    .is_some_and(|s| s.awaiting_parent)
+                {
+                    return Task::none();
+                }
+                self.welcome.update_sheet(&msg);
+                let Some(sheet) = self
+                    .welcome
+                    .creating
+                    .as_ref()
+                    .filter(|sheet| sheet.awaiting_parent)
+                else {
+                    return Task::none();
                 };
-                return self.update_welcome(translated);
-            }
-            return Task::none();
-        }
-        match &msg {
-            welcome::Message::OpenExisting => {
-                let title = fl!("scegli-la-cartella-del-progetto-da-aprire");
-                return Task::future(async move {
-                    let future = choose_folder(&title);
-                    Message::OpenFolderChosen(future.await)
+                let pick = self.parent_folder_pick(sheet.trimmed_name());
+                Task::future(async move {
+                    let future = choose_folder_at(&pick.title, pick.start.as_deref());
+                    Message::ParentFolderChosen(future.await)
                 })
-                .map(Action::App);
+                .map(Action::App)
             }
-            welcome::Message::OpenRecent(path) => {
-                let path = path.clone();
-                return self.open_project(path);
+            welcome::new_project::Message::Created(_) | welcome::new_project::Message::Name(_) => {
+                self.welcome.update_sheet(&msg);
+                Task::none()
             }
-            welcome::Message::RevealRecent(path) => {
-                let path = path.clone();
-                return Task::future(async move {
-                    reveal_path(path).await;
-                    Message::Noop
-                })
-                .map(Action::App);
-            }
-            welcome::Message::RemoveRecent(path) => {
-                let path = path.clone();
-                self.recents.remove(path);
-            }
-            welcome::Message::NewProject | welcome::Message::RecentMenu(_, _) => {}
-            welcome::Message::NewSheet(sheet_msg) => match sheet_msg {
-                welcome::new_project::Message::Cancel => {
-                    self.welcome.creating = None;
-                }
-                welcome::new_project::Message::Advance => {
-                    // fold the sheet state: the fold sets awaiting_parent
-                    // only for a valid name (upstream create()'s
-                    // `guard isNameValid`, NewProjectSheet.swift:57) — an
-                    // invalid Return asks nothing, and a pick already in
-                    // flight is not asked twice (upstream's panel is modal)
-                    if self
-                        .welcome
-                        .creating
-                        .as_ref()
-                        .is_some_and(|s| s.awaiting_parent)
-                    {
-                        return Task::none();
-                    }
-                    let _ = self.welcome.update(msg.clone());
-                    let Some(sheet) = self
-                        .welcome
-                        .creating
-                        .as_ref()
-                        .filter(|sheet| sheet.awaiting_parent)
-                    else {
-                        return Task::none();
-                    };
-                    let pick = self.parent_folder_pick(sheet.trimmed_name());
-                    return Task::future(async move {
-                        let future = choose_folder_at(&pick.title, pick.start.as_deref());
-                        Message::ParentFolderChosen(future.await)
-                    })
-                    .map(Action::App);
-                }
-                welcome::new_project::Message::Created(_)
-                | welcome::new_project::Message::Name(_) => {}
-            },
         }
-        let task = self.welcome.update(msg).map(Message::Welcome);
-        task.map(Action::App)
     }
 
     /// The new-project parent-folder panel: titled for the name, opening
@@ -676,74 +653,28 @@ impl CadStudio {
     fn parent_folder_pick(&self, name: &str) -> FolderPick {
         FolderPick {
             title: fl!("scegli-dove-creare-la-cartella", name = name.to_string()),
-            start: Some(self.settings.default_project_location.clone()),
+            start: Some(self.settings.load().default_project_location),
         }
     }
 
+    /// A project window's message: its app requests are the app's, the
+    /// rest is the window's own update.
     fn update_project(&mut self, id: window::Id, msg: project::Message) -> Task<Action<Message>> {
+        if let project::Message::App(request) = msg {
+            return self.app_request(id, request);
+        }
+        // the pane-drag listener hears every window's cursor; only this
+        // window's events drive its drag
+        if let project::Message::PaneDragMoved(source, _)
+        | project::Message::PaneDragEnded(source) = msg
+        {
+            if source != id {
+                return Task::none();
+            }
+        }
         let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
-        // the attach button needs the app's portal — intercept before the
-        // window's own update routes it into widget state
-        if matches!(
-            msg,
-            project::Message::Chat(crate::chat_view::Message::Attach)
-        ) {
-            return project
-                .attach()
-                .map(move |m| Message::Project(id, m))
-                .map(Action::App);
-        }
-        if matches!(msg, project::Message::CloseRequested) {
-            return self.close_window(id);
-        }
-        if let project::Message::Window(op) = msg {
-            return match op {
-                project::WindowOp::Drag => cosmic::iced::window::drag(id),
-                project::WindowOp::ToggleMaximize => cosmic::iced::window::toggle_maximize(id),
-                project::WindowOp::Minimize => cosmic::iced::window::minimize(id, true),
-                project::WindowOp::Menu => cosmic::iced::window::show_system_menu(id),
-            };
-        }
-        if matches!(msg, project::Message::PresentSetupSheet) {
-            // a python-readiness refusal presents the setup sheet over
-            // whatever window is up, UNCONDITIONALLY (Project.swift:184-197
-            // set isSetupSheetPresented = true; the hasCompletedSetup gate
-            // belongs to the startup check's terminal only)
-            self.python.presented = true;
-            return Task::none();
-        }
-        if matches!(msg, project::Message::PresentAgentSheet) {
-            return self.update(Message::PresentAgentSheet);
-        }
-        if let project::Message::OpenRecentPath(path) = msg {
-            project.recent_card = None;
-            return self.open_project(path);
-        }
-        if matches!(msg, project::Message::ClearRecents) {
-            // Commands.swift:36-40 `recents.clear()`
-            project.recent_card = Some(Vec::new());
-            self.recents.clear();
-            return Task::none();
-        }
-        if let project::Message::App(request) = msg {
-            let translated = match request {
-                project::AppRequest::NewProject => welcome::Message::NewProject,
-                project::AppRequest::OpenProject => welcome::Message::OpenExisting,
-                // "Apri recenti" drops the recents card from the File root
-                project::AppRequest::OpenRecent => {
-                    project.recent_card = Some(self.recents.paths().to_vec());
-                    return Task::none();
-                }
-                project::AppRequest::Welcome => return self.show_welcome(),
-                project::AppRequest::Settings => {
-                    return self.open_settings(settings::Tab::General);
-                }
-                project::AppRequest::About => return self.open_about(),
-            };
-            return self.update_welcome(translated);
-        }
         // a turn that found no agent executable presents the agent-missing
         // sheet beside the window's own ConfigureClaude row
         // (AgentSession.swift:41-50 `locator.isMissingSheetPresented = true`)
@@ -763,6 +694,70 @@ impl CadStudio {
         task
     }
 
+    /// What project window `id` asked of the app layer.
+    fn app_request(
+        &mut self,
+        id: window::Id,
+        request: project::AppRequest,
+    ) -> Task<Action<Message>> {
+        if !matches!(self.windows.get(&id), Some(WindowKind::Project(_))) {
+            return Task::none();
+        }
+        match request {
+            project::AppRequest::Command(command) => self.app_command(id, command),
+            project::AppRequest::Close => self.close_window(id),
+            project::AppRequest::Window(op) => match op {
+                project::WindowOp::Drag => cosmic::iced::window::drag(id),
+                project::WindowOp::ToggleMaximize => cosmic::iced::window::toggle_maximize(id),
+                project::WindowOp::Minimize => cosmic::iced::window::minimize(id, true),
+                project::WindowOp::Menu => cosmic::iced::window::show_system_menu(id),
+            },
+            project::AppRequest::PresentSetupSheet => {
+                // a python-readiness refusal presents the setup sheet over
+                // whatever window is up, UNCONDITIONALLY (Project.swift:184-197
+                // set isSetupSheetPresented = true; the hasCompletedSetup gate
+                // belongs to the startup check's terminal only)
+                self.python.presented = true;
+                Task::none()
+            }
+            project::AppRequest::PresentAgentSheet => self.update(Message::PresentAgentSheet),
+            project::AppRequest::OpenRecentPath(path) => {
+                self.set_recent_card(id, None);
+                self.open_project(path)
+            }
+            project::AppRequest::ClearRecents => {
+                // Commands.swift:36-40 `recents.clear()`
+                self.set_recent_card(id, Some(Vec::new()));
+                self.recents.clear();
+                Task::none()
+            }
+        }
+    }
+
+    /// Show (`Some`) or close project window `id`'s Open Recent card.
+    fn set_recent_card(&mut self, id: window::Id, card: Option<Vec<PathBuf>>) {
+        if let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) {
+            project.recent_card = card;
+        }
+    }
+
+    /// An app-level command from window `id`: a shortcut pressed there, or
+    /// a project window's File menu.
+    fn app_command(&mut self, id: window::Id, command: AppCommand) -> Task<Action<Message>> {
+        match command {
+            AppCommand::NewProject => self.new_project(),
+            AppCommand::OpenProject => choose_existing(),
+            // "Apri recenti" drops the recents card from the File root
+            AppCommand::OpenRecent => {
+                self.set_recent_card(id, Some(self.recents.paths().to_vec()));
+                Task::none()
+            }
+            AppCommand::Welcome => self.show_welcome(),
+            AppCommand::Settings => self.open_settings(settings::Tab::General),
+            AppCommand::About => self.open_about(),
+        }
+    }
+
     fn update_agent_sheet(&mut self, msg: sheets::AgentMessage) -> Task<Action<Message>> {
         let Some(sheet) = self.agent_missing.as_mut() else {
             return Task::none();
@@ -777,14 +772,14 @@ impl CadStudio {
             }
             sheets::AgentMessage::Verify => {
                 // persist the custom path first — locate consults it
-                let mut settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
+                let mut settings = self.settings.load();
                 sheet.stage_custom_path(&mut settings);
-                self.settings = settings.clone();
-                let _ = settings.save(&self.settings_file);
+                let _ = self
+                    .settings
+                    .update(|stored| sheet.stage_custom_path(stored));
                 sheet.checking = true;
-                let engine = self.settings.agent_kind();
-                let future =
-                    locate_agent(engine, self.settings.agent_path(engine).map(str::to_string));
+                let engine = settings.agent_kind();
+                let future = locate_agent(engine, settings.agent_path(engine).map(str::to_string));
                 return Task::future(async move {
                     let found = future.await;
                     Message::AgentSheet(sheets::AgentMessage::Verified(found))
@@ -813,13 +808,7 @@ impl CadStudio {
         if matches!(msg, sheets::SetupMessage::Continue) {
             // the three preference keys into the engine settings, the flag
             // into cosmic-config (SetupSheet.swift:31-34)
-            let mut settings = EngineSettings::load(&self.settings_file).unwrap_or_default();
-            setup.apply(&mut settings);
-            if let Err(why) = settings.save(&self.settings_file) {
-                eprintln!("cad-studio: setup save failed: {why}");
-            } else {
-                self.settings = settings;
-            }
+            let _ = self.settings.update(|settings| setup.apply(settings));
             let _ = recents::complete_setup(&self.config);
             self.setup = None;
             // the first-run sheet coming down presents the python sheet
@@ -939,20 +928,25 @@ impl CadStudio {
             .iter_mut()
             .find(|(_, kind)| matches!(kind, WindowKind::Settings(_)))
         {
+            let before = state.height();
             state.update(&settings::Message::Tab(tab));
             let focus = *id;
-            return window::gain_focus(focus).map(Action::App);
+            let resize = settings_resize(focus, before, state.height());
+            let title = self.set_window_title(tab.title(), focus);
+            return Task::batch([resize, title, window::gain_focus(focus).map(Action::App)]);
         }
-        let mut state = SettingsState::new(&self.settings);
+        let settings = self.settings.load();
+        let mut state = SettingsState::new(&settings);
         state.update(&settings::Message::Tab(tab));
         let (id, spawn) = window::open(Self::window_settings(
-            cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
+            cosmic::iced::Size::new(settings::WIDTH, state.height()),
             None,
         ));
         self.windows.insert(id, WindowKind::Settings(state));
-        let title = self.set_window_title(fl!("settings"), id);
+        // the window title follows the selected tab, as the header does
+        let title = self.set_window_title(tab.title(), id);
         let locates = settings::ENGINES.map(|kind| {
-            let custom = self.settings.agent_path(kind).map(str::to_string);
+            let custom = settings.agent_path(kind).map(str::to_string);
             Task::future(locate_agent_path(kind, custom))
                 .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
         });
@@ -989,8 +983,25 @@ impl CadStudio {
             return Task::none();
         }
         let task = self.update_settings_any(msg.clone());
+        let before = self.settings_height();
         self.fold_settings_state(&msg);
-        task
+        let resize = match (before, self.settings_height()) {
+            (Some(before), Some(after)) => settings_resize(id, before, after),
+            _ => Task::none(),
+        };
+        let title = match msg {
+            settings::Message::Tab(tab) => self.set_window_title(tab.title(), id),
+            _ => Task::none(),
+        };
+        Task::batch([task, resize, title])
+    }
+
+    /// The open settings window's content height, if one is open.
+    fn settings_height(&self) -> Option<f32> {
+        self.windows.values().find_map(|window| match window {
+            WindowKind::Settings(state) => Some(state.height()),
+            _ => None,
+        })
     }
 
     /// Fold one message into the open settings window's mirror (there is
@@ -1007,16 +1018,17 @@ impl CadStudio {
     /// settings window is open (there is at most one; the portal's answer
     /// arrives here when the window that asked has since closed).
     fn update_settings_any(&mut self, msg: settings::Message) -> Task<Action<Message>> {
-        // the write: load-modify-save, engine settings.json only
-        let mut persisted = EngineSettings::load(&self.settings_file).unwrap_or_default();
-        if settings::stage(&msg, &mut persisted) {
-            match persisted.save(&self.settings_file) {
-                Ok(()) => {
-                    self.settings = persisted;
-                    self.push_unit_to_viewers();
-                }
-                Err(why) => eprintln!("cad-studio: settings save failed: {why}"),
-            }
+        // the write: engine settings.json only, through the one store; an
+        // effect message (a tab switch, a locate) writes nothing
+        if settings::persists(&msg)
+            && self
+                .settings
+                .update(|persisted| {
+                    settings::stage(&msg, persisted);
+                })
+                .is_ok()
+        {
+            self.push_unit_to_viewers();
         }
         match msg {
             settings::Message::ChooseLocation(starting) => {
@@ -1028,7 +1040,7 @@ impl CadStudio {
                 .map(Action::App)
             }
             settings::Message::Verify(kind) => {
-                let custom = self.settings.agent_path(kind).map(str::to_string);
+                let custom = self.settings.load().agent_path(kind).map(str::to_string);
                 Task::future(locate_agent_path(kind, custom))
                     .map(move |found| Action::App(Message::SettingsLocated(kind, found)))
             }
@@ -1049,12 +1061,24 @@ impl CadStudio {
                 self.python.presented = true;
                 self.update_python_sheet(sheets::PythonMessage::Install)
             }
-            _ => Task::none(),
+            // the write above (or the window's own fold) is the whole effect
+            settings::Message::Tab(_)
+            | settings::Message::LocationChosen(_)
+            | settings::Message::Language(_)
+            | settings::Message::PrintPref(_)
+            | settings::Message::Engine(_)
+            | settings::Message::Located(_, _)
+            | settings::Message::CustomPath(_, _)
+            | settings::Message::Model(_, _)
+            | settings::Message::Effort(_)
+            | settings::Message::RestrictedBash(_)
+            | settings::Message::Streaming(_)
+            | settings::Message::Isolates(_) => Task::none(),
         }
     }
 
-    /// A python or agent-missing sheet is up (both present as modal
-    /// popovers over the project and welcome bodies).
+    /// A python or agent-missing sheet is up (both present over the
+    /// project and welcome bodies).
     fn modal_sheet_up(&self) -> bool {
         self.python.presented || self.agent_missing.is_some()
     }
@@ -1129,7 +1153,7 @@ impl CadStudio {
     /// change re-renders the size label and measure badge live,
     /// ModelPane.swift:7).
     fn push_unit_to_viewers(&mut self) {
-        let unit = self.settings.measurement_unit;
+        let unit = self.settings.load().measurement_unit;
         for window in self.windows.values_mut() {
             if let WindowKind::Project(project) = window {
                 project.viewer.unit = unit;
@@ -1150,20 +1174,8 @@ impl CadStudio {
                 return self.update(msg);
             }
         }
-        match app_shortcut(&key, &modifiers) {
-            Some(AppShortcut::NewProject) => {
-                return self.update_welcome(welcome::Message::NewProject);
-            }
-            Some(AppShortcut::OpenProject) => {
-                return self.update_welcome(welcome::Message::OpenExisting);
-            }
-            Some(AppShortcut::Welcome) => {
-                return self.show_welcome();
-            }
-            Some(AppShortcut::Settings) => {
-                return self.open_settings(settings::Tab::General);
-            }
-            None => {}
+        if let Some(command) = app_shortcut(&key, &modifiers) {
+            return self.app_command(id, command);
         }
         if let Some(command) = project::project_shortcut(&key, &modifiers) {
             return self.update_project(id, project::Message::Command(command));
@@ -1301,29 +1313,18 @@ impl CadStudio {
 
     /// Wrap a window's body with the app-level sheets (python setup, then
     /// agent-missing; ProjectWindow.swift:59-68 stacks python over
-    /// agent-missing). The first-run sheet is NOT here: it replaces the
-    /// welcome body instead (see `view_window`) because a modal popover
-    /// captures mouse events window-wide, killing the window chrome.
-    /// These two are modal gates over the project canvas — blocking the
-    /// content behind them is the intent.
+    /// agent-missing), each presented over the dimmed body like every
+    /// other sheet ([`sheets::present`]): the body takes no presses while
+    /// one is up, and the window chrome stays live.
     fn apply_sheets<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {
-        let mut pop = popover(body);
-        let mut presented = false;
-        if self.python.presented {
-            let sheet: Element<'_, Message> =
-                sheets::view_python_setup(&self.python).map(Message::PythonSheet);
-            pop = pop.popup(sheet);
-            presented = true;
+        let card: Element<'_, Message> = if self.python.presented {
+            sheets::view_python_setup(&self.python).map(Message::PythonSheet)
         } else if let Some(sheet) = &self.agent_missing {
-            let sheet: Element<'_, Message> =
-                sheets::view_agent_missing(sheet).map(Message::AgentSheet);
-            pop = pop.popup(sheet);
-            presented = true;
-        }
-        if presented {
-            pop = pop.modal(true);
-        }
-        pop.into()
+            sheets::view_agent_missing(sheet).map(Message::AgentSheet)
+        } else {
+            return body;
+        };
+        sheets::present(body, card, Message::Noop)
     }
 
     /// The welcome window's chrome (WelcomeWindow.swift: a full-size
@@ -1420,7 +1421,7 @@ fn view_load_error(error: &str) -> Element<'_, Message> {
             .push(
                 text(fl!("impossibile-aprire-il-progetto"))
                     .size(crate::typography::TITLE)
-                    .font(cosmic::font::bold()),
+                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold)),
             )
             .push(
                 text(error)
@@ -1460,6 +1461,15 @@ pub fn sheet_key_role(key: &Key, modifiers: &Modifiers) -> Option<SheetKey> {
     }
 }
 
+/// Resize settings window `id` when its tab or engine changed the height
+/// its content calls for (upstream's per-tab window size).
+fn settings_resize(id: window::Id, before: f32, after: f32) -> Task<Action<Message>> {
+    if before == after {
+        return Task::none();
+    }
+    window::resize(id, cosmic::iced::Size::new(settings::WIDTH, after))
+}
+
 /// Drop keyboard focus from every focusable widget.
 fn release_focus() -> Task<Action<Message>> {
     cosmic::iced::advanced::widget::operate(
@@ -1470,7 +1480,7 @@ fn release_focus() -> Task<Action<Message>> {
 
 /// The app-level shortcut table (upstream's global commands; ⌘→Ctrl, ⌘,
 /// the standard Settings scene's binding).
-pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppShortcut> {
+pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
     let ctrl = modifiers.control();
     let shift = modifiers.shift();
     let alt = modifiers.alt();
@@ -1479,10 +1489,10 @@ pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppShortcut> {
         _ => return None,
     };
     match (ctrl, shift, alt, character.as_str()) {
-        (true, false, false, "n") => Some(AppShortcut::NewProject),
-        (true, false, false, "o") => Some(AppShortcut::OpenProject),
-        (true, true, false, "1") => Some(AppShortcut::Welcome),
-        (true, false, false, ",") => Some(AppShortcut::Settings),
+        (true, false, false, "n") => Some(AppCommand::NewProject),
+        (true, false, false, "o") => Some(AppCommand::OpenProject),
+        (true, true, false, "1") => Some(AppCommand::Welcome),
+        (true, false, false, ",") => Some(AppCommand::Settings),
         _ => None,
     }
 }
@@ -1617,6 +1627,17 @@ pub async fn choose_folder_at(
 }
 
 /// [`choose_folder_at`] with no starting directory.
+/// The open-existing folder portal; its answer comes back as
+/// [`Message::OpenFolderChosen`].
+fn choose_existing() -> Task<Action<Message>> {
+    let title = fl!("scegli-la-cartella-del-progetto-da-aprire");
+    Task::future(async move {
+        let future = choose_folder(&title);
+        Message::OpenFolderChosen(future.await)
+    })
+    .map(Action::App)
+}
+
 pub async fn choose_folder(title: &str) -> Result<Vec<PathBuf>, String> {
     choose_folder_at(title, None).await
 }
@@ -1787,20 +1808,20 @@ mod tests {
 
         assert_eq!(
             app_shortcut(&Key::Character("n".into()), &ctrl),
-            Some(AppShortcut::NewProject)
+            Some(AppCommand::NewProject)
         );
         assert_eq!(
             app_shortcut(&Key::Character("o".into()), &ctrl),
-            Some(AppShortcut::OpenProject)
+            Some(AppCommand::OpenProject)
         );
         assert_eq!(
             app_shortcut(&Key::Character("1".into()), &ctrl_shift),
-            Some(AppShortcut::Welcome),
+            Some(AppCommand::Welcome),
             "⇧⌘1 is the welcome window command"
         );
         assert_eq!(
             app_shortcut(&Key::Character(",".into()), &ctrl),
-            Some(AppShortcut::Settings),
+            Some(AppCommand::Settings),
             "⌘, opens the settings window"
         );
         assert_eq!(
@@ -1840,7 +1861,9 @@ mod packaging_identity {
 #[cfg(test)]
 mod shell_behavior {
     use super::*;
+    use cosmic::iced::Size;
     use cosmic::iced::keyboard::key::Named;
+    use engine::project::layout::PaneKind;
     use engine::settings::MeasurementUnit;
 
     struct Fixture {
@@ -1860,8 +1883,7 @@ mod shell_behavior {
             welcome: Welcome::new(),
             recents: Recents::load(config.clone()),
             config,
-            settings: EngineSettings::default(),
-            settings_file: dir.join("settings.json"),
+            settings: SettingsStore::at(dir.join("settings.json")),
             agent_missing: None,
             setup: None,
             python: sheets::PythonSetup::default(),
@@ -1905,9 +1927,12 @@ mod shell_behavior {
     /// default project location (ProjectPanels.swift:20).
     #[test]
     fn the_parent_folder_panel_opens_at_the_default_project_location() {
-        let mut f = fixture();
+        let f = fixture();
         let location = f.dir.join("Progetti");
-        f.app.settings.default_project_location = location.clone();
+        f.app
+            .settings
+            .update(|settings| settings.default_project_location = location.clone())
+            .unwrap();
         let pick = f.app.parent_folder_pick("Staffa");
         assert_eq!(pick.start, Some(location));
         assert!(
@@ -1972,7 +1997,7 @@ mod shell_behavior {
     #[test]
     fn return_continues_the_first_run_sheet_and_esc_does_not_dismiss_it() {
         let mut f = fixture();
-        f.app.setup = Some(sheets::Setup::from_settings(&f.app.settings));
+        f.app.setup = Some(sheets::Setup::from_settings(&f.app.settings.load()));
         key(&mut f.app, f.welcome, Named::Escape);
         assert!(
             f.app.setup.is_some(),
@@ -1981,7 +2006,7 @@ mod shell_behavior {
         key(&mut f.app, f.welcome, Named::Enter);
         assert!(f.app.setup.is_none(), "Return runs Continua");
         assert!(
-            f.app.settings_file.exists(),
+            f.app.settings.path().exists(),
             "Continua persisted the preferences"
         );
     }
@@ -2057,9 +2082,109 @@ mod shell_behavior {
         assert_eq!(window.viewer.unit, MeasurementUnit::Inches);
     }
 
+    /// Settings a project window writes (the parameters overlay's collapse
+    /// toggle, a layout preset's global default layout) reach the next
+    /// project window the app opens, without a restart.
+    #[tokio::test]
+    async fn a_project_window_settings_write_reaches_the_next_window_opened() {
+        let mut f = fixture();
+        let first = open_real_project(&mut f, "Uno");
+        let _ = f.app.update_project(
+            first,
+            project::Message::Viewer(crate::viewer_pane::Message::Parameters(
+                crate::parameters_view::Message::Collapse(true),
+            )),
+        );
+        let _ = f.app.update_project(
+            first,
+            project::Message::Command(project::Command::LayoutChatBottom),
+        );
+
+        store::create_project(&f.dir, "Due").unwrap();
+        let _ = f.app.open_project(f.dir.join("Due"));
+        let second = f
+            .app
+            .windows
+            .values()
+            .find_map(|kind| match kind {
+                WindowKind::Project(window) if window.name == "Due" => Some(window),
+                _ => None,
+            })
+            .expect("the second project window registered");
+        assert!(
+            second.viewer.parameters.collapsed,
+            "the new window seeds the last collapse toggle"
+        );
+        assert_eq!(
+            second.layout,
+            engine::project::layout::LayoutNode::chat_bottom(),
+            "the new project opens on the last default layout"
+        );
+    }
+
     /// 2.10: an unreadable project opens the load-error window with the
     /// error (ProjectWindow.swift:16-22, 42-44); no recent is added and
     /// the welcome window stays.
+    /// The File menu's recents entries reach the app through the window's
+    /// one `App` variant: Apri recenti fills the card from the store,
+    /// Cancella menu empties both.
+    #[tokio::test]
+    async fn file_menu_recents_requests_reach_the_app() {
+        let mut f = fixture();
+        let id = open_real_project(&mut f, "Recenti");
+        let card = |app: &CadStudio| match app.windows.get(&id) {
+            Some(WindowKind::Project(window)) => window.recent_card.clone(),
+            _ => panic!("the project window is open"),
+        };
+        let request = |request| Message::Project(id, project::Message::App(request));
+
+        let _ = f.app.update(request(project::AppRequest::Command(
+            AppCommand::OpenRecent,
+        )));
+        let stored = f.app.recents.paths().to_vec();
+        assert!(!stored.is_empty(), "opening the project recorded it");
+        assert_eq!(card(&f.app), Some(stored));
+
+        let _ = f.app.update(request(project::AppRequest::ClearRecents));
+        assert_eq!(card(&f.app), Some(Vec::new()));
+        assert!(f.app.recents.paths().is_empty());
+    }
+
+    /// The pane-drag listener hears every window's cursor: while a grip is
+    /// held in one project window, another window's motion and release
+    /// must not retarget or drop its drag.
+    #[tokio::test]
+    async fn a_pane_drag_follows_only_its_own_window() {
+        let mut f = fixture();
+        let id = open_real_project(&mut f, "Trascina");
+        let other = window::Id::unique();
+        let drag = |app: &CadStudio| match app.windows.get(&id) {
+            Some(WindowKind::Project(window)) => window.pane_drag,
+            _ => panic!("the project window is open"),
+        };
+        let over = cosmic::iced::Point::new(1300.0, 700.0);
+        let size = Size::new(1320.0, 787.0);
+        let _ = f
+            .app
+            .update_project(id, project::Message::GridResized(size));
+        let _ = f
+            .app
+            .update_project(id, project::Message::GripPressed(PaneKind::Chat));
+
+        let moved = |window| project::Message::PaneDragMoved(window, over);
+        let _ = f.app.update_project(id, moved(other));
+        assert_eq!(drag(&f.app), None, "another window's cursor is ignored");
+
+        let _ = f.app.update_project(id, moved(id));
+        let own = "the window's own cursor drives the drag";
+        assert!(drag(&f.app).is_some(), "{own}");
+        let _ = f
+            .app
+            .update_project(id, project::Message::PaneDragEnded(other));
+        let foreign = "another window's release drops nothing";
+        assert!(drag(&f.app).is_some(), "{foreign}");
+    }
+
     #[test]
     fn opening_an_unreadable_project_shows_the_load_error_window() {
         let _lang = crate::localize::pin_en();

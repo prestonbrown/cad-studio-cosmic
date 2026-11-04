@@ -28,7 +28,7 @@ pub enum Axis {
 /// `_0`, so a leaf is `{"pane":{"_0":"chat"}}` and a split is
 /// `{"split":{"_0":{"axis":…,"first":…,"second":…,"fraction":…}}}`.
 /// Decoding also accepts the bare forms `{"pane":"chat"}` and
-/// `{"split":{"axis":…}}` that earlier port builds wrote.
+/// `{"split":{"axis":…}}`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutNode {
     Pane(PaneKind),

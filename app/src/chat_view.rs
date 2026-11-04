@@ -206,7 +206,19 @@ impl ChatPane {
             Message::ToggleFullOutput(id) => toggle(&mut self.full_output, id),
             Message::ToggleDetail(id) => toggle(&mut self.detail, id),
             Message::CopyCode(text) => return cosmic::iced::clipboard::write(text),
-            _ => {}
+            // the shell's (project window's update_chat)
+            Message::Send
+            | Message::Stop
+            | Message::SendSuggestion(_)
+            | Message::RowAction(_, _)
+            | Message::OpenUrl(_)
+            | Message::Attach
+            | Message::Detach(_)
+            | Message::Paste
+            | Message::AttachContent(_)
+            | Message::RemoveQueued(_)
+            | Message::SendQueuedNow
+            | Message::RestoreVersion(_) => {}
         }
         Task::none()
     }
@@ -369,7 +381,12 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true))
+        .class(ui::surface::fill(
+            Tone::Quaternary,
+            0.5,
+            Corner::S,
+            Some(1.0),
+        ))
         .into()
 }
 
@@ -381,7 +398,7 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
 /// its staged originals at 52px (ChatInputView.swift:82-104) and sent rows
 /// the `references/…` copies at 64px (MessageView.swift:10-23) — the
 /// resolution rule ([`attachments::resolve_attachment`]) treats an
-/// absolute path (every pre-M8 row's original) as itself.
+/// absolute path (a legacy row's original request path) as itself.
 fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, Message> {
     let resolved = attachments::resolve_attachment(path, root);
     let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
@@ -412,7 +429,12 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
             .height(Length::Fixed(size))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(ui::surface::fill(Tone::Quaternary, 1.0, Corner::S, true)),
+            .class(ui::surface::fill(
+                Tone::Quaternary,
+                1.0,
+                Corner::S,
+                Some(1.0),
+            )),
         file_name,
         cosmic::widget::tooltip::Position::FollowCursor,
     );
@@ -435,10 +457,7 @@ fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
                 },
                 Tone::Secondary,
             )
-            .font(Font {
-                weight: FontWeight::Semibold,
-                ..cosmic::font::default()
-            }),
+            .font(crate::typography::font(FontWeight::Semibold)),
         )
         .align_x(Alignment::Center)
         .into()
@@ -532,10 +551,7 @@ fn markdown_spans(ir: Vec<markdown::MdSpan>) -> Element<'static, Message> {
             match span.style {
                 MdStyle::Plain => {}
                 MdStyle::Strong => {
-                    out = out.font(Font {
-                        weight: FontWeight::Bold,
-                        ..cosmic::font::default()
-                    });
+                    out = out.font(crate::typography::font(FontWeight::Bold));
                 }
                 MdStyle::Emphasis => {
                     out = out.font(Font {
@@ -760,7 +776,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
     container(stack)
         .padding([4.0, 8.0])
         .width(Length::Fill)
-        .class(ui::surface::fill(Tone::Quaternary, 0.35, Corner::S, false))
+        .class(ui::surface::fill(Tone::Quaternary, 0.35, Corner::S, None))
         .into()
 }
 
@@ -876,7 +892,7 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
                 container(label)
                     .padding([6.0, 10.0])
                     .width(Length::Fill)
-                    .class(ui::surface::fill(Tone::Quaternary, 0.6, Corner::S, false)),
+                    .class(ui::surface::fill(Tone::Quaternary, 0.6, Corner::S, None)),
             )
             .padding(0)
             .width(Length::Fill)
@@ -888,10 +904,8 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         .spacing(4)
         .align_x(Alignment::Center)
         .push(
-            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary).font(Font {
-                weight: FontWeight::Semibold,
-                ..cosmic::font::default()
-            }),
+            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary)
+                .font(crate::typography::font(FontWeight::Semibold)),
         )
         .push(
             styled_text(
@@ -929,11 +943,7 @@ fn input_bar<'a>(
     root: &Path,
 ) -> Element<'a, Message> {
     let mut stack = Column::new().width(Length::Fill);
-    stack = stack.push(
-        container(Space::new().height(Length::Fixed(1.0)))
-            .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Separator, 1.0, Corner::None, false)),
-    );
+    stack = stack.push(ui::surface::divider());
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
     }
@@ -1039,7 +1049,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             )
             .padding([7.0, 10.0])
             .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, false)),
+            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, None)),
         );
     }
     let items = cosmic::widget::scrollable::vertical(items).height(Length::Shrink);
@@ -1557,11 +1567,11 @@ mod tests {
     /// The pane builds in every shape: empty (the suggestion-button empty
     /// state), populated, busy, with a queue, with a staged draft strip,
     /// and with sent-row attachment thumbnails over both storage forms —
-    /// relative `references/…` copy names and the absolute originals the
-    /// pre-M8 rows carry. Element construction is pure — but it
+    /// relative `references/…` copy names and the absolute originals
+    /// legacy rows carry. Element construction is pure — but it
     /// instantiates every widget class the runtime would (scrollables,
     /// tooltips, image widgets), which is where tree-shape regressions
-    /// surface first (the always-scrollable hardening's lesson).
+    /// surface first.
     #[test]
     fn view_chat_builds_in_every_shape() {
         let root = std::env::temp_dir().join(format!("cad-chatview-{}", Uuid::new_v4()));
@@ -1579,7 +1589,7 @@ mod tests {
         let _ = view_chat(&pane, &empty, true, &[], false, &root);
 
         // a user row with both attachment forms: the relative copy names
-        // M8 rows carry, and an absolute original (the pre-M8 shape)
+        // current rows carry, and an absolute original (the legacy shape)
         let mut with_attachments = user_row("model this");
         with_attachments.attachments = vec![
             "references/1790000000-1-sketch.png".into(),

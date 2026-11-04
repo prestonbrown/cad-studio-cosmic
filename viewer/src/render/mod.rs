@@ -14,7 +14,7 @@
 //! camera moves. What legitimately writes per frame: the camera uniform,
 //! the section-cap quad, and each visible part's model uniform — the
 //! [`Frame`] pose path moves and hides parts (draw-skip on `None`)
-//! without touching a vertex, and M7's playback rides the same binding:
+//! without touching a vertex, and motion playback rides the same binding:
 //! poses AND the collision/translucency appearance flags are uniform
 //! state (80 B/part), never vertex re-staging.
 //!
@@ -33,16 +33,17 @@
 //! multisample color + depth attachment, resolves into an intermediate
 //! single-sample texture, and blits that over the target with premultiplied
 //! alpha — iced's content underneath survives, same Load-and-composite
-//! contract as the single-sample path. The app's `m`-key toggle flips
-//! [`Options::msaa`] between 1 and 4; `prepare_parts` then rebuilds the
-//! render pipelines and owned attachments in place (iced's Storage owns one
-//! pipeline per type and cannot hand out replacements), while the wireframe
-//! toggle stays a pure draw-path switch.
+//! contract as the single-sample path. The app pane sets [`Options::msaa`]
+//! to 4 (the example's `m` key flips it between 1 and 4); a count that
+//! differs from the resident one makes `prepare_parts` rebuild the render
+//! pipelines and owned attachments in place (iced builds the pipeline at 1
+//! through `Pipeline::new` and its Storage cannot hand out replacements),
+//! while the wireframe toggle stays a pure draw-path switch.
 //!
 //! Cross-sections: the mesh pass writes winding parity into the stencil
 //! (front +1 / back -1 per rasterized fragment, wrap ops, section-discarded
 //! fragments excluded), and a red cap quad drawn right after fills exactly
-//! the cut face (stencil != 0) when `Camera::section_enable` is set.
+//! the cut face (stencil != 0) when the frame carries a [`SectionPlane`].
 //!
 //! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
 //! part pass to the 1px hairline edge list — same material, LineList
@@ -53,8 +54,8 @@
 //! spheres at the picked points plus the two-point link. Both are
 //! depth-tested so the model occludes them, but neither writes depth.
 //!
-//! The compare ghost (M5's comparison split — this port owns the render
-//! half): a second [`PartScene`] staged from the comparison version in
+//! The compare ghost (the render half of version comparison; the app
+//! owns the comparison state): a second [`PartScene`] staged from the comparison version in
 //! the CURRENT scene's pin (`PartScene::from_parts_with_pin`,
 //! ModelViewer.swift:135 — ghostEntity hangs under `content`) draws as
 //! an unlit systemOrange wireframe at [`GHOST_ALPHA`] through its own
@@ -62,33 +63,91 @@
 //! the overlays — depth-tested so the mesh occludes it, never writing
 //! depth so it occludes nothing after it.
 
+pub mod camera;
 pub mod gpu;
 pub mod grid;
+pub mod lights;
 pub mod markers;
 pub mod parts;
+mod pipelines;
+mod residency;
 pub mod scene;
+mod shaders;
+mod targets;
+#[cfg(test)]
+mod test_support;
 
+pub use camera::{Camera, default_camera, preset_camera};
 pub use grid::{GridMesh, GridVertex, Palette};
 pub use markers::{MarkerMesh, ORANGE};
 pub use parts::{
     GpuPart, NEUTRAL, NEUTRAL_LIGHT, PartScene, neutral, srgb_to_linear, srgb_to_linear_f,
 };
 pub use scene::{ModelPrimitive, ModelScene, Themed};
+pub use shaders::{COLLISION_LINEAR, CUT_FACE_LINEAR, GHOST_ALPHA};
 
-use std::hash::Hasher;
-
+pub use engine::parsing::Box3;
 use wgpu::util::DeviceExt;
 
+use pipelines::{Blit, Pipelines};
+use residency::{ResidentGhostPart, ResidentGrid, ResidentPart, ghost_identity, stage_overlay};
+use targets::MsaaTargets;
+
+/// A scene-space axis (render coords, Y up).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl SceneAxis {
+    pub fn index(self) -> usize {
+        match self {
+            SceneAxis::X => 0,
+            SceneAxis::Y => 1,
+            SceneAxis::Z => 2,
+        }
+    }
+}
+
+/// A section plane in a scene's PINNED frame: fragments with
+/// `position[axis] > pos` are discarded, and the red cap fills the cut.
+/// `cap` is the scene-space box of what is drawn (arranged offsets
+/// included), which the cap quad must span — it travels with the plane so
+/// the discard and the cap cannot be built from two different boxes.
+/// [`crate::tools::section::pinned_plane`] builds one from the tool state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SectionPlane {
+    pub axis: SceneAxis,
+    pub pos: f32,
+    pub cap: Box3,
+}
+
+/// The camera uniform (group 0) as the shaders read it: the frame's
+/// view-projection plus its section plane, if any.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Camera {
-    pub view_proj: [[f32; 4]; 4],
-    pub section_axis: u32,
-    pub section_pos: f32,
-    pub section_enable: f32,
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+    section_axis: u32,
+    section_pos: f32,
+    section_enable: f32,
     /// WGSL uniform structs round their size up to 16 bytes: 64 + 4 + 4 + 4 = 76
     /// must be padded to 80 or bind-group validation fails on min_binding_size.
-    pub _pad: f32,
+    _pad: f32,
+}
+
+impl CameraUniform {
+    fn new(camera: &Camera, section: Option<&SectionPlane>) -> Self {
+        CameraUniform {
+            view_proj: camera.view_proj,
+            section_axis: section.map_or(1, |s| s.axis.index() as u32),
+            section_pos: section.map_or(f32::MAX, |s| s.pos),
+            section_enable: if section.is_some() { 1.0 } else { 0.0 },
+            _pad: 0.0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -152,19 +211,15 @@ pub struct PartAppearance {
 
 /// Everything one frame's prepare needs, bundled: the camera, the staged
 /// scene, one [`PartPose`] and one [`PartAppearance`] per part (both same
-/// length — asserted), the aabb the section cap and framing should use
-/// (defaults to the scene's own; the arrangement wiring replaces it with
-/// the effective box), the overlay, and the render mode. The struct is the
-/// renderer's whole per-frame input contract — later tasks extend it
-/// rather than grow the parameter list again.
+/// length — asserted), the section plane, the overlays, and the render
+/// mode. The struct is the renderer's whole per-frame input contract.
 pub struct Frame<'a> {
     pub camera: &'a Camera,
     pub scene: &'a PartScene,
     pub poses: &'a [PartPose],
     pub appearances: &'a [PartAppearance],
-    /// The aabb of what is effectively drawn (hidden parts excluded,
-    /// arranged offsets included) in pinned scene space.
-    pub effective_aabb: ([f32; 3], [f32; 3]),
+    /// The section plane, when sectioning: the mesh discard and the cap.
+    pub section: Option<SectionPlane>,
     pub grid: Option<&'a GridMesh>,
     /// The staged measure markers, when a measurement is active — drawn
     /// after the grid on the same unlit overlay pass.
@@ -205,530 +260,37 @@ struct CapVertex {
     pos: [f32; 3],
 }
 
-/// The section cap's color: upstream's cut-face material —
-/// `systemRed.blended(withFraction: 0.15, of: .black)` (ModelViewer.swift:
-/// 363) = sRGB `(0.85, 0.85·59/255, 0.85·48/255)` through the exact EOTF —
-/// LINEAR, the space the unlit cap shader writes, encoded for the target
-/// by `to_target` (the same once-only crossing every staged triangle color
-/// makes). The Rust constant is the one definition: `cap_wgsl_source`
-/// substitutes it into cap.wgsl, and the cap-color test reads it back
-/// against this value.
-pub const CUT_FACE_LINEAR: [f32; 3] = [0.6920, 0.0321, 0.0220];
-
-/// The motion collision material's color: systemRed straight through the
-/// exact EOTF (the same red [`CUT_FACE_LINEAR`] blends 15% black for the
-/// cut face; the collision material uses it unblended as BOTH baseColor
-/// and emissiveColor, ModelViewer.swift:275-279 — hence flat, unlit).
-/// LINEAR, the space the mesh shader writes, encoded for the target by
-/// `to_target`. The Rust constant is the one definition:
-/// `mesh_wgsl_source` substitutes it into mesh.wgsl, and the
-/// collision-color test reads it back against this value.
-pub const COLLISION_LINEAR: [f32; 3] = [1.0, 0.0437, 0.0295];
-
 /// The translucent static-parts material's opacity
 /// (ModelViewer.swift:410: `.transparent(opacity: 0.22)`).
 pub const TRANSLUCENT_ALPHA: f32 = 0.22;
 
-/// The compare ghost's straight alpha (ModelViewer.swift:375):
-/// `blending = .transparent(opacity: 0.6)` over the unlit systemOrange
-/// rgb ([`markers::ORANGE`]) — the value `ghost_wgsl_source` substitutes
-/// into ghost.wgsl and the blend test reads pixels back against.
-pub const GHOST_ALPHA: f32 = 0.6;
-
-/// World-space quad on the section plane: the effective scene aabb
-/// cross-section at `frame.camera.section_pos`, grown 10% on the two
-/// off-axis directions so the cap always covers the cut face (the stencil
-/// test clips it back to the solid). A 4-vertex triangle strip.
-fn cap_quad(frame: &Frame<'_>) -> [CapVertex; 4] {
-    let camera = frame.camera;
-    // match the mesh shader: axis 0 -> x, 2 -> z, anything else -> y
-    let axis = match camera.section_axis {
-        0 | 1 | 2 => camera.section_axis as usize,
-        _ => 1,
-    };
+/// World-space quad on the section plane: the cross-section of the
+/// plane's cap box at `plane.pos`, grown 10% on the two off-axis
+/// directions so the cap always covers the cut face (the stencil test
+/// clips it back to the solid). A 4-vertex triangle strip.
+fn cap_quad(plane: &SectionPlane) -> [CapVertex; 4] {
+    let axis = plane.axis.index();
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
     let at = |pu: f32, pv: f32| {
         let mut p = [0.0f32; 3];
-        p[axis] = camera.section_pos;
+        p[axis] = plane.pos;
         p[u] = pu;
         p[v] = pv;
         CapVertex { pos: p }
     };
+    let (center, size) = (plane.cap.center(), plane.cap.size());
     let edge = |a: usize| {
-        let center = (frame.effective_aabb.0[a] + frame.effective_aabb.1[a]) / 2.0;
-        let half = (frame.effective_aabb.1[a] - frame.effective_aabb.0[a]) / 2.0 * 1.1;
-        (center - half, center + half)
+        let half = size[a] / 2.0 * 1.1;
+        (center[a] - half, center[a] + half)
     };
     let (u0, u1) = edge(u);
     let (v0, v1) = edge(v);
     [at(u0, v0), at(u1, v0), at(u0, v1), at(u1, v1)]
 }
 
-impl Camera {
-    /// The orbit camera at `(distance, yaw, pitch)` around `target` for a
-    /// `aspect`-wide viewport, sectioning off — the uniform form of
-    /// [`camera::orbit`].
-    pub fn orbiting(distance: f32, yaw: f32, pitch: f32, target: [f32; 3], aspect: f32) -> Camera {
-        Camera {
-            view_proj: camera::orbit(distance, yaw, pitch, target, aspect),
-            section_axis: 1,
-            section_pos: f32::MAX,
-            section_enable: 0.0,
-            _pad: 0.0,
-        }
-    }
-}
-
-/// Parity camera math, transcribed from ModelViewer.swift (facts §1).
-/// Pure — no GPU types — so the formulas are testable headless; the
-/// adapter owns the state (yaw/pitch/distance/target) and calls in.
-pub mod camera {
-    /// Vertical FOV (ModelViewer.swift:144) with near and far planes
-    /// (:142-143) — absolute, never radius-relative.
-    pub const FOV: f32 = 35.0_f32.to_radians();
-    pub const NEAR: f32 = 1.0;
-    pub const FAR: f32 = 100_000.0;
-    /// Upstream's exact pitch clamp (ModelViewer.swift:95), π/2 minus
-    /// ~0.01 — not a value this crate invents.
-    pub const MAX_PITCH: f32 = 1.5607;
-    /// Drag-to-orbit sensitivity, radians per point (ModelViewer.swift:302-303).
-    pub const ORBIT_SENSITIVITY: f32 = 0.008;
-
-    /// Upstream's named views (ModelViewer.swift:4-33).
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Preset {
-        Iso,
-        Front,
-        Top,
-        Right,
-    }
-
-    impl Preset {
-        pub fn yaw_pitch(self) -> (f32, f32) {
-            match self {
-                Preset::Iso => (std::f32::consts::FRAC_PI_4, 0.6),
-                Preset::Front => (0.0, 0.0),
-                // top looks straight down at the same maximumPitch constant
-                Preset::Top => (0.0, MAX_PITCH),
-                Preset::Right => (std::f32::consts::FRAC_PI_2, 0.0),
-            }
-        }
-    }
-
-    /// placeCamera's eye offset (ModelViewer.swift:339-342): the unit
-    /// direction from the look-at target toward an orbit camera at
-    /// `(yaw, pitch)` — yaw about scene +Y from +Z toward +X, pitch up
-    /// from the floor plane. The one definition every pose derivation
-    /// ([`orbit`], [`panned`], [`pick_ray`], `lights::to_eye`) builds on.
-    pub fn eye_dir(yaw: f32, pitch: f32) -> glam::Vec3 {
-        glam::Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        )
-    }
-
-    /// placeCamera (ModelViewer.swift:339-342): look at `target` from
-    /// `target + dir(yaw, pitch)·distance` with Y up, projected at
-    /// `aspect` — the viewport's width/height, required, so the projection
-    /// always matches the window it renders into.
-    pub fn orbit(
-        distance: f32,
-        yaw: f32,
-        pitch: f32,
-        target: [f32; 3],
-        aspect: f32,
-    ) -> [[f32; 4]; 4] {
-        let at = glam::Vec3::from_array(target);
-        let view = glam::camera::rh::view::look_at_mat4(
-            at + eye_dir(yaw, pitch) * distance,
-            at,
-            glam::Vec3::Y,
-        );
-        // directx = WebGPU NDC (Z in [0,1], Y-up)
-        let proj = glam::camera::rh::proj::directx::perspective(FOV, aspect, NEAR, FAR);
-        (proj * view).to_cols_array_2d()
-    }
-
-    /// Framing radius: half the aabb DIAGONAL, floored at 1
-    /// (ModelViewer.swift:330) — a long-thin part frames by its diagonal,
-    /// not its longest extent.
-    pub fn framing_radius(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
-        let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
-        (size.length() / 2.0).max(1.0)
-    }
-
-    /// frame() (ModelViewer.swift:328-337), aspect-free by construction:
-    /// the target is half the scene height above the pinned floor, the
-    /// distance fits the radius through the FOV with 15% headroom. The
-    /// x/z zeros assume the PartScene's floor pin already centered the
-    /// model horizontally.
-    pub fn frame(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> ([f32; 3], f32) {
-        let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
-        let target = [0.0, size.y / 2.0, 0.0];
-        let distance = framing_radius(aabb_min, aabb_max) / (FOV / 2.0).sin() * 1.15;
-        (target, distance)
-    }
-
-    /// zoom (ModelViewer.swift:307-310): distance × factor clamped to
-    /// [0.1·radius, 200·radius].
-    pub fn zoomed(distance: f32, factor: f32, radius: f32) -> f32 {
-        (distance * factor).clamp(radius * 0.1, radius * 200.0)
-    }
-
-    /// pan's units-per-point (ModelViewer.swift:312-320): the view-plane
-    /// height covered by one point at `distance`. The target translation
-    /// wiring is M4's; this is the parity formula.
-    pub fn pan_units_per_point(distance: f32, view_height: f32) -> f32 {
-        2.0 * distance * (FOV / 2.0).tan() / view_height
-    }
-
-    /// pan(by:viewHeight:) (ModelViewer.swift:312-320): the look-at target
-    /// shifted by the drag in camera-plane world units — `target +=
-    /// (-right·dx + up·dy)·units_per_point` over the camera's own scene
-    /// axes, derived here from the yaw/pitch pose the same way
-    /// [`orbit`]'s look-at builds them. `dx`/`dy` are AppKit-convention
-    /// deltas (dy bottom-up; iced's top-down cursor y must be negated by
-    /// the caller). The drag WIRING is M4's; this is the parity formula.
-    pub fn panned(
-        target: [f32; 3],
-        yaw: f32,
-        pitch: f32,
-        distance: f32,
-        view_height: f32,
-        dx: f32,
-        dy: f32,
-    ) -> [f32; 3] {
-        if view_height <= 0.0 {
-            return target;
-        }
-        let back = eye_dir(yaw, pitch);
-        // the look-at basis: camera +X/+Y in scene space, Y-up world
-        let right = glam::Vec3::Y.cross(back).normalize_or_zero();
-        let up = back.cross(right);
-        let t = glam::Vec3::from_array(target)
-            + (right * -dx + up * dy) * pan_units_per_point(distance, view_height);
-        t.to_array()
-    }
-
-    /// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
-    /// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
-    /// scaled 0.008, pitch clamped to ±MAX_PITCH.
-    pub fn orbit_drag(yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f32) {
-        (
-            yaw - dx * ORBIT_SENSITIVITY,
-            (pitch + dy * ORBIT_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
-        )
-    }
-
-    /// pick(at:in:on:)'s ray half (ModelViewer.swift:291-299, facts #29):
-    /// the scene-space (origin, direction) a click at `cursor` casts through
-    /// the orbit camera at `(distance, yaw, pitch)` around `target`, for a
-    /// `view`-sized viewport at `aspect`. Upstream unprojects through
-    /// RealityKit — `camera.convert((x, y, −1), to: root)` — which in pure
-    /// math is `normalize(x·r + y·u + f)` over the look-at basis
-    /// [`orbit`]/[`panned`] build: eye from placeCamera's formula, `f`
-    /// forward, `r`/`u` the camera's own right/up. `cursor` is iced's
-    /// top-down point and must cross to AppKit's bottom-up `h − cy` BEFORE
-    /// the NDC mapping (facts #29) or every vertical click aims mirrored;
-    /// `x` scales by `aspect` and both by the half-FOV tangent, exactly
-    /// upstream's unprojection terms. Pure — the click flow owns the
-    /// off-thread seam this is cast from.
-    pub fn pick_ray(
-        distance: f32,
-        yaw: f32,
-        pitch: f32,
-        target: [f32; 3],
-        aspect: f32,
-        cursor: (f32, f32),
-        view: (f32, f32),
-    ) -> ([f32; 3], [f32; 3]) {
-        let at = glam::Vec3::from_array(target);
-        let back = eye_dir(yaw, pitch);
-        let eye = at + back * distance;
-        // the look-at basis: f = normalize(target − eye) = −back; r and u as
-        // `panned` derives them (r degenerate only at ±90° pitch, which
-        // MAX_PITCH's clamp keeps unreachable)
-        let f = -back;
-        let r = glam::Vec3::Y.cross(back).normalize_or_zero();
-        let u = back.cross(r);
-        let tangent = (FOV / 2.0).tan();
-        let (w, h) = view;
-        let x = (2.0 * cursor.0 / w - 1.0) * tangent * aspect;
-        // iced's cursor is top-down; AppKit's point is bottom-up (facts #29)
-        let y = (2.0 * (h - cursor.1) / h - 1.0) * tangent;
-        let dir = (r * x + u * y + f).normalize_or_zero();
-        (eye.to_array(), dir.to_array())
-    }
-}
-
-/// Parity shading for upstream's PhysicallyBasedMaterial under its light
-/// rig (ModelViewer.swift:344-353, 415-423). Upstream adds two directional
-/// lights — key 2600 looking at the origin from (60,120,90), fill 900 from
-/// (-90,40,-60), both SCENE space — on top of RealityView's default
-/// image-based environment, then shades metallic 0.15 / roughness 0.55.
-/// The IBL is not in the source, so the model here is fitted to the
-/// upstream capture's per-face colors (both box parts, three visible faces
-/// each, sampled after converting the capture from its display profile to
-/// sRGB) and reproduces them within ~7 sRGB units:
-///
-/// `rgb = shoulder(D(n)·base + S(n, v))` with
-/// - `D(n) = AMBIENT + KEY·max(n·key, 0) + FILL·max(n·fill, 0) + ENV·max(n·env, 0)`
-///   — key and fill keep upstream's 2600:900 intensity ratio, `env` is the
-///   environment's dominant direction (up and toward scene +Z);
-/// - `S(n, v) = SPECULAR·max(n·h, 0)^SHININESS·max(n·key, 0)`, a white
-///   Blinn-Phong lobe on the key light, `h = normalize(key + v)` with `v`
-///   the direction toward the camera (the view axis, uniform per frame,
-///   so a flat face shades flat);
-/// - `shoulder` is the per-channel highlight roll-off RealityKit's output
-///   shows above 0.76 linear (the Khronos PBR Neutral curve's compression).
-///
-/// The constants live here, once: [`MeshPipeline`] substitutes them into
-/// mesh.wgsl at creation, and [`lights::shade`] is the Rust twin the
-/// headless shading tests derive their expectations from.
-pub mod lights {
-    /// Key light position, scene space (ModelViewer.swift:346-348).
-    pub const KEY_POS: [f32; 3] = [60.0, 120.0, 90.0];
-    /// Key light intensity (ModelViewer.swift:347).
-    pub const KEY_INTENSITY: f32 = 2600.0;
-    /// Fill light position, scene space (ModelViewer.swift:350-352).
-    pub const FILL_POS: [f32; 3] = [-90.0, 40.0, -60.0];
-    /// Fill light intensity (ModelViewer.swift:351).
-    pub const FILL_INTENSITY: f32 = 900.0;
-    /// Environment light direction, scene space (fitted).
-    pub const ENV_DIR: [f32; 3] = [0.0, 0.69, 0.73];
-    /// Environment light diffuse coefficient (fitted).
-    pub const ENV_COEFF: f32 = 0.43;
-    /// Flat ambient term (fitted).
-    pub const AMBIENT: f32 = 0.216;
-    /// Key-light Blinn-Phong strength and exponent (fitted).
-    pub const SPECULAR: f32 = 3.53;
-    pub const SHININESS: f32 = 8.4;
-    /// Linear value above which the highlight shoulder compresses.
-    pub const SHOULDER_START: f32 = 0.76;
-    /// Directional intensity to diffuse coefficient (fitted on the key:
-    /// 2600 -> 0.89, so the fill's 900 -> 0.308).
-    const INTENSITY_SCALE: f32 = 0.89 / 2600.0;
-
-    /// The key light's diffuse coefficient.
-    pub fn key_coeff() -> f32 {
-        KEY_INTENSITY * INTENSITY_SCALE
-    }
-
-    /// The fill light's diffuse coefficient.
-    pub fn fill_coeff() -> f32 {
-        FILL_INTENSITY * INTENSITY_SCALE
-    }
-
-    /// The diffuse light `D(n)` for a scene-space normal. A zero vector
-    /// degrades to ambient.
-    pub fn diffuse(normal: [f32; 3]) -> f32 {
-        let n = glam::Vec3::from_array(normal).normalize_or_zero();
-        let key = glam::Vec3::from_array(KEY_POS).normalize();
-        let fill = glam::Vec3::from_array(FILL_POS).normalize();
-        let env = glam::Vec3::from_array(ENV_DIR).normalize();
-        AMBIENT
-            + key_coeff() * n.dot(key).max(0.0)
-            + fill_coeff() * n.dot(fill).max(0.0)
-            + ENV_COEFF * n.dot(env).max(0.0)
-    }
-
-    /// The white specular term `S(n, v)`, `to_eye` the direction toward
-    /// the camera.
-    pub fn specular(normal: [f32; 3], to_eye: [f32; 3]) -> f32 {
-        let n = glam::Vec3::from_array(normal).normalize_or_zero();
-        let key = glam::Vec3::from_array(KEY_POS).normalize();
-        let h = (key + glam::Vec3::from_array(to_eye).normalize_or_zero()).normalize_or_zero();
-        SPECULAR * n.dot(h).max(0.0).powf(SHININESS) * n.dot(key).max(0.0)
-    }
-
-    /// The highlight shoulder on one linear channel.
-    pub fn shoulder(c: f32) -> f32 {
-        if c < SHOULDER_START {
-            c.max(0.0)
-        } else {
-            let d = 1.0 - SHOULDER_START;
-            1.0 - d * d / (c + d - SHOULDER_START)
-        }
-    }
-
-    /// The linear rgb mesh.wgsl writes for a linear `base` color with
-    /// scene normal `normal`, seen from `to_eye`.
-    pub fn shade(base: [f32; 3], normal: [f32; 3], to_eye: [f32; 3]) -> [f32; 3] {
-        let d = diffuse(normal);
-        let s = specular(normal, to_eye);
-        base.map(|c| shoulder(d * c + s))
-    }
-
-    /// The direction toward an orbit camera at `(yaw, pitch)` —
-    /// placeCamera's eye offset (ModelViewer.swift:339-342), which is the
-    /// view axis mesh.wgsl reads back out of the view-projection matrix.
-    pub fn to_eye(yaw: f32, pitch: f32) -> [f32; 3] {
-        super::camera::eye_dir(yaw, pitch).to_array()
-    }
-}
-
-/// The camera for `preset` framing `scene` (upstream's preset-change
-/// reframe, ModelViewer.swift:322-337).
-pub fn preset_camera(scene: &PartScene, preset: camera::Preset, aspect: f32) -> Camera {
-    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-    let (yaw, pitch) = preset.yaw_pitch();
-    Camera::orbiting(distance, yaw, pitch, target, aspect)
-}
-
-/// Default iso camera framing `scene` (upstream presets: yaw π/4, pitch 0.6).
-pub fn default_camera(scene: &PartScene, aspect: f32) -> Camera {
-    preset_camera(scene, camera::Preset::Iso, aspect)
-}
-
-/// Blit stage for the msaa > 1 path: a fullscreen-textured-quad pipeline
-/// that composites the resolved intermediate over the destination.
-struct Blit {
-    pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
-    layout: wgpu::BindGroupLayout,
-}
-
-/// Owned multisample targets, recreated in [`MeshPipeline::prepare_parts`]
-/// only on size change (never per frame). `color` is the sample-`count`
-/// attachment the mesh pass renders into; `resolve` is the single-sample
-/// intermediate the pass resolves into and the blit samples.
-struct MsaaTargets {
-    color: wgpu::TextureView,
-    resolve: wgpu::TextureView,
-    bind_group: wgpu::BindGroup,
-}
-
-/// A part's GPU residency: its vertex buffer, draw count, and the content
-/// identity the buffer currently holds — the transform is NOT part of it
-/// (poses write the model uniform per frame). Built by `prepare_parts`
-/// when a part's hash differs; untouched otherwise.
-struct ResidentPart {
-    content_hash: u64,
-    vertex_buf: wgpu::Buffer,
-    vertex_count: u32,
-    /// The wireframe line list as a u32 index buffer into `vertex_buf`
-    /// (2 indices per edge) and its index count.
-    edge_buf: wgpu::Buffer,
-    edge_count: u32,
-    /// Group 1 for this part's draws: the model transform + appearance.
-    model_bg: wgpu::BindGroup,
-    /// The model uniform behind `model_bg` — every prepare writes the
-    /// frame's pose and appearance into it (80 B), the whole per-frame
-    /// cost of moving or recoloring a part.
-    model_buf: wgpu::Buffer,
-}
-
-/// An overlay's GPU residency — the same content-identity contract as
-/// [`ResidentPart`], over the unlit meshes staged by [`grid::geometry`]
-/// and [`markers::geometry`].
-struct ResidentGrid {
-    content_hash: u64,
-    vertex_buf: wgpu::Buffer,
-    vertex_count: u32,
-}
-
-/// Content-hash-keyed overlay residency — the staging step both overlay
-/// slots (`grid`, `marker`) share: (re)build the vertex buffer only when
-/// the content identity differs from what the slot holds; `None` drops
-/// the slot entirely. `label` names the buffer for debuggers.
-fn stage_overlay(
-    slot: &mut Option<ResidentGrid>,
-    device: &wgpu::Device,
-    mesh: Option<(u64, &[GridVertex], &str)>,
-) {
-    if let Some((content_hash, vertices, label)) = mesh {
-        if !slot
-            .as_ref()
-            .is_some_and(|r| r.content_hash == content_hash)
-        {
-            *slot = Some(ResidentGrid {
-                content_hash,
-                vertex_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("{label} vertices")),
-                    contents: bytemuck::cast_slice(vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-                vertex_count: vertices.len() as u32,
-            });
-        }
-    } else {
-        *slot = None;
-    }
-}
-
-/// A ghost part's GPU residency — [`ResidentPart`] minus the model
-/// uniform: the ghost draws through the camera-only layout (upstream
-/// parents ghostEntity straight under `content`, so there is no per-part
-/// pose to carry). The vertex buffer holds the ghost scene's staged
-/// bytes; the edge index buffer is the line list this part draws.
-struct ResidentGhostPart {
-    vertex_buf: wgpu::Buffer,
-    edge_buf: wgpu::Buffer,
-    edge_count: u32,
-}
-
-/// Whole-scene identity of a ghost [`PartScene`]: the part count and every
-/// part's content hash — the key that stands in for upstream's ghostID
-/// swap (ModelViewer.swift:171-174 restages the ghost when ghostID or the
-/// mesh changes). The per-part identities are already computed at staging
-/// (pin included), so this is O(parts), not O(vertices).
-fn ghost_identity(scene: &PartScene) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write_usize(scene.parts.len());
-    for part in &scene.parts {
-        h.write_u64(part.content_hash);
-    }
-    h.finish()
-}
-
-/// The depth/stencil contract shared by every pass that must not occlude —
-/// the grid/markers overlay pipeline, the compare ghost, and the
-/// translucent part pipelines: depth-TESTED so the opaque mesh orders
-/// these draws correctly, depth-write OFF so they occlude nothing after
-/// them, stencil inert (Always/Keep — the mesh pass's winding parity stays
-/// untouched for whoever reads it next).
-fn overlay_depth_stencil() -> wgpu::DepthStencilState {
-    wgpu::DepthStencilState {
-        format: wgpu::TextureFormat::Depth24PlusStencil8,
-        depth_write_enabled: false,
-        depth_compare: wgpu::CompareFunction::LessEqual,
-        stencil: wgpu::StencilState {
-            front: wgpu::StencilFaceState {
-                compare: wgpu::CompareFunction::Always,
-                fail_op: wgpu::StencilOperation::Keep,
-                depth_fail_op: wgpu::StencilOperation::Keep,
-                pass_op: wgpu::StencilOperation::Keep,
-            },
-            back: wgpu::StencilFaceState {
-                compare: wgpu::CompareFunction::Always,
-                fail_op: wgpu::StencilOperation::Keep,
-                depth_fail_op: wgpu::StencilOperation::Keep,
-                pass_op: wgpu::StencilOperation::Keep,
-            },
-            read_mask: 0xFF,
-            write_mask: 0xFF,
-        },
-        bias: Default::default(),
-    }
-}
-
 pub struct MeshPipeline {
-    pipeline: wgpu::RenderPipeline,
-    cap_pipeline: wgpu::RenderPipeline,
-    /// Wireframe hairlines (facts #44): the mesh shader at LineList
-    /// topology, drawn instead of `pipeline` when `wireframe` is set.
-    line_pipeline: wgpu::RenderPipeline,
-    /// The translucent part set's pipelines (motion playback): the mesh
-    /// and line materials with alpha blending and no depth write — drawn
-    /// after the opaque set, before the cap.
-    mesh_blend_pipeline: wgpu::RenderPipeline,
-    line_blend_pipeline: wgpu::RenderPipeline,
-    /// Unlit grid/bed/tripod overlay (facts #34/#37).
-    grid_pipeline: wgpu::RenderPipeline,
-    /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
-    /// 371-378): LINE topology over the ghost scene's edge lists.
-    ghost_pipeline: wgpu::RenderPipeline,
+    /// The render pipelines at the current sample count.
+    pipelines: Pipelines,
     /// Part-draw pipeline layout (camera + per-part model groups): the mesh
     /// and line pipelines; rebuilt pipelines keep using this object so the
     /// resident bind groups stay compatible.
@@ -795,108 +357,6 @@ pub struct MeshPipeline {
     ghost_upload_count: u32,
 }
 
-/// The output-space block substituted as `@TARGET_SPACE@` into every
-/// color-writing shader: the viewer's colors are LINEAR (staged through
-/// [`parts::srgb_to_linear`], lit in linear), and whether the pipeline must
-/// encode them on the way out depends on the target — an sRGB-tagged
-/// format stores the encode in hardware, a plain one (what iced's
-/// compositor picks under libcosmic's `web-colors` build, where
-/// `GAMMA_CORRECTION` is false and every iced primitive writes
-/// display-space values itself) does not, so the shader carries the curve.
-/// `SRGB_ENCODE` is 1.0 only in the second case, and the curve is the
-/// exact inverse of [`parts::srgb_to_linear_f`] (its Rust twin
-/// [`parts::linear_to_srgb_f`] is what the tests pin against).
-fn target_space_wgsl(target_format: wgpu::TextureFormat) -> String {
-    let flag = if target_format.is_srgb() { 0.0 } else { 1.0 };
-    format!(
-        "// Substituted from target_space_wgsl: a plain (non-sRGB) target\n\
-         // stores no encode in hardware, so the shader carries the curve.\n\
-         const SRGB_ENCODE: f32 = {flag:.1};\n\
-         fn encode_target(c: f32) -> f32 {{\n\
-         \x20   let e = select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);\n\
-         \x20   return clamp(e, 0.0, 1.0);\n\
-         }}\n\
-         fn to_target(rgb: vec3<f32>) -> vec3<f32> {{\n\
-         \x20   if (SRGB_ENCODE < 0.5) {{ return rgb; }}\n\
-         \x20   return vec3<f32>(encode_target(rgb.r), encode_target(rgb.g), encode_target(rgb.b));\n\
-         }}"
-    )
-}
-
-/// mesh.wgsl with the lighting constants substituted from [`lights`], the
-/// collision color from [`COLLISION_LINEAR`], and the output-space block
-/// for `target_format` — the one definition the shader and the shading
-/// tests share. The @NAME@ markers are not valid WGSL, so a missed
-/// substitution breaks shader compilation instead of silently rendering
-/// numbers the tests do not assert against.
-fn mesh_wgsl_source(target_format: wgpu::TextureFormat) -> String {
-    let vec3 = |p: [f32; 3]| format!("vec3<f32>({}, {}, {})", p[0], p[1], p[2]);
-    include_str!("mesh.wgsl")
-        .replace("@KEY_POS@", &vec3(lights::KEY_POS))
-        .replace("@KEY_COEFF@", &lights::key_coeff().to_string())
-        .replace("@FILL_POS@", &vec3(lights::FILL_POS))
-        .replace("@FILL_COEFF@", &lights::fill_coeff().to_string())
-        .replace("@ENV_DIR@", &vec3(lights::ENV_DIR))
-        .replace("@ENV_COEFF@", &lights::ENV_COEFF.to_string())
-        .replace("@AMBIENT@", &lights::AMBIENT.to_string())
-        .replace("@SPECULAR@", &lights::SPECULAR.to_string())
-        .replace("@SHININESS@", &lights::SHININESS.to_string())
-        .replace("@SHOULDER_START@", &lights::SHOULDER_START.to_string())
-        .replace("@COLLISION_R@", &COLLISION_LINEAR[0].to_string())
-        .replace("@COLLISION_G@", &COLLISION_LINEAR[1].to_string())
-        .replace("@COLLISION_B@", &COLLISION_LINEAR[2].to_string())
-        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
-}
-
-/// cap.wgsl with the cut-face color substituted from [`CUT_FACE_LINEAR`]
-/// and the output-space block for `target_format` — the mesh_wgsl_source
-/// pattern: the @CAP_@ markers are not valid WGSL, so a missed
-/// substitution breaks shader compilation instead of silently rendering a
-/// color the tests do not assert against.
-fn cap_wgsl_source(target_format: wgpu::TextureFormat) -> String {
-    include_str!("cap.wgsl")
-        .replace("@CAP_R@", &CUT_FACE_LINEAR[0].to_string())
-        .replace("@CAP_G@", &CUT_FACE_LINEAR[1].to_string())
-        .replace("@CAP_B@", &CUT_FACE_LINEAR[2].to_string())
-        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
-}
-
-/// grid.wgsl with the output-space block for `target_format` — the
-/// mesh_wgsl_source pattern over the unlit overlay's passthrough fragment
-/// (rgb encoded, alpha carried as staged).
-fn grid_wgsl_source(target_format: wgpu::TextureFormat) -> String {
-    include_str!("grid.wgsl").replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
-}
-
-/// ghost.wgsl with the ghost color substituted from [`markers::ORANGE`],
-/// [`GHOST_ALPHA`], and the output-space block for `target_format` — the
-/// mesh_wgsl_source pattern: the @GHOST_@ markers are not valid WGSL, so a
-/// missed substitution breaks shader compilation instead of silently
-/// rendering a color the tests do not assert against.
-fn ghost_wgsl_source(target_format: wgpu::TextureFormat) -> String {
-    include_str!("ghost.wgsl")
-        .replace("@GHOST_R@", &markers::ORANGE[0].to_string())
-        .replace("@GHOST_G@", &markers::ORANGE[1].to_string())
-        .replace("@GHOST_B@", &markers::ORANGE[2].to_string())
-        .replace("@GHOST_ALPHA@", &GHOST_ALPHA.to_string())
-        .replace("@TARGET_SPACE@", &target_space_wgsl(target_format))
-}
-
-/// The sample-count-dependent render pipelines, rebuilt as a set by
-/// [`MeshPipeline::make_pipelines`] at creation and on every
-/// [`Options::msaa`] flip in `prepare_parts`.
-struct Pipelines {
-    mesh: wgpu::RenderPipeline,
-    cap: wgpu::RenderPipeline,
-    line: wgpu::RenderPipeline,
-    /// The mesh/line pipelines' alpha-blended twins for the translucent
-    /// part set (blend on, the overlay depth stance).
-    mesh_blend: wgpu::RenderPipeline,
-    line_blend: wgpu::RenderPipeline,
-    grid: wgpu::RenderPipeline,
-    ghost: wgpu::RenderPipeline,
-}
-
 impl MeshPipeline {
     pub fn new(
         device: &wgpu::Device,
@@ -927,13 +387,12 @@ impl MeshPipeline {
     ) -> Self {
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
-            contents: bytemuck::bytes_of(&Camera {
-                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                section_axis: 1,
-                section_pos: f32::MAX,
-                section_enable: 0.0,
-                _pad: 0.0,
-            }),
+            contents: bytemuck::bytes_of(&CameraUniform::new(
+                &Camera {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                },
+                None,
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -984,7 +443,7 @@ impl MeshPipeline {
             immediate_size: 0,
             label: None,
         });
-        let pipelines = Self::make_pipelines(
+        let pipelines = pipelines::build(
             device,
             target_format,
             sample_count,
@@ -998,16 +457,10 @@ impl MeshPipeline {
             contents: bytemuck::cast_slice(&[CapVertex { pos: [0.0; 3] }; 4]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        let blit = (sample_count > 1).then(|| Self::make_blit(device, target_format));
-        let (depth_tex, depth) = Self::make_depth(device, (1, 1), sample_count);
+        let blit = (sample_count > 1).then(|| pipelines::blit(device, target_format));
+        let (depth_tex, depth) = targets::depth(device, (1, 1), sample_count);
         Self {
-            pipeline: pipelines.mesh,
-            cap_pipeline: pipelines.cap,
-            line_pipeline: pipelines.line,
-            mesh_blend_pipeline: pipelines.mesh_blend,
-            line_blend_pipeline: pipelines.line_blend,
-            grid_pipeline: pipelines.grid,
-            ghost_pipeline: pipelines.ghost,
+            pipelines,
             part_pass_layout,
             camera_pass_layout,
             bind_group,
@@ -1036,456 +489,6 @@ impl MeshPipeline {
         }
     }
 
-    /// The six render pipelines at `sample_count`, built against the SAME
-    /// pipeline layout objects the resident bind groups reference — a
-    /// rebuilt pipeline stays bind-compatible without re-staging anything.
-    fn make_pipelines(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-        sample_count: u32,
-        part_layout: &wgpu::PipelineLayout,
-        camera_layout: &wgpu::PipelineLayout,
-    ) -> Pipelines {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mesh.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(mesh_wgsl_source(target_format).into()),
-        });
-        let vlayout = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 12,
-                shader_location: 1,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 24,
-                shader_location: 2,
-            },
-        ];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                // No culling: back faces must rasterize or their decrement
-                // never happens and the winding parity below breaks.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                // Winding parity for the section cap: every rasterized
-                // fragment flips the stencil (front +1, back -1), including
-                // depth-occluded ones, so after the pass stencil != 0 exactly
-                // where a ray from the camera ends inside the sectioned
-                // solid — the cut face the cap quad fills. Wrap (not Clamp)
-                // keeps 0-1 = 255 in the parity; fragments discarded by the
-                // section plane never reach the stencil op, which is what
-                // clips the count at the cut.
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::IncrementWrap,
-                        pass_op: wgpu::StencilOperation::IncrementWrap,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::DecrementWrap,
-                        pass_op: wgpu::StencilOperation::DecrementWrap,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The cap quad fills the cut face where the mesh pass left winding
-        // parity. Its stencil test is read-only (all ops Keep) so the mesh's
-        // inc/dec stays in the attachment; depth is read-only too (the quad
-        // must not occlude anything drawn after it), and it wins LessEqual
-        // only where the surviving mesh lies beyond the section plane.
-        // Camera-only (camera_layout): the cap has no per-part transform.
-        let cap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cap.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(cap_wgsl_source(target_format).into()),
-        });
-        let cap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("section cap"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &cap_shader,
-                entry_point: Some("vs_cap"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<CapVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &cap_shader,
-                entry_point: Some("fs_cap"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            // The quad is 4 Z-ordered vertices drawn 0..4 (see `cap_quad`) —
-            // a STRIP, so both halves rasterize. The topology must say so:
-            // PrimitiveState's TriangleList default renders only the first
-            // 3 of the 4 vertices, HALF the quad, with the cut-face center
-            // landing on the unrendered diagonal (the cap-color test's
-            // sample point; through M3 this half-quad was invisible — the
-            // red-pixel tests counted area, not shape).
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::NotEqual,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::NotEqual,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // Wireframe hairlines (facts #44): the SAME mesh shader, material,
-        // and opacity as fill — only the topology (LineList; wgpu/WebGPU
-        // fix line width at 1, so no wide lines and no tint) and culling
-        // change. Depth-tested like the fill so hidden edges stay hidden.
-        // Stencil ops all Keep: winding parity is a filled-rasterization
-        // trick, and the cap it feeds is disabled in wireframe anyway.
-        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe lines"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::Always,
-                        fail_op: wgpu::StencilOperation::Keep,
-                        depth_fail_op: wgpu::StencilOperation::Keep,
-                        pass_op: wgpu::StencilOperation::Keep,
-                    },
-                    read_mask: 0xFF,
-                    write_mask: 0xFF,
-                },
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The translucent part set (motion playback, ModelViewer.swift:410):
-        // the mesh material with ALPHA_BLENDING and the overlay depth stance
-        // ([`overlay_depth_stencil`]) — depth-TESTED so the opaque set orders
-        // correctly, never WRITING depth so a translucent part occludes
-        // nothing after it. Stencil all Keep through that shared state: the
-        // blend pipelines never participate in section winding parity —
-        // section ∩ animation is empty by mutual exclusion (the pane's
-        // isAnimating excludes sectioning) — stated here rather than silently
-        // inheriting the mesh's inc/dec ops that rely on it. No culling,
-        // like the mesh (upstream's translucent material sets faceCulling
-        // .none too).
-        let mesh_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh blend"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The same swap on the wireframe hairlines: a translucent part in
-        // wireframe mode draws its edge list through this pipeline — fs_main
-        // applies model.alpha identically to fill.
-        let line_blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe lines blend"),
-            layout: Some(part_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 36,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // Grid / bed / tripod overlay (facts #34/#37): unlit vertex colors,
-        // alpha-blended, no culling. Depth-tested so the model occludes
-        // the overlay, but NO depth write — an overlay must not occlude
-        // ([`overlay_depth_stencil`]).
-        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("grid.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(grid_wgsl_source(target_format).into()),
-        });
-        let grid_vlayout = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 12,
-                shader_location: 1,
-            },
-        ];
-        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("grid overlay"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs_grid"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GridVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &grid_vlayout,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs_grid"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // The compare ghost (ModelViewer.swift:371-378): unlit systemOrange
-        // wireframe at 0.6 — LINE topology like the wireframe pass but its
-        // OWN unlit shader and blend (upstream's ghost is a different
-        // material than the shaded wireframe: UnlitMaterial + transparent
-        // blending). Camera-only (camera_layout): upstream parents
-        // ghostEntity straight under `content`, so the ghost carries no
-        // per-part pose. Depth ON / write OFF — the grid overlay contract:
-        // the mesh occludes the ghost, the ghost occludes nothing after it.
-        let ghost_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ghost.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(ghost_wgsl_source(target_format).into()),
-        });
-        let ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("compare ghost"),
-            layout: Some(camera_layout),
-            vertex: wgpu::VertexState {
-                module: &ghost_shader,
-                entry_point: Some("vs_ghost"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    // the staged part vertex (pos/normal/color, 36 B) with
-                    // only the position attribute read
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &ghost_shader,
-                entry_point: Some("fs_ghost"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(overlay_depth_stencil()),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        Pipelines {
-            mesh: pipeline,
-            cap: cap_pipeline,
-            line: line_pipeline,
-            mesh_blend: mesh_blend_pipeline,
-            line_blend: line_blend_pipeline,
-            grid: grid_pipeline,
-            ghost: ghost_pipeline,
-        }
-    }
-
     /// The msaa toggle's in-place rebuild (iced's Storage owns one
     /// [`MeshPipeline`] per type and cannot hand out replacements):
     /// recreate every render pipeline and owned attachment at `count`,
@@ -1493,190 +496,29 @@ impl MeshPipeline {
     /// pipelines are built against the kept layout objects, so the
     /// resident bind groups stay valid.
     fn set_msaa(&mut self, device: &wgpu::Device, count: u32) {
-        let pipelines = Self::make_pipelines(
+        self.pipelines = pipelines::build(
             device,
             self.format,
             count,
             &self.part_pass_layout,
             &self.camera_pass_layout,
         );
-        self.pipeline = pipelines.mesh;
-        self.cap_pipeline = pipelines.cap;
-        self.line_pipeline = pipelines.line;
-        self.mesh_blend_pipeline = pipelines.mesh_blend;
-        self.line_blend_pipeline = pipelines.line_blend;
-        self.grid_pipeline = pipelines.grid;
-        self.ghost_pipeline = pipelines.ghost;
-        self.blit = (count > 1).then(|| Self::make_blit(device, self.format));
-        let (depth_tex, depth) = Self::make_depth(device, self.size, count);
+        self.blit = (count > 1).then(|| pipelines::blit(device, self.format));
+        self.sample_count = count;
+        self.rebuild_attachments(device, self.size);
+    }
+
+    /// Recreate the owned depth/stencil and (at count > 1) msaa
+    /// attachments at `size` and the current sample count.
+    fn rebuild_attachments(&mut self, device: &wgpu::Device, size: (u32, u32)) {
+        let (depth_tex, depth) = targets::depth(device, size, self.sample_count);
         self.depth_tex = depth_tex;
         self.depth = depth;
-        self.msaa = match &self.blit {
-            Some(blit) => Some(Self::make_msaa_targets(
-                device,
-                blit,
-                self.format,
-                count,
-                self.size,
-            )),
-            None => None,
-        };
-        self.sample_count = count;
-    }
-
-    /// Blit pipeline for the msaa path: fullscreen triangle sampling the
-    /// resolved intermediate, drawn over the destination (`LoadOp::Load` +
-    /// premultiplied alpha, single-sample).
-    fn make_blit(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Blit {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("blit.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-            label: Some("blit bindings layout"),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            bind_group_layouts: &[&layout],
-            immediate_size: 0,
-            label: None,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("msaa blit"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_blit"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_blit"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        // nearest: a 1:1 copy — the blit must not blur the resolve output
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("blit sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        Blit {
-            pipeline,
-            sampler,
-            layout,
-        }
-    }
-
-    fn make_msaa_targets(
-        device: &wgpu::Device,
-        blit: &Blit,
-        format: wgpu::TextureFormat,
-        sample_count: u32,
-        size: (u32, u32),
-    ) -> MsaaTargets {
-        let extent = wgpu::Extent3d {
-            width: size.0.max(1),
-            height: size.1.max(1),
-            depth_or_array_layers: 1,
-        };
-        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewer msaa color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let resolve_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewer msaa resolve"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let color = color_tex.create_view(&Default::default());
-        let resolve = resolve_tex.create_view(&Default::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &blit.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&blit.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&resolve),
-                },
-            ],
-            label: Some("blit bindings"),
-        });
-        MsaaTargets {
-            color,
-            resolve,
-            bind_group,
-        }
-    }
-
-    fn make_depth(
-        device: &wgpu::Device,
-        size: (u32, u32),
-        sample_count: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let t = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewer depth+stencil"),
-            size: wgpu::Extent3d {
-                width: size.0.max(1),
-                height: size.1.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24PlusStencil8,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let v = t.create_view(&Default::default());
-        (t, v)
+        self.msaa = self
+            .blit
+            .as_ref()
+            .map(|blit| targets::msaa(device, blit, self.format, self.sample_count, size));
+        self.size = size;
     }
 
     /// Per-frame upload: camera uniform, depth-texture resize to the
@@ -1725,21 +567,13 @@ impl MeshPipeline {
             self.set_msaa(device, options.msaa);
         }
         if self.size != size {
-            let (t, v) = Self::make_depth(device, size, self.sample_count);
-            self.depth_tex = t;
-            self.depth = v;
-            if let Some(blit) = &self.blit {
-                self.msaa = Some(Self::make_msaa_targets(
-                    device,
-                    blit,
-                    self.format,
-                    self.sample_count,
-                    size,
-                ));
-            }
-            self.size = size;
+            self.rebuild_attachments(device, size);
         }
-        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(camera));
+        queue.write_buffer(
+            &self.uniform_buf,
+            0,
+            bytemuck::bytes_of(&CameraUniform::new(camera, frame.section.as_ref())),
+        );
         // upload-once: slot-keyed by part index. A resident part whose
         // content identity still matches is skipped whole; a changed or new
         // part gets a fresh exact-size vertex buffer (its allocation and
@@ -1846,9 +680,10 @@ impl MeshPipeline {
         // The cap is this port's cut-face stand-in, and upstream disables
         // the interior shell in wireframe (facts #45); line rasterization
         // breaks winding parity anyway
-        self.draw_cap = camera.section_enable > 0.5 && !options.wireframe;
-        if self.draw_cap {
-            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(frame)));
+        let cap = frame.section.filter(|_| !options.wireframe);
+        self.draw_cap = cap.is_some();
+        if let Some(plane) = &cap {
+            queue.write_buffer(&self.cap_buf, 0, bytemuck::cast_slice(&cap_quad(plane)));
         }
         self.wireframe = options.wireframe;
         // Overlay residency — the same content-identity contract as the
@@ -1910,8 +745,8 @@ impl MeshPipeline {
     /// Vertex uploads since pipeline creation (test visibility): counts
     /// vertex uploads only — the camera, cap, and per-part model uniforms
     /// legitimately write every frame and never count.
-    
-#[cfg(test)]
+
+    #[cfg(test)]
     pub(crate) fn upload_count_for_tests(&self) -> u32 {
         self.upload_count
     }
@@ -2096,7 +931,7 @@ impl MeshPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         if self.wireframe {
             // facts #44: same material and opacity as fill, hairline list
-            pass.set_pipeline(&self.line_pipeline);
+            pass.set_pipeline(&self.pipelines.line);
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2105,7 +940,7 @@ impl MeshPipeline {
                 pass.draw_indexed(0..resident.edge_count, 0, 0..1);
             }
         } else {
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.pipelines.mesh);
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2119,7 +954,7 @@ impl MeshPipeline {
         // (opaque by partition), so the flat-red branch never blends.
         if !self.drawn_translucent.is_empty() {
             if self.wireframe {
-                pass.set_pipeline(&self.line_blend_pipeline);
+                pass.set_pipeline(&self.pipelines.line_blend);
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2128,7 +963,7 @@ impl MeshPipeline {
                     pass.draw_indexed(0..resident.edge_count, 0, 0..1);
                 }
             } else {
-                pass.set_pipeline(&self.mesh_blend_pipeline);
+                pass.set_pipeline(&self.pipelines.mesh_blend);
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
@@ -2141,7 +976,7 @@ impl MeshPipeline {
             // Same pass, after the mesh: the stencil attachment already holds
             // the parity the mesh's inc/dec left, so the quad only survives
             // where the cut opened the solid.
-            pass.set_pipeline(&self.cap_pipeline);
+            pass.set_pipeline(&self.pipelines.cap);
             pass.set_stencil_reference(0);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.cap_buf.slice(..));
@@ -2154,7 +989,7 @@ impl MeshPipeline {
         // the wireframe toggle (facts #44/#45 disable the interior shell,
         // not the ghost).
         if !self.ghost_residents.is_empty() {
-            pass.set_pipeline(&self.ghost_pipeline);
+            pass.set_pipeline(&self.pipelines.ghost);
             pass.set_bind_group(0, &self.bind_group, &[]);
             for resident in &self.ghost_residents {
                 pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
@@ -2170,7 +1005,7 @@ impl MeshPipeline {
             .into_iter()
             .flatten()
         {
-            pass.set_pipeline(&self.grid_pipeline);
+            pass.set_pipeline(&self.pipelines.grid);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, overlay.vertex_buf.slice(..));
             pass.draw(0..overlay.vertex_count, 0..1);
@@ -2181,150 +1016,7 @@ impl MeshPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use engine::parsing::stl::parse_stl;
-    use engine::parsing::threemf::parse_3mf;
-
-    fn fixture(rel: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../fixtures/golden")
-            .join(rel)
-    }
-
-    fn golden_stl_parts() -> Vec<engine::parsing::Part> {
-        let bytes = std::fs::read(fixture("model.stl"))
-            .unwrap_or_else(|e| panic!("read fixture model.stl: {e}"));
-        vec![parse_stl(&bytes).expect("golden model.stl parses")]
-    }
-
-    fn golden_3mf_parts() -> Vec<engine::parsing::Part> {
-        let bytes = std::fs::read(fixture("model.3mf"))
-            .unwrap_or_else(|e| panic!("read fixture model.3mf: {e}"));
-        parse_3mf(&bytes).expect("golden model.3mf parses: 2 parts x 12 triangles")
-    }
-
-    #[test]
-    fn from_parts_remaps_and_pins_floor_at_origin() {
-        let part = engine::parsing::Part {
-            name: "tri".into(),
-            positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-            triangle_colors: vec![None],
-        };
-        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
-        // upstream sceneVector (x, z, -y) maps the MODEL triangle to
-        // x[1,7] y[3,9] z[-8,-2]; the pin then translates by
-        // (-center.x, -min.y, -center.z) = (-4, -3, +5): floor at scene
-        // y=0, x/z centered (ModelViewer.swift:167-168)
-        assert_eq!(scene.parts[0].vertices[0].pos, [-3.0, 0.0, 3.0]);
-        assert_eq!(scene.parts[0].vertices[2].pos, [3.0, 6.0, -3.0]);
-        // neutral painted, per-part aabb is the pinned triangle's
-        assert_eq!(scene.parts[0].vertices[0].color, NEUTRAL);
-        assert_eq!(scene.parts[0].aabb_min, [-3.0, 0.0, -3.0]);
-        assert_eq!(scene.parts[0].aabb_max, [3.0, 6.0, 3.0]);
-        // the scene aabb is the pinned union: y from 0, x/z symmetric
-        assert_eq!(scene.aabb_min, [-3.0, 0.0, -3.0]);
-        assert_eq!(scene.aabb_max, [3.0, 6.0, 3.0]);
-    }
-
-    #[test]
-    fn golden_stl_scene_is_24_triangles_inside_its_aabb() {
-        let scene = PartScene::from_parts(&golden_stl_parts(), NEUTRAL);
-        assert_eq!(scene.parts.len(), 1);
-        assert_eq!(scene.parts[0].vertices.len(), 24 * 3);
-        for v in &scene.parts[0].vertices {
-            for a in 0..3 {
-                assert!(v.pos[a] >= scene.aabb_min[a] - 1e-6);
-                assert!(v.pos[a] <= scene.aabb_max[a] + 1e-6);
-            }
-        }
-        for a in 0..3 {
-            assert!(scene.aabb_max[a] > scene.aabb_min[a]);
-        }
-    }
-
-    #[test]
-    fn golden_3mf_scene_is_two_parts_of_twelve_triangles() {
-        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
-        assert_eq!(scene.parts.len(), 2, "one GpuPart per engine part");
-        for part in &scene.parts {
-            assert_eq!(part.vertices.len(), 12 * 3);
-            for a in 0..3 {
-                assert!(part.aabb_max[a] > part.aabb_min[a]);
-                assert!(part.aabb_min[a] >= scene.aabb_min[a] - 1e-6);
-                assert!(part.aabb_max[a] <= scene.aabb_max[a] + 1e-6);
-            }
-        }
-        // fixture: two boxes, base 60x60 z in [-4,4] and lid 40x40 z in
-        // [12,22] — MODEL x/y/z spans 60/60/26 become SCENE x/y/z 60/26/60
-        let span = |a: usize| scene.aabb_max[a] - scene.aabb_min[a];
-        assert!((span(0) - 60.0).abs() < 1e-3, "scene x span {}", span(0));
-        assert!((span(1) - 26.0).abs() < 1e-3, "scene y span {}", span(1));
-        assert!((span(2) - 60.0).abs() < 1e-3, "scene z span {}", span(2));
-        // post-pin the union aabb itself: MODEL floor (z=-4) at scene y=0,
-        // x/z centered on the scene origin, spans unchanged
-        let pinned = [
-            (scene.aabb_min[0], scene.aabb_max[0], -30.0, 30.0),
-            (scene.aabb_min[1], scene.aabb_max[1], 0.0, 26.0),
-            (scene.aabb_min[2], scene.aabb_max[2], -30.0, 30.0),
-        ];
-        for (a, &(mn, mx, emn, emx)) in pinned.iter().enumerate() {
-            assert!(
-                (mn - emn).abs() < 1e-3 && (mx - emx).abs() < 1e-3,
-                "pinned aabb[{a}] [{mn}, {mx}] vs [{emn}, {emx}]"
-            );
-        }
-    }
-
-    #[test]
-    fn frame_radius_is_diagonal_half() {
-        // the long-thin regression: max-extent/2 would frame at 5.0, the
-        // diagonal at √102/2 ≈ 5.05 (facts #1: ModelViewer.swift:328-337)
-        let (min, max) = ([0.0, 0.0, 0.0], [10.0, 1.0, 1.0]);
-        let r = f32::sqrt(102.0) / 2.0;
-        assert!((camera::framing_radius(min, max) - r).abs() < 1e-5);
-        let (target, distance) = camera::frame(min, max);
-        // aspect-free: half the height; x/z zero assumes the pinned scene
-        assert_eq!(target, [0.0, 0.5, 0.0]);
-        let expected = r / f32::sin(17.5f32.to_radians()) * 1.15;
-        assert!(
-            (distance - expected).abs() < 1e-3,
-            "distance {distance} vs r/sin(17.5°)·1.15 = {expected}"
-        );
-        // the radius floors at 1 so a degenerate model still frames
-        assert_eq!(camera::framing_radius([0.0; 3], [0.0; 3]), 1.0);
-    }
-
-    #[test]
-    fn zoom_clamps_and_presets() {
-        // zoom: distance × factor clamped to [0.1r, 200r] (facts #19)
-        assert_eq!(camera::zoomed(50.0, 0.5, 10.0), 25.0);
-        assert_eq!(camera::zoomed(50.0, 0.001, 10.0), 1.0, "floor 0.1r");
-        assert_eq!(camera::zoomed(50.0, 100.0, 10.0), 2000.0, "ceiling 200r");
-        // pitch clamp is upstream's exact constant, not π/2 − ε (facts #18)
-        assert_eq!(camera::MAX_PITCH, 1.5607);
-        assert!(camera::MAX_PITCH < std::f32::consts::FRAC_PI_2);
-        // drag: yaw -= dx·0.008, pitch += dy·0.008, clamped at ±MAX_PITCH
-        let (yaw, pitch) = camera::orbit_drag(0.3, 0.2, 100.0, 25.0);
-        assert!((yaw + 0.5).abs() < 1e-6, "yaw {yaw}");
-        assert!((pitch - 0.4).abs() < 1e-6, "pitch {pitch}");
-        assert_eq!(camera::orbit_drag(0.0, 1.5, 0.0, 1000.0).1, 1.5607);
-        assert_eq!(camera::orbit_drag(0.0, -1.5, 0.0, -1000.0).1, -1.5607);
-        // presets (facts #25): top reuses the maximumPitch constant
-        assert_eq!(
-            camera::Preset::Iso.yaw_pitch(),
-            (std::f32::consts::FRAC_PI_4, 0.6)
-        );
-        assert_eq!(camera::Preset::Front.yaw_pitch(), (0.0, 0.0));
-        assert_eq!(camera::Preset::Top.yaw_pitch(), (0.0, camera::MAX_PITCH));
-        assert_eq!(
-            camera::Preset::Right.yaw_pitch(),
-            (std::f32::consts::FRAC_PI_2, 0.0)
-        );
-        // pan: world units per view point at `distance` (facts #22)
-        let upp = camera::pan_units_per_point(100.0, 500.0);
-        let expected = 2.0 * 100.0 * f32::tan(17.5f32.to_radians()) / 500.0;
-        assert!((upp - expected).abs() < 1e-6, "{upp} vs {expected}");
-    }
+    use crate::render::test_support::{cube_part, golden_3mf_parts, golden_stl_parts};
 
     /// The default must be the single-sample count, not `u32::default()`
     /// (0): that differs from a fresh pipeline's resident 1 and would
@@ -2336,168 +1028,8 @@ mod tests {
         assert!(!Options::default().wireframe);
     }
 
-    /// pan (facts #22): the target moves by (-right·dx + up·dy)·units/pt
-    /// over the camera's own scene axes — verified against the look-at
-    /// basis glam builds for the same pose (rows 0/1 of the view matrix's
-    /// rotation block are the camera's right/up in world space). Dragging
-    /// right (dx > 0) moves the target LEFT, so the model follows the
-    /// cursor; a non-positive view height leaves the target alone, as the
-    /// upstream guard does.
-    #[test]
-    fn pan_matches_lookat_basis() {
-        let target = [3.0, -4.0, 5.0];
-        let (yaw, pitch, distance) = (0.7f32, 0.3f32, 120.0f32);
-        let (dx, dy, view_height) = (25.0f32, -10.0f32, 500.0f32);
-        let panned = camera::panned(target, yaw, pitch, distance, view_height, dx, dy);
-        let at = glam::Vec3::from_array(target);
-        let back = camera::eye_dir(yaw, pitch);
-        let view = glam::camera::rh::view::look_at_mat4(at + back * distance, at, glam::Vec3::Y);
-        // col-major glam: matrix rows 0/1 are the camera right/up axes
-        let right = glam::Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
-        let up = glam::Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
-        let upp = camera::pan_units_per_point(distance, view_height);
-        let expected = at + (right * -dx + up * dy) * upp;
-        for a in 0..3 {
-            assert!(
-                (panned[a] - expected[a]).abs() < 1e-4,
-                "panned {panned:?} vs look-at basis {expected:?}"
-            );
-        }
-        // the model follows the cursor: dx > 0 shifts the target against
-        // the camera's right axis
-        assert!(glam::Vec3::from_array(panned).dot(right) < at.dot(right));
-        assert_eq!(
-            camera::panned(target, yaw, pitch, distance, 0.0, dx, dy),
-            target,
-            "zero view height must not pan"
-        );
-    }
-
-    /// placeCamera's eye offset on its defining poses: yaw 0 looks from
-    /// +Z, yaw π/2 from +X, pitch π/2 from straight above; and every pose
-    /// is a unit vector, so `distance` scales it to the true eye distance.
-    #[test]
-    fn eye_dir_is_place_cameras_offset() {
-        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
-        let near = |a: glam::Vec3, b: [f32; 3]| (a - glam::Vec3::from_array(b)).length() < 1e-6;
-        assert!(near(camera::eye_dir(0.0, 0.0), [0.0, 0.0, 1.0]));
-        assert!(near(camera::eye_dir(FRAC_PI_2, 0.0), [1.0, 0.0, 0.0]));
-        assert!(near(camera::eye_dir(0.0, FRAC_PI_2), [0.0, 1.0, 0.0]));
-        let (c, s) = (0.6f32.cos(), 0.6f32.sin());
-        let h = std::f32::consts::FRAC_1_SQRT_2;
-        assert!(near(camera::eye_dir(FRAC_PI_4, 0.6), [c * h, s, c * h]));
-        for &(yaw, pitch) in &[(0.7f32, 0.3f32), (-2.5, camera::MAX_PITCH), (3.0, -1.2)] {
-            assert!((camera::eye_dir(yaw, pitch).length() - 1.0).abs() < 1e-6);
-        }
-        assert_eq!(
-            lights::to_eye(0.7, 0.3),
-            camera::eye_dir(0.7, 0.3).to_array(),
-            "the shading's view axis is the camera's eye offset"
-        );
-    }
-
-    /// The ported orbit test: the view_proj is exactly the Swift
-    /// placeCamera formula (facts #1: ModelViewer.swift:339-342), the
-    /// orbit target sits at clip-space (0, 0) for every pose, the aspect
-    /// argument is load-bearing, and extreme poses stay finite.
-    #[test]
-    fn orbit_view_proj_matches_formula() {
-        // arbitrary off-center target: the formula must not assume pinning
-        let target = [3.0, -4.0, 5.0];
-        let aspect = 800.0 / 600.0;
-        for &(yaw, pitch, distance) in &[
-            (0.7f32, 0.3f32, 120.0f32),
-            (0.0, 0.0, 1.0),
-            (-2.5, camera::MAX_PITCH, 90_000.0),
-            (std::f32::consts::PI, -camera::MAX_PITCH, 250.0),
-        ] {
-            let vp = camera::orbit(distance, yaw, pitch, target, aspect);
-            let dir = camera::eye_dir(yaw, pitch);
-            let at = glam::Vec3::from_array(target);
-            let view = glam::camera::rh::view::look_at_mat4(at + dir * distance, at, glam::Vec3::Y);
-            let proj = glam::camera::rh::proj::directx::perspective(
-                35f32.to_radians(),
-                aspect,
-                1.0,
-                100_000.0,
-            );
-            let expected = (proj * view).to_cols_array_2d();
-            for (row, erow) in vp.iter().zip(expected.iter()) {
-                for (a, b) in row.iter().zip(erow.iter()) {
-                    assert!((a - b).abs() < 1e-4, "{vp:?} vs {expected:?}");
-                }
-            }
-            // the target is the look-at point: it projects to (0, 0)
-            let clip = glam::Mat4::from_cols_array_2d(&vp)
-                * glam::Vec4::new(target[0], target[1], target[2], 1.0);
-            assert!(clip.x.abs() < 1e-3 && clip.y.abs() < 1e-3, "{clip:?}");
-            for row in vp {
-                for x in row {
-                    assert!(x.is_finite());
-                }
-            }
-            // aspect is load-bearing: a 16:9 projection differs from 4:3 —
-            // the hardcode this task kills would render both identically
-            assert_ne!(vp, camera::orbit(distance, yaw, pitch, target, 16.0 / 9.0));
-        }
-    }
-
-    /// The Frame every upload-once test shares: default options, no overlay
-    /// or markers, effective_aabb at the staged scene's own (T10 replaces
-    /// that input).
-    /// The pick ray aims where the clicked pixel looks: center exactly along
-    /// the view axis at the target, the screen edges tilting with the
-    /// camera's own right/up axes. The y-flip (facts #29) is the load-bearing
-    /// convention here — iced's cursor is top-down, upstream's AppKit point
-    /// is bottom-up, so `h − cy` must happen BEFORE the NDC mapping or every
-    /// vertical drag picks mirrored.
-    #[test]
-    fn pick_ray_center_points_at_the_target() {
-        // yaw 0, pitch 0: eye = target + dist*(0,0,1); center pixel aims at f
-        let (o, d) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (400.0, 300.0),
-            (800.0, 600.0),
-        );
-        assert!(
-            (o[0] - 0.0).abs() < 1e-4 && (o[1] - 5.0).abs() < 1e-4 && (o[2] - 100.0).abs() < 1e-4
-        );
-        let dot = glam::Vec3::from_array(d).dot(glam::Vec3::new(0.0, 0.0, -1.0));
-        assert!(dot > 0.999, "center ray along the view axis: {d:?}");
-        // right edge (x=799) tilts toward +x; BOTTOM-left corner tilts -x -y
-        // (iced y is top-down: cursor y 599 flips to AppKit y 1 = bottom,
-        // which aims DOWN in any bottom-up convention)
-        let (_, d2) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (799.0, 300.0),
-            (800.0, 600.0),
-        );
-        assert!(d2[0] > 0.1, "right edge aims right: {d2:?}");
-        let (_, d3) = camera::pick_ray(
-            100.0,
-            0.0,
-            0.0,
-            [0.0, 5.0, 0.0],
-            4.0 / 3.0,
-            (0.0, 599.0),
-            (800.0, 600.0),
-        );
-        assert!(
-            d3[0] < 0.0 && d3[1] < 0.0,
-            "bottom-left aims left and DOWN (iced bottom = AppKit bottom after the flip): {d3:?}"
-        );
-    }
-
-    /// The Frame every upload-once test shares: default options, no overlay,
-    /// effective_aabb at the staged scene's own (T10 replaces that input).
+    /// The Frame every upload-once test shares: default options, no
+    /// overlay, no section.
     fn frame<'a>(
         camera: &'a Camera,
         scene: &'a PartScene,
@@ -2520,7 +1052,7 @@ mod tests {
             scene,
             poses,
             appearances,
-            effective_aabb: (scene.aabb_min, scene.aabb_max),
+            section: None,
             grid: None,
             markers: None,
             ghost,
@@ -2557,8 +1089,14 @@ mod tests {
         );
         assert_eq!((u1, a1), (2, 2), "one upload+alloc per part on residency");
         // second frame, same scene, MOVED camera: mesh bytes must not move
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
+        let framed = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
+        let moved = camera::Orbit {
+            yaw: 0.9,
+            pitch: 0.4,
+            distance: framed.distance * 2.0,
+            ..framed
+        }
+        .camera(4.0 / 3.0);
         pipeline.prepare_parts(
             device,
             queue,
@@ -2656,7 +1194,7 @@ mod tests {
         assert_eq!(pipeline.alloc_count_for_tests(), a1 + 1);
     }
 
-    /// T1-review carry, resolved: the content hash covers the STAGED vertex
+    /// The content hash covers the STAGED vertex
     /// bytes and `from_parts` paints `neutral` into the color field, so two
     /// scenes differing only in neutral already differ in staged content —
     /// no separate hash input is needed. This test is the proof, and the
@@ -2693,177 +1231,6 @@ mod tests {
             u1 + 1,
             "a neutral change must reupload — stale colors otherwise"
         );
-    }
-
-    /// The shading model reproduces upstream's box: every visible face of
-    /// both golden parts (3MF colors #D62629 lid, #1F78B5 base) at the iso
-    /// preset, against shots/upstream/project-model.png converted from its
-    /// display profile to sRGB. Each reference is the value the face
-    /// presents as a whole: the polygon mean for the tops, and the flat
-    /// plateau that covers most of each side (a side's mean is pulled up
-    /// by a reflection band along the base's front edge). Five faces must
-    /// land within 7 units per channel. The base top is an in-face IBL
-    /// gradient a flat-shaded face cannot follow — left corner 86,158,212,
-    /// right corner 64,147,205, mean 74,152,208 — and must land inside
-    /// that measured span, within 3.
-    #[test]
-    fn shade_matches_the_upstream_iso_faces() {
-        let lin = |c: [u8; 3]| c.map(parts::srgb_to_linear);
-        let (lid, base) = (lin([214, 38, 41]), lin([31, 120, 181]));
-        let to_eye = lights::to_eye(std::f32::consts::FRAC_PI_4, 0.6);
-        let (top, left, right) = ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
-        let srgb = |color: [f32; 3], normal: [f32; 3]| {
-            lights::shade(color, normal, to_eye)
-                .map(|c| (parts::linear_to_srgb_f(c) * 255.0).round() as i32)
-        };
-        for (color, normal, upstream) in [
-            (lid, top, [238, 94, 94]),
-            (lid, left, [217, 53, 54]),
-            (lid, right, [161, 32, 34]),
-            (base, left, [48, 130, 187]),
-            (base, right, [33, 93, 138]),
-        ] {
-            let shaded = srgb(color, normal);
-            for i in 0..3 {
-                assert!(
-                    (shaded[i] - upstream[i]).abs() <= 7,
-                    "normal {normal:?}: {shaded:?} vs upstream {upstream:?}"
-                );
-            }
-        }
-        let (lo, hi) = ([64, 147, 205], [86, 158, 212]);
-        let shaded = srgb(base, top);
-        for i in 0..3 {
-            assert!(
-                shaded[i] >= lo[i] - 3 && shaded[i] <= hi[i] + 3,
-                "base top {shaded:?} outside upstream's gradient {lo:?}..{hi:?}"
-            );
-        }
-    }
-
-    /// The sRGB EOTF is the exact IEC piecewise, not a single power: the
-    /// linear segment below 0.04045 and the 2.4 segment above differ enough
-    /// that a 2.2-only conversion is visibly wrong on dark channels.
-    #[test]
-    fn srgb_conversion_table() {
-        let f = parts::srgb_to_linear;
-        assert_eq!(f(0), 0.0);
-        assert!((f(255) - 1.0).abs() < 1e-6);
-        assert!((f(128) - 0.216).abs() < 5e-4, "128 -> {}", f(128));
-        // the dark discriminator — the base part's own blue R channel: a
-        // 2.2 power reads 0.0097 here, 29% low, and fails this assert
-        assert!((f(31) - 0.0137).abs() < 2e-4, "31 -> {}", f(31));
-        // the linear segment: 10/255 = 0.0392 stays below 0.04045, so
-        // /12.92 — a power-only formula reads 0.0008, 3.8x low
-        assert!((f(10) - 0.003035).abs() < 2e-5, "10 -> {}", f(10));
-        // continuity across the segment boundary (10 linear, 11 power)
-        assert!(f(10) < f(11) && f(11) < f(12));
-    }
-
-    /// Per-triangle colors stage per corner: `Some` goes through the sRGB
-    /// EOTF onto all 3 corners, `None` paints the neutral. Pinned against
-    /// the golden fixture's actual bytes so a parse regression cannot pass.
-    #[test]
-    fn colored_triangles_paint_linear_corners() {
-        let parts = golden_3mf_parts();
-        // fixture truth (model.3mf basematerials): base #1F78B5, lid #D62629
-        assert_eq!(parts[0].name, "base");
-        assert_eq!(parts[0].triangle_colors, vec![Some([31, 120, 181]); 12]);
-        assert_eq!(parts[1].name, "lid");
-        assert_eq!(parts[1].triangle_colors, vec![Some([214, 38, 41]); 12]);
-        let scene = PartScene::from_parts(&parts, NEUTRAL);
-        let linear = |c: [u8; 3]| {
-            [
-                parts::srgb_to_linear(c[0]),
-                parts::srgb_to_linear(c[1]),
-                parts::srgb_to_linear(c[2]),
-            ]
-        };
-        let (blue, red) = (linear([31, 120, 181]), linear([214, 38, 41]));
-        assert!(blue[0] < 0.02 && blue[2] > 0.45, "dark-R blue: {blue:?}");
-        for v in &scene.parts[0].vertices {
-            assert_eq!(v.color, blue, "base corner painted its triangle's color");
-        }
-        for v in &scene.parts[1].vertices {
-            assert_eq!(v.color, red, "lid corner painted its triangle's color");
-        }
-        // mixed part: Some -> linear red exactly; None -> neutral
-        let mixed = engine::parsing::Part {
-            name: "mixed".into(),
-            positions: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 1.0],
-                [0.0, 1.0, 1.0],
-            ],
-            triangle_colors: vec![Some([255, 0, 0]), None],
-        };
-        let scene = PartScene::from_parts(std::slice::from_ref(&mixed), NEUTRAL);
-        for v in &scene.parts[0].vertices[0..3] {
-            assert_eq!(
-                v.color,
-                [1.0, 0.0, 0.0],
-                "Some([255,0,0]) is exact linear red"
-            );
-        }
-        for v in &scene.parts[0].vertices[3..6] {
-            assert_eq!(v.color, NEUTRAL, "None paints the neutral");
-        }
-    }
-
-    /// Task 4: every staged triangle is flat-shaded with its own face
-    /// normal — all 3 corners carry normalize(cross(b−a, c−a)) of the
-    /// STAGED (remapped, floor-pinned) positions, recomputed here
-    /// independently of the staging code. A zero-area triangle falls back
-    /// to (0,0,1) (upstream TriangleMesh.swift:21-23). The 1e-4 tolerance
-    /// is float headroom only: a wrong normal (wrong corner order, MODEL
-    /// instead of scene space, unnormalized) is O(1) off.
-    #[test]
-    fn normals_match_cross_product() {
-        let scenes = [
-            PartScene::from_parts(&golden_3mf_parts(), NEUTRAL),
-            PartScene::from_parts(&golden_stl_parts(), NEUTRAL),
-        ];
-        for scene in &scenes {
-            for part in &scene.parts {
-                for tri in part.vertices.chunks_exact(3) {
-                    let (a, b, c) = (
-                        glam::Vec3::from_array(tri[0].pos),
-                        glam::Vec3::from_array(tri[1].pos),
-                        glam::Vec3::from_array(tri[2].pos),
-                    );
-                    let cross = (b - a).cross(c - a);
-                    let len = cross.length();
-                    assert!(len > 0.0, "fixture triangles are non-degenerate");
-                    let n = (cross / len).to_array();
-                    for v in tri {
-                        for axis in 0..3 {
-                            assert!(
-                                (v.normal[axis] - n[axis]).abs() < 1e-4,
-                                "corner normal {:?} != face normal {n:?}",
-                                v.normal
-                            );
-                        }
-                        let l = v.normal.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        assert!((l - 1.0).abs() < 1e-4, "unit length, got {l}");
-                    }
-                }
-            }
-        }
-        // degenerate: a zero-area triangle stages the (0,0,1) fallback on
-        // all 3 corners — the brief's literal constant, matching upstream's
-        // addTriangle fallback shape (unobservable: nothing rasterizes)
-        let part = engine::parsing::Part {
-            name: "degenerate".into(),
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
-            triangle_colors: vec![None],
-        };
-        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
-        for v in &scene.parts[0].vertices {
-            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
-        }
     }
 
     /// The floor pin is baked into the staged vertices, so content identity
@@ -2906,8 +1273,8 @@ mod tests {
     }
 
     /// The GPU-first transform law: a pose change moves ink through the
-    /// model uniform alone — zero vertex uploads (the M3 behavior this
-    /// task retires restaged the whole part).
+    /// model uniform alone — zero vertex uploads, never a restage of
+    /// the whole part.
     #[test]
     fn pose_change_moves_ink_without_uploads() {
         let (device, queue) = gpu::device_queue();
@@ -2971,9 +1338,61 @@ mod tests {
         );
     }
 
-    /// The WGSL uniform struct rounds to 16-byte boundaries: 64 + 4 + 4 is 72,
-    /// which must be padded to 80 in BOTH the Rust repr and the WGSL struct —
-    /// a mismatch fails bind-group validation at min_binding_size, loudly.
+    /// WGSL uniform structs round to 16-byte boundaries, so the camera's 76
+    /// and the model's 72 bytes pad to 80 in BOTH the Rust repr and the WGSL
+    /// struct — a mismatch fails bind-group validation at
+    /// min_binding_size, loudly.
+    #[test]
+    fn camera_uniform_is_80_bytes_and_carries_the_plane() {
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
+        let cam = Camera {
+            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        };
+        let off = CameraUniform::new(&cam, None);
+        assert_eq!(off.section_enable, 0.0);
+        let plane = SectionPlane {
+            axis: SceneAxis::Z,
+            pos: 2.5,
+            cap: Box3::ZERO,
+        };
+        let on = CameraUniform::new(&cam, Some(&plane));
+        assert_eq!(
+            (on.section_axis, on.section_pos, on.section_enable),
+            (2, 2.5, 1.0)
+        );
+    }
+
+    /// The cap quad spans the plane's cap box, grown 10% on the two
+    /// off-axis directions, at the plane position.
+    #[test]
+    fn cap_quad_spans_the_planes_box() {
+        let plane = SectionPlane {
+            axis: SceneAxis::X,
+            pos: 1.0,
+            cap: Box3::new([-5.0, 0.0, -2.0], [5.0, 20.0, 2.0]),
+        };
+        let q = cap_quad(&plane);
+        assert!(q.iter().all(|v| v.pos[0] == 1.0));
+        let ys: Vec<f32> = q.iter().map(|v| v.pos[1]).collect();
+        let zs: Vec<f32> = q.iter().map(|v| v.pos[2]).collect();
+        let span = |v: &[f32]| {
+            (
+                v.iter().copied().fold(f32::MAX, f32::min),
+                v.iter().copied().fold(f32::MIN, f32::max),
+            )
+        };
+        let (y0, y1) = span(&ys);
+        let (z0, z1) = span(&zs);
+        assert!(
+            (y0 - -1.0).abs() < 1e-5 && (y1 - 21.0).abs() < 1e-5,
+            "{y0} {y1}"
+        );
+        assert!(
+            (z0 - -2.2).abs() < 1e-5 && (z1 - 2.2).abs() < 1e-5,
+            "{z0} {z1}"
+        );
+    }
+
     #[test]
     fn model_uniform_is_80_bytes() {
         assert_eq!(
@@ -2981,22 +1400,6 @@ mod tests {
             80,
             "transform 64 + collision 4 + alpha 4 + pad 8"
         );
-    }
-
-    /// COLLISION_LINEAR is systemRed through the exact EOTF (the same red
-    /// ModelViewer.swift:363 blends 15% black for the cut face; the motion
-    /// material uses it straight, ModelViewer.swift:275-279).
-    #[test]
-    fn collision_color_is_linear_system_red() {
-        let srgb = [1.0_f32, 59.0 / 255.0, 48.0 / 255.0];
-        for i in 0..3 {
-            assert!(
-                (COLLISION_LINEAR[i] - parts::srgb_to_linear_f(srgb[i])).abs() < 1e-3,
-                "channel {i}: {} vs {}",
-                COLLISION_LINEAR[i],
-                parts::srgb_to_linear_f(srgb[i])
-            );
-        }
     }
 
     /// The whole motion surface is uniform state: a playback-shaped sweep —
@@ -3047,40 +1450,6 @@ mod tests {
         );
     }
 
-    /// A 10mm axis-aligned cube as 6 quads -> 12 triangles, corners drawn
-    /// from a shared 8-entry table so identical positions repeat across
-    /// faces exactly like real unindexed engine parts.
-    fn cube_part() -> engine::parsing::Part {
-        let c = |x: f32, y: f32, z: f32| [10.0 * x, 10.0 * y, 10.0 * z];
-        let v = [
-            c(0.0, 0.0, 0.0),
-            c(1.0, 0.0, 0.0),
-            c(1.0, 1.0, 0.0),
-            c(0.0, 1.0, 0.0),
-            c(0.0, 0.0, 1.0),
-            c(1.0, 0.0, 1.0),
-            c(1.0, 1.0, 1.0),
-            c(0.0, 1.0, 1.0),
-        ];
-        let faces = [
-            (0usize, 3, 2, 1),
-            (4, 5, 6, 7),
-            (0, 1, 5, 4),
-            (1, 2, 6, 5),
-            (2, 3, 7, 6),
-            (3, 0, 4, 7),
-        ];
-        let mut positions = Vec::new();
-        for &(a, b, c2, d) in &faces {
-            positions.extend_from_slice(&[v[a], v[b], v[c2], v[a], v[c2], v[d]]);
-        }
-        engine::parsing::Part {
-            name: "cube".into(),
-            positions,
-            triangle_colors: vec![None; 12],
-        }
-    }
-
     /// Wireframe edges (facts #44): upstream's `.lines` fill mode
     /// rasterizes every triangle edge, so a cube triangulated as 6 quads
     /// shows its 12 polygon edges PLUS the 6 face diagonals = 18; dedup
@@ -3129,27 +1498,6 @@ mod tests {
         );
     }
 
-    /// The f32 EOTF is the exact core the u8 form delegates to: every u8
-    /// value through `srgb_to_linear_f(c / 255)` equals `srgb_to_linear(c)`,
-    /// so downstream f32 callers (T3's cap color, T6's marker orange) sit on
-    /// the same curve the staging paints with.
-    #[test]
-    fn srgb_to_linear_f_is_the_u8_forms_core() {
-        for c in 0..=255u8 {
-            assert_eq!(
-                parts::srgb_to_linear_f(c as f32 / 255.0),
-                parts::srgb_to_linear(c),
-                "u8 {c}"
-            );
-        }
-        // the segment boundary is <= on the linear side
-        assert_eq!(parts::srgb_to_linear_f(0.04045), 0.04045 / 12.92);
-        assert!(parts::srgb_to_linear_f(0.04046) > parts::srgb_to_linear_f(0.04045));
-        // out-of-range inputs keep the formula's shape (callers clamp)
-        assert_eq!(parts::srgb_to_linear_f(0.0), 0.0);
-        assert!((parts::srgb_to_linear_f(1.0) - 1.0).abs() < 1e-6);
-    }
-
     /// Ghost residency (the GPU-first law's ghost clause): the whole ghost
     /// scene restages only when its content identity changes — the same
     /// ghost under a moved camera uploads zero ghost bytes, a dropped ghost
@@ -3183,8 +1531,14 @@ mod tests {
         let u1 = pipeline.ghost_upload_count_for_tests();
         assert_eq!(u1, 2, "one upload per ghost part on residency");
         // moved camera, same ghost: zero ghost bytes
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let moved = Camera::orbiting(distance * 2.0, 0.9, 0.4, target, 4.0 / 3.0);
+        let framed = camera::Orbit::framed(scene.aabb(), camera::Preset::Iso);
+        let moved = camera::Orbit {
+            yaw: 0.9,
+            pitch: 0.4,
+            distance: framed.distance * 2.0,
+            ..framed
+        }
+        .camera(4.0 / 3.0);
         pipeline.prepare_parts(
             device,
             queue,
@@ -3220,243 +1574,5 @@ mod tests {
             pipeline.ghost_upload_count_for_tests() > u1,
             "new ghost content restages"
         );
-    }
-
-    /// `to_scene` is exactly the staging map (remap + the struct's pin), and
-    /// `to_model` inverts it: every MODEL corner lands on its staged byte,
-    /// and the roundtrip returns the MODEL corner — the crossing T5's
-    /// picking and T11's marker placement ride.
-    #[test]
-    fn to_scene_to_model_match_staging_and_roundtrip() {
-        let parts = golden_3mf_parts();
-        let scene = PartScene::from_parts(&parts, NEUTRAL);
-        for (part, raw) in scene.parts.iter().zip(&parts) {
-            assert_eq!(part.vertices.len(), raw.positions.len());
-            for (v, p) in part.vertices.iter().zip(&raw.positions) {
-                let s = scene.to_scene(*p);
-                let m = scene.to_model(v.pos);
-                for a in 0..3 {
-                    assert!((s[a] - v.pos[a]).abs() < 1e-5, "to_scene != staged at {a}");
-                    assert!((m[a] - p[a]).abs() < 1e-4, "roundtrip != MODEL at {a}");
-                }
-            }
-        }
-        // the recorded pin is the map's translation: to_scene of the origin
-        // is the pin itself
-        assert_eq!(scene.to_scene([0.0; 3]), scene.pin);
-    }
-
-    /// `from_parts_with_pin` stages against a caller-chosen frame: the
-    /// recorded pin is the input, and the staged bytes sit at exactly
-    /// (foreign pin − own pin) from `from_parts`'s — the comparison ghost's
-    /// contract (T12 stages the old model in the CURRENT scene's frame).
-    #[test]
-    fn from_parts_with_pin_honors_a_foreign_pin() {
-        let parts = golden_3mf_parts();
-        let own = PartScene::from_parts(&parts, NEUTRAL);
-        let pin = [10.0, 20.0, 30.0];
-        let foreign = PartScene::from_parts_with_pin(&parts, NEUTRAL, pin);
-        assert_eq!(foreign.pin, pin);
-        let shift = |a: usize| pin[a] - own.pin[a];
-        for a in 0..3 {
-            assert!(
-                (foreign.aabb_min[a] - own.aabb_min[a] - shift(a)).abs() < 1e-4,
-                "aabb shifted by the pin difference at {a}"
-            );
-        }
-        for (f, o) in foreign.parts[0].vertices.iter().zip(&own.parts[0].vertices) {
-            for a in 0..3 {
-                assert!((f.pos[a] - o.pos[a] - shift(a)).abs() < 1e-4);
-            }
-        }
-        // and the foreign scene's own crossing map lands on ITS staging
-        let p = parts[0].positions[0];
-        let s = foreign.to_scene(p);
-        for a in 0..3 {
-            assert!((s[a] - foreign.parts[0].vertices[0].pos[a]).abs() < 1e-5);
-        }
-    }
-
-    #[test]
-    fn framed_iso_model_fills_the_pane() {
-        // The pane-fill contract of frame() (ModelViewer.swift:328-337):
-        // the framed distance puts the scene's bounding sphere at
-        // sin(half-FOV)/1.15 of the camera — 86.6 % of the half-view — and
-        // the golden fixture's box (scene 60×26×60, radius √7876/2) fills
-        // ~two thirds of the viewport height at the iso preset, at ANY
-        // aspect (the projection's y extent is aspect-free). If the 1.15
-        // headroom, the half-diagonal radius, or the target rule changes,
-        // these ratios move and the fill visibly changes with them.
-        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
-        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
-        let half_fov = camera::FOV / 2.0;
-        let angular_fill = (radius / distance).asin() / half_fov;
-        assert!(
-            (angular_fill - 0.866).abs() < 0.005,
-            "sphere fills {angular_fill:.3} of the half-view, not 86.6 %"
-        );
-        let (yaw, pitch) = camera::Preset::Iso.yaw_pitch();
-        let corners = |a: f32| {
-            let view_proj =
-                glam::Mat4::from_cols_array_2d(&camera::orbit(distance, yaw, pitch, target, a));
-            let mut span = (f32::MAX, f32::MIN);
-            for i in 0..8 {
-                let p = [
-                    [scene.aabb_min[0], scene.aabb_max[0]][i & 1],
-                    [scene.aabb_min[1], scene.aabb_max[1]][i >> 1 & 1],
-                    [scene.aabb_min[2], scene.aabb_max[2]][i >> 2 & 1],
-                    1.0,
-                ];
-                let clip = view_proj * glam::Vec4::from_array(p);
-                let ndc_y = clip.y / clip.w;
-                span.0 = span.0.min(ndc_y);
-                span.1 = span.1.max(ndc_y);
-            }
-            (span.1 - span.0) / 2.0 // fraction of the viewport height
-        };
-        let (square, wide) = (corners(1.0), corners(2.16));
-        for (aspect, fill) in [(1.0, square), (2.16, wide)] {
-            assert!(
-                (0.60..=0.75).contains(&fill),
-                "aspect {aspect}: the framed box fills {fill:.2} of the viewport height"
-            );
-        }
-        assert!(
-            (square - wide).abs() < 0.005,
-            "the y fill is aspect-free: {square:.4} vs {wide:.4}"
-        );
-    }
-
-    /// The output-space contract: iced's compositor under libcosmic's
-    /// `web-colors` build picks a PLAIN (non-sRGB) surface and every iced
-    /// primitive writes display-space values itself, so the viewer's
-    /// linear-light output must be encoded in-shader there — and must stay
-    /// linear for an sRGB-tagged target (the headless tests' format,
-    /// where the hardware owns the encode).
-    #[test]
-    fn shader_sources_encode_only_for_plain_targets() {
-        let plain = mesh_wgsl_source(wgpu::TextureFormat::Bgra8Unorm);
-        assert!(
-            plain.contains("SRGB_ENCODE: f32 = 1.0"),
-            "a plain target turns the in-shader encode on"
-        );
-        let srgb = mesh_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb);
-        assert!(
-            srgb.contains("SRGB_ENCODE: f32 = 0.0"),
-            "an sRGB target keeps the hardware encode"
-        );
-        for (name, source) in [
-            ("mesh", mesh_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
-            ("cap", cap_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
-            ("grid", grid_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
-            ("ghost", ghost_wgsl_source(wgpu::TextureFormat::Bgra8Unorm)),
-            (
-                "mesh/srgb",
-                mesh_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
-            ),
-            (
-                "cap/srgb",
-                cap_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
-            ),
-            (
-                "grid/srgb",
-                grid_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
-            ),
-            (
-                "ghost/srgb",
-                ghost_wgsl_source(wgpu::TextureFormat::Rgba8UnormSrgb),
-            ),
-        ] {
-            // the real markers this shader must have substituted (WGSL's
-            // own @group/@location decorators and the docs' @NAME@ example
-            // are not markers); a genuine survivor is caught here AND by
-            // the parse test, since a marker is invalid WGSL
-            for marker in [
-                "@KEY_POS@",
-                "@KEY_COEFF@",
-                "@FILL_POS@",
-                "@FILL_COEFF@",
-                "@ENV_DIR@",
-                "@ENV_COEFF@",
-                "@AMBIENT@",
-                "@SPECULAR@",
-                "@SHININESS@",
-                "@SHOULDER_START@",
-                "@COLLISION_R@",
-                "@COLLISION_G@",
-                "@COLLISION_B@",
-                "@CAP_R@",
-                "@CAP_G@",
-                "@CAP_B@",
-                "@GHOST_R@",
-                "@GHOST_G@",
-                "@GHOST_B@",
-                "@GHOST_ALPHA@",
-                "@TARGET_SPACE@",
-            ] {
-                assert!(
-                    !source.contains(marker),
-                    "{name}: substitution marker {marker} survived"
-                );
-            }
-            assert!(
-                source.contains("to_target("),
-                "{name}: a color-writing shader must route through to_target"
-            );
-        }
-    }
-
-    /// The substituted sources must be valid WGSL for BOTH target kinds —
-    /// a marker that survives, a bad declaration order, or a malformed
-    /// encode block is a parse error here, not a silent dark render.
-    #[test]
-    fn substituted_shaders_parse_as_wgsl() {
-        let mut flags = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::default(),
-        );
-        for format in [
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-        ] {
-            for source in [
-                mesh_wgsl_source(format),
-                cap_wgsl_source(format),
-                grid_wgsl_source(format),
-                ghost_wgsl_source(format),
-            ] {
-                let module = naga::front::wgsl::parse_str(&source)
-                    .unwrap_or_else(|e| panic!("parse {format:?}: {e}"));
-                flags
-                    .validate(&module)
-                    .unwrap_or_else(|e| panic!("validate {format:?}: {e}"));
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod target_space_tests {
-    use super::*;
-
-    /// The WGSL encode string's curve constants must match the Rust twin
-    /// exactly (review F1: a typo in the string passes every pure test —
-    /// only the GPU test would catch it, which runs on one machine).
-    #[test]
-    fn wgsl_encode_constants_match_the_rust_twin() {
-        let src = target_space_wgsl(wgpu::TextureFormat::Bgra8Unorm);
-        for constant in ["0.0031308", "12.92", "1.055", "2.4", "0.055"] {
-            assert!(src.contains(constant), "the WGSL curve lost {constant}: {src}");
-        }
-        // and the sRGB path is the identity (no curve at all)
-        let identity = target_space_wgsl(wgpu::TextureFormat::Bgra8UnormSrgb);
-        assert!(identity.contains("SRGB_ENCODE: f32 = 0.0"));
-        // the twin and the string implement the same function at the knee
-        // and mid-range (the knee's both branches + a gamma-branch value)
-        let knee = parts::linear_to_srgb_f(0.003);
-        assert!((knee - 0.003 * 12.92).abs() < 1e-6);
-        let mid = parts::linear_to_srgb_f(0.5);
-        assert!((mid - (1.055 * 0.5f32.powf(1.0 / 2.4) - 0.055)).abs() < 1e-6);
     }
 }

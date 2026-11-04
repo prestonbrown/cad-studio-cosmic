@@ -16,7 +16,7 @@
 //! what is purely widget state (drags, drafts, collapse, close) and turns
 //! [`Message::Release`]/[`Message::Submit`] into commit values; the SHELL
 //! intercepts the rest — `Message::Collapse` (persist
-//! `Settings.parameters_collapsed` through the engine's `settings_path()`,
+//! `Settings.parameters_collapsed` through the window's settings store,
 //! then forward), `Message::Compare` (the bridge's compare wiring), and the
 //! mount's emitted `ParameterCommit` (`Bridge::set_parameter`). The pane
 //! mounts the overlay in [`crate::viewer_pane::ViewerPane::view_model_3d`].
@@ -190,7 +190,7 @@ fn collapsed_capsule() -> Element<'static, Message> {
         .push(
             text(fl!("parametri"))
                 .size(typography::CALLOUT)
-                .font(cosmic::font::semibold())
+                .font(crate::typography::font(cosmic::iced::font::Weight::Medium))
                 .class(Tone::Primary.text(BACKDROP)),
         );
     let capsule = button::borderless(
@@ -221,9 +221,7 @@ fn header() -> Element<'static, Message> {
                     .align_y(Alignment::Center)
                     .push(slider_glyph())
                     .push(
-                        text(fl!("parametri"))
-                            .size(typography::HEADLINE)
-                            .font(cosmic::font::semibold())
+                        typography::headline(text(fl!("parametri")))
                             .class(Tone::Primary.text(BACKDROP)),
                     ),
             )

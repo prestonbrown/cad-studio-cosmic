@@ -351,7 +351,7 @@ menu-view = View
 version-not-in-history = Version {$version} is not in the history
 # Port addition (no upstream key).
 settings = Settings
-# conv2-ifix: version timestamps (SwiftUI .relative(presentation: .named) and .abbreviated/.shortened)
+# Version timestamps (SwiftUI .relative(presentation: .named) and .abbreviated/.shortened)
 version-relative-now = just now
 version-relative-minute = 1 minute ago
 version-relative-minutes = {$n} minutes ago
@@ -373,3 +373,9 @@ version-month-sep = Sep
 version-month-oct = Oct
 version-month-nov = Nov
 version-month-dec = Dec
+
+# About window
+about-copyright = © 2026 Filippo Finke · MIT License
+
+# Settings store
+settings-unreadable = The settings file cannot be read, so changes are not saved.

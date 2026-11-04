@@ -26,7 +26,7 @@
 //! `Working` synchronously before the command leaves, so no window exists
 //! where a `set_parameter` can slip past a turn that is already starting).
 //!
-//! The drain law (plan Review Focus 1): commands are absorbed between EVERY
+//! The drain law: commands are absorbed between EVERY
 //! pair of event translations and selected against while waiting for the next
 //! event, and the forward channel is unbounded — a slow consumer (or the
 //! engine's 256-deep backpressure) can never wedge a cancel.
@@ -54,7 +54,8 @@ use cosmic::iced::futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, u
 use engine::agent::attachments;
 use engine::agent::claude::TurnRequest;
 use engine::agent::locator::AgentKind;
-use engine::agent::session::{EngineEvent, Session, TurnHandle, TurnOutcome};
+use engine::agent::session::{EngineEvent, Session, TEST_CLAUDE_ENV, TurnHandle, TurnOutcome};
+use engine::project::folder;
 use engine::project::manifest::Manifest;
 use engine::project::outputs::missing_files;
 use engine::project::parameters::{
@@ -70,74 +71,10 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver as CmdReceiver, UnboundedSender as CmdSender};
 use uuid::Uuid;
 
+use crate::activity::{self, Activity, Signal};
 use crate::chat::ChatState;
 use crate::fl;
-
-/// Where a turn's engine name comes from: the settings file re-read at turn
-/// start (Ruling 1 — the engine picker's write is decisive for the NEXT
-/// turn, not the next project), falling back to the launch snapshot when
-/// the test seam suspends the re-read. Mirrors the engine's own
-/// `Session::with_settings_file` rule: a scripted agent must not have the
-/// developer's real settings file decide its turn's name.
-#[derive(Debug, Clone)]
-struct EngineSource {
-    /// The settings file re-read per turn; `None` under the test seam.
-    file: Option<PathBuf>,
-    /// The launch snapshot's engine — the answer when `file` is `None`.
-    fallback: AgentKind,
-}
-
-impl EngineSource {
-    fn at_launch(settings: &Settings) -> Self {
-        Self {
-            file: (std::env::var_os("CAD_TEST_CLAUDE").is_none()).then(settings_path),
-            fallback: settings.agent_kind(),
-        }
-    }
-
-    /// The engine the next turn runs under. A missing settings file reads
-    /// as a fresh install (claude, `Settings::load`'s rule — NOT the
-    /// snapshot); the snapshot answers only when the re-read is suspended
-    /// or the read actually errors.
-    fn current(&self) -> AgentKind {
-        self.file
-            .as_deref()
-            .and_then(|path| Settings::load(path).ok())
-            .map_or(self.fallback, |settings| settings.agent_kind())
-    }
-}
-
-/// Upstream `Activity` (Project.swift:19-26): the status line the app
-/// renders, and the sole busy flag — `isBusy` is `activity.isWorking`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Activity {
-    Idle,
-    Working(String),
-    Succeeded(String),
-    Failed(String),
-}
-
-impl Activity {
-    /// Upstream `Activity.isWorking`.
-    pub fn is_working(&self) -> bool {
-        matches!(self, Activity::Working(_))
-    }
-}
-
-/// The bridge's activity classification, as the header's pure model sees
-/// it — two enums of the same upstream shape (the pipeline's actor-side
-/// field, [`crate::activity::Activity`] the ActivityViewer's model); the
-/// window folds terminal/build states across through this.
-impl From<Activity> for crate::activity::Activity {
-    fn from(activity: Activity) -> Self {
-        match activity {
-            Activity::Idle => Self::Idle,
-            Activity::Working(text) => Self::Working(text),
-            Activity::Succeeded(text) => Self::Succeeded(text),
-            Activity::Failed(text) => Self::Failed(text),
-        }
-    }
-}
+use crate::settings_store::SettingsStore;
 
 /// Why a pipeline command refused (upstream's guard branches in
 /// `setParameter`/`build`/`send`, Project.swift:343-362 and 373-391).
@@ -188,7 +125,7 @@ impl Pipeline {
             versions: versions::load_versions(root),
             parameters: refresh_parameters(root),
             build_error: None,
-            missing_outputs: missing_files(&root.join("output")),
+            missing_outputs: missing_files(&folder::output_dir(root)),
             sheet_requested: false,
             draft: None,
             compare_version: None,
@@ -212,7 +149,7 @@ impl Pipeline {
     /// turn.
     fn begin_turn(&mut self, engine: AgentKind) {
         self.build_error = None;
-        self.activity = Activity::Working(fl!("sta-lavorando", agent = engine.display_name()));
+        self.activity = activity::next(Signal::TurnStarted, false, engine);
     }
 }
 
@@ -221,9 +158,9 @@ impl Pipeline {
 /// `orderedParameters`). Pure: a missing manifest or model.py reads as no
 /// parameters.
 pub fn refresh_parameters(root: &Path) -> Vec<ModelParameter> {
-    match Manifest::load(&root.join("output").join("manifest.json")) {
+    match Manifest::load(&folder::output_dir(root).join(folder::MANIFEST)) {
         Ok(manifest) => {
-            let script = std::fs::read_to_string(root.join("model.py")).unwrap_or_default();
+            let script = std::fs::read_to_string(folder::model_script(root)).unwrap_or_default();
             ordered_parameters(&manifest.parameters, &script)
         }
         Err(_) => Vec::new(),
@@ -253,8 +190,8 @@ pub enum Message {
     /// `attachments` carries the `references/<stamp>-<n>-<name>` COPY names
     /// the bridge just made (upstream's row stores the copies,
     /// Project.swift:201) — render them root-relative. `engine` is the
-    /// engine the turn runs under — the per-turn re-read's answer at turn
-    /// start, so the window names the turn's rows with it.
+    /// engine the turn runs, as the engine decided it
+    /// (`TurnHandle::engine`), so the window names the turn's rows with it.
     TurnStarted {
         prompt: String,
         attachments: Vec<String>,
@@ -286,7 +223,7 @@ pub enum Message {
     /// has landed on disk (upstream `agentDidFinish`, Project.swift:262-278).
     TurnSuccessBookkeeping,
     /// A command refused on python readiness: present the setup sheet
-    /// (the bridge never touches windows; the app maps this to T8's sheet).
+    /// (the bridge never touches windows; the app maps this to the python setup sheet).
     PythonSheetRequested,
 }
 
@@ -321,6 +258,16 @@ struct QueuedSend {
     attachments: Vec<String>,
 }
 
+impl QueuedSend {
+    fn new(prompt: String, attachments: Vec<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            prompt,
+            attachments,
+        }
+    }
+}
+
 /// A queued send as the app layer sees the queue (upstream exposes the full
 /// `ChatMessage` items; the shell needs identity, preview text and the image
 /// count).
@@ -352,7 +299,10 @@ pub struct Bridge {
     pipeline: Arc<Mutex<Pipeline>>,
     root: PathBuf,
     interpreter: PathBuf,
-    engine_source: EngineSource,
+    /// The driver's session configuration, consulted only for the working
+    /// label a send shows before the driver starts it (the driver's
+    /// [`Message::TurnStarted`] then names the engine the turn runs).
+    session: Session,
 }
 
 /// [`Bridge::with_interpreter`]'s pending launch — a named construction seam
@@ -368,58 +318,61 @@ impl BridgeBuilder {
         settings: Settings,
         root: impl Into<PathBuf>,
     ) -> (Bridge, UnboundedReceiver<Message>) {
-        Bridge::launch_with(self.interpreter, settings, root)
+        Bridge::launch_with(self.interpreter, settings, settings_path(), root)
     }
 }
 
 impl Bridge {
     /// The bridge plus the message stream to return from the app's `init` or
-    /// `update`. Must be called inside the tokio runtime cosmic runs on.
-    pub fn new(settings: Settings, root: impl Into<PathBuf>) -> (Self, cosmic::Task<Message>) {
-        let (bridge, messages) = Self::launch(settings, root);
+    /// `update`, its turns reading their settings fresh from `settings`.
+    /// Must be called inside the tokio runtime cosmic runs on.
+    pub fn new(
+        settings: &SettingsStore,
+        root: impl Into<PathBuf>,
+    ) -> (Self, cosmic::Task<Message>) {
+        let (bridge, messages) = Self::launch_with(
+            default_interpreter(),
+            settings.load(),
+            settings.path().to_path_buf(),
+            root,
+        );
         (bridge, cosmic::task::stream(messages))
     }
 
     /// [`Bridge::new`] without the `cosmic::Task` wrapper: spawns the driver
     /// and returns its message stream raw. A `cosmic::Task`'s stream is
-    /// private to the iced runtime, so headless drivers (tests, the Task 8
-    /// slice) tap here — the same seam pattern as the engine's
+    /// private to the iced runtime, so headless drivers (tests, the
+    /// wrap slice) tap here — the same seam pattern as the engine's
     /// `CAD_TEST_CLAUDE` override.
     pub fn launch(
         settings: Settings,
         root: impl Into<PathBuf>,
     ) -> (Self, UnboundedReceiver<Message>) {
-        Self::launch_with(default_interpreter(), settings, root)
+        Self::launch_with(default_interpreter(), settings, settings_path(), root)
     }
 
+    /// `settings_file` is the file each turn re-reads its settings from;
+    /// a scripted agent under test (the engine's override seam) ignores it,
+    /// so the developer's own settings cannot decide a test turn.
     fn launch_with(
         interpreter: PathBuf,
         settings: Settings,
+        settings_file: PathBuf,
         root: impl Into<PathBuf>,
     ) -> (Self, UnboundedReceiver<Message>) {
         let root = root.into();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = unbounded();
         let pipeline = Arc::new(Mutex::new(Pipeline::load(&root)));
-        let engine_source = EngineSource::at_launch(&settings);
         let mut session = Session::new(settings).with_system_template(SYSTEM_TEMPLATE);
-        // The per-turn settings re-read (the engine picker flips the runner
-        // mid-conversation, Ruling 1) — attached only when a real agent
-        // runs: a scripted agent under test (the CAD_TEST_CLAUDE seam)
-        // suspends it so the developer's own settings file cannot decide a
-        // test turn. The app-side name source follows the same rule.
-        if std::env::var_os("CAD_TEST_CLAUDE").is_none() {
-            session = session.with_settings_file(settings_path());
+        // the per-turn settings re-read (the engine picker flips the runner
+        // mid-conversation)
+        if std::env::var_os(TEST_CLAUDE_ENV).is_none() {
+            session = session.with_settings_file(settings_file);
         }
         tokio::spawn(
-            Drive::new(
-                root.clone(),
-                cmd_rx,
-                msg_tx.clone(),
-                Arc::clone(&pipeline),
-                engine_source.clone(),
-            )
-            .run(session),
+            Drive::new(root.clone(), cmd_rx, msg_tx.clone(), Arc::clone(&pipeline))
+                .run(session.clone()),
         );
         (
             Self {
@@ -428,7 +381,7 @@ impl Bridge {
                 pipeline,
                 root,
                 interpreter,
-                engine_source,
+                session,
             },
             msg_rx,
         )
@@ -469,8 +422,9 @@ impl Bridge {
                 // the handle-side half of send()'s pre-task state: marking
                 // busy HERE keeps the flag ahead of the driver's turn start
                 // (the driver-side half lives in start_turn, which every
-                // turn-start path reaches)
-                pipeline.begin_turn(self.engine_source.current());
+                // turn-start path reaches and which names the engine the
+                // turn actually runs)
+                pipeline.begin_turn(self.session.turn_settings().agent_kind());
                 pipeline.draft = None;
             }
         }
@@ -501,7 +455,7 @@ impl Bridge {
         // silently before anything happens. The pre-read is what splits
         // read from write failures downstream; the second read inside the
         // engine helper is the price of not widening its error type.
-        if std::fs::read_to_string(self.root.join("model.py")).is_err() {
+        if std::fs::read_to_string(folder::model_script(&self.root)).is_err() {
             return Ok(());
         }
         match rewrite_parameter(&self.root, name, value) {
@@ -555,7 +509,7 @@ impl Bridge {
                 return Err(BuildRefusal::PythonNotReady);
             }
         }
-        if !self.root.join("model.py").exists() {
+        if !folder::model_script(&self.root).exists() {
             self.pipeline().activity = Activity::Failed(fl!("nessun-model-py-da-compilare"));
             return Err(BuildRefusal::NoModelScript);
         }
@@ -625,7 +579,7 @@ impl Bridge {
             .unwrap_or_else(|| Err(fl!("version-not-in-history", version = number)));
         match outcome {
             Ok(session_id) => {
-                let mut metadata = fresh_metadata(&self.root);
+                let mut metadata = store::load_metadata_or_new(&self.root);
                 metadata.session_id = session_id;
                 metadata.current_version = Some(number);
                 let _ = store::save_metadata(&self.root, &metadata);
@@ -654,7 +608,7 @@ impl Bridge {
     /// version's stored model.py copy — a slider rewrite never regenerates
     /// the manifest, so the model source is the only value that stays
     /// truthful. `None` ("Nessuna") empties them. The ghost MESH the
-    /// orange values annotate is M6's, documented out of scope here.
+    /// orange values annotate is staged by `compare_pane`, not here.
     pub fn compare_with(&mut self, number: Option<i64>) {
         let mut pipeline = self.pipeline();
         pipeline.comparison_parameters = versions::comparison_parameters(&self.root, number);
@@ -678,6 +632,12 @@ impl Bridge {
     /// `PythonEnvironment.shared.isReady`).
     pub fn python_ready(&self) -> bool {
         self.pipeline().python_ready()
+    }
+
+    /// The manifest changed on disk, whoever wrote it
+    /// (ProjectOutput.swift:48-51): re-read the parameter rows.
+    pub fn reload_parameters(&self) {
+        self.pipeline().parameters = refresh_parameters(&self.root);
     }
 
     /// The parameter panel's rows, manifest order (upstream `parameters`).
@@ -725,7 +685,7 @@ impl Bridge {
         self.pipeline().python_state = state;
     }
 
-    /// Test seam for T8's startup check / sheet completion: mark the
+    /// Test seam for the startup check / sheet completion: mark the
     /// environment verified so guards pass without a real venv (production
     /// goes through [`Bridge::set_python_state`] with the sheet's state).
     pub fn mark_python_ready_for_test(&self) {
@@ -757,18 +717,6 @@ impl Bridge {
 /// the bridge is injected).
 fn default_interpreter() -> PathBuf {
     interpreter_path(&venv_dir())
-}
-
-fn app_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-/// The project's metadata, loaded now — the load-fresh law EVERY writer of
-/// `project.json` follows, the shell's save points included (see
-/// [`Drive::record_version`] for why: the engine writes `session_id` into
-/// the same file mid-turn, and a copy held from launch would clobber it).
-pub fn fresh_metadata(root: &Path) -> ProjectMetadata {
-    store::load_metadata(root).unwrap_or_else(|_| ProjectMetadata::new(app_version()))
 }
 
 /// How a drained turn ended, for the driver's queue decision.
@@ -813,6 +761,28 @@ enum Phase {
     },
 }
 
+/// What a command asks of the phase loop ([`Drive::command`]).
+enum Next {
+    /// Keep the current phase.
+    Stay,
+    /// Start this send as a turn now.
+    Start(QueuedSend),
+    /// Start the queue's next send now, if the queue is not paused.
+    SendNext,
+    /// Drain this build now.
+    Build {
+        handle: BuildHandle,
+        version_prompt: Option<String>,
+    },
+}
+
+/// The driver's end: the bridge handle is gone, so any running turn or build
+/// was already cancelled; the engine's process registry is reaped (upstream's
+/// quit path reaps orphans).
+fn shutdown() {
+    engine::processes::reap_orphans();
+}
+
 /// The driver: everything the message stream's far side owns — the session,
 /// the queue, the pause flag, the build drains, and the transcript that
 /// persists. One `run` call is the bridge's lifetime.
@@ -823,7 +793,6 @@ struct Drive {
     cmds: CmdReceiver<Command>,
     out: UnboundedSender<Message>,
     pipeline: Arc<Mutex<Pipeline>>,
-    engine_source: EngineSource,
     /// Every message the driver sent, with the activity the pipeline held
     /// at that instant (`None` when the pipeline was locked mid-send):
     /// ordering tests read state at send time, not when a consumer wakes.
@@ -837,7 +806,6 @@ impl Drive {
         cmds: CmdReceiver<Command>,
         out: UnboundedSender<Message>,
         pipeline: Arc<Mutex<Pipeline>>,
-        engine_source: EngineSource,
     ) -> Self {
         Self {
             root,
@@ -846,7 +814,6 @@ impl Drive {
             cmds,
             out,
             pipeline,
-            engine_source,
             #[cfg(test)]
             sent: Mutex::new(Vec::new()),
         }
@@ -872,41 +839,11 @@ impl Drive {
         loop {
             phase = match phase {
                 Phase::Idle => match self.cmds.recv().await {
-                    Some(Command::Enqueue {
-                        prompt,
-                        attachments,
-                    }) => self.start_turn(
-                        &mut session,
-                        QueuedSend {
-                            id: Uuid::new_v4(),
-                            prompt,
-                            attachments,
-                        },
-                    ),
-                    // nothing is running: upstream's stop is a no-op
-                    Some(Command::Cancel) => Phase::Idle,
-                    // removing from an empty-idle queue can only un-pause
-                    Some(Command::RemoveQueued(_)) => {
-                        self.paused = false;
-                        self.notify_queue();
-                        Phase::Idle
+                    Some(cmd) => {
+                        let next = self.command(cmd, None);
+                        self.settle(next, &mut session, Phase::Idle)
                     }
-                    Some(Command::StartBuild {
-                        handle,
-                        version_prompt,
-                    }) => Phase::Building {
-                        handle,
-                        version_prompt,
-                    },
-                    Some(Command::ResumeQueue) => {
-                        self.paused = false;
-                        self.notify_queue();
-                        self.send_next_queued(&mut session)
-                    }
-                    None => {
-                        engine::processes::reap_orphans();
-                        return;
-                    }
+                    None => return shutdown(),
                 },
                 Phase::Running {
                     mut handle,
@@ -924,10 +861,7 @@ impl Drive {
                     match end {
                         TurnEnd::Finished { succeeded } => self.continue_queue(succeeded),
                         TurnEnd::Closed => self.continue_queue(false),
-                        TurnEnd::Shutdown => {
-                            engine::processes::reap_orphans();
-                            return;
-                        }
+                        TurnEnd::Shutdown => return shutdown(),
                     }
                 }
                 Phase::Building {
@@ -938,122 +872,142 @@ impl Drive {
                     let mut events = std::mem::replace(&mut handle.events, mpsc::channel(1).1);
                     let end = self.drain_build(&mut events, || handle.cancel()).await;
                     match end {
-                        BuildEnd::Shutdown => {
-                            engine::processes::reap_orphans();
-                            return;
-                        }
+                        BuildEnd::Shutdown => return shutdown(),
                         _ => self.finish_build(end, version_prompt),
                     }
                 }
+                // a direct send or a build arriving in the gap eats the
+                // pending delay: its own end re-arms the queue's next step
                 Phase::Delay { auto_at } => tokio::select! {
                     _ = tokio::time::sleep_until(auto_at) => self.send_next_queued(&mut session),
                     cmd = self.cmds.recv() => match cmd {
-                        // no turn is running, so a direct send starts now —
-                        // and eats the pending delay: its own turn end
-                        // re-arms the queue's next step instead. A build
-                        // eats it the same way; the build's end re-arms.
-                        Some(Command::Enqueue { prompt, attachments }) => {
-                            self.start_turn(
-                                &mut session,
-                                QueuedSend {
-                                    id: Uuid::new_v4(),
-                                    prompt,
-                                    attachments,
-                                },
-                            )
+                        Some(cmd) => {
+                            let next = self.command(cmd, None);
+                            self.settle(next, &mut session, Phase::Delay { auto_at })
                         }
-                        Some(Command::StartBuild { handle, version_prompt }) => {
-                            Phase::Building { handle, version_prompt }
-                        }
-                        // nothing to interrupt; the gap keeps running
-                        Some(Command::Cancel) => Phase::Delay { auto_at },
-                        // an emptied queue un-pauses and ends the gap
-                        Some(Command::RemoveQueued(id)) => {
-                            self.queue.retain(|send| send.id != id);
-                            if self.queue.is_empty() {
-                                self.paused = false;
-                                self.notify_queue();
-                                Phase::Idle
-                            } else {
-                                self.notify_queue();
-                                Phase::Delay { auto_at }
-                            }
-                        }
-                        Some(Command::ResumeQueue) => {
-                            self.paused = false;
-                            self.notify_queue();
-                            self.send_next_queued(&mut session)
-                        }
-                        None => {
-                            engine::processes::reap_orphans();
-                            return;
-                        }
+                        None => return shutdown(),
                     },
                 },
             };
         }
     }
 
-    /// One command applied outside a drain loop's reach. `cancel` is the
-    /// running turn's or build's interrupt switch, split from the event
-    /// receiver the drain loop owns.
-    fn absorb(&mut self, cmd: Command, cancel: &impl Fn()) {
+    /// One command, applied by the same rule in every phase. `running` is
+    /// the interrupt switch of the turn or build being drained, `None` while
+    /// nothing runs. It decides the three phase-dependent answers: a send
+    /// starts now or joins the queue FIFO, a build starts now or is refused
+    /// late (the handle's busy guard raced the running start), and a resume
+    /// starts the next queued send now or at the running one's end
+    /// (upstream `sendNextQueued` guards `isBusy`). The queue edits
+    /// themselves are phase-blind: upstream `removeQueued` drops the entry
+    /// and an emptied queue loses its pause (Project.swift:278-283).
+    fn command(&mut self, cmd: Command, running: Option<&dyn Fn()>) -> Next {
         match cmd {
-            Command::Cancel => cancel(),
             Command::Enqueue {
                 prompt,
                 attachments,
             } => {
-                self.queue.push_back(QueuedSend {
-                    id: Uuid::new_v4(),
-                    prompt,
-                    attachments,
-                });
+                let send = QueuedSend::new(prompt, attachments);
+                if running.is_none() {
+                    return Next::Start(send);
+                }
+                self.queue.push_back(send);
                 self.notify_queue();
+                Next::Stay
             }
-            // the handle's busy guard refuses a start while anything runs;
-            // a handle reaching a drain means the guard raced the turn's
-            // start — refuse it late by cancelling
-            Command::StartBuild { handle, .. } => handle.cancel(),
-            // upstream `sendNextQueued` guards `isBusy`: the flag clears now,
-            // the queue moves at this turn's end
+            // with nothing running, upstream's stop is a no-op
+            Command::Cancel => {
+                if let Some(cancel) = running {
+                    cancel();
+                }
+                Next::Stay
+            }
+            Command::StartBuild {
+                handle,
+                version_prompt,
+            } => {
+                if running.is_some() {
+                    handle.cancel();
+                    return Next::Stay;
+                }
+                Next::Build {
+                    handle,
+                    version_prompt,
+                }
+            }
             Command::ResumeQueue => {
                 self.paused = false;
                 self.notify_queue();
+                if running.is_some() {
+                    Next::Stay
+                } else {
+                    Next::SendNext
+                }
             }
-            // upstream `removeQueued`: drop the entry, and an emptied queue
-            // loses its pause (Project.swift:278-283)
             Command::RemoveQueued(id) => {
                 self.queue.retain(|send| send.id != id);
                 if self.queue.is_empty() {
                     self.paused = false;
                 }
                 self.notify_queue();
+                Next::Stay
             }
         }
     }
 
+    /// The phase an idle-side command leads to; `stay` is the phase it was
+    /// applied in.
+    fn settle(&mut self, next: Next, session: &mut Session, stay: Phase) -> Phase {
+        match next {
+            Next::Stay => stay,
+            Next::Start(send) => self.start_turn(session, send),
+            Next::SendNext => self.send_next_queued(session),
+            Next::Build {
+                handle,
+                version_prompt,
+            } => Phase::Building {
+                handle,
+                version_prompt,
+            },
+        }
+    }
+
+    /// One command absorbed inside a drain loop: `cancel` is the running
+    /// turn's or build's interrupt switch, split from the event receiver the
+    /// loop owns. Nothing starts while something runs, so every command
+    /// leaves the phase as it is.
+    fn absorb(&mut self, cmd: Command, cancel: &impl Fn()) {
+        let next = self.command(cmd, Some(cancel));
+        debug_assert!(matches!(next, Next::Stay), "a running phase starts nothing");
+    }
+
     /// Start a turn (upstream `send`, Project.swift:192-208): copy the
     /// attachments into `references/` FIRST — before the user row is
-    /// appended, exactly upstream's order — then append the row carrying
-    /// the COPY names, save, announce, and hand the request to the engine's
-    /// lifecycle dance. Every turn-start path lands here (a direct send, the
-    /// 1 s auto-run, a resume), so a QUEUED send's copies are made here, at
-    /// its own start, never at enqueue (Project.swift:177-190). The bridge
+    /// appended, exactly upstream's order — then hand the request to the
+    /// engine's lifecycle dance, append the row carrying the COPY names,
+    /// save, and announce. Every turn-start path lands here (a direct send,
+    /// the 1 s auto-run, a resume), so a QUEUED send's copies are made here,
+    /// at its own start, never at enqueue (Project.swift:177-190). The bridge
     /// is the single writer of `references/`: the engine's session consumes
-    /// the names and writes nothing. The turn's ENGINE is resolved here too
-    /// (the per-turn re-read, Ruling 1) and rides the transcript and the
-    /// announcement, so the turn's rows and activity name the engine that
-    /// actually runs them, whatever the settings say by the time they land.
-    /// The transcript reloads from disk — the last turn's save is this
+    /// the names and writes nothing. The turn's ENGINE is the one the engine
+    /// decided for it ([`TurnHandle::engine`]); it rides the transcript and
+    /// the announcement, so the turn's rows and activity name the engine
+    /// that actually runs them, whatever the settings say by the time they
+    /// land. The transcript reloads from disk — the last turn's save is this
     /// turn's base, exactly the crash-recovery shape `load_chat`'s
     /// `unwrap_or_default` gives a fresh project.
     fn start_turn(&mut self, session: &mut Session, send: QueuedSend) -> Phase {
-        let engine = self.engine_source.current();
-        self.pipeline().begin_turn(engine);
         let sources: Vec<PathBuf> = send.attachments.iter().map(PathBuf::from).collect();
         let references = attachments::copy_attachments(&sources, &self.root);
         let images: Vec<PathBuf> = references.iter().map(|name| self.root.join(name)).collect();
+        let request = TurnRequest {
+            prompt: send.prompt.clone(),
+            references: references.clone(),
+            images,
+        };
+        let handle = session.send(&self.root, &request);
+        let engine = handle.engine();
+        self.pipeline().begin_turn(engine);
         let mut transcript = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
         transcript.engine = engine;
         transcript.append(ChatMessage {
@@ -1069,16 +1023,10 @@ impl Drive {
         });
         let _ = store::save_chat(&self.root, &transcript.messages);
         self.emit(Message::TurnStarted {
-            prompt: send.prompt.clone(),
-            attachments: references.clone(),
+            prompt: send.prompt,
+            attachments: references,
             engine,
         });
-        let request = TurnRequest {
-            prompt: send.prompt,
-            references,
-            images,
-        };
-        let handle = session.send(&self.root, &request);
         Phase::Running { handle, transcript }
     }
 
@@ -1171,21 +1119,24 @@ impl Drive {
             // a dropped receiver is the app going away: keep translating so
             // the engine's channel keeps draining, but never block on it
             transcript.apply(&event);
+            if let EngineEvent::ToolStarted { title, .. } = &event {
+                let title = crate::engine_text::tool_title(title);
+                self.pipeline().activity =
+                    activity::next(Signal::ToolOpened(&title), false, transcript.engine);
+            }
             if let EngineEvent::TurnFinished(outcome) = &event {
                 let succeeded = matches!(outcome, TurnOutcome::Success { .. });
-                let failure =
-                    (!succeeded).then(|| turn_failure_activity(outcome, transcript.engine));
                 // the terminal saves BEFORE it forwards: a consumer that saw
                 // the TurnFinished message can read chat.json and the turn's
                 // activity, outputs and parameters immediately (upstream's
                 // agentDidFinish saves before the UI hears)
                 let _ = store::save_chat(&self.root, &transcript.messages);
-                let record_prompt = match failure {
-                    Some(text) => {
-                        self.pipeline().activity = Activity::Failed(text);
-                        None
-                    }
-                    None => self.settle_turn_outputs(&transcript),
+                let record_prompt = if succeeded {
+                    self.settle_turn_outputs(&transcript, outcome)
+                } else {
+                    self.pipeline().activity =
+                        activity::next(Signal::TurnFinished(outcome), false, transcript.engine);
+                    None
                 };
                 self.emit(Message::Event(event));
                 if succeeded {
@@ -1197,14 +1148,13 @@ impl Drive {
         }
     }
 
-    /// The channel-close turn end (plan Review Focus 4): running tools fail
+    /// The channel-close turn end: running tools fail
     /// open, the partial transcript saves, the app layer hears
     /// [`Message::Closed`].
     fn close_open_turn(&mut self, transcript: &mut ChatState) {
         transcript.fail_running_tools();
         let _ = store::save_chat(&self.root, &transcript.messages);
-        self.pipeline().activity =
-            Activity::Failed(fl!("errore-di", agent = transcript.engine.display_name()));
+        self.pipeline().activity = activity::next(Signal::Closed, false, transcript.engine);
         self.emit(Message::Closed);
     }
 
@@ -1275,7 +1225,7 @@ impl Drive {
                 }
                 BuildOutcome::Success => {
                     pipeline.parameters = refresh_parameters(&self.root);
-                    pipeline.missing_outputs = missing_files(&self.root.join("output"));
+                    pipeline.missing_outputs = missing_files(&folder::output_dir(&self.root));
                     pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
                 }
                 BuildOutcome::Failed { last_line, output } => {
@@ -1322,12 +1272,18 @@ impl Drive {
     /// Project.swift:262-276): parameters and missing outputs re-read and
     /// the finished activity set. Returns the prompt to record a version
     /// under, present only when ALL expected outputs exist.
-    fn settle_turn_outputs(&mut self, transcript: &ChatState) -> Option<String> {
+    fn settle_turn_outputs(
+        &mut self,
+        transcript: &ChatState,
+        outcome: &TurnOutcome,
+    ) -> Option<String> {
         let mut pipeline = self.pipeline();
         pipeline.parameters = refresh_parameters(&self.root);
-        pipeline.missing_outputs = missing_files(&self.root.join("output"));
-        if pipeline.missing_outputs.is_empty() {
-            pipeline.activity = Activity::Succeeded(fl!("modello-generato"));
+        pipeline.missing_outputs = missing_files(&folder::output_dir(&self.root));
+        let complete = pipeline.missing_outputs.is_empty();
+        pipeline.activity =
+            activity::next(Signal::TurnFinished(outcome), complete, transcript.engine);
+        if complete {
             Some(
                 transcript
                     .messages
@@ -1338,7 +1294,6 @@ impl Drive {
                     .unwrap_or_default(),
             )
         } else {
-            pipeline.activity = Activity::Succeeded(fl!("risposta-completata"));
             None
         }
     }
@@ -1410,29 +1365,10 @@ impl Drive {
         }
     }
 
-    /// The project's metadata, loaded now ([`fresh_metadata`]'s law).
+    /// The project's metadata as it is on disk now
+    /// ([`store::load_metadata_or_new`]).
     fn load_metadata(&self) -> ProjectMetadata {
-        fresh_metadata(&self.root)
-    }
-}
-
-/// The failure activity a turn's terminal reports (upstream
-/// AgentSession.swift:48/100/269/294 — the turn's engine name in each).
-fn turn_failure_activity(outcome: &TurnOutcome, engine: AgentKind) -> String {
-    match outcome {
-        TurnOutcome::Failed { auth, .. } if *auth => {
-            fl!("accesso-a-richiesto", agent = engine.display_name())
-        }
-        TurnOutcome::Failed { .. } | TurnOutcome::StartFailed { .. } => {
-            fl!("errore-di", agent = engine.display_name())
-        }
-        TurnOutcome::AgentMissing => fl!("non-trovato", agent = engine.display_name()),
-        TurnOutcome::Cancelled => crate::chat::interrupted(),
-        // the engine's dance absorbs Busy/MissingSession before the app
-        // hears them; Success never reaches a failure activity
-        TurnOutcome::Busy | TurnOutcome::MissingSession | TurnOutcome::Success { .. } => {
-            String::new()
-        }
+        store::load_metadata_or_new(&self.root)
     }
 }
 
@@ -1682,54 +1618,6 @@ mod tests {
         );
     }
 
-    /// The turn's engine source re-reads the settings file every ask
-    /// (Ruling 1: a picker flip written mid-conversation decides the NEXT
-    /// turn), and the launch snapshot answers only when the file is
-    /// suspended (the scripted-agent test seam) or unreadable.
-    #[test]
-    fn engine_source_rereads_the_file_per_turn() {
-        let dir = std::env::temp_dir().join(format!("cad-src-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("settings.json");
-
-        let mut codex = Settings::default();
-        codex.agent_engine = "codex".into();
-        codex.save(&file).unwrap();
-
-        let source = EngineSource {
-            file: Some(file.clone()),
-            fallback: AgentKind::Claude,
-        };
-        assert_eq!(source.current(), AgentKind::Codex, "the file decides");
-
-        Settings::default().save(&file).unwrap();
-        assert_eq!(
-            source.current(),
-            AgentKind::Claude,
-            "a flip on disk redirects the next turn"
-        );
-
-        let suspended = EngineSource {
-            file: None,
-            fallback: AgentKind::Codex,
-        };
-        assert_eq!(
-            suspended.current(),
-            AgentKind::Codex,
-            "the snapshot answers when the re-read is suspended"
-        );
-
-        let unreadable = EngineSource {
-            file: Some(dir.join("absent-settings.json")),
-            fallback: AgentKind::Codex,
-        };
-        assert_eq!(
-            unreadable.current(),
-            AgentKind::Claude,
-            "a missing settings file is a fresh install, not the snapshot"
-        );
-    }
-
     /// The activity the pipeline held when the driver sent its
     /// TurnFinished message.
     fn activity_at_turn_finished(drive: &Drive) -> Activity {
@@ -1937,10 +1825,6 @@ mod tests {
                 cmd_rx,
                 msg_tx,
                 Arc::new(Mutex::new(Pipeline::load(root))),
-                EngineSource {
-                    file: None,
-                    fallback: AgentKind::Claude,
-                },
             ),
             cmd_tx,
             msg_rx,
@@ -1950,7 +1834,7 @@ mod tests {
     /// The event channel closing without a TurnFinished (the engine task
     /// dying) ends the turn cleanly: the open tool row fails open and
     /// persists, the app layer hears `Closed`, and the queue treats it as a
-    /// failure (plan Review Focus 4).
+    /// failure.
     #[tokio::test(flavor = "multi_thread")]
     async fn channel_close_without_turn_finished() {
         let root = std::env::temp_dir().join(format!("cad-bridge-close-{}", Uuid::new_v4()));
@@ -2099,6 +1983,52 @@ mod tests {
         drop(cmd_tx);
     }
 
+    /// A failed turn leaves the driver idle over a paused, non-empty queue.
+    /// Removing one queued send there drops exactly that send and keeps the
+    /// pause, as it does while a turn runs: the idle driver applies queue
+    /// commands by the same rule as every other phase.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_queued_after_a_failed_turn_removes_and_keeps_the_pause() {
+        let root = std::env::temp_dir().join(format!("cad-bridge-idle-rm-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut drive, cmd_tx, mut messages) = harness(&root);
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for (id, prompt) in [(first, "first"), (second, "second")] {
+            drive.queue.push_back(QueuedSend {
+                id,
+                prompt: prompt.into(),
+                attachments: Vec::new(),
+            });
+        }
+        assert!(
+            matches!(drive.continue_queue(false), Phase::Idle),
+            "a failed turn ends idle"
+        );
+        assert!(drive.paused, "a failed turn pauses the queue");
+
+        let driver = tokio::spawn(drive.run(Session::new(Settings::default())));
+        cmd_tx.send(Command::RemoveQueued(first)).unwrap();
+        let mut after = None;
+        run_until(&mut messages, |m| match m {
+            Message::QueueChanged { queue, paused } if queue.len() != 2 || !paused => {
+                after = Some((
+                    queue.iter().map(|item| item.id).collect::<Vec<_>>(),
+                    *paused,
+                ));
+                true
+            }
+            _ => false,
+        })
+        .await;
+        driver.abort();
+        assert_eq!(
+            after,
+            Some((vec![second], true)),
+            "the addressed send is gone and the rest stays paused"
+        );
+    }
+
     /// The send's attachments are copied into `references/` at TURN START,
     /// before anything else happens (upstream `copyReferences` inside
     /// `send`, Project.swift:199-201): the persisted user row, the
@@ -2152,7 +2082,8 @@ mod tests {
         .await;
         assert_eq!(announced.len(), 1, "{announced:?}");
         assert!(
-            announced[0].starts_with("references/") && announced[0].ends_with(&format!("-1-{leaf}")),
+            announced[0].starts_with("references/")
+                && announced[0].ends_with(&format!("-1-{leaf}")),
             "the copy name is upstream's <stamp>-1-<name>: {}",
             announced[0]
         );
@@ -2191,8 +2122,8 @@ mod tests {
         );
     }
 
-    /// A QUEUED send copies when it STARTS, not when it is queued (Ruling 4:
-    /// upstream's queue holds pre-copy urls — Project.swift:177-190 — and
+    /// A QUEUED send copies when it STARTS, not when it is queued
+    /// (upstream's queue holds pre-copy urls — Project.swift:177-190 — and
     /// `sendNextQueued` runs the same copy-on-send path as a direct send).
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_send_copies_when_it_starts_not_when_queued() {
@@ -2268,7 +2199,10 @@ mod tests {
             Role::User,
             "the queued turn's user row persisted"
         );
-        assert_eq!(chat[0].attachments, vec![format!("references/{}", names[0])]);
+        assert_eq!(
+            chat[0].attachments,
+            vec![format!("references/{}", names[0])]
+        );
         drop(guard);
         unsafe {
             std::env::remove_var("CAD_TEST_CLAUDE");

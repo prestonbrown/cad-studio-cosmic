@@ -131,7 +131,7 @@ impl<'de> Deserialize<'de> for Frame {
     }
 }
 
-/// The study's state at one instant: what M7 renders.
+/// The study's state at one instant: what the viewer renders.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StudyState {
     pub parts: HashMap<String, Pose>,

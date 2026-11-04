@@ -6,7 +6,7 @@
 //! 167-168): `(-center.x, -min.y, -center.z)`, putting the model floor at
 //! scene y=0 and centering x/z. The pin is recorded on the struct and
 //! [`PartScene::to_scene`]/[`PartScene::to_model`] are its public crossing
-//! — the grid, bed outline, and tripod (Task 5) and `camera::frame`'s
+//! — the grid, bed outline, and tripod and `camera::frame`'s
 //! `(0, size.y/2, 0)` target are all stated against this pinned frame.
 //!
 //! Per-triangle colors stage here too: `TriangleColor::Some` is u8 sRGB
@@ -25,9 +25,9 @@
 
 use std::hash::Hasher;
 
-use engine::parsing::{Part, TriangleColor};
+use engine::parsing::{Box3, Part, TriangleColor};
 
-use super::Vertex;
+use super::{PartPose, Vertex};
 
 /// Upstream's neutral face color for uncolored triangles, dark appearance
 /// (ModelViewer.swift:401-403: `NSColor(red: 0.62, green: 0.70, blue:
@@ -242,40 +242,23 @@ impl PartScene {
                         .map(move |pos| Vertex { pos, normal, color })
                 })
                 .collect::<Vec<_>>();
-            let mut mn = [f32::MAX; 3];
-            let mut mx = [f32::MIN; 3];
-            for v in &vertices {
-                for a in 0..3 {
-                    mn[a] = mn[a].min(v.pos[a]);
-                    mx[a] = mx[a].max(v.pos[a]);
-                }
-            }
+            let bounds = Box3::from_points(vertices.iter().map(|v| v.pos)).unwrap_or(Box3::ZERO);
             staged.push(GpuPart {
                 name: part.name.clone(),
                 vertices,
                 edges: Vec::new(), // set after the pin below
-                aabb_min: mn,
-                aabb_max: mx,
+                aabb_min: bounds.min,
+                aabb_max: bounds.max,
                 content_hash: 0, // set after the pin below
             });
         }
-        let (mut scene_min, mut scene_max) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for part in &staged {
-            for a in 0..3 {
-                scene_min[a] = scene_min[a].min(part.aabb_min[a]);
-                scene_max[a] = scene_max[a].max(part.aabb_max[a]);
-            }
-        }
-        if staged.is_empty() {
-            // an empty scene renders nothing; keep the aabb finite for the
-            // camera math (the pin of a degenerate box is zero anyway)
-            return Self {
-                parts: staged,
-                aabb_min: [0.0; 3],
-                aabb_max: [0.0; 3],
-                pin,
-            };
-        }
+        // a part with no triangles stages a zero box but bounds nothing
+        let scene_box = Box3::union_all(
+            staged
+                .iter()
+                .filter(|p| !p.vertices.is_empty())
+                .map(|p| Box3::new(p.aabb_min, p.aabb_max)),
+        );
         // The pin is baked into the staged vertices — a later part growing
         // past the union aabb moves `from_parts`'s pin, and the content
         // hashes (computed after) pick that up so residency never serves a
@@ -291,20 +274,24 @@ impl PartScene {
                 part.aabb_max[a] += pin[a];
             }
         }
-        for a in 0..3 {
-            scene_min[a] += pin[a];
-            scene_max[a] += pin[a];
-        }
+        // an empty scene renders nothing; its box stays finite for the
+        // camera math
+        let scene_box = scene_box.map_or(Box3::ZERO, |b| b.translated(pin));
         for part in &mut staged {
             part.edges = undirected_edges(&part.vertices);
             part.content_hash = content_hash(&part.vertices);
         }
         Self {
             parts: staged,
-            aabb_min: scene_min,
-            aabb_max: scene_max,
+            aabb_min: scene_box.min,
+            aabb_max: scene_box.max,
             pin,
         }
+    }
+
+    /// The staged (pinned scene) bounds as a [`Box3`].
+    pub fn aabb(&self) -> Box3 {
+        Box3::new(self.aabb_min, self.aabb_max)
     }
 
     /// MODEL -> this scene's pinned SCENE: the remap plus the recorded
@@ -323,38 +310,81 @@ impl PartScene {
         ];
         [s[0], -s[2], s[1]]
     }
+
+    /// A MODEL box as this scene's pinned SCENE box: the corners cross
+    /// [`PartScene::to_scene`] and re-fold, since the remap negates an axis.
+    pub fn model_box_to_scene(&self, model: Box3) -> Box3 {
+        Box3::from_points([self.to_scene(model.min), self.to_scene(model.max)]).expect("two points")
+    }
+
+    /// A pinned SCENE box as a MODEL box: [`PartScene::model_box_to_scene`]
+    /// inverted.
+    pub fn scene_box_to_model(&self, scene: Box3) -> Box3 {
+        Box3::from_points([self.to_model(scene.min), self.to_model(scene.max)]).expect("two points")
+    }
+
+    /// The pose that moves a staged part by a MODEL-space `offset` (an
+    /// arrangement push): the offset is a direction, so it takes the remap
+    /// but not the pin.
+    pub fn model_offset_pose(offset: [f32; 3]) -> PartPose {
+        Some(glam::Mat4::from_translation(glam::Vec3::from_array(remap(offset))).to_cols_array_2d())
+    }
 }
 
 /// The floor pin (ModelViewer.swift:167-168) over the remapped union aabb:
 /// `(-center.x, -min.y, -center.z)` — the model floor at scene y=0, x/z
 /// centered on the origin. Zero for an empty scene.
 fn floor_pin(parts: &[Part]) -> [f32; 3] {
-    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut any = false;
-    for part in parts {
-        for &p in &part.positions {
-            let p = remap(p);
-            any = true;
-            for a in 0..3 {
-                mn[a] = mn[a].min(p[a]);
-                mx[a] = mx[a].max(p[a]);
-            }
-        }
-    }
-    if !any {
+    let remapped = parts
+        .iter()
+        .flat_map(|p| p.positions.iter().map(|&q| remap(q)));
+    let Some(b) = Box3::from_points(remapped) else {
         return [0.0; 3];
-    }
-    let mut pin = [0.0f32; 3];
-    for a in 0..3 {
-        pin[a] = -(mn[a] + mx[a]) / 2.0;
-    }
-    pin[1] = -mn[1];
-    pin
+    };
+    let c = b.center();
+    [-c[0], -b.min[1], -c[2]]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::parts;
+    use crate::render::test_support::{golden_3mf_parts, golden_stl_parts};
+
+    /// The box crossings agree with the point crossings, re-fold the
+    /// negated axis, and invert each other.
+    #[test]
+    fn box_crossings_match_to_scene_and_roundtrip() {
+        let part = Part {
+            name: "p".into(),
+            positions: vec![[-10.0, -6.0, 0.0], [10.0, 6.0, 20.0], [0.0, 0.0, 5.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(&[part], NEUTRAL);
+        let model = Box3::new([-10.0, -6.0, 0.0], [10.0, 6.0, 20.0]);
+        let s = scene.model_box_to_scene(model);
+        // scene x = model x, scene y = model z, scene z = -model y; pinned
+        // floor at y 0, x/z centered
+        assert_eq!(s, Box3::new([-10.0, 0.0, -6.0], [10.0, 20.0, 6.0]));
+        assert_eq!(s, scene.aabb(), "the staged box is the model box crossed");
+        assert_eq!(scene.scene_box_to_model(s), model);
+    }
+
+    /// An arrangement offset moves a part by the remapped direction alone.
+    #[test]
+    fn model_offset_pose_remaps_without_the_pin() {
+        let m =
+            glam::Mat4::from_cols_array_2d(&PartScene::model_offset_pose([1.0, 2.0, 3.0]).unwrap());
+        assert_eq!(
+            m.transform_point3(glam::Vec3::ZERO),
+            glam::vec3(1.0, 3.0, -2.0)
+        );
+        assert_eq!(
+            m.transform_vector3(glam::Vec3::X),
+            glam::Vec3::X,
+            "pure translation"
+        );
+    }
 
     /// The neutrals are upstream's NSColor literals decoded to linear —
     /// staging the raw literals as linear renders them visibly washed out.
@@ -402,5 +432,278 @@ mod tests {
         // out-of-range input clamps, never NaN
         assert_eq!(linear_to_srgb_f(1.2), 1.0);
         assert_eq!(linear_to_srgb_f(-0.1), 0.0);
+    }
+
+    #[test]
+    fn from_parts_remaps_and_pins_floor_at_origin() {
+        let part = engine::parsing::Part {
+            name: "tri".into(),
+            positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
+        // upstream sceneVector (x, z, -y) maps the MODEL triangle to
+        // x[1,7] y[3,9] z[-8,-2]; the pin then translates by
+        // (-center.x, -min.y, -center.z) = (-4, -3, +5): floor at scene
+        // y=0, x/z centered (ModelViewer.swift:167-168)
+        assert_eq!(scene.parts[0].vertices[0].pos, [-3.0, 0.0, 3.0]);
+        assert_eq!(scene.parts[0].vertices[2].pos, [3.0, 6.0, -3.0]);
+        // neutral painted, per-part aabb is the pinned triangle's
+        assert_eq!(scene.parts[0].vertices[0].color, NEUTRAL);
+        assert_eq!(scene.parts[0].aabb_min, [-3.0, 0.0, -3.0]);
+        assert_eq!(scene.parts[0].aabb_max, [3.0, 6.0, 3.0]);
+        // the scene aabb is the pinned union: y from 0, x/z symmetric
+        assert_eq!(scene.aabb_min, [-3.0, 0.0, -3.0]);
+        assert_eq!(scene.aabb_max, [3.0, 6.0, 3.0]);
+    }
+
+    #[test]
+    fn golden_stl_scene_is_24_triangles_inside_its_aabb() {
+        let scene = PartScene::from_parts(&golden_stl_parts(), NEUTRAL);
+        assert_eq!(scene.parts.len(), 1);
+        assert_eq!(scene.parts[0].vertices.len(), 24 * 3);
+        for v in &scene.parts[0].vertices {
+            for a in 0..3 {
+                assert!(v.pos[a] >= scene.aabb_min[a] - 1e-6);
+                assert!(v.pos[a] <= scene.aabb_max[a] + 1e-6);
+            }
+        }
+        for a in 0..3 {
+            assert!(scene.aabb_max[a] > scene.aabb_min[a]);
+        }
+    }
+
+    #[test]
+    fn golden_3mf_scene_is_two_parts_of_twelve_triangles() {
+        let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
+        assert_eq!(scene.parts.len(), 2, "one GpuPart per engine part");
+        for part in &scene.parts {
+            assert_eq!(part.vertices.len(), 12 * 3);
+            for a in 0..3 {
+                assert!(part.aabb_max[a] > part.aabb_min[a]);
+                assert!(part.aabb_min[a] >= scene.aabb_min[a] - 1e-6);
+                assert!(part.aabb_max[a] <= scene.aabb_max[a] + 1e-6);
+            }
+        }
+        // fixture: two boxes, base 60x60 z in [-4,4] and lid 40x40 z in
+        // [12,22] — MODEL x/y/z spans 60/60/26 become SCENE x/y/z 60/26/60
+        let span = |a: usize| scene.aabb_max[a] - scene.aabb_min[a];
+        assert!((span(0) - 60.0).abs() < 1e-3, "scene x span {}", span(0));
+        assert!((span(1) - 26.0).abs() < 1e-3, "scene y span {}", span(1));
+        assert!((span(2) - 60.0).abs() < 1e-3, "scene z span {}", span(2));
+        // post-pin the union aabb itself: MODEL floor (z=-4) at scene y=0,
+        // x/z centered on the scene origin, spans unchanged
+        let pinned = [
+            (scene.aabb_min[0], scene.aabb_max[0], -30.0, 30.0),
+            (scene.aabb_min[1], scene.aabb_max[1], 0.0, 26.0),
+            (scene.aabb_min[2], scene.aabb_max[2], -30.0, 30.0),
+        ];
+        for (a, &(mn, mx, emn, emx)) in pinned.iter().enumerate() {
+            assert!(
+                (mn - emn).abs() < 1e-3 && (mx - emx).abs() < 1e-3,
+                "pinned aabb[{a}] [{mn}, {mx}] vs [{emn}, {emx}]"
+            );
+        }
+    }
+
+    /// The sRGB EOTF is the exact IEC piecewise, not a single power: the
+    /// linear segment below 0.04045 and the 2.4 segment above differ enough
+    /// that a 2.2-only conversion is visibly wrong on dark channels.
+    #[test]
+    fn srgb_conversion_table() {
+        let f = parts::srgb_to_linear;
+        assert_eq!(f(0), 0.0);
+        assert!((f(255) - 1.0).abs() < 1e-6);
+        assert!((f(128) - 0.216).abs() < 5e-4, "128 -> {}", f(128));
+        // the dark discriminator — the base part's own blue R channel: a
+        // 2.2 power reads 0.0097 here, 29% low, and fails this assert
+        assert!((f(31) - 0.0137).abs() < 2e-4, "31 -> {}", f(31));
+        // the linear segment: 10/255 = 0.0392 stays below 0.04045, so
+        // /12.92 — a power-only formula reads 0.0008, 3.8x low
+        assert!((f(10) - 0.003035).abs() < 2e-5, "10 -> {}", f(10));
+        // continuity across the segment boundary (10 linear, 11 power)
+        assert!(f(10) < f(11) && f(11) < f(12));
+    }
+
+    /// Per-triangle colors stage per corner: `Some` goes through the sRGB
+    /// EOTF onto all 3 corners, `None` paints the neutral. Pinned against
+    /// the golden fixture's actual bytes so a parse regression cannot pass.
+    #[test]
+    fn colored_triangles_paint_linear_corners() {
+        let parts = golden_3mf_parts();
+        // fixture truth (model.3mf basematerials): base #1F78B5, lid #D62629
+        assert_eq!(parts[0].name, "base");
+        assert_eq!(parts[0].triangle_colors, vec![Some([31, 120, 181]); 12]);
+        assert_eq!(parts[1].name, "lid");
+        assert_eq!(parts[1].triangle_colors, vec![Some([214, 38, 41]); 12]);
+        let scene = PartScene::from_parts(&parts, NEUTRAL);
+        let linear = |c: [u8; 3]| {
+            [
+                parts::srgb_to_linear(c[0]),
+                parts::srgb_to_linear(c[1]),
+                parts::srgb_to_linear(c[2]),
+            ]
+        };
+        let (blue, red) = (linear([31, 120, 181]), linear([214, 38, 41]));
+        assert!(blue[0] < 0.02 && blue[2] > 0.45, "dark-R blue: {blue:?}");
+        for v in &scene.parts[0].vertices {
+            assert_eq!(v.color, blue, "base corner painted its triangle's color");
+        }
+        for v in &scene.parts[1].vertices {
+            assert_eq!(v.color, red, "lid corner painted its triangle's color");
+        }
+        // mixed part: Some -> linear red exactly; None -> neutral
+        let mixed = engine::parsing::Part {
+            name: "mixed".into(),
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ],
+            triangle_colors: vec![Some([255, 0, 0]), None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&mixed), NEUTRAL);
+        for v in &scene.parts[0].vertices[0..3] {
+            assert_eq!(
+                v.color,
+                [1.0, 0.0, 0.0],
+                "Some([255,0,0]) is exact linear red"
+            );
+        }
+        for v in &scene.parts[0].vertices[3..6] {
+            assert_eq!(v.color, NEUTRAL, "None paints the neutral");
+        }
+    }
+
+    /// Every staged triangle is flat-shaded with its own face
+    /// normal — all 3 corners carry normalize(cross(b−a, c−a)) of the
+    /// STAGED (remapped, floor-pinned) positions, recomputed here
+    /// independently of the staging code. A zero-area triangle falls back
+    /// to (0,0,1) (upstream TriangleMesh.swift:21-23). The 1e-4 tolerance
+    /// is float headroom only: a wrong normal (wrong corner order, MODEL
+    /// instead of scene space, unnormalized) is O(1) off.
+    #[test]
+    fn normals_match_cross_product() {
+        let scenes = [
+            PartScene::from_parts(&golden_3mf_parts(), NEUTRAL),
+            PartScene::from_parts(&golden_stl_parts(), NEUTRAL),
+        ];
+        for scene in &scenes {
+            for part in &scene.parts {
+                for tri in part.vertices.chunks_exact(3) {
+                    let (a, b, c) = (
+                        glam::Vec3::from_array(tri[0].pos),
+                        glam::Vec3::from_array(tri[1].pos),
+                        glam::Vec3::from_array(tri[2].pos),
+                    );
+                    let cross = (b - a).cross(c - a);
+                    let len = cross.length();
+                    assert!(len > 0.0, "fixture triangles are non-degenerate");
+                    let n = (cross / len).to_array();
+                    for v in tri {
+                        for axis in 0..3 {
+                            assert!(
+                                (v.normal[axis] - n[axis]).abs() < 1e-4,
+                                "corner normal {:?} != face normal {n:?}",
+                                v.normal
+                            );
+                        }
+                        let l = v.normal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        assert!((l - 1.0).abs() < 1e-4, "unit length, got {l}");
+                    }
+                }
+            }
+        }
+        // degenerate: a zero-area triangle stages the (0,0,1) fallback on
+        // all 3 corners — the brief's literal constant, matching upstream's
+        // addTriangle fallback shape (unobservable: nothing rasterizes)
+        let part = engine::parsing::Part {
+            name: "degenerate".into(),
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
+        for v in &scene.parts[0].vertices {
+            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
+        }
+    }
+
+    /// The f32 EOTF is the exact core the u8 form delegates to: every u8
+    /// value through `srgb_to_linear_f(c / 255)` equals `srgb_to_linear(c)`,
+    /// so downstream f32 callers (the cap color, the marker orange) sit on
+    /// the same curve the staging paints with.
+    #[test]
+    fn srgb_to_linear_f_is_the_u8_forms_core() {
+        for c in 0..=255u8 {
+            assert_eq!(
+                parts::srgb_to_linear_f(c as f32 / 255.0),
+                parts::srgb_to_linear(c),
+                "u8 {c}"
+            );
+        }
+        // the segment boundary is <= on the linear side
+        assert_eq!(parts::srgb_to_linear_f(0.04045), 0.04045 / 12.92);
+        assert!(parts::srgb_to_linear_f(0.04046) > parts::srgb_to_linear_f(0.04045));
+        // out-of-range inputs keep the formula's shape (callers clamp)
+        assert_eq!(parts::srgb_to_linear_f(0.0), 0.0);
+        assert!((parts::srgb_to_linear_f(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// `to_scene` is exactly the staging map (remap + the struct's pin), and
+    /// `to_model` inverts it: every MODEL corner lands on its staged byte,
+    /// and the roundtrip returns the MODEL corner — the crossing
+    /// picking and marker placement ride.
+    #[test]
+    fn to_scene_to_model_match_staging_and_roundtrip() {
+        let parts = golden_3mf_parts();
+        let scene = PartScene::from_parts(&parts, NEUTRAL);
+        for (part, raw) in scene.parts.iter().zip(&parts) {
+            assert_eq!(part.vertices.len(), raw.positions.len());
+            for (v, p) in part.vertices.iter().zip(&raw.positions) {
+                let s = scene.to_scene(*p);
+                let m = scene.to_model(v.pos);
+                for a in 0..3 {
+                    assert!((s[a] - v.pos[a]).abs() < 1e-5, "to_scene != staged at {a}");
+                    assert!((m[a] - p[a]).abs() < 1e-4, "roundtrip != MODEL at {a}");
+                }
+            }
+        }
+        // the recorded pin is the map's translation: to_scene of the origin
+        // is the pin itself
+        assert_eq!(scene.to_scene([0.0; 3]), scene.pin);
+    }
+
+    /// `from_parts_with_pin` stages against a caller-chosen frame: the
+    /// recorded pin is the input, and the staged bytes sit at exactly
+    /// (foreign pin − own pin) from `from_parts`'s — the comparison ghost's
+    /// contract (the ghost stages the old model in the CURRENT scene's frame).
+    #[test]
+    fn from_parts_with_pin_honors_a_foreign_pin() {
+        let parts = golden_3mf_parts();
+        let own = PartScene::from_parts(&parts, NEUTRAL);
+        let pin = [10.0, 20.0, 30.0];
+        let foreign = PartScene::from_parts_with_pin(&parts, NEUTRAL, pin);
+        assert_eq!(foreign.pin, pin);
+        let shift = |a: usize| pin[a] - own.pin[a];
+        for a in 0..3 {
+            assert!(
+                (foreign.aabb_min[a] - own.aabb_min[a] - shift(a)).abs() < 1e-4,
+                "aabb shifted by the pin difference at {a}"
+            );
+        }
+        for (f, o) in foreign.parts[0].vertices.iter().zip(&own.parts[0].vertices) {
+            for a in 0..3 {
+                assert!((f.pos[a] - o.pos[a] - shift(a)).abs() < 1e-4);
+            }
+        }
+        // and the foreign scene's own crossing map lands on ITS staging
+        let p = parts[0].positions[0];
+        let s = foreign.to_scene(p);
+        for a in 0..3 {
+            assert!((s[a] - foreign.parts[0].vertices[0].pos[a]).abs() < 1e-5);
+        }
     }
 }

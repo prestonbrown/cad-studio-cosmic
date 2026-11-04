@@ -4,9 +4,9 @@
 //! (cap 12, canonicalize-dedupe, most-recent-first — never re-implemented
 //! here) and persists ONLY the path list through cosmic-config.
 //!
-//! Cosmic-config is the app-UI state store by the settings single-writer law
-//! (plan Global Constraints): the engine's `settings.json` is untouched by
-//! recents; `Settings.recent_projects` stays dead in M4.
+//! Cosmic-config is the app-UI state store by the settings single-writer law:
+//! the engine's `settings.json` is untouched by recents, and
+//! `Settings.recent_projects` is never read or written.
 
 use std::path::{Path, PathBuf};
 
@@ -89,7 +89,7 @@ impl Recents {
 }
 
 /// Whether the first-run SetupSheet must show: only the cosmic-config flag
-/// decides (the engine's `has_completed_setup` is dead in M4 by the
+/// decides (the engine's `has_completed_setup` is never read, by the
 /// single-writer law).
 pub fn needs_setup(config: &Config) -> bool {
     !config.get::<bool>(FIRST_RUN_KEY).unwrap_or(false)

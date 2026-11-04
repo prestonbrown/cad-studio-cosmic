@@ -1,4 +1,4 @@
-//! Pure-helper tests for the parts-overlay family (M6 T9): the measure
+//! Pure-helper tests for the parts-overlay family: the measure
 //! badge's text in all three states (ModelPane.swift:163-179) and the
 //! legend's 12-dot cap plus count label (ModelPane.swift:202-213).
 //!

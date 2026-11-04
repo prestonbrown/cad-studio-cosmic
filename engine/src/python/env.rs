@@ -8,8 +8,7 @@
 //! `check`'s verification, [`Probe`] for `--version` discovery — so tests
 //! script fakes and never run real uv/pip/build123d.
 //!
-//! Two divergences from upstream, both forced by the plan's own test
-//! fixtures:
+//! Two divergences from upstream, both forced by the test fixtures:
 //! - uv discovery walks the same dirs [`find_executable`][locator] searches
 //!   but resolves the winner through the [`Probe`] seam (upstream's
 //!   `locate` is a plain file check). A test must be able to force the uv
@@ -162,20 +161,14 @@ pub struct EnvHandle {
     pub events: mpsc::Receiver<EnvEvent>,
 }
 
-/// The canonical app-wide venv location, `<data_dir>/venv` via the same
-/// ProjectDirs helper settings and the process registry use —
-/// `~/.local/share/cad-studio/venv` on Linux (spec §2/§6), where it is the
-/// same path session.rs feeds `{{PYTHON}}` and the restricted-bash
-/// allowlist (session.rs routes `app_venv_python` through this helper, so
-/// the two can never drift). On a macOS dev box the directories crate
-/// resolves `~/Library/Application Support/cad-studio/venv` instead —
-/// upstream Swift's own choice; production is the Linux path. Only this
-/// helper is ambient; every other function takes `dir` injected for tests.
+/// The canonical app-wide venv location, `<data_dir>/venv`
+/// ([`crate::storage::data_dir`]): `~/.local/share/cad-studio/venv` on
+/// Linux (spec §2/§6), `~/Library/Application Support/cad-studio/venv` on a
+/// macOS dev box. The agent session feeds this same path to `{{PYTHON}}`
+/// and the restricted-bash allowlist. Only this helper is ambient; every
+/// other function takes `dir` injected for tests.
 pub fn venv_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "cad-studio")
-        .expect("no home directory: cannot locate venv")
-        .data_dir()
-        .join("venv")
+    crate::storage::data_dir().join("venv")
 }
 
 /// `dir/bin/python` (PythonEnvironment.interpreter).

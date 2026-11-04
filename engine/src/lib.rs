@@ -4,20 +4,19 @@
 //! - [`agent`] — the agent session stack: executable discovery
 //!   ([`agent::locator`]), stream-event decoding ([`agent::stream_event`]),
 //!   tool-use row summaries ([`agent::tool_summary`]), argv and prompt
-//!   assembly ([`agent::claude`]), and the turn state machine plus
-//!   busy/missing/auth lifecycle dance ([`agent::session`]), driven through
-//!   the [`agent::EngineCommand`]/[`agent::EngineEvent`] pair
+//!   assembly ([`agent::claude`], [`agent::codex`]), and the turn state
+//!   machine plus busy/missing/auth lifecycle dance ([`agent::session`]);
+//!   the app drives it through `Session::send` and the returned
+//!   `TurnHandle` (see [`agent`] for the drain/pacing contract)
 //! - [`settings`] — app settings (upstream UserDefaults key names, XDG path)
-//! - [`project`] — manifest decoding, output requirements, project metadata/chat/layouts, recents
+//! - [`project`] — the project folder layout, manifest decoding, output
+//!   requirements, project metadata/chat/layouts, versions, recents
 //! - [`parsing`] — STL/3MF mesh parts and animation studies
 //! - [`watch`] — output/ directory reload watching
-//! - [`processes`] — streamed child spawn, SIGINT→SIGTERM escalation, pid registry
-//! - [`python`] — venv install planning/check driver and (M5 T2) the model.py runner
-//!
-//! M4's app drives agent sessions only through that command/event pair,
-//! and drains [`agent::EngineEvent`]s for the whole turn: the engine acts
-//! on a cancel only between event translations, so a reader that stops
-//! draining stalls the turn rather than cancelling it.
+//! - [`processes`] — streamed child spawn, SIGINT→SIGTERM escalation, pid
+//!   registry, the tool environment
+//! - [`python`] — venv install planning/check driver and the model.py runner
+//! - [`storage`] — the atomic file writer and the per-user app directories
 
 /// A fieldless enum plus its `ALL` slice, every variant in declaration
 /// order, derived from the one declaration so a new variant cannot be
@@ -47,4 +46,5 @@ pub mod processes;
 pub mod project;
 pub mod python;
 pub mod settings;
+pub mod storage;
 pub mod watch;

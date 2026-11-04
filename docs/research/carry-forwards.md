@@ -450,6 +450,12 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
 - Unreadable model with a broken 3MF and NO STL
   (ProjectOutput.swift:139-187): the port shows the 3MF's parse error;
   upstream shows the missing STL's file-not-found.
+- The agent engine is pinned for the whole turn (engine/src/agent/session.rs
+  `turn_settings`, carried on the turn handle). Upstream re-reads the engine
+  on every `run()`, the busy retry's included (AgentSession.swift:31, :76),
+  so flipping the picker during a busy wait changes the retry's engine
+  there. The port's retry resumes a claude session id, which only the same
+  engine can resume; the picker's write decides the next turn.
 
 ## M9 / general
 

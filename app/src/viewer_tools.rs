@@ -7,13 +7,13 @@
 //! whether motion is offered, and the double-click decode for part rows.
 //!
 //! Pure: no cosmic/iced types, no I/O, part-name keyed (`BTreeSet<String>`)
-//! so the pane resolves T1's `groups` to names at the call site. Layout and
+//! so the pane resolves the parts tree's `groups` to names at the call site. Layout and
 //! collapse arrive as constructor arguments — the CALLER reads them from
 //! engine settings (`parts_layout`/`parts_collapsed`) and writes them back
 //! there per the settings-persistence law; this module never touches the
 //! settings file. Scene-side consequences (re-frame on layout change, mesh
 //! rebuild on section change) stay with the pane, which owns the camera
-//! ([`crate::camera_input`]) and the scene.
+//! ([`viewer::camera_input`]) and the scene.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};

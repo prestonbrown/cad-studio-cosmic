@@ -7,9 +7,9 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 // per-part model transform + motion appearance: one bind group per part
-// draw (identity today; explode offsets, playback poses, and the
-// collision/translucency flags all go through this same binding — motion
-// is uniform state, never a re-stage)
+// draw (explode offsets, playback poses, and the collision/translucency
+// flags all go through this same binding — motion is uniform state, never
+// a re-stage)
 struct Model {
     transform: mat4x4<f32>,
     collision: f32,
@@ -64,7 +64,7 @@ fn vs_main(in: Vin) -> Vout {
     out.color = in.color;
     out.world = world.xyz;
     // w = 0 rotates the normal without translating it — correct for the
-    // rigid part transforms explode/playback will send through `model`
+    // rigid part transforms explode and playback send through `model`
     out.normal = (model.transform * vec4<f32>(in.normal, 0.0)).xyz;
     return out;
 }
@@ -97,8 +97,8 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
         // every normal, opaque even on a would-be-translucent part
         return vec4<f32>(to_target(vec3<f32>(COLLISION_R, COLLISION_G, COLLISION_B)), 1.0);
     }
-    // staged normals are unit and `model` is identity today; normalize is
-    // insurance for scaled future transforms
+    // staged normals are unit and `model` is rigid (translations and
+    // rotations), so this normalize only guards against drift
     let n = normalize(in.normal);
     let key = normalize(KEY_POS);
     let n_key = max(dot(n, key), 0.0);

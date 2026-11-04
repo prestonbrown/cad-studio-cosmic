@@ -19,7 +19,7 @@
 //! [`PartScene::to_model`] to MODEL coords, what the measure points and
 //! the badge deltas consume.
 
-use crate::render::{PartPose, PartScene};
+use crate::render::{PartPose, PartScene, SectionPlane};
 
 /// Möller–Trumbore against one triangle: the ray's `t` at the intersection,
 /// or `None` when it misses. Two-sided — `|det| <= 1e-9` rejects the
@@ -62,14 +62,14 @@ fn moller_trumbore(
 
 /// The nearest ray/triangle hit across every part `poses` places visibly,
 /// as a MODEL-space point — the measure tool's pick. `origin`/`dir` are
-/// scene-space (the output of [`crate::render::camera::pick_ray`]);
+/// scene-space (the output of [`crate::render::camera::Orbit::pick_ray`]);
 /// `section` is the shader's discard plane as the camera uniform carries
 /// it (a scene axis and keep-below position in the PINNED scene frame),
 /// and a hit beyond it is skipped so the nearest SURVIVING hit wins.
 pub fn first_hit(
     scene: &PartScene,
     poses: &[PartPose],
-    section: Option<(u32, f32)>,
+    section: Option<&SectionPlane>,
     origin: [f32; 3],
     dir: [f32; 3],
 ) -> Option<[f32; 3]> {
@@ -101,8 +101,8 @@ pub fn first_hit(
             // the section test runs on the WORLD point — the shader
             // discards on the fragment's posed position
             let hit = world.transform_point3(staged);
-            if let Some((axis, pos)) = section {
-                if hit[axis as usize] > pos {
+            if let Some(plane) = section {
+                if hit[plane.axis.index()] > plane.pos {
                     continue;
                 }
             }
@@ -187,6 +187,14 @@ mod tests {
         }
     }
 
+    fn keep_below_y(pos: f32) -> SectionPlane {
+        SectionPlane {
+            axis: crate::render::SceneAxis::Y,
+            pos,
+            cap: engine::parsing::Box3::ZERO,
+        }
+    }
+
     #[test]
     fn section_filter_removes_discarded_hits() {
         let scene = ground_tri_scene();
@@ -196,7 +204,7 @@ mod tests {
             first_hit(
                 &scene,
                 &poses,
-                Some((1, -1.0)),
+                Some(&keep_below_y(-1.0)),
                 [0.0, 50.0, 0.0],
                 [0.0, -1.0, 0.0]
             )
@@ -206,7 +214,7 @@ mod tests {
             first_hit(
                 &scene,
                 &poses,
-                Some((1, 5.0)),
+                Some(&keep_below_y(5.0)),
                 [0.0, 50.0, 0.0],
                 [0.0, -1.0, 0.0]
             )

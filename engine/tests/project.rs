@@ -202,7 +202,7 @@ fn recents_dedupe_evict_and_filter_missing() {
     assert_eq!(filtered.0.len(), 11);
 }
 
-// ─── project creation (M4 task 0) ────────────────────────────────────────────
+// ─── project creation ────────────────────────────────────────────────────────
 
 /// `create_project` scaffolds the upstream tree (ProjectStore.create +
 /// prepare, contract §4:126): the root as a leaf of the parent, `output/`,

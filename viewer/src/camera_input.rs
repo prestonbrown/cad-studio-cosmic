@@ -1,21 +1,20 @@
 //! Camera input state machine — the port of upstream `CameraInputView.swift`
-//! over the viewer's parity camera formulas (`viewer::render::camera`,
-//! facts §1). Owns the pose (yaw/pitch/distance/target) plus the gesture
+//! over the parity camera formulas ([`crate::render::camera`], facts §1).
+//! Owns the pose (one [`Orbit`]) plus the gesture
 //! bookkeeping: press/release with the click-vs-drag accumulator, drag decode
 //! (orbit vs pan), scroll decode (precise `/12` steps, `y`-then-`x` fallback),
 //! pinch magnify, presets with re-frame, fit, and the re-frame-on->50 %-diagonal
 //! mesh-change rule (ModelViewerState.swift:127-135).
 //!
-//! Pure: no cosmic/iced types, no I/O — inputs arrive as plain numbers in
+//! Pure: no iced types, no I/O — inputs arrive as plain numbers in
 //! iced's conventions and the AppKit-convention flips happen HERE, at the
 //! boundary, so the pane never re-derives them:
 //! - cursor-derived `dy` (drag) is TOP-DOWN in iced and BOTTOM-UP in AppKit —
 //!   negated once on the way into the formulas (facts #18/#29);
 //! - scroll deltas pass through UNCHANGED — iced's wheel conversion forwards
-//!   winit's deltas, which carry AppKit's `scrollingDelta` sign, the same
-//!   assumption the M3-settled zoom decode already makes.
+//!   winit's deltas, which carry AppKit's `scrollingDelta` sign.
 //!
-//! Pinch/magnify (facts #116, this module's to-own carry-forward): the
+//! Pinch/magnify (facts #116): the
 //! formula is `zoom(1 / max(1 + magnification, 0.1))` through the same
 //! radius-relative clamp as scroll. The iced fork at the workspace's pin
 //! translates no magnify event (winit's `PinchGesture` is dropped in
@@ -23,7 +22,9 @@
 //! [`CameraInput::magnify`] today — the state machine and the pane message
 //! exist so the wiring is one match arm when the runtime grows the event.
 
-use viewer::render::camera::{self, Preset};
+use engine::parsing::Box3;
+
+use crate::render::camera::{self, Orbit, Preset};
 
 /// Click-vs-drag threshold in px (CameraInputView.swift:37,40-52): a press
 /// whose accumulated `|dx| + |dy|` stays strictly under this counts as a
@@ -59,28 +60,22 @@ pub fn magnify_factor(magnification: f32) -> f32 {
     1.0 / (1.0 + magnification).max(MAGNIFY_FLOOR)
 }
 
-/// The orbit/pan camera pose plus gesture state. The pane constructs it
+/// The orbit/pan camera pose plus gesture state. The owner constructs it
 /// against the scene aabb (iso preset, parity framing), feeds it iced's
-/// raw numbers, and pushes the settled pose into the viewer's `ModelScene`
-/// after every event.
+/// raw numbers, and hands the settled [`CameraInput::orbit`] to the
+/// `ModelScene` after every event.
 pub struct CameraInput {
-    /// Orbit yaw, radians. Decreases with rightward drag.
-    pub yaw: f32,
-    /// Orbit pitch, radians, clamped to ±[`camera::MAX_PITCH`].
-    pub pitch: f32,
-    /// Camera distance from `target` — scroll and pinch zoom this itself,
-    /// clamped to [0.1·radius, 200·radius].
-    pub distance: f32,
-    /// Look-at target (scene space).
-    pub target: [f32; 3],
+    /// The pose. Scroll and pinch zoom `distance` within
+    /// [0.1·radius, 200·radius]; drags orbit or pan it.
+    pub orbit: Orbit,
     /// The scene aabb presets and fit re-frame against.
-    aabb: ([f32; 3], [f32; 3]),
+    aabb: Box3,
     /// Framing radius of the current scene — the zoom clamp scales it.
     radius: f32,
-    /// Size vector of the aabb the camera last framed against; the > 50 %
+    /// Diagonal of the aabb the camera last framed against; the > 50 %
     /// diagonal rule compares new meshes to it. Set at construction (the
     /// initial frame) and by every re-frame.
-    framed_size: [f32; 3],
+    framed_diagonal: f32,
     /// Accumulated `|dx| + |dy|` since the press (click-vs-drag).
     drag_distance: f32,
     /// The open drag pans instead of orbiting (right/middle button or a
@@ -96,23 +91,19 @@ pub struct CameraInput {
 impl CameraInput {
     /// The iso preset framing `aabb` (upstream's initial camera:
     /// ModelViewer.swift:19-33, 328-337).
-    pub fn new(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> Self {
+    pub fn new(aabb: Box3) -> Self {
         let mut input = Self {
-            yaw: 0.0,
-            pitch: 0.0,
-            distance: 0.0,
-            target: [0.0; 3],
-            aabb: (aabb_min, aabb_max),
+            orbit: Orbit::framed(aabb, Preset::Iso),
+            aabb,
             radius: 0.0,
-            framed_size: [0.0; 3],
+            framed_diagonal: 0.0,
             drag_distance: 0.0,
             drag_pan: false,
             pressed: false,
             last: None,
             view_height: 0.0,
         };
-        input.reframe_to(aabb_min, aabb_max, true);
-        (input.yaw, input.pitch) = Preset::Iso.yaw_pitch();
+        input.reframe_to(aabb, true);
         input
     }
 
@@ -141,7 +132,7 @@ impl CameraInput {
             if self.drag_pan {
                 self.pan(dx, -dy);
             } else {
-                (self.yaw, self.pitch) = camera::orbit_drag(self.yaw, self.pitch, dx, -dy);
+                self.orbit = self.orbit.dragged(dx, -dy);
             }
         }
         self.last = Some((x, y));
@@ -162,9 +153,8 @@ impl CameraInput {
     /// instead of zoom (CameraInputView.swift:63-71).
     pub fn scroll(&mut self, x: f32, y: f32, precise: bool, pan: bool) {
         if pan {
-            // scroll deltas carry AppKit's scrollingDelta sign already (the
-            // M3-settled zoom decode assumes the same), so they pass
-            // through unflipped
+            // scroll deltas carry AppKit's scrollingDelta sign already, so
+            // they pass through unflipped
             self.pan(x, y);
         } else {
             self.zoom(ZOOM_STEP_BASE.powf(scroll_steps(x, y, precise)));
@@ -180,15 +170,13 @@ impl CameraInput {
     /// Switch to `preset` and re-frame (upstream's preset change bumps
     /// `cameraID`, ModelViewer.swift:322-326).
     pub fn preset(&mut self, preset: Preset) {
-        let (aabb_min, aabb_max) = self.aabb;
-        self.reframe_to(aabb_min, aabb_max, true);
-        (self.yaw, self.pitch) = preset.yaw_pitch();
+        self.reframe_to(self.aabb, true);
+        (self.orbit.yaw, self.orbit.pitch) = preset.yaw_pitch();
     }
 
     /// Re-frame the current scene, keeping the angles (upstream's fit).
     pub fn fit(&mut self) {
-        let (aabb_min, aabb_max) = self.aabb;
-        self.reframe_to(aabb_min, aabb_max, true);
+        self.reframe_to(self.aabb, true);
     }
 
     /// The scene became `aabb` (an output reload): stores the framing
@@ -199,11 +187,10 @@ impl CameraInput {
     /// (ModelViewerState.swift:127-135). The construction frame counts as
     /// the first framed size, so a reload is always measured against the
     /// scene on screen.
-    pub fn mesh_changed(&mut self, aabb_min: [f32; 3], aabb_max: [f32; 3]) -> bool {
-        let size = size_of(aabb_min, aabb_max);
-        let previous = diagonal(self.framed_size).max(0.001);
-        let reframe = (diagonal(size) - previous).abs() / previous > REFRAME_DIAGONAL_FRACTION;
-        self.reframe_to(aabb_min, aabb_max, reframe);
+    pub fn mesh_changed(&mut self, aabb: Box3) -> bool {
+        let previous = self.framed_diagonal.max(0.001);
+        let reframe = (aabb.diagonal() - previous).abs() / previous > REFRAME_DIAGONAL_FRACTION;
+        self.reframe_to(aabb, reframe);
         reframe
     }
 
@@ -214,8 +201,8 @@ impl CameraInput {
     /// camera pose itself is held here; the next
     /// [`CameraInput::preset`]/[`CameraInput::fit`] frames against `aabb`,
     /// and the zoom clamp follows its radius immediately.
-    pub fn set_framing_reference(&mut self, aabb: ([f32; 3], [f32; 3])) {
-        self.reframe_to(aabb.0, aabb.1, false);
+    pub fn set_framing_reference(&mut self, aabb: Box3) {
+        self.reframe_to(aabb, false);
     }
 
     /// The viewport's pixel height — the pan formula's scale
@@ -232,67 +219,44 @@ impl CameraInput {
     /// distance × `factor`, clamped to [0.1·radius, 200·radius]
     /// (ModelViewer.swift:307-310).
     fn zoom(&mut self, factor: f32) {
-        self.distance = camera::zoomed(self.distance, factor, self.radius);
+        self.orbit = self.orbit.zoomed(factor, self.radius);
     }
 
     /// target += (-right·dx + up·dy)·units_per_point over the camera's own
     /// scene axes, `dx`/`dy` in AppKit convention (bottom-up dy).
     fn pan(&mut self, dx: f32, dy: f32) {
-        self.target = camera::panned(
-            self.target,
-            self.yaw,
-            self.pitch,
-            self.distance,
-            self.view_height,
-            dx,
-            dy,
-        );
+        self.orbit = self.orbit.panned(self.view_height, dx, dy);
     }
 
     /// Adopt `aabb` as the framing reference: recompute radius, store the
-    /// size vector, and (when `frame_too`) reset target/distance from
-    /// [`camera::frame`].
-    fn reframe_to(&mut self, aabb_min: [f32; 3], aabb_max: [f32; 3], frame_too: bool) {
-        self.aabb = (aabb_min, aabb_max);
-        self.radius = camera::framing_radius(aabb_min, aabb_max);
-        self.framed_size = size_of(aabb_min, aabb_max);
+    /// diagonal, and (when `frame_too`) reset target/distance from
+    /// [`camera::frame`]. The diagonal is the same in MODEL and SCENE (the
+    /// remap permutes extents).
+    fn reframe_to(&mut self, aabb: Box3, frame_too: bool) {
+        self.aabb = aabb;
+        self.radius = camera::framing_radius(aabb);
+        self.framed_diagonal = aabb.diagonal();
         if frame_too {
-            let (target, distance) = camera::frame(aabb_min, aabb_max);
-            self.target = target;
-            self.distance = distance;
+            let (target, distance) = camera::frame(aabb);
+            self.orbit.target = target;
+            self.orbit.distance = distance;
         }
     }
-}
-
-/// An aabb's extent vector.
-fn size_of(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> [f32; 3] {
-    [
-        aabb_max[0] - aabb_min[0],
-        aabb_max[1] - aabb_min[1],
-        aabb_max[2] - aabb_min[2],
-    ]
-}
-
-/// A size vector's diagonal length — the re-frame rule's measure (the
-/// remap permutes it, so MODEL and SCENE agree here).
-fn diagonal(size: [f32; 3]) -> f32 {
-    (size[0] * size[0] + size[1] * size[1] + size[2] * size[2]).sqrt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::camera::{FOV, MAX_PITCH};
     use std::f32::consts::FRAC_PI_2;
-    use viewer::render::camera::{FOV, MAX_PITCH};
 
     /// The golden-rule aabb: a 30×40×0 plate has diagonal 50, radius 25.
-    fn plate_aabb() -> ([f32; 3], [f32; 3]) {
-        ([0.0; 3], [30.0, 40.0, 0.0])
+    fn plate_aabb() -> Box3 {
+        Box3::new([0.0; 3], [30.0, 40.0, 0.0])
     }
 
     fn input() -> CameraInput {
-        let (min, max) = plate_aabb();
-        CameraInput::new(min, max)
+        CameraInput::new(plate_aabb())
     }
 
     fn approx(actual: f32, expected: f32) {
@@ -314,10 +278,10 @@ mod tests {
         // height above the pinned floor, distance = radius/sin(fov/2)*1.15
         // with radius = diagonal/2 = 25 — not max-extent/2 (facts #23).
         let cam = input();
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
-        approx(cam.distance, distance);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
+        approx(cam.orbit.distance, distance);
         approx(distance, 25.0 / (FOV / 2.0).sin() * 1.15);
-        approx3(cam.target, [0.0, 20.0, 0.0]); // half the scene height
+        approx3(cam.orbit.target, [0.0, 20.0, 0.0]); // half the scene height
     }
 
     #[test]
@@ -329,7 +293,7 @@ mod tests {
         cam.press(false);
         cam.move_to(100.0, 100.0);
         cam.move_to(180.0, 50.0); // dx = 80, iced dy = -50 -> AppKit dy = +50
-        let (yaw, pitch) = (cam.yaw, cam.pitch);
+        let (yaw, pitch) = (cam.orbit.yaw, cam.orbit.pitch);
         approx(yaw, std::f32::consts::FRAC_PI_4 - 80.0 * 0.008);
         approx(pitch, 0.6 + 50.0 * 0.008);
     }
@@ -340,24 +304,29 @@ mod tests {
         cam.press(false);
         cam.move_to(0.0, 0.0);
         cam.move_to(0.0, -2000.0); // AppKit dy = +2000 -> 16 rad, clamped
-        approx(cam.pitch, MAX_PITCH);
+        approx(cam.orbit.pitch, MAX_PITCH);
         cam.release();
         cam.press(false);
         cam.move_to(0.0, 0.0);
         cam.move_to(0.0, 2000.0); // AppKit dy = -2000
-        approx(cam.pitch, -MAX_PITCH);
+        approx(cam.orbit.pitch, -MAX_PITCH);
     }
 
     #[test]
     fn hover_moves_are_ignored() {
         let mut cam = input();
-        let (yaw, pitch, distance, target) = (cam.yaw, cam.pitch, cam.distance, cam.target);
+        let (yaw, pitch, distance, target) = (
+            cam.orbit.yaw,
+            cam.orbit.pitch,
+            cam.orbit.distance,
+            cam.orbit.target,
+        );
         cam.move_to(10.0, 10.0);
         cam.move_to(400.0, -300.0);
-        approx(cam.yaw, yaw);
-        approx(cam.pitch, pitch);
-        approx(cam.distance, distance);
-        approx3(cam.target, target);
+        approx(cam.orbit.yaw, yaw);
+        approx(cam.orbit.pitch, pitch);
+        approx(cam.orbit.distance, distance);
+        approx3(cam.orbit.target, target);
     }
 
     #[test]
@@ -373,11 +342,11 @@ mod tests {
     #[test]
     fn scroll_zoom_multiplies_distance_by_step_factor() {
         let mut cam = input();
-        let d0 = cam.distance;
+        let d0 = cam.orbit.distance;
         cam.scroll(0.0, 24.0, true, false); // 2 precise steps
-        approx(cam.distance, d0 * 0.9f32.powf(2.0));
+        approx(cam.orbit.distance, d0 * 0.9f32.powf(2.0));
         cam.scroll(0.0, 3.0, false, false); // 3 line steps the other way
-        approx(cam.distance, d0 * 0.9f32.powf(2.0) * 0.9f32.powf(3.0));
+        approx(cam.orbit.distance, d0 * 0.9f32.powf(2.0) * 0.9f32.powf(3.0));
     }
 
     #[test]
@@ -386,9 +355,9 @@ mod tests {
         let mut cam = input();
         let radius = 25.0;
         cam.scroll(0.0, f32::MAX / 12.0, true, false); // zoom in, huge
-        approx(cam.distance, radius * 0.1);
+        approx(cam.orbit.distance, radius * 0.1);
         cam.scroll(0.0, -f32::MAX / 12.0, true, false); // zoom out, huge
-        approx(cam.distance, radius * 200.0);
+        approx(cam.orbit.distance, radius * 200.0);
     }
 
     #[test]
@@ -399,13 +368,16 @@ mod tests {
         let mut cam = input();
         cam.preset(Preset::Front);
         cam.set_view_height(600.0);
-        let (t0, d0) = (cam.target, cam.distance);
+        let (t0, d0) = (cam.orbit.target, cam.orbit.distance);
         let upp = 2.0 * d0 * (FOV / 2.0).tan() / 600.0;
         cam.press(true); // right-drag pans (CameraInputView.swift:55-61)
         cam.move_to(0.0, 0.0);
         cam.move_to(30.0, -40.0); // dx = 30, AppKit dy = +40
-        approx3(cam.target, [t0[0] - 30.0 * upp, t0[1] + 40.0 * upp, t0[2]]);
-        approx(cam.distance, d0); // pan never zooms
+        approx3(
+            cam.orbit.target,
+            [t0[0] - 30.0 * upp, t0[1] + 40.0 * upp, t0[2]],
+        );
+        approx(cam.orbit.distance, d0); // pan never zooms
     }
 
     #[test]
@@ -415,11 +387,14 @@ mod tests {
         let mut cam = input();
         cam.preset(Preset::Front);
         cam.set_view_height(600.0);
-        let (t0, d0) = (cam.target, cam.distance);
+        let (t0, d0) = (cam.orbit.target, cam.orbit.distance);
         let upp = 2.0 * d0 * (FOV / 2.0).tan() / 600.0;
         cam.scroll(20.0, -30.0, true, true);
-        approx(cam.distance, d0);
-        approx3(cam.target, [t0[0] - 20.0 * upp, t0[1] - 30.0 * upp, t0[2]]);
+        approx(cam.orbit.distance, d0);
+        approx3(
+            cam.orbit.target,
+            [t0[0] - 20.0 * upp, t0[1] - 30.0 * upp, t0[2]],
+        );
     }
 
     #[test]
@@ -461,12 +436,12 @@ mod tests {
     #[test]
     fn magnify_zooms_under_the_same_clamp() {
         let mut cam = input();
-        let d0 = cam.distance;
+        let d0 = cam.orbit.distance;
         cam.magnify(0.5); // factor 2/3 -> closer
-        approx(cam.distance, (d0 * (1.0 / 1.5)).max(25.0 * 0.1));
+        approx(cam.orbit.distance, (d0 * (1.0 / 1.5)).max(25.0 * 0.1));
         cam.scroll(0.0, -f32::MAX / 12.0, true, false); // park at 200r
         cam.magnify(-0.95); // factor 10, but clamped at 200*radius
-        approx(cam.distance, 25.0 * 200.0);
+        approx(cam.orbit.distance, 25.0 * 200.0);
     }
 
     #[test]
@@ -481,11 +456,11 @@ mod tests {
             (Preset::Right, FRAC_PI_2, 0.0),
         ] {
             cam.preset(preset);
-            approx(cam.yaw, yaw);
-            approx(cam.pitch, pitch);
-            let (target, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
-            approx(cam.distance, distance);
-            approx3(cam.target, target);
+            approx(cam.orbit.yaw, yaw);
+            approx(cam.orbit.pitch, pitch);
+            let (target, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
+            approx(cam.orbit.distance, distance);
+            approx3(cam.orbit.target, target);
         }
     }
 
@@ -495,9 +470,9 @@ mod tests {
         cam.preset(Preset::Right);
         cam.scroll(0.0, 24.0, true, false); // zoom off the preset distance
         cam.fit();
-        approx(cam.yaw, FRAC_PI_2); // angles kept
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
-        approx(cam.distance, distance); // distance reset
+        approx(cam.orbit.yaw, FRAC_PI_2); // angles kept
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
+        approx(cam.orbit.distance, distance); // distance reset
     }
 
     #[test]
@@ -507,18 +482,18 @@ mod tests {
         // drag the camera off the framed pose so a re-frame is observable
         cam.preset(Preset::Front);
         cam.scroll(0.0, 24.0, true, false);
-        let (target_before, distance_before) = (cam.target, cam.distance);
+        let (target_before, distance_before) = (cam.orbit.target, cam.orbit.distance);
 
         // diagonal 50 -> 60: |60-50|/50 = 0.2, under threshold
-        assert!(!cam.mesh_changed([0.0; 3], [30.0, 48.0, 0.0]));
-        approx3(cam.target, target_before);
-        approx(cam.distance, distance_before);
+        assert!(!cam.mesh_changed(Box3::new([0.0; 3], [30.0, 48.0, 0.0])));
+        approx3(cam.orbit.target, target_before);
+        approx(cam.orbit.distance, distance_before);
 
         // diagonal 60 -> 120: ratio 1.0, over threshold
-        assert!(cam.mesh_changed([0.0; 3], [96.0, 48.0, 0.0]));
-        let (_, distance) = camera::frame([0.0; 3], [96.0, 48.0, 0.0]);
-        approx(cam.distance, distance);
-        approx3(cam.target, [0.0, 24.0, 0.0]);
+        assert!(cam.mesh_changed(Box3::new([0.0; 3], [96.0, 48.0, 0.0])));
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [96.0, 48.0, 0.0]));
+        approx(cam.orbit.distance, distance);
+        approx3(cam.orbit.target, [0.0, 24.0, 0.0]);
     }
 
     #[test]
@@ -527,10 +502,13 @@ mod tests {
         // (upstream zoom(by:) reads the current mesh's radius).
         let mut cam = input(); // diagonal 50, radius 25
         let (min, max) = ([0.0; 3], [48.0, 48.0, 0.0]); // diagonal ~67.9
-        assert!(!cam.mesh_changed(min, max), "ratio 0.36 stays under 0.5");
+        assert!(
+            !cam.mesh_changed(Box3::new(min, max)),
+            "ratio 0.36 stays under 0.5"
+        );
         cam.scroll(0.0, -f32::MAX / 12.0, true, false); // zoom out hard
-        let radius = camera::framing_radius(min, max);
-        approx(cam.distance, radius * 200.0); // the NEW radius, not 25
+        let radius = camera::framing_radius(Box3::new(min, max));
+        approx(cam.orbit.distance, radius * 200.0); // the NEW radius, not 25
     }
 
     #[test]
@@ -539,10 +517,10 @@ mod tests {
         // different from what `new` framed re-frames, an identical one
         // never does.
         let mut cam = input();
-        assert!(!cam.mesh_changed([0.0; 3], [30.0, 40.0, 0.0]));
-        assert!(cam.mesh_changed([0.0; 3], [300.0, 400.0, 0.0]));
-        let (_, distance) = camera::frame([0.0; 3], [300.0, 400.0, 0.0]);
-        approx(cam.distance, distance);
+        assert!(!cam.mesh_changed(Box3::new([0.0; 3], [30.0, 40.0, 0.0])));
+        assert!(cam.mesh_changed(Box3::new([0.0; 3], [300.0, 400.0, 0.0])));
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [300.0, 400.0, 0.0]));
+        approx(cam.orbit.distance, distance);
     }
 
     #[test]
@@ -555,14 +533,14 @@ mod tests {
         let mut cam = input();
         cam.preset(Preset::Front);
         cam.scroll(0.0, 24.0, true, false); // zoom off the preset distance
-        let distance_before = cam.distance;
+        let distance_before = cam.orbit.distance;
 
         // diagonal 50 -> ~57.2: well under the re-frame gate
-        cam.set_framing_reference(([0.0; 3], [30.0, 48.0, 0.0]));
-        approx(cam.distance, distance_before); // reference only, camera held
+        cam.set_framing_reference(Box3::new([0.0; 3], [30.0, 48.0, 0.0]));
+        approx(cam.orbit.distance, distance_before); // reference only, camera held
 
         cam.preset(Preset::Front);
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 48.0, 0.0]);
-        approx(cam.distance, distance); // framed at the pushed aabb
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 48.0, 0.0]));
+        approx(cam.orbit.distance, distance); // framed at the pushed aabb
     }
 }

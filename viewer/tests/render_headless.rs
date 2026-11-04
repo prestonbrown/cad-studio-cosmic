@@ -16,7 +16,7 @@ use viewer::render::lights;
 use viewer::render::markers;
 use viewer::render::{
     Camera, Frame, GHOST_ALPHA, MeshPipeline, NEUTRAL, Options, PartAppearance, PartPose,
-    PartScene, default_camera, preset_camera, srgb_to_linear,
+    PartScene, SceneAxis, SectionPlane, default_camera, preset_camera, srgb_to_linear,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -186,12 +186,89 @@ fn render_frame_with_poses_format(
         scene,
         poses,
         appearances,
-        effective_aabb: (scene.aabb_min, scene.aabb_max),
+        section: None,
         grid,
         markers,
         ghost,
         options: *options,
     };
+    render_frame_struct(device, queue, pipeline, &frame, w, h, format)
+}
+
+/// One `Frame` at `w` x `h` in `format`: `prepare_parts`, then
+/// [`draw_and_read`] with the pipeline's own render pass.
+fn render_frame_struct(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    frame: &Frame<'_>,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+) -> Vec<u8> {
+    pipeline.prepare_parts(device, queue, (w, h), frame);
+    draw_and_read(device, queue, w, h, format, |encoder, view| {
+        pipeline.render(encoder, view, [0.0, 0.0, w as f32, h as f32]);
+    })
+}
+
+/// A section plane on scene `axis` at `pos`, capped over `scene`'s own box.
+fn plane(scene: &PartScene, axis: SceneAxis, pos: f32) -> SectionPlane {
+    SectionPlane {
+        axis,
+        pos,
+        cap: scene.aabb(),
+    }
+}
+
+/// [`render_frame`] with a section plane: identity poses, default options.
+fn render_sectioned(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    scene: &PartScene,
+    camera: &Camera,
+    section: SectionPlane,
+    options: Options,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let poses = identity_poses(scene);
+    let appearances = default_appearances(scene);
+    let frame = Frame {
+        camera,
+        scene,
+        poses: &poses,
+        appearances: &appearances,
+        section: Some(section),
+        grid: None,
+        markers: None,
+        ghost: None,
+        options,
+    };
+    render_frame_struct(
+        device,
+        queue,
+        pipeline,
+        &frame,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    )
+}
+
+/// A `w` x `h` target in `format`, cleared to the app background, `draw`
+/// recorded on top, read back tightly packed (`w * h * 4` bytes in the
+/// format's channel order). `queue.write_buffer` calls made before this
+/// are ordered ahead of the submitted encoder's commands.
+fn draw_and_read(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+    draw: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
+) -> Vec<u8> {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless target"),
         size: wgpu::Extent3d {
@@ -207,7 +284,6 @@ fn render_frame_with_poses_format(
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    pipeline.prepare_parts(device, queue, (w, h), &frame);
     let mut encoder = device.create_command_encoder(&Default::default());
     // clear to the app background first, then viewer pass loads on top
     // (mirrors iced underlay)
@@ -232,7 +308,7 @@ fn render_frame_with_poses_format(
         });
         drop(pass);
     }
-    pipeline.render(&mut encoder, &view, [0.0, 0.0, w as f32, h as f32]);
+    draw(&mut encoder, &view);
     // buffer copies require bytes_per_row 256-aligned; 800 * 4 = 3200 is not,
     // so pad the rows and strip the padding on readback
     let stride = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
@@ -579,7 +655,7 @@ fn mesh_renders_with_ink_and_is_frame_stable() {
 /// readback values are sRGB-ENCODED, not linear: the cap fragment's linear
 /// CUT_FACE_LINEAR (0.692, 0.032, 0.022) reads back as (217, 50, 41) — a
 /// brief's linear-g `g < 90` band would misfire on exactly that. Calibrated
-/// from a measured histogram (T4, per-part colors under two-light shading):
+/// from a measured histogram (per-part colors under two-light shading):
 /// cap (217,50,41) — the cap shader is unlit, so it alone is
 /// shading-invariant; blue base faces (11,61,95), (13,67,103), (16,75,115);
 /// red lid faces (113,15,16), (123,17,19), (137,21,23); background
@@ -612,18 +688,19 @@ fn section_cap_appears_and_shrinks_toward_the_edge() {
     // one pipeline across every cut (iced Storage lifetime): stencil state
     // must not leak between frames
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1; // SCENE y — the MODEL z stack after the remap
+    let cam = default_camera(&scene, 800.0 / 600.0);
     let span = scene.aabb_max[1] - scene.aabb_min[1];
     let mut cap_at = |frac: f32| {
-        cam.section_pos = scene.aabb_min[1] + span * frac;
-        cap_red_pixels(&render_frame(
+        // SCENE y — the MODEL z stack after the remap
+        let cut = plane(&scene, SceneAxis::Y, scene.aabb_min[1] + span * frac);
+        cap_red_pixels(&render_sectioned(
             device,
             queue,
             &mut pipeline,
             &scene,
             &cam,
+            cut,
+            Options::default(),
             800,
             600,
         ))
@@ -716,26 +793,6 @@ fn box_scene(bounds: [[f32; 3]; 2]) -> PartScene {
     PartScene::from_parts_with_pin(std::slice::from_ref(&part), NEUTRAL, [0.0; 3])
 }
 
-/// The MODEL-space aabb of `scene`: the scene aabb's corners through
-/// `to_model` (the inverse remap+pin), re-extremized — the aabb
-/// `tools::section::plane_value` interpolates.
-fn scene_model_aabb(scene: &PartScene) -> ([f32; 3], [f32; 3]) {
-    let mut mn = [f32::MAX; 3];
-    let mut mx = [f32::MIN; 3];
-    for a in [scene.aabb_min[0], scene.aabb_max[0]] {
-        for b in [scene.aabb_min[1], scene.aabb_max[1]] {
-            for c in [scene.aabb_min[2], scene.aabb_max[2]] {
-                let m = scene.to_model([a, b, c]);
-                for i in 0..3 {
-                    mn[i] = mn[i].min(m[i]);
-                    mx[i] = mx[i].max(m[i]);
-                }
-            }
-        }
-    }
-    (mn, mx)
-}
-
 /// The ink's row extent (min, max texture row, row 0 at the top), or None
 /// when nothing is inked. The top-preset section test compares this against
 /// projected geometry: from that camera screen rows order monotonically in
@@ -773,16 +830,23 @@ fn y_axis_section_keeps_the_model_above_side() {
     let (axis, pos) = viewer::tools::section::scene_plane(
         viewer::tools::section::SectionAxis::Y,
         0.5,
-        scene_model_aabb(&scene),
+        scene.scene_box_to_model(scene.aabb()),
     );
-    assert_eq!((axis, pos), (2, 12.0));
-    let mut cam = preset_camera(&scene, camera::Preset::Top, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = axis;
-    cam.section_pos = pos;
+    assert_eq!((axis, pos), (SceneAxis::Z, 12.0));
+    let cam = preset_camera(&scene, camera::Preset::Top, 800.0 / 600.0);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        plane(&scene, axis, pos),
+        Options::default(),
+        800,
+        600,
+    );
     assert!(
         ink_pixels(&px, bg) > 1_000,
         "the kept half renders: {}",
@@ -834,7 +898,6 @@ fn y_axis_section_keeps_the_model_above_side() {
     );
     // control: unsectioned, the box's far side reaches the z=20 band — the
     // clipped extent above is the discard's doing, not the helper's blindness
-    cam.section_enable = 0.0;
     let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
     let (_, full_hi) = ink_row_extent(&px, bg, 800).expect("unsectioned ink rows");
     assert!(
@@ -843,7 +906,7 @@ fn y_axis_section_keeps_the_model_above_side() {
     );
 }
 
-/// The discard does not depend on winding (carry-forward M6 line 1): flip
+/// The discard does not depend on winding: flip
 /// one part's triangle windings and the above-plane pixels still disappear.
 /// The plane sits BELOW the pinned aabb, so keep-below keeps nothing —
 /// every fragment is above it and the discard alone decides every pixel;
@@ -859,13 +922,21 @@ fn section_discard_is_winding_independent() {
         t.swap(1, 2); // rewind the base
     }
     let scene = PartScene::from_parts(&parts, NEUTRAL);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = scene.aabb_min[1] - 0.5;
+    let cam = default_camera(&scene, 800.0 / 600.0);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let bg = background_reference(device, queue, &mut pipeline, &cam, 800, 600);
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let below = plane(&scene, SceneAxis::Y, scene.aabb_min[1] - 0.5);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        below,
+        Options::default(),
+        800,
+        600,
+    );
     assert_eq!(
         ink_pixels(&px, bg),
         0,
@@ -873,7 +944,6 @@ fn section_discard_is_winding_independent() {
     );
     // control: unsectioned, the rewound geometry itself renders — the zero
     // above is the discard, not a broken scene
-    cam.section_enable = 0.0;
     let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
     assert!(
         ink_pixels(&px, bg) > 5_000,
@@ -890,11 +960,20 @@ fn cap_color_matches_blended_system_red() {
     let (device, queue) = gpu::device_queue();
     let scene = golden_scene();
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut cam = default_camera(&scene, 800.0 / 600.0);
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = 4.0; // mid-base cut (the established `base` plane)
-    let px = render_frame(device, queue, &mut pipeline, &scene, &cam, 800, 600);
+    let cam = default_camera(&scene, 800.0 / 600.0);
+    // mid-base cut (the established `base` plane)
+    let mid_base = plane(&scene, SceneAxis::Y, 4.0);
+    let px = render_sectioned(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &cam,
+        mid_base,
+        Options::default(),
+        800,
+        600,
+    );
     // the cut face's center: the fixture's staged x/z are pin-centered and
     // symmetric, and the cut sits at pinned scene y = 4 — the exact middle
     // of the 60mm base cross-section
@@ -908,6 +987,126 @@ fn cap_color_matches_blended_system_red() {
             "channel {i}: {lin:?}"
         );
     }
+}
+
+/// Renders `model` the way iced does: `Program::draw` builds the frame's
+/// primitive, `Primitive::prepare` stages it, `Primitive::render` records
+/// the viewer pass over the cleared target.
+fn render_adapter(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &mut MeshPipeline,
+    model: &viewer::render::ModelScene,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    use iced::widget::shader::{Primitive, Program, Viewport};
+    let bounds = iced::Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: w as f32,
+        height: h as f32,
+    };
+    let primitive = Program::<()>::draw(model, &(), iced::mouse::Cursor::Unavailable, bounds);
+    let viewport = Viewport::with_physical_size(iced::Size::new(w, h), 1.0);
+    primitive.prepare(pipeline, device, queue, &bounds, &viewport);
+    let clip = iced::Rectangle {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    draw_and_read(
+        device,
+        queue,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        |encoder, view| primitive.render(pipeline, encoder, view, &clip),
+    )
+}
+
+/// Exploded + section through the iced adapter: the cap must fill the cut
+/// of every exploded part. The golden lid explodes up along MODEL z (scene
+/// y), past the assembled box, and an X cut's cap quad spans scene y and z,
+/// so a cap sized from the assembled box stops short of the pushed lid.
+/// The oracle is the same frame drawn with a cap quad far larger than any
+/// part: the stencil clips a cap to the solid, so that frame's red count
+/// is the full cut area.
+#[test]
+fn exploded_section_cap_covers_every_pushed_part() {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use viewer::tools::arrangement;
+    use viewer::tools::section::{self, SectionAxis};
+
+    let (device, queue) = gpu::device_queue();
+    let parts = golden_parts();
+    let scene = Arc::new(PartScene::from_parts(&parts, NEUTRAL));
+    let none = BTreeSet::new();
+    let arranged = arrangement::arrange(
+        &parts,
+        &[],
+        engine::settings::PartsLayout::Exploded,
+        1.0,
+        &none,
+        &none,
+    );
+    let lid_push = arranged.offsets.iter().map(|o| o[2]).fold(0.0f32, f32::max);
+    assert!(
+        lid_push > 2.0,
+        "the lid explodes up: offsets {:?}",
+        arranged.offsets
+    );
+    let eff = arrangement::effective_model_aabb(&parts, &arranged);
+
+    let mut model = viewer::render::ModelScene::new(scene.clone());
+    model.poses = arranged
+        .offsets
+        .iter()
+        .map(|&o| PartScene::model_offset_pose(o))
+        .collect::<Vec<_>>()
+        .into();
+    let cut = section::pinned_plane(SectionAxis::X, 0.5, eff, &scene);
+    model.set_section(Some(cut));
+    // look down -x at the cap, framed on the exploded scene box
+    model.orbit = camera::Orbit::framed(cut.cap, camera::Preset::Right);
+
+    let (w, h) = (800, 600);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let drawn = cap_red_pixels(&render_adapter(device, queue, &mut pipeline, &model, w, h));
+
+    let cam = model.orbit.camera(w as f32 / h as f32);
+    let appearances = default_appearances(&scene);
+    let oracle = Frame {
+        camera: &cam,
+        scene: &scene,
+        poses: &model.poses,
+        appearances: &appearances,
+        section: Some(SectionPlane {
+            cap: viewer::render::Box3::new([-1e4; 3], [1e4; 3]),
+            ..cut
+        }),
+        grid: None,
+        markers: None,
+        ghost: None,
+        options: Options::default(),
+    };
+    let full = cap_red_pixels(&render_frame_struct(
+        device,
+        queue,
+        &mut pipeline,
+        &oracle,
+        w,
+        h,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ));
+    eprintln!("exploded X cut: lid push {lid_push}, adapter cap {drawn} px, full cut {full} px");
+    assert!(full > 2_000, "both parts' cuts are in view: {full} px");
+    assert!(
+        drawn * 100 >= full * 99,
+        "the cap must cover the whole cut: {drawn} of {full} red px"
+    );
 }
 
 #[test]
@@ -932,7 +1131,7 @@ fn viewport_resize_reallocates_depth_and_renders() {
     );
 }
 
-/// Aspect comes from the viewport (Review Focus 3, the discriminator): the
+/// Aspect comes from the viewport: the
 /// same model, framed identically (framing is aspect-free), rendered at
 /// 800×600 (4:3) and 1280×600 (≈2.13:1) — equal heights. With a vertical
 /// FOV a point's pixel x offset scales as h / (2·tan(fov/2))·aspect_factor
@@ -973,10 +1172,8 @@ fn aspect_from_viewport() {
     let ratio = wide as f64 / narrow as f64;
     // measured on Metal: identical ink counts (98560) and bbox widths
     // (468 px) at both sizes — ratio 1.000; the 5% band only absorbs
-    // driver rounding. (T3 re-measure: per-part colors made the dark-blue
-    // face ink-visible, lifting the count from the neutral-era 31834; the
-    // bbox width is unchanged.) Under the 16:9 hardcode this same render
-    // measures 1.606 (verified against this test during T2).
+    // driver rounding. A hardcoded 16:9 aspect reads 1.606 on this same
+    // render.
     assert!(
         (0.95..=1.05).contains(&ratio),
         "ink bbox width ratio {ratio:.3} must be ~1.0 — viewport aspect must drive the projection (16:9 hardcode reads ~1.6)"
@@ -1029,11 +1226,9 @@ fn msaa_smooths_a_diagonal_edge() {
     // at 1x the pipeline writes unblended single-sample fragments, so every
     // pixel IS a pure chroma — anything else is a blend/state leak
     assert_eq!(e1, 0, "1x frame must contain only pure-chroma pixels");
-    // measured 1153 blend pixels at 4x on Metal — unchanged by two-light
-    // shading (T4 re-measure: the blended edge set is geometric; T3's
-    // luminance-band predecessor read 1199 at T2 until per-part colors
-    // killed that band and the chroma metric replaced it); the floor
-    // guards "real AA happened"
+    // measured 1153 blend pixels at 4x on Metal under two-light shading
+    // (the blended edge set is geometric, so shading leaves it alone); the
+    // floor guards "real AA happened"
     assert!(e4 > 600, "4x blend count {e4} should be substantial");
     // one pipeline across two frames at 4x: uncleared stencil/depth would
     // leak into the second frame through the resolve path too. The options
@@ -1050,11 +1245,17 @@ fn msaa_smooths_a_diagonal_edge() {
     // cap at 4x, mid-base cut (fixture geometry: base box MODEL z in
     // [-4,4]; the pin lifts the floor to y=0, so the base spans pinned
     // y in [0,8] and its middle is y=4)
-    let mut cam = camera;
-    cam.section_enable = 1.0;
-    cam.section_axis = 1;
-    cam.section_pos = 4.0;
-    let cut = render_frame_msaa(device, queue, &scene, &cam, 800, 600, 4);
+    let cut = render_sectioned(
+        device,
+        queue,
+        &mut p4,
+        &scene,
+        &camera,
+        plane(&scene, SceneAxis::Y, 4.0),
+        *at4,
+        800,
+        600,
+    );
     assert!(
         cap_red_pixels(&cut) > 2_000,
         "section cap must render through the 4x path: {} red px",
@@ -1062,7 +1263,7 @@ fn msaa_smooths_a_diagonal_edge() {
     );
 }
 
-/// Carry-forward strike (M6 T7): the alpha-blended grid survives the 4x
+/// The alpha-blended grid survives the 4x
 /// MSAA resolve path. The grid pipeline runs INSIDE the multisample pass,
 /// so its straight-alpha lines blend onto the transparent-cleared
 /// attachment and the resolve+blit composite carries them back over the
@@ -1106,7 +1307,7 @@ fn msaa_resolves_keep_grid_alpha() {
     );
 }
 
-/// Per-part colors reach pixels (Review Focus 4). The golden model paints
+/// Per-part colors reach pixels. The golden model paints
 /// base #1F78B5 and lid #D62629; every ink pixel of a 1x frame (no blends —
 /// the pipeline writes unblended, single-sample) must classify, by
 /// chromaticity-normalized nearest of the two expected linear colors, as
@@ -1126,7 +1327,7 @@ fn two_parts_two_colors() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let (blue, red) = fixture_chromas();
-    // Measured on Metal (T4, two-light shading): a 1x frame has exactly 6
+    // Measured on Metal (two-light shading): a 1x frame has exactly 6
     // distinct ink values — three blue faces and three red faces, each
     // within 0.0074 of its part's chroma (u8 quantization noise), the
     // nearest WRONG color 1.42 away. TOL 0.05 holds ~7x noise headroom and
@@ -1212,7 +1413,7 @@ fn neutral_when_uncolored() {
     let n_ink = ink_pixels(&px, bg);
     assert!(n_ink > 5_000, "model must cover a healthy area: {n_ink}");
     let neutral = face_chromas(NEUTRAL, &iso_visible_normals());
-    // Measured on Metal (T4, two-light shading): max chroma distance over
+    // Measured on Metal (two-light shading): max chroma distance over
     // all 98560 ink pixels is 0.0115 (u8 quantization on the lit-neutral
     // faces — ambient-only faces are dark and quantize coarser); TOL 0.05
     // is >4x that. A per-triangle default color or sRGB passthrough lands
@@ -1284,15 +1485,13 @@ fn white_shade(n: [f32; 3]) -> f32 {
 fn shaded_faces_differ() {
     let (device, queue) = gpu::device_queue();
     let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
-    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
     // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
-    let camera = Camera::orbiting(
-        distance,
-        3.0 * std::f32::consts::FRAC_PI_4,
-        0.6,
-        target,
-        800.0 / 600.0,
-    );
+    let camera = camera::Orbit {
+        yaw: 3.0 * std::f32::consts::FRAC_PI_4,
+        pitch: 0.6,
+        ..camera::Orbit::framed(scene.aabb(), camera::Preset::Iso)
+    }
+    .camera(800.0 / 600.0);
     // expected decoded luminance of a white face with scene normal n: the
     // linear lit, carried through the target's u8 sRGB quantization
     // (nearest byte by the same EOTF the readback decodes with) — computed,
@@ -1434,15 +1633,13 @@ fn plain_target_shader_carries_the_srgb_encode() {
     let (device, queue) = gpu::device_queue();
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
     let scene = PartScene::from_parts(std::slice::from_ref(&white_diamond_cube()), NEUTRAL);
-    let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
     // yaw 3π/4 + pitch 0.6: top and front visible, other sides edge-on
-    let camera = Camera::orbiting(
-        distance,
-        3.0 * std::f32::consts::FRAC_PI_4,
-        0.6,
-        target,
-        800.0 / 600.0,
-    );
+    let camera = camera::Orbit {
+        yaw: 3.0 * std::f32::consts::FRAC_PI_4,
+        pitch: 0.6,
+        ..camera::Orbit::framed(scene.aabb(), camera::Preset::Iso)
+    }
+    .camera(800.0 / 600.0);
     let px = render_frame_with_poses_format(
         device,
         queue,
@@ -1460,7 +1657,7 @@ fn plain_target_shader_carries_the_srgb_encode() {
         wgpu::TextureFormat::Bgra8Unorm,
     );
     // the two visible faces' expected STORED bytes: the linear lit through
-    // the encode the shader now carries (encode_srgb is its test twin)
+    // the encode the shader carries (encode_srgb is its test twin)
     let lits = [
         white_shade([0.0, 1.0, 0.0]),
         white_shade([
@@ -1512,12 +1709,11 @@ fn plain_target_shader_carries_the_srgb_encode() {
         face
     );
 
-    // review F2: the plain path must be BYTE-COMPARABLE to a same-frame
+    // the plain path must be BYTE-COMPARABLE to a same-frame
     // sRGB-attachment render (the hardware encode vs the shader encode)
     // — assert the mean absolute delta over the frame is within 2/255
     // (piecewise-vs-hardware rounding; anything structural shows up >>).
     // (assertion folded into the same test's tolerance above)
-
 }
 
 /// Wireframe mode draws hairlines, not faces (facts #44): the same scene,
@@ -1551,12 +1747,11 @@ fn wireframe_renders_lines_not_faces() {
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
-    // measured on Metal: solid 98560 ink px, wireframe 3423 — that was the
-    // edge list WITHOUT face diagonals; upstream parity (facts #44, .lines
+    // measured on Metal: solid 98560 ink px, wireframe 3423 for the edge
+    // list WITHOUT face diagonals; upstream parity (facts #44, .lines
     // draws every triangle edge) adds the 12 diagonals, which can only
     // grow wire ink. Even a 3x growth reads ratio 0.104, inside the band,
-    // and the floor only rises — full-suite re-measure deferred to the
-    // thelio merge gate (laptop test policy)
+    // and the floor only rises
     assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
     let ratio = wi as f64 / si as f64;
     assert!(
@@ -1900,7 +2095,7 @@ fn orientation_grid_discriminates_mirrors() {
     }
 }
 
-/// The M0-deferred orientation obligation: the readback's occupied-cell
+/// The orientation check: the readback's occupied-cell
 /// pattern must match a CPU rasterization of the SAME triangles through
 /// the SAME view_proj — a flipped projection, viewport, or readback row
 /// order lands the L where the CPU grid says nothing is. Agreement is
@@ -1952,7 +2147,7 @@ fn orientation_pattern_matches_projection() {
     };
     assert_grid_agrees(&px, "1x");
     // and through the resolve+blit path, where a UV flip in the blit would
-    // mirror the composited frame — the M0 obligation's actual subject
+    // mirror the composited frame — the orientation check's actual subject
     let mut p4 = MeshPipeline::with_msaa(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, 4);
     let px4 = render_frame_with_poses(
         device,
@@ -2106,7 +2301,7 @@ fn markers_render_orange_at_projected_points() {
     // ±30); ±25 corners clear the lid's ±20 x/y footprint
     let model_points = [[-25.0, -25.0, 4.0], [25.0, 25.0, 4.0]];
     let scene_points: Vec<[f32; 3]> = model_points.iter().map(|p| scene.to_scene(*p)).collect();
-    let radius = markers::marker_radius(camera::framing_radius(scene.aabb_min, scene.aabb_max));
+    let radius = markers::marker_radius(camera::framing_radius(scene.aabb()));
     let mesh = markers::geometry(&scene_points, radius);
     let poses = identity_poses(&scene);
     // orange-chroma ink within 12px of each point's projection
@@ -2390,7 +2585,7 @@ fn collision_paints_flat_red_on_every_normal() {
     }
 }
 
-/// Carry-forward class (the M3/M6 grid-alpha bug, now on mesh parts): a 0.22
+/// The grid-alpha failure class, on mesh parts: a 0.22
 /// part through the 4x MSAA resolve must still composite at 0.22 — neither
 /// snapped to the opaque color (alpha lost) nor to the background. The 4x
 /// options ride the harness core directly: default options carry msaa 1 and
