@@ -28,7 +28,8 @@ version := `cargo pkgid -p app | sed 's/.*[@#]//'`
 # (libcosmic's icon lookup scans the theme directory, so no
 # gtk-update-icon-cache pass is needed). Builds the app binary first —
 # release by default; `just install dev` installs the debug build (cargo
-# profile names; dev artifacts land in target/debug). The desktop
+# profile names; dev artifacts land in target/debug under $CARGO_TARGET_DIR,
+# default ./target). The desktop
 # entry's Exec and the metainfo's version are rewritten at install time
 # (the @BIN@ / @CARGO_PKG_VERSION@ placeholders in
 # app/resources/packaging/): a session PATH without ~/.local/bin would
@@ -43,7 +44,7 @@ install profile="release":
         $HOME/.local/share/icons/hicolor/256x256/apps \
         $HOME/.local/share/icons/hicolor/512x512/apps
     install -m 755 \
-        target/{{ if profile == "dev" { "debug" } else { profile } }}/cad-studio \
+        ${CARGO_TARGET_DIR:-target}/{{ if profile == "dev" { "debug" } else { profile } }}/cad-studio \
         $HOME/.local/bin/cad-studio
     sed -e "s|@BIN@|$HOME/.local/bin/cad-studio|" \
         app/resources/packaging/{{app-id}}.desktop \
