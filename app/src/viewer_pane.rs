@@ -84,12 +84,14 @@
 //! instead mounts the subscription only while playing — behavior-identical,
 //! without waking the runtime 60×/s for nothing. Upstream's Space shortcut
 //! (MotionControls.swift:19) is a SwiftUI button shortcut, inert while a
-//! text field has focus — and the pane's listener is scoped the same way
-//! by the pin itself, no focus query needed: `keyboard::listen` delivers
-//! only widget-IGNORED key events, and a focused text editor or input
-//! consumes bare Space as an insert (captured), so Space typed into the
-//! chat draft never reaches this listener — only editor-unfocused Space
-//! does, which is exactly upstream's rule.
+//! text field has focus — and the pane's key path is scoped the same way
+//! by the pin itself, no focus query needed: the app's `key_events`
+//! forwards only widget-IGNORED key presses, tagged with their window, and
+//! a focused text editor or input consumes bare Space as an insert
+//! (captured), so Space typed into the chat draft never arrives — only
+//! editor-unfocused Space does, which is exactly upstream's rule. The
+//! window's key router hands the press to its own pane as
+//! [`Message::Key`], so a background project window never sees it.
 //!
 //! The mounts: the bottom-center overlay slot is upstream's either/or
 //! (ModelPane.swift:39-45) — animating with a study floats
@@ -167,6 +169,20 @@ pub const RELAY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 /// 16,666,666.7 ns).
 pub const TICK: Duration = Duration::from_nanos(16_666_667);
 
+/// The pane message a key press maps to: bare Space toggles playback
+/// (MotionControls.swift:19; the update arm's animating gate no-ops it on
+/// an idle pane — winit reports no Named::Space, the logical key is the
+/// character " "), Esc clears an in-flight measurement.
+pub fn key_message(key: &keyboard::Key, modifiers: Modifiers) -> Option<Message> {
+    match key {
+        keyboard::Key::Character(c) if modifiers.is_empty() && c.as_str() == " " => {
+            Some(Message::TogglePlayback)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+        _ => None,
+    }
+}
+
 /// The pane's messages. Pane focus and viewer preset/fit menu commands are
 /// the shell's on top of these.
 #[derive(Clone, Debug)]
@@ -215,6 +231,9 @@ pub enum Message {
     /// Esc — clears an in-flight measurement (ModelPane.swift:54-58);
     /// ignored when the tool is not measuring.
     Escape,
+    /// An editor-unfocused key press, delivered by the owning project
+    /// window's key router ([`key_message`] maps it).
+    Key(keyboard::Key, Modifiers),
     // ── tool controls (the parts overlay draws the widgets; the pane arms
     // the semantics) ──────────────────────────────────────────────────────
     /// Upstream `showsGrid` (facts #38): the parity grid overlay.
@@ -623,6 +642,11 @@ impl ViewerPane {
                 self.parameters_visible = !self.parameters_visible;
             }
             Message::Picked(hit) => self.picked(hit),
+            Message::Key(key, modifiers) => {
+                if let Some(message) = key_message(&key, modifiers) {
+                    return self.update(message);
+                }
+            }
             Message::Escape => {
                 if self.tools.measuring {
                     self.tools.clear_measurement();
@@ -847,10 +871,10 @@ impl ViewerPane {
     }
 
     /// The pane's subscriptions: the output-event relay plus keyboard
-    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag),
-    /// Space while animating, Esc (clears an in-flight measurement,
-    /// ModelPane.swift:54-58), and the playback clock while
-    /// [`Self::wants_tick`]. The ⌥⌘I parameters toggle is NOT here — the
+    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag)
+    /// and the playback clock while [`Self::wants_tick`]. Space and Esc
+    /// arrive as [`Message::Key`] from the owning window's key router, so
+    /// only the key window's pane reacts. The ⌥⌘I parameters toggle is NOT here — the
     /// app's key router owns it app-wide (Commands.swift:69-73), routed
     /// through the window's command table.
     pub fn subscription(&self) -> Subscription<Message> {
@@ -862,24 +886,6 @@ impl ViewerPane {
             keyboard::Event::ModifiersChanged(modifiers) => {
                 Some(Message::ModifiersChanged(modifiers))
             }
-            // Space with no modifiers toggles playback while animating
-            // (MotionControls.swift:19) — the update arm's animating gate
-            // no-ops it on an idle pane. winit reports no Named::Space;
-            // the logical key is the character " ". Only editor-IGNORED
-            // Space ever reaches this filter: listen() drops captured
-            // events, and a focused text editor/input captures bare Space
-            // as an insert — SwiftUI's inert-while-a-text-field-has-focus
-            // rule, via capture status rather than a focus query (module
-            // docs).
-            keyboard::Event::KeyPressed {
-                key: keyboard::Key::Character(c),
-                modifiers,
-                ..
-            } if modifiers.is_empty() && c.as_str() == " " => Some(Message::TogglePlayback),
-            keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            } => Some(Message::Escape),
             _ => None,
         });
         // The playback clock: mounted only while a frame can actually
@@ -3573,16 +3579,16 @@ mod tests {
     }
 
     /// The Space/focus parity (module docs) rests on the pin's editor
-    /// behavior: `keyboard::listen` delivers only widget-IGNORED events,
+    /// behavior: the key router receives only widget-IGNORED events,
     /// and the FOCUSED editor's binding for bare Space is an insert —
-    /// captured, so it never reaches the pane's filter.
+    /// captured, so it never reaches the key router.
     /// `Binding::from_key_press` is that editor decision function (the
     /// chat draft's `key_binding` falls through to it for every
     /// non-shortcut character), so pinning it here guards the pin's
     /// BINDING half: an editor rev that stopped *binding* Space (mapping
     /// it to something else, or nothing) trips this test. The other two
-    /// halves — the binding arm's capture call and listen()'s
-    /// Ignored-only filter — are doc-only coverage (untestable without a
+    /// halves — the binding arm's capture call and key_events'
+    /// Ignored-only forwarding — are doc-only coverage (untestable without a
     /// GUI at this repo's test bar); if either ever changes, re-derive
     /// the module doc's mechanism paragraph with them.
     #[test]
@@ -3597,13 +3603,13 @@ mod tests {
             status,
         };
         // focused: an insert binding — the editor captures the press and
-        // listen() drops it; Space in the chat draft cannot toggle playback
+        // key_events drops it; Space in the chat draft cannot toggle playback
         assert!(matches!(
             Binding::<Message>::from_key_press(space_press(Status::Focused { is_hovered: false })),
             Some(Binding::Insert(' '))
         ));
         // unfocused: no binding — the press stays ignored and reaches the
-        // pane's filter, where the animating gate decides (upstream's rule)
+        // key router, where the animating gate decides (upstream's rule)
         assert!(matches!(
             Binding::<Message>::from_key_press(space_press(Status::Active)),
             None

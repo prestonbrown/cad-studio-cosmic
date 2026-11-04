@@ -628,7 +628,7 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   (ParameterCommitted/BuildFinished) are its only population paths today.
   Owner: M9 or the next fixwave pass.~~ (wave 2: `ProjectWindow::with_bridge`
   syncs at open, plus TurnSuccessBookkeeping and manifest reloads — matrix 7.21)
-- Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
+- ~~Multi-window keyboard scope (M8 T9 review, 2026-10-29): the pane's
   keyboard listener rides `keyboard::listen()`, which drops the window tag —
   with TWO project windows open, an editor-unfocused Space/Esc reaches BOTH
   panes' subscriptions (playback toggles in the background window) where
@@ -636,7 +636,7 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   dedups by root; two roots = two windows); the fix is window-tagged event
   routing (the pane has no window-focus knowledge today) — a later-milestone
   design, recorded here until then. The single-window case is unaffected
-  (T9 verified the editor-capture mechanism end-to-end). **Owner: M9 Task 2.**
+  (T9 verified the editor-capture mechanism end-to-end). **Owner: M9 Task 2.**~~ (M9 Task 2: `key_events` tags the window, the app's key router hands Space/Esc to the key window's pane as `viewer_pane::Message::Key`; the pane no longer listens globally)
 
 - Settings-window follow-ups (M8 T6 review, 2026-10-29, all LOW): (a)
   ~~ConfigureClaude parity: upstream auto-presents the agent-missing sheet PER
