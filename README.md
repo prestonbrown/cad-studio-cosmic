@@ -87,17 +87,17 @@ COSMIC app grid. `just install dev` installs the debug build instead.
   slicer button opens the plate (or the model) in the application your desktop
   associates with 3MF files.
 - **Language.** Settings > General has a language picker: System, Italiano,
-  English, Deutsch, Francais. The change applies on the next launch. System
+  English, Deutsch, Français. The change applies on the next launch. System
   follows the desktop language and falls back to English.
 
 ## Troubleshooting
 
 **Agent not found.** The app searches your `PATH` and the usual install
 directories for `claude` or `codex`. If yours lives elsewhere, set the
-executable path in Settings > Agent and press Verify. Make sure you are logged
+executable path in Settings > Agent and press Check. Make sure you are logged
 in: run `claude` once in a terminal, or `codex login`.
 
-**Python setup failed.** The Python sheet shows the installer output. Install
+**Python setup failed.** The Python sheet shows the failure message; Show Details reveals the installer log. Install
 `uv`, or a Python 3.10 to 3.13 with the `venv` module, and use Reinstall in
 Settings > Python.
 
