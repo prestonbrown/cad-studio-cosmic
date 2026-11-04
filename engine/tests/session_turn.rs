@@ -366,6 +366,39 @@ async fn unknown_events_do_not_break_turn() {
     );
 }
 
+/// An unknown top-level event type between two assistant events: both
+/// assistant texts confirm, in order, and the turn ends in Success.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_stream_event_types_are_skipped() {
+    let root = mk_project();
+    let events = run_fake(
+        &root,
+        &fixture_fake("scenarios/unknown-between-assistant.jsonl"),
+        &Settings::default(),
+    )
+    .await;
+
+    let first = positions(
+        &events,
+        |e| matches!(e, EngineEvent::TextConfirmed { text } if text == "first"),
+    );
+    let second = positions(
+        &events,
+        |e| matches!(e, EngineEvent::TextConfirmed { text } if text == "second"),
+    );
+    assert_eq!(first.len(), 1, "{events:?}");
+    assert_eq!(second.len(), 1, "{events:?}");
+    assert!(first[0] < second[0], "{events:?}");
+    assert!(
+        matches!(
+            finished(&events),
+            TurnOutcome::Success { session_id: Some(sid), .. }
+                if sid == "00000000-0000-0000-0000-00000000a007"
+        ),
+        "{events:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn argv_dump_asserts_flags() {
     let root = mk_project();
