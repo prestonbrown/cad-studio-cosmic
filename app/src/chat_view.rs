@@ -462,7 +462,7 @@ fn tile_icon_name(path: &Path) -> &'static str {
 
 /// The queue row's attachment-count caption: every attachment counts, not
 /// only images (upstream's "N immagini", ChatInputView.swift:218-219).
-fn queue_attachment_label(item: &QueueItem) -> Option<String> {
+pub(crate) fn queue_attachment_label(item: &QueueItem) -> Option<String> {
     (item.images > 0).then(|| fl!("lld-immagini", count = item.images))
 }
 
@@ -1656,19 +1656,6 @@ mod tests {
         assert_eq!(tile_icon_name(Path::new("m.PY")), "text-x-python");
         assert_eq!(tile_icon_name(Path::new("x.step")), "text-x-generic");
         assert_eq!(tile_icon_name(Path::new("noext")), "text-x-generic");
-    }
-
-    #[test]
-    fn queue_label_counts_every_attachment() {
-        let from_send = crate::bridge::QueuedItem {
-            id: Uuid::new_v4(),
-            text: String::new(),
-            images: 3,
-        };
-        let item = QueueItem { id: from_send.id, text: from_send.text, images: from_send.images };
-        assert_eq!(queue_attachment_label(&item), Some(fl!("lld-immagini", count = 3)));
-        let none = QueueItem { images: 0, ..item };
-        assert_eq!(queue_attachment_label(&none), None);
     }
 
     /// The three spinner-bearing rows construct together — the active

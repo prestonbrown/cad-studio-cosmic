@@ -123,7 +123,7 @@ fn percent_decode(text: &str) -> String {
 pub fn saved_image(png: &[u8]) -> Option<PathBuf> {
     // Upstream's NSImage(data:) refuses bytes that are not an image at paste;
     // the clipboard offered `image/png`, so anything else is not staged.
-    if !matches!(image::guess_format(png), Ok(image::ImageFormat::Png)) {
+    if image::load_from_memory_with_format(png, image::ImageFormat::Png).is_err() {
         return None;
     }
     let folder = std::env::temp_dir().join("CAD Studio Attachments");
@@ -167,6 +167,12 @@ mod tests {
     #[test]
     fn pasted_bytes_that_do_not_decode_are_refused() {
         assert_eq!(saved_image(b"not an image"), None);
+        let mut truncated = tiny_png();
+        truncated.truncate(truncated.len() / 2);
+        assert_eq!(saved_image(&truncated), None, "a PNG header over a cut body");
+        let mut garbage = tiny_png()[..8].to_vec();
+        garbage.extend_from_slice(b"garbage garbage garbage");
+        assert_eq!(saved_image(&garbage), None);
         let png = tiny_png();
         let saved = saved_image(&png).expect("valid PNG bytes save");
         assert_eq!(std::fs::read(&saved).unwrap(), png);
