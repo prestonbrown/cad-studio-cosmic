@@ -25,10 +25,12 @@
 //!
 //! - Upstream nests the speed picker and the Ripeti toggle in ONE menu
 //!   (:35-49); the port's menu is the kit's borderless pull-down (iced's
-//!   pick list, not a cosmic menu: docs/research/
-//!   libcosmic-menu-dynamic-items-bug.md), whose entries are plain
-//!   labels, so the checkmarks of the inline picker and the toggle are a
-//!   leading `✓` on the checked entries ([`speed_menu_items`]).
+//!   pick list), whose entries are plain labels, so the checkmarks of the
+//!   inline picker and the toggle are a leading `✓` on the checked
+//!   entries ([`speed_menu_items`]). A cosmic menu with `Item::CheckBox`
+//!   entries is certified safe for this (docs/research/
+//!   libcosmic-menu-dynamic-items-bug.md, probes b and b'); the swap is
+//!   deferred with the remaining visual differences.
 //! - iced sliders and pick lists carry no accessibility text at the
 //!   pinned rev, so their descriptions render as tooltips (the parts
 //!   overlay's slider pattern); buttons get real descriptions.

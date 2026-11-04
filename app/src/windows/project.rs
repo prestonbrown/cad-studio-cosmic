@@ -1851,10 +1851,10 @@ impl ProjectWindow {
         let root_button: Element<'_, Message> = root(fl!("menu-view")).into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
-        // STATIC roots only: cosmic's menu overlay corrupts widget state
-        // when an item set changes between rebuilds (a version menu that
-        // grows mid-turn panics with "Downcast widget state";
-        // version_menu's module doc carries the chain). Dynamic
+        // Each root's item SET stays fixed (labels, enabled and check
+        // states may change): cosmic's open menu panics when its item list
+        // shrinks, and opens later roots against root 0's item trees
+        // (docs/research/libcosmic-menu-dynamic-items-bug.md). Dynamic
         // dropdowns — the version history — live as popovers instead.
         cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
             .item_width(ItemWidth::Static(220))
@@ -1864,8 +1864,9 @@ impl ProjectWindow {
 
     /// The Modello root's item list (Commands.swift:113-138): Compila,
     /// Stop, Esporta, Mostra nel Finder, Apri in slicer — each gate a
-    /// Button↔ButtonDisabled swap, so the item SET never changes (the
-    /// dynamic-items corruption family stays out of reach).
+    /// Button↔ButtonDisabled swap, so the item SET never changes (an open
+    /// cosmic menu panics when its items shrink:
+    /// docs/research/libcosmic-menu-dynamic-items-bug.md).
     fn model_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
         use cosmic::widget::menu::Item;
         let gate = |enabled: bool, label: String, command: Command| {
@@ -1895,9 +1896,10 @@ impl ProjectWindow {
     fn view_entries(&self) -> Vec<cosmic::widget::menu::Item<Command, String>> {
         use cosmic::widget::menu::Item;
 
-        // Button↔ButtonDisabled keeps every root's item SET and labels
-        // fixed (the Compila entry's busy gate is the running precedent),
-        // outside the dynamic-items corruption family
+        // Button↔ButtonDisabled keeps every root's item SET fixed (the
+        // Compila entry's busy gate is the running precedent): an open
+        // cosmic menu panics when its items shrink
+        // (docs/research/libcosmic-menu-dynamic-items-bug.md)
         let gate = |enabled: bool, label: String, command: Command| {
             if enabled {
                 Item::Button(label, None, command)
@@ -1913,25 +1915,24 @@ impl ProjectWindow {
         let has_svg = output.join(folder::SCHEMATIC_SVG).exists();
 
         vec![
-            // STATIC label: upstream flips "Mostra/Nascondi chat"
-            // (Commands.swift:52), a text-only change inside the menu-overlay
-            // corruption family; the label is upstream's own toolbar phrasing
-            // (ProjectWindow.swift:103), like the parameters entry below
+            // Static label where upstream flips "Mostra/Nascondi chat"
+            // (Commands.swift:52): upstream's own toolbar phrasing
+            // (ProjectWindow.swift:103)
             Item::Button(fl!("mostra-o-nascondi-la-chat"), None, Command::ShowChat),
             Item::Divider,
             Item::Button(fl!("vai-alla-chat"), None, Command::FocusChat),
             Item::Button(fl!("vai-al-viewer-3d"), None, Command::FocusModel),
             Item::Button(fl!("vai-alla-schematica-2d"), None, Command::FocusSchematic),
             // ⌥⌘I (Commands.swift:69-73), directly after the focus trio as
-            // upstream orders it. STATIC label — upstream flips
-            // "Mostra/Nascondi parametri" with areParametersVisible, but a
-            // text-only flip is inside the menu-overlay corruption family
-            // the static-roots law rules out (the divergence is recorded in
-            // docs/research/carry-forwards.md).
-            // The label is upstream's own tooltip phrasing
-            // (ProjectWindow.swift:159), shortcut hint included.
+            // upstream orders it; the label follows areParametersVisible.
+            // A text-only change on a fixed-height Item::Button is safe in
+            // any root (docs/research/libcosmic-menu-dynamic-items-bug.md).
             Item::Button(
-                fl!("mostra-o-nascondi-i-parametri-i"),
+                if self.viewer.parameters_visible {
+                    fl!("nascondi-parametri")
+                } else {
+                    fl!("mostra-parametri")
+                },
                 None,
                 Command::ToggleParameters,
             ),
@@ -2353,15 +2354,13 @@ mod tests {
         );
     }
 
-    /// The View root carries the parameters toggle at upstream's position
-    /// (Commands.swift:69-73, directly after the focus trio) under ONE
-    /// unchanging label — upstream flips "Mostra/Nascondi parametri" with
-    /// areParametersVisible; the port pins upstream's own tooltip phrasing
-    /// because label churn between rebuilds sits
-    /// in the menu-overlay corruption family the static-roots law rules
-    /// out. The item set survives the toggle's own rebuild identically.
+    /// The View root's parameters toggle sits at upstream's position
+    /// (Commands.swift:69-73, directly after the focus trio) and its label
+    /// follows areParametersVisible: "Hide Parameters" while the panel
+    /// shows, "Show Parameters" once it is hidden. The toggle's own rebuild
+    /// changes that one label and nothing else in the View item set.
     #[tokio::test]
-    async fn view_menu_parameters_entry_is_static_at_upstream_position() {
+    async fn view_menu_parameters_label_follows_visibility() {
         use cosmic::widget::menu::Item;
 
         fn describe(entries: &[Item<Command, String>]) -> Vec<String> {
@@ -2385,6 +2384,25 @@ mod tests {
                 .collect()
         }
 
+        fn parameters_entry(entries: &[Item<Command, String>]) -> (usize, String) {
+            let hits: Vec<_> = entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| match entry {
+                    Item::Button(label, _, Command::ToggleParameters) => {
+                        Some((index, label.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "exactly one parameters entry in the View root"
+            );
+            hits.into_iter().next().unwrap()
+        }
+
         let _lang = crate::localize::pin_en();
         let root = std::env::temp_dir().join(format!("cad-viewmenu-{}", uuid::Uuid::new_v4()));
         store::create_project(
@@ -2393,49 +2411,47 @@ mod tests {
         )
         .unwrap();
         let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
-
-        let before = describe(&window.view_entries());
-        // the message a menu CLICK produces (MenuAction::message) — the
-        // entry is the second producer of this command beside the ⌥⌘I
-        // keybind, but on the click path only: a keystroke routes through
-        // the app's key router alone, so one input fires one command
-        let _ = window.update(Message::Command(Command::ToggleParameters));
-        assert!(
-            !window.viewer.parameters_visible,
-            "the command fired — the static-set assert below is not vacuous"
-        );
         window.bridge.mark_python_ready_for_test();
-        assert_eq!(
-            before,
-            describe(&window.view_entries()),
-            "the toggle's own rebuild leaves every View item and label byte-identical"
-        );
 
-        let entries = window.view_entries();
-        let mut hits: Vec<_> = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| match entry {
-                Item::Button(label, _, Command::ToggleParameters) => Some((index, label)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "exactly one parameters entry in the View root"
-        );
-        let (index, label) = hits.pop().unwrap();
+        let shown = window.view_entries();
         assert!(
-            matches!(&entries[index - 1], Item::Button(previous, _, Command::FocusSchematic)
+            window.viewer.parameters_visible,
+            "a new window shows the parameters"
+        );
+        let (index, label) = parameters_entry(&shown);
+        assert_eq!(label, "Hide Parameters");
+        assert!(
+            matches!(&shown[index - 1], Item::Button(previous, _, Command::FocusSchematic)
                 if previous == "Go to 2D Drawing"),
             "directly after the focus trio, upstream's View order"
         );
+
+        // the message a menu CLICK produces (MenuAction::message); a
+        // keystroke routes through the app's key router alone
+        let _ = window.update(Message::Command(Command::ToggleParameters));
+        assert!(!window.viewer.parameters_visible, "the command fired");
+        let hidden = window.view_entries();
         assert_eq!(
-            label,
-            // upstream's static tooltip string (ProjectWindow.swift:159),
-            // never flipping with the overlay's state
-            "Show or hide parameters (⌥⌘I)"
+            parameters_entry(&hidden),
+            (index, "Show Parameters".to_string())
+        );
+
+        let mut expected = describe(&shown);
+        let row = expected
+            .iter()
+            .position(|row| row.contains("ToggleParameters"))
+            .unwrap();
+        expected[row] = "button \"Show Parameters\" ToggleParameters".to_string();
+        assert_eq!(
+            expected,
+            describe(&hidden),
+            "the flip changes the parameters label and nothing else"
+        );
+
+        let _ = window.update(Message::Command(Command::ToggleParameters));
+        assert_eq!(
+            parameters_entry(&window.view_entries()).1,
+            "Hide Parameters"
         );
     }
 
