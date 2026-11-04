@@ -122,6 +122,68 @@ pub fn text<M: Clone + 'static>(
     .into()
 }
 
+/// The push button's padding: 20 px tall around body text, like
+/// upstream's form buttons (shots/upstream/settings-general.png, 1x).
+const PUSH_PADDING: [f32; 2] = [1.0, 9.0];
+/// The push button's face in a dark theme, against the window's `on`
+/// color (macOS dark controls sit a step above their surface).
+const PUSH_DARK_FACE: f32 = 0.2;
+
+/// The push button face: the lightest neutral in a light theme (macOS's
+/// white control), a lift off the window in a dark one.
+fn push_face(theme: &cosmic::Theme) -> cosmic::iced::Color {
+    let cosmic = theme.cosmic();
+    if cosmic.is_dark {
+        let background = cosmic.background(false);
+        super::tone::mix(
+            background.base.into(),
+            background.on.into(),
+            PUSH_DARK_FACE,
+        )
+    } else {
+        cosmic.palette.neutral_0.into()
+    }
+}
+
+/// The push button class: the face, a separator hairline, the `on` wash
+/// on hover and press.
+fn push_class() -> cosmic::theme::Button {
+    let style = |theme: &cosmic::Theme, fill: f32| {
+        let mut style = button::Style::new();
+        style.background = Some(Background::Color(super::tone::mix(
+            push_face(theme),
+            theme.cosmic().background(false).on.into(),
+            fill,
+        )));
+        style.border_radius = Corner::S.radius(theme);
+        style.border_width = 1.0;
+        style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
+        style
+    };
+    cosmic::theme::Button::Custom {
+        active: Box::new(move |_, theme| style(theme, 0.0)),
+        disabled: Box::new(move |theme| style(theme, 0.0)),
+        hovered: Box::new(move |_, theme| style(theme, HOVER)),
+        pressed: Box::new(move |_, theme| style(theme, PRESS)),
+    }
+}
+
+/// A form's push button (`Button("…")` in a grouped Form, macOS's
+/// bordered push style): `label` in body text on the push face; disabled
+/// without a message.
+pub fn push<'a, M: Clone + 'a>(label: String, on_press: Option<M>) -> Element<'a, M> {
+    let tone = content_tone(Tone::Primary, &on_press);
+    button::custom(
+        cosmic::widget::text(label)
+            .size(typography::BODY)
+            .class(tone.text(Backdrop::Plain)),
+    )
+    .padding(PUSH_PADDING)
+    .class(push_class())
+    .on_press_maybe(on_press)
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

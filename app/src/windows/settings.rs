@@ -39,7 +39,7 @@ use cosmic::iced::Alignment;
 use cosmic::iced::Length;
 use cosmic::iced::font::Weight;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::widget::{Column, Row, Space, button, container, scrollable};
+use cosmic::widget::{Column, Row, Space, container, scrollable};
 use engine::agent::locator::{AgentKind, AgentPath};
 use engine::python::env::EnvState;
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
@@ -50,10 +50,23 @@ use crate::{fl, typography};
 
 /// Upstream's window geometry (SettingsView.swift:19 `.frame(width: 600)`).
 pub const WIDTH: f32 = 600.0;
-/// The port's window height: upstream sizes vertically to the content; a
-/// fixed height over a scrollable body keeps tab switches from resizing
-/// the window.
-pub const HEIGHT: f32 = 560.0;
+/// The window height for `tab` with `engine` selected: upstream's Settings
+/// window fits each tab's content (shots/upstream/settings-*.png, 1x:
+/// General 413, Agent 633, Python 260, Advanced 323), so the port resizes
+/// on every tab or engine switch. Each value is the tab's content under
+/// the port's header plus upstream's bottom margin (last baseline to the
+/// window edge, about 25 px), at the default text scale in English; the
+/// body still scrolls should a longer translation or a larger text scale
+/// run past it.
+pub fn height(tab: Tab, engine: AgentKind) -> f32 {
+    match (tab, engine) {
+        (Tab::General, _) => 474.0,
+        (Tab::Agent, AgentKind::Claude) => 682.0,
+        (Tab::Agent, AgentKind::Codex) => 613.0,
+        (Tab::Python, _) => 291.0,
+        (Tab::Advanced, _) => 365.0,
+    }
+}
 
 /// The About window's geometry: AppKit's standard About panel, 284 wide,
 /// 206 under its title bar (shots/upstream/about.png), plus the header.
@@ -324,6 +337,11 @@ impl SettingsState {
         }
     }
 
+    /// The window height this state's tab and engine call for ([`height`]).
+    pub fn height(&self) -> f32 {
+        height(self.tab, self.engine)
+    }
+
     /// Fold one message into the mirror — the field messages' other half
     /// is [`stage`]; the effect messages keep their state in the app.
     pub fn update(&mut self, message: &Message) {
@@ -558,9 +576,7 @@ fn view_general(state: &SettingsState) -> Vec<Element<'_, Message>> {
         .align_y(Alignment::Center)
         .push(path_text(abbreviate_with_tilde(&state.location, &home)))
         .push(
-            button::text(fl!("scegli-2"))
-                .class(cosmic::theme::Button::Standard)
-                .on_press(Message::ChooseLocation(state.location.clone())),
+            ui::button::push(fl!("scegli-2"), Some(Message::ChooseLocation(state.location.clone()))),
         );
     let language_titles = LanguageChoice::ALL
         .iter()
@@ -577,7 +593,7 @@ fn view_general(state: &SettingsState) -> Vec<Element<'_, Message>> {
         )]),
         form::section(vec![form::row(
             fl!("lingua"),
-            cosmic::widget::dropdown(language_titles, Some(language_row), |index| {
+            ui::picker::picker(language_titles, Some(language_row), |index| {
                 Message::Language(LanguageChoice::ALL[index])
             }),
         )]),
@@ -631,7 +647,7 @@ fn view_agent(state: &SettingsState) -> Vec<Element<'_, Message>> {
         engine_section(state),
         form::section(vec![form::row(
             fl!("effort"),
-            cosmic::widget::dropdown(effort_titles, Some(effort_row), |index| {
+            ui::picker::picker(effort_titles, Some(effort_row), |index| {
                 Message::Effort(Effort::ALL[index])
             }),
         )]),
@@ -708,9 +724,7 @@ fn engine_section(state: &SettingsState) -> Element<'_, Message> {
         ),
         form::full_row(
             Row::new().push(Space::new().width(Length::Fill)).push(
-                button::text(fl!("verifica"))
-                    .class(cosmic::theme::Button::Standard)
-                    .on_press_maybe((!checking).then_some(Message::Verify(kind))),
+                ui::button::push(fl!("verifica"), (!checking).then_some(Message::Verify(kind))),
             ),
         ),
     ])
@@ -741,14 +755,10 @@ fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
         .spacing(8)
         .push(Space::new().width(Length::Fill))
         .push(
-            button::text(fl!("verifica"))
-                .class(cosmic::theme::Button::Standard)
-                .on_press_maybe((!installing).then_some(Message::PythonCheck)),
+            ui::button::push(fl!("verifica"), (!installing).then_some(Message::PythonCheck)),
         )
         .push(
-            button::text(fl!("reinstalla"))
-                .class(cosmic::theme::Button::Standard)
-                .on_press_maybe((!installing).then_some(Message::PythonReinstall)),
+            ui::button::push(fl!("reinstalla"), (!installing).then_some(Message::PythonReinstall)),
         );
     vec![
         form::section(vec![
@@ -773,7 +783,7 @@ fn view_advanced(state: &SettingsState) -> Vec<Element<'_, Message>> {
     vec![
         form::section(vec![form::row(
             fl!("formato-di-output"),
-            cosmic::widget::dropdown(formats, Some(selected), |index| {
+            ui::picker::picker(formats, Some(selected), |index| {
                 Message::Streaming(index == 0)
             }),
         )]),
@@ -891,6 +901,28 @@ pub fn abbreviate_with_tilde(path: &Path, home: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window follows the content like upstream's Settings scene:
+    /// each tab its own height, in upstream's order (Python shortest,
+    /// Agent tallest), and the Agent tab shrinks when Codex drops the
+    /// restricted-bash section.
+    #[test]
+    fn the_window_height_follows_the_tab_and_engine() {
+        let mut state = SettingsState::new(&Settings::default());
+        let general = state.height();
+        state.update(&Message::Tab(Tab::Agent));
+        let claude = state.height();
+        state.update(&Message::Engine(AgentKind::Codex));
+        let codex = state.height();
+        state.update(&Message::Tab(Tab::Python));
+        let python = state.height();
+        state.update(&Message::Tab(Tab::Advanced));
+        let advanced = state.height();
+        assert!(python < advanced && advanced < general && general < claude);
+        assert!(codex < claude && codex > general);
+        // the engine matters only on the Agent tab
+        assert_eq!(height(Tab::General, AgentKind::Codex), general);
+    }
 
     /// The mirror seeds from the settings exactly (every field the tabs
     /// render), claude-first defaults included.
