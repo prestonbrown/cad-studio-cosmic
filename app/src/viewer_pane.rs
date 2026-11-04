@@ -579,21 +579,7 @@ impl ViewerPane {
                 self.input.press(true);
                 self.sync_pose();
             }
-            Message::Released => {
-                // a click (< 4 px travel) while measuring fires the pick;
-                // the pane funnels right/middle releases here too, so the
-                // PRESS kind gates (upstream picks on left mouseUp only,
-                // CameraInputView.swift:50-53), and one pick at a time —
-                // a click during a pending pick is dropped
-                let was_click = self.input.release();
-                if was_click
-                    && self.last_press_primary
-                    && self.tools.measuring
-                    && !self.pick_pending
-                {
-                    self.spawn_pick();
-                }
-            }
+            Message::Released => self.released(),
             Message::Moved(point) => {
                 self.last_cursor = point;
                 self.input.move_to(point.x, point.y);
@@ -627,23 +613,7 @@ impl ViewerPane {
                 self.input.fit();
                 self.sync_pose();
             }
-            Message::Reload(kind) => match kind {
-                // model-shaped outputs rebuild the scene; the manifest
-                // feeds the status bar's warning count and the plate-view
-                // bed. Schematic reloads are the schematic pane's (its own
-                // watcher wiring).
-                ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
-                ReloadKind::Plate => self.reload_plate(),
-                // a CHANGED study keeps playing — upstream has no stop on
-                // change, only on disappearance (ModelPane.swift:69-73)
-                ReloadKind::Motion => {
-                    self.reload_motion();
-                    if self.tools.animating {
-                        self.apply_poses();
-                    }
-                }
-                ReloadKind::Schematic => {}
-            },
+            Message::Reload(kind) => self.reload(kind),
             Message::Resized(size) => {
                 // the relay delivers what report_size already deduped
                 // through last_size; recording it here keeps the message
@@ -655,15 +625,7 @@ impl ViewerPane {
             Message::ToggleParameters => {
                 self.parameters_visible = !self.parameters_visible;
             }
-            Message::Picked(hit) => {
-                self.pick_pending = false;
-                // the flight can outlive the mode it was fired under (Esc,
-                // a toggle mid-pick): a stale pick never lands
-                if let (true, Some(p)) = (self.tools.measuring, hit) {
-                    self.tools.add_measure_point(p);
-                    self.rebuild_markers();
-                }
-            }
+            Message::Picked(hit) => self.picked(hit),
             Message::Escape => {
                 if self.tools.measuring {
                     self.tools.clear_measurement();
@@ -717,80 +679,17 @@ impl ViewerPane {
                 self.tools.toggle_attached(&group);
                 self.apply_arrangement();
             }
-            Message::RowClicked(group) => {
-                let now = Instant::now();
-                let double = is_double_click(self.last_row_click.take(), now, &group);
-                self.last_row_click = Some((now, group.clone()));
-                if double {
-                    let names = self
-                        .groups()
-                        .into_iter()
-                        .map(|g| g.name)
-                        .collect::<Vec<_>>();
-                    self.tools.isolate(&group, &names);
-                    self.plate_scene_cache = None;
-                    self.apply_arrangement();
-                }
-            }
+            Message::RowClicked(group) => self.row_clicked(group),
             Message::TogglePartsCollapsed => {
                 self.tools.collapsed = !self.tools.collapsed;
                 self.persist_setting(|s| s.parts_collapsed = self.tools.collapsed);
             }
-            Message::ToggleAnimation => {
-                // no re-frame: upstream's isAnimating didSet bumps no
-                // cameraID; set_animating owns the player reset and the
-                // measuring/sectioning exclusion; the exclusion clears the
-                // points through isMeasuring's didSet chain
-                // (ModelViewerState.swift:28-38, 51-53) — the markers go
-                // with them or they'd render through playback
-                let was_measuring = self.tools.measuring;
-                self.tools.set_animating(!self.tools.animating);
-                if was_measuring && self.tools.animating {
-                    self.tools.measure_points.clear();
-                    self.rebuild_markers();
-                }
-                self.last_tick = None;
-                self.apply_poses();
-            }
-            Message::TogglePlayback => {
-                if self.tools.animating {
-                    if let Some(study) = self.study.as_ref() {
-                        let duration = study.duration();
-                        self.tools.player.toggle_playback(duration);
-                        // the subscription re-mounts on resume; its first
-                        // tick baselines instead of leaping across the gap
-                        self.last_tick = None;
-                    }
-                }
-            }
-            Message::Scrub(time) => {
-                if self.tools.animating {
-                    if let Some(study) = self.study.as_ref() {
-                        let duration = study.duration();
-                        self.tools.player.time = time.min(duration);
-                        self.tools.player.is_playing = false;
-                        self.posed_time = Some(self.tools.player.time);
-                        self.apply_poses();
-                    }
-                }
-            }
+            Message::ToggleAnimation => self.toggle_animation(),
+            Message::TogglePlayback => self.toggle_playback(),
+            Message::Scrub(time) => self.scrub(time),
             Message::SetSpeed(speed) => self.tools.player.speed = speed,
             Message::ToggleLoops => self.tools.player.loops = !self.tools.player.loops,
-            Message::Tick(now) => {
-                if !self.wants_tick() {
-                    // a straggler tick after pause/stop: baseline afresh
-                    self.last_tick = None;
-                } else if let Some(last) = self.last_tick.replace(now) {
-                    let duration = self.study.as_ref().map_or(0.0, MotionStudy::duration);
-                    self.tools
-                        .player
-                        .advance(now.duration_since(last).as_secs_f64(), duration);
-                    if self.posed_time != Some(self.tools.player.time) {
-                        self.posed_time = Some(self.tools.player.time);
-                        self.apply_poses();
-                    }
-                }
-            }
+            Message::Tick(now) => self.tick(now),
             Message::RequestMotionStudy => {}
             // The shell acts on commits; the pane's local half (value snap,
             // draft clear) was applied when the message was emitted.
@@ -798,6 +697,125 @@ impl ViewerPane {
             Message::Parameters(message) => return self.update_parameters(message),
         }
         Task::none()
+    }
+
+    /// A button came up. A click (< 4 px travel) while measuring fires the
+    /// pick; the pane funnels right/middle releases here too, so the PRESS
+    /// kind gates (upstream picks on left mouseUp only,
+    /// CameraInputView.swift:50-53), and one pick at a time — a click
+    /// during a pending pick is dropped.
+    fn released(&mut self) {
+        let was_click = self.input.release();
+        if was_click && self.last_press_primary && self.tools.measuring && !self.pick_pending {
+            self.spawn_pick();
+        }
+    }
+
+    /// The pane's output watch saw a settled change.
+    fn reload(&mut self, kind: ReloadKind) {
+        match kind {
+            // model-shaped outputs rebuild the scene; the manifest
+            // feeds the status bar's warning count and the plate-view
+            // bed. Schematic reloads are the schematic pane's (its own
+            // watcher wiring).
+            ReloadKind::Mesh | ReloadKind::Manifest => self.reload_outputs(),
+            ReloadKind::Plate => self.reload_plate(),
+            // a CHANGED study keeps playing — upstream has no stop on
+            // change, only on disappearance (ModelPane.swift:69-73)
+            ReloadKind::Motion => {
+                self.reload_motion();
+                if self.tools.animating {
+                    self.apply_poses();
+                }
+            }
+            ReloadKind::Schematic => {}
+        }
+    }
+
+    /// A parts-panel row click; the second of a double click isolates
+    /// that group.
+    fn row_clicked(&mut self, group: String) {
+        let now = Instant::now();
+        let double = is_double_click(self.last_row_click.take(), now, &group);
+        self.last_row_click = Some((now, group.clone()));
+        if double {
+            let names = self
+                .groups()
+                .into_iter()
+                .map(|g| g.name)
+                .collect::<Vec<_>>();
+            self.tools.isolate(&group, &names);
+            self.plate_scene_cache = None;
+            self.apply_arrangement();
+        }
+    }
+
+    /// A measure pick came back from the GPU readback.
+    fn picked(&mut self, hit: Option<[f32; 3]>) {
+        self.pick_pending = false;
+        // the flight can outlive the mode it was fired under (Esc, a
+        // toggle mid-pick): a stale pick never lands
+        if let (true, Some(p)) = (self.tools.measuring, hit) {
+            self.tools.add_measure_point(p);
+            self.rebuild_markers();
+        }
+    }
+
+    /// The motion-study toggle. No re-frame: upstream's isAnimating didSet
+    /// bumps no cameraID; set_animating owns the player reset and the
+    /// measuring/sectioning exclusion; the exclusion clears the points
+    /// through isMeasuring's didSet chain (ModelViewerState.swift:28-38,
+    /// 51-53) — the markers go with them or they'd render through playback.
+    fn toggle_animation(&mut self) {
+        let was_measuring = self.tools.measuring;
+        self.tools.set_animating(!self.tools.animating);
+        if was_measuring && self.tools.animating {
+            self.tools.measure_points.clear();
+            self.rebuild_markers();
+        }
+        self.last_tick = None;
+        self.apply_poses();
+    }
+
+    fn toggle_playback(&mut self) {
+        if self.tools.animating {
+            if let Some(study) = self.study.as_ref() {
+                let duration = study.duration();
+                self.tools.player.toggle_playback(duration);
+                // the subscription re-mounts on resume; its first tick
+                // baselines instead of leaping across the gap
+                self.last_tick = None;
+            }
+        }
+    }
+
+    fn scrub(&mut self, time: f64) {
+        if self.tools.animating {
+            if let Some(study) = self.study.as_ref() {
+                let duration = study.duration();
+                self.tools.player.time = time.min(duration);
+                self.tools.player.is_playing = false;
+                self.posed_time = Some(self.tools.player.time);
+                self.apply_poses();
+            }
+        }
+    }
+
+    /// The playback clock: advance the player and re-pose on a new time.
+    fn tick(&mut self, now: Instant) {
+        if !self.wants_tick() {
+            // a straggler tick after pause/stop: baseline afresh
+            self.last_tick = None;
+        } else if let Some(last) = self.last_tick.replace(now) {
+            let duration = self.study.as_ref().map_or(0.0, MotionStudy::duration);
+            self.tools
+                .player
+                .advance(now.duration_since(last).as_secs_f64(), duration);
+            if self.posed_time != Some(self.tools.player.time) {
+                self.posed_time = Some(self.tools.player.time);
+                self.apply_poses();
+            }
+        }
     }
 
     /// Whether the playback clock should run: animation on, the player
