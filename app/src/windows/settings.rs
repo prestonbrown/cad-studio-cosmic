@@ -58,18 +58,22 @@ pub const WIDTH: f32 = 600.0;
 /// translation or a larger text scale run past it.
 pub fn height(tab: Tab, engine: AgentKind) -> f32 {
     match (tab, engine) {
-        (Tab::General, _) => 468.0,
-        (Tab::Agent, AgentKind::Claude) => 672.0,
-        (Tab::Agent, AgentKind::Codex) => 618.0,
-        (Tab::Python, _) => 284.0,
-        (Tab::Advanced, _) => 365.0,
+        (Tab::General, _) => 463.0,
+        (Tab::Agent, AgentKind::Claude) => 667.0,
+        (Tab::Agent, AgentKind::Codex) => 613.0,
+        (Tab::Python, _) => 279.0,
+        (Tab::Advanced, _) => 360.0,
     }
 }
 
-/// The About window's geometry: AppKit's standard About panel, 284 wide,
-/// 206 under its title bar (shots/upstream/about.png), plus the header.
+/// The About window's geometry: AppKit's standard About panel, 284 wide
+/// (shots/upstream/about.png), the header, then the content as tall as
+/// its text runs.
 pub const ABOUT_WIDTH: f32 = 284.0;
 pub const ABOUT_HEIGHT: f32 = 270.0;
+/// The About content's top inset under the header: the icon's frame
+/// starts 8 px below the titlebar, as under AppKit's.
+const ABOUT_TOP: f32 = 8.0;
 
 /// The two engines, picker order (AgentEngine.allCases).
 pub const ENGINES: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
@@ -509,9 +513,11 @@ pub fn view<'a>(state: &'a SettingsState, python: &EnvState) -> Element<'a, Mess
     };
     Column::new()
         .push(
+            // the tab pills hang right under the header and sit 28 px
+            // above the first box, as under upstream's titlebar
             container(tabs)
                 .width(Length::Fill)
-                .padding([4, 0, 8, 0])
+                .padding([0, 0, 7, 0])
                 .align_x(Alignment::Center),
         )
         .push(scrollable(
@@ -858,7 +864,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
     container(column)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([8, 20, 24, 20])
+        .padding([ABOUT_TOP, 20.0, 24.0, 20.0])
         .class(cosmic::theme::Container::WindowBackground)
         .into()
 }

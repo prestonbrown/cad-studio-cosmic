@@ -500,8 +500,9 @@ impl Application for CadStudio {
                 self.decorate(id, focused, body, &state.tab.title())
             }
             Some(WindowKind::About) => {
+                // AppKit's About panel: a titlebar with no title
                 let body: cosmic::Element<'_, Message> = settings::view_about();
-                self.decorate(id, focused, body, &fl!("informazioni-su-cad-studio"))
+                self.decorate(id, focused, body, "")
             }
             Some(WindowKind::LoadError(error)) => {
                 self.decorate(id, focused, view_load_error(error), &fl!("cad-studio"))
