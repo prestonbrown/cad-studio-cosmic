@@ -30,6 +30,7 @@ use cosmic::iced::futures::stream::BoxStream;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::stream;
 use cosmic::iced::time::every;
+use cosmic::iced::window;
 use cosmic::iced::{Color, Length, Size, Subscription, Task};
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::pane_grid::{self, ResizeEvent};
@@ -180,10 +181,13 @@ pub enum Message {
     GripPressed(PaneKind),
     /// The pointer entered (`Some`) or left (`None`) a pane's grab handle.
     GripHovered(Option<PaneKind>),
-    /// The cursor moved while a handle is held (window coordinates).
-    PaneDragMoved(cosmic::iced::Point),
-    /// The mouse button came up while a handle is held: drop.
-    PaneDragEnded,
+    /// The cursor moved while a handle is held: the window the event came
+    /// from and the position in its coordinates. The listener hears every
+    /// window; the app drops events from any window but this one.
+    PaneDragMoved(window::Id, cosmic::iced::Point),
+    /// The mouse button came up while a handle is held (in that window):
+    /// drop.
+    PaneDragEnded(window::Id),
     /// The attach portal answered.
     AttachChosen(Result<Vec<PathBuf>, String>),
     /// The export save portal answered (`Err` = cancelled — upstream's
@@ -290,7 +294,7 @@ pub struct ProjectWindow {
     /// The handle under the pointer (full opacity while hovered).
     grip_hover: Option<PaneKind>,
     /// The live drag once the cursor has moved (upstream `paneDrag`).
-    pane_drag: Option<panes::PaneDrag>,
+    pub(crate) pane_drag: Option<panes::PaneDrag>,
     /// The last reported grid size (the report dedup).
     last_size: Arc<Mutex<Size>>,
     /// Keeps the shell's output watch alive; dropped with the window.
@@ -615,11 +619,11 @@ impl ProjectWindow {
                 self.grip_hover = kind;
                 Task::none()
             }
-            Message::PaneDragMoved(position) => {
+            Message::PaneDragMoved(_, position) => {
                 self.pane_drag_moved(position);
                 Task::none()
             }
-            Message::PaneDragEnded => {
+            Message::PaneDragEnded(_) => {
                 self.pane_drag_ended();
                 Task::none()
             }
@@ -1250,14 +1254,14 @@ impl ProjectWindow {
         }
         if self.grip_held.is_some() {
             subs.push(cosmic::iced::event::listen_with(
-                |event, _status, _window| {
+                |event, _status, window| {
                     use cosmic::iced::{Event, mouse};
                     match event {
                         Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                            Some(Message::PaneDragMoved(position))
+                            Some(Message::PaneDragMoved(window, position))
                         }
                         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                            Some(Message::PaneDragEnded)
+                            Some(Message::PaneDragEnded(window))
                         }
                         _ => None,
                     }
@@ -2860,23 +2864,24 @@ mod tests {
         window.rebuild_grid();
         let _ = window.update(Message::GridResized(Size::new(1320.0, 787.0)));
         let before = window.layout.clone();
+        let id = window::Id::unique();
 
         // a press and release with no motion drops nothing
         let _ = window.update(Message::GripPressed(PaneKind::Chat));
-        let _ = window.update(Message::PaneDragEnded);
+        let _ = window.update(Message::PaneDragEnded(id));
         assert_eq!(window.layout, before);
 
         // chat → the right edge of the schematic pane (bottom-right of
         // chat_leading's grid)
         let _ = window.update(Message::GripPressed(PaneKind::Chat));
         let over = cosmic::iced::Point::new(1300.0, HEADER_HEIGHT + 1.0 + 700.0);
-        let _ = window.update(Message::PaneDragMoved(over));
+        let _ = window.update(Message::PaneDragMoved(id, over));
         assert_eq!(
             window.pane_drag.and_then(|drag| drag.target),
             Some(PaneKind::Schematic),
             "the drag targets the pane under the cursor"
         );
-        let _ = window.update(Message::PaneDragEnded);
+        let _ = window.update(Message::PaneDragEnded(id));
         assert_eq!(window.pane_drag, None);
         assert_eq!(
             window.layout,

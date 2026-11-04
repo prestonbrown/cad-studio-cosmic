@@ -683,6 +683,15 @@ impl CadStudio {
         if let project::Message::App(request) = msg {
             return self.app_request(id, request);
         }
+        // the pane-drag listener hears every window's cursor; only this
+        // window's events drive its drag
+        if let project::Message::PaneDragMoved(source, _)
+        | project::Message::PaneDragEnded(source) = msg
+        {
+            if source != id {
+                return Task::none();
+            }
+        }
         let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
@@ -1852,7 +1861,9 @@ mod packaging_identity {
 #[cfg(test)]
 mod shell_behavior {
     use super::*;
+    use cosmic::iced::Size;
     use cosmic::iced::keyboard::key::Named;
+    use engine::project::layout::PaneKind;
     use engine::settings::MeasurementUnit;
 
     struct Fixture {
@@ -2137,6 +2148,35 @@ mod shell_behavior {
         let _ = f.app.update(request(project::AppRequest::ClearRecents));
         assert_eq!(card(&f.app), Some(Vec::new()));
         assert!(f.app.recents.paths().is_empty());
+    }
+
+    /// The pane-drag listener hears every window's cursor: while a grip is
+    /// held in one project window, another window's motion and release
+    /// must not retarget or drop its drag.
+    #[tokio::test]
+    async fn a_pane_drag_follows_only_its_own_window() {
+        let mut f = fixture();
+        let id = open_real_project(&mut f, "Trascina");
+        let other = window::Id::unique();
+        let drag = |app: &CadStudio| match app.windows.get(&id) {
+            Some(WindowKind::Project(window)) => window.pane_drag,
+            _ => panic!("the project window is open"),
+        };
+        let over = cosmic::iced::Point::new(1300.0, 700.0);
+        let size = Size::new(1320.0, 787.0);
+        let _ = f.app.update_project(id, project::Message::GridResized(size));
+        let _ = f.app.update_project(id, project::Message::GripPressed(PaneKind::Chat));
+
+        let moved = |window| project::Message::PaneDragMoved(window, over);
+        let _ = f.app.update_project(id, moved(other));
+        assert_eq!(drag(&f.app), None, "another window's cursor is ignored");
+
+        let _ = f.app.update_project(id, moved(id));
+        let own = "the window's own cursor drives the drag";
+        assert!(drag(&f.app).is_some(), "{own}");
+        let _ = f.app.update_project(id, project::Message::PaneDragEnded(other));
+        let foreign = "another window's release drops nothing";
+        assert!(drag(&f.app).is_some(), "{foreign}");
     }
 
     #[test]
