@@ -208,9 +208,9 @@ The review (m8-plan-review MAJOR 1) voided the probe design: a bare-app example 
 
 ### Task 16: Visual match pass (the close gate's named step)
 
-- [ ] **Step 1:** Enumerate the touched upstream screens (welcome, project window states, sheets, settings tabs, menus, version card, attachments surfaces) and capture each port state on :99 (drive + xwd) into `shots/m8/`; this pass also OWNS the width-starvation eyeball of the input row's send area (the carry-forward M9 follow-up) and the playback-shot verdict collection from Preston (shots delivered 2026-10-28 — Ruling 15's input).
-- [ ] **Step 2:** Side-by-side against the upstream gallery (`shots/upstream/`; the capture agent's report names what exists); divergences dispositioned into carry-forwards or fixed.
-- [ ] **Step 3:** Preston's eyeball verdict on the gallery closes M8.
+- [x] **Step 1:** Enumerate the touched upstream screens (welcome, project window states, sheets, settings tabs, menus, version card, attachments surfaces) and capture each port state on :99 (drive + xwd) into `shots/m8/`; this pass also OWNS the width-starvation eyeball of the input row's send area (the carry-forward M9 follow-up) and the playback-shot verdict collection from Preston (shots delivered 2026-10-28 — Ruling 15's input).
+- [x] **Step 2:** Side-by-side against the upstream gallery (`shots/upstream/`; the capture agent's report names what exists); divergences dispositioned into carry-forwards or fixed.
+- [x] **Step 3:** Preston's eyeball verdict on the gallery closes M8.
 
 ---
 

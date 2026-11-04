@@ -456,6 +456,24 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   so flipping the picker during a busy wait changes the retry's engine
   there. The port's retry resumes a claude session id, which only the same
   engine can resume; the picker's write decides the next turn.
+- Gallery-2 divergences (light + dark against shots/upstream, 2026-11-04):
+  - The COSMIC header bar is ~19 px taller than the macOS title bar; its
+    height follows the user's header-density setting (libcosmic
+    header_bar.rs:384-427).
+  - The picker's dropdown menu keeps libcosmic's flat look: `pick_list` and
+    its menu take no style class (iced.rs:802-827). It opens with the
+    current option highlighted.
+  - The version menu is clipped to the window; upstream's menu window can
+    extend past it.
+  - The playback speed menu's ✓ marks are text, and its width shortens the
+    scrub slider by ~25 px.
+  - The lid's specular falloff is missing. In dark playback the ghost's
+    side faces read 10-19 low in red, because the opaque side shading is
+    darker.
+  - A focused sheet field's ring sits inside the field; libcosmic's outside
+    ring leaves a 1 px gap.
+  - The agent-missing sheet lists only the npm install line (`brew --cask`
+    is macOS-only).
 
 ## M9 / general
 
