@@ -1405,7 +1405,7 @@ fn view_load_error(error: &str) -> Element<'_, Message> {
             .push(
                 text(fl!("impossibile-aprire-il-progetto"))
                     .size(crate::typography::TITLE)
-                    .font(cosmic::font::bold()),
+                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold)),
             )
             .push(
                 text(error)

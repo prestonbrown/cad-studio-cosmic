@@ -112,7 +112,7 @@ pub mod new_project {
             .push(
                 text(fl!("scegli-le-opzioni-per-il-nuovo-progetto"))
                     .size(typography::HEADLINE)
-                    .font(weighted(Weight::Semibold)),
+                    .font(crate::typography::font(Weight::Semibold)),
             )
             .push(
                 Row::new()
@@ -261,7 +261,7 @@ impl Welcome {
             .push(
                 text(fl!("cad-studio"))
                     .size(typography::scaled(36.0))
-                    .font(weighted(Weight::Bold))
+                    .font(crate::typography::font(Weight::Bold))
                     .class(Tone::Primary.text(Backdrop::Plain)),
             )
             .push(
@@ -405,7 +405,7 @@ impl Welcome {
                     // plain button, which hands its content no text color
                     .push(
                         text(name)
-                            .font(weighted(Weight::Semibold))
+                            .font(crate::typography::font(Weight::Semibold))
                             .wrapping(Wrapping::None)
                             .class(Tone::Primary.text(Backdrop::Plain)),
                     )
@@ -499,7 +499,7 @@ fn action_button<'a>(symbol: Symbol, label: String, message: Message) -> Element
         ))
         .push(
             text(label)
-                .font(weighted(Weight::Medium))
+                .font(crate::typography::font(Weight::Medium))
                 .class(Tone::Primary.text(Backdrop::Plain)),
         )
         .push(Space::new().width(Length::Fill))
@@ -517,14 +517,6 @@ fn action_button<'a>(symbol: Symbol, label: String, message: Message) -> Element
     )
     .width(320)
     .into()
-}
-
-/// The default font at `weight`.
-fn weighted(weight: Weight) -> cosmic::iced::Font {
-    cosmic::iced::Font {
-        weight,
-        ..cosmic::font::default()
-    }
 }
 
 #[cfg(test)]

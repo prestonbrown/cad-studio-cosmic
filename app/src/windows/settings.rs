@@ -811,7 +811,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         .push(
             body("CAD Studio")
                 .size(typography::TITLE3)
-                .font(weighted(Weight::Bold))
+                .font(crate::typography::font(Weight::Bold))
                 .class(Tone::Primary.text(Backdrop::Plain)),
         )
         .push(Space::new().height(6))
@@ -866,14 +866,6 @@ fn path_text<'a>(path: String) -> Text<'a> {
 
 fn body<'a>(label: impl Into<String>) -> Text<'a> {
     cosmic::widget::text(label.into()).wrapping(Wrapping::Word)
-}
-
-/// The default font at `weight`.
-fn weighted(weight: Weight) -> cosmic::iced::Font {
-    cosmic::iced::Font {
-        weight,
-        ..cosmic::font::default()
-    }
 }
 
 /// `~/`-abbreviate `path` against `home` (upstream

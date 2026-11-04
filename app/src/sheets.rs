@@ -739,10 +739,7 @@ fn body<'a>(label: impl Into<String>) -> Text<'a> {
 fn headline<'a>(label: impl Into<String>) -> Text<'a> {
     body(label)
         .size(typography::HEADLINE)
-        .font(cosmic::iced::font::Font {
-            weight: cosmic::iced::font::Weight::Semibold,
-            ..cosmic::font::default()
-        })
+        .font(crate::typography::font(cosmic::iced::font::Weight::Semibold))
 }
 
 /// `.callout`.

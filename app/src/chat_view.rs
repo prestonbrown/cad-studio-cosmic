@@ -435,10 +435,7 @@ fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
                 },
                 Tone::Secondary,
             )
-            .font(Font {
-                weight: FontWeight::Semibold,
-                ..cosmic::font::default()
-            }),
+            .font(crate::typography::font(FontWeight::Semibold)),
         )
         .align_x(Alignment::Center)
         .into()
@@ -532,10 +529,7 @@ fn markdown_spans(ir: Vec<markdown::MdSpan>) -> Element<'static, Message> {
             match span.style {
                 MdStyle::Plain => {}
                 MdStyle::Strong => {
-                    out = out.font(Font {
-                        weight: FontWeight::Bold,
-                        ..cosmic::font::default()
-                    });
+                    out = out.font(crate::typography::font(FontWeight::Bold));
                 }
                 MdStyle::Emphasis => {
                     out = out.font(Font {
@@ -888,10 +882,7 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         .spacing(4)
         .align_x(Alignment::Center)
         .push(
-            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary).font(Font {
-                weight: FontWeight::Semibold,
-                ..cosmic::font::default()
-            }),
+            styled_text(fl!("descrivi-un-oggetto"), TITLE3, Tone::Primary).font(crate::typography::font(FontWeight::Semibold)),
         )
         .push(
             styled_text(

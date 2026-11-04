@@ -32,9 +32,6 @@
 //! - iced sliders and cosmic dropdowns carry no accessibility text at the
 //!   pinned rev, so their descriptions render as tooltips (the parts
 //!   overlay's slider pattern); buttons get real descriptions.
-//! - The phase label's `.fontWeight(.medium)` maps to cosmic's
-//!   `semibold` — the pinned rev has no medium font helper (its own
-//!   caption-heading preset makes the same step).
 //! - The warning glyph is `dialog-warning`, the freedesktop stand-in for
 //!   `exclamationmark.triangle.fill`; the icon theme decides its tint —
 //!   the text beside it carries the red.
@@ -291,7 +288,7 @@ fn state_row<'a>(study: &MotionStudy, state: &StudyState) -> Element<'a, Message
         row = row.push(
             text(label.clone())
                 .size(CAPTION)
-                .font(cosmic::font::semibold())
+                .font(crate::typography::font(cosmic::iced::font::Weight::Medium))
                 .class(Tone::Primary.text(BACKDROP)),
         );
     }

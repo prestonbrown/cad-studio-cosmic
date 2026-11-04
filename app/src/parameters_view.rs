@@ -190,7 +190,7 @@ fn collapsed_capsule() -> Element<'static, Message> {
         .push(
             text(fl!("parametri"))
                 .size(typography::CALLOUT)
-                .font(cosmic::font::semibold())
+                .font(crate::typography::font(cosmic::iced::font::Weight::Medium))
                 .class(Tone::Primary.text(BACKDROP)),
         );
     let capsule = button::borderless(
@@ -223,7 +223,7 @@ fn header() -> Element<'static, Message> {
                     .push(
                         text(fl!("parametri"))
                             .size(typography::HEADLINE)
-                            .font(cosmic::font::semibold())
+                            .font(crate::typography::font(cosmic::iced::font::Weight::Semibold))
                             .class(Tone::Primary.text(BACKDROP)),
                     ),
             )

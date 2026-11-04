@@ -2098,7 +2098,7 @@ fn content_unavailable<'a>(
             .push(
                 text(title)
                     .size(crate::typography::TITLE)
-                    .font(cosmic::font::bold())
+                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold))
                     .class(Tone::Secondary.text(BACKDROP)),
             )
             .push(Space::new().height(Length::Fixed(6.0)))
