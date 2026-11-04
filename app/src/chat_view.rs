@@ -206,7 +206,19 @@ impl ChatPane {
             Message::ToggleFullOutput(id) => toggle(&mut self.full_output, id),
             Message::ToggleDetail(id) => toggle(&mut self.detail, id),
             Message::CopyCode(text) => return cosmic::iced::clipboard::write(text),
-            _ => {}
+            // the shell's (project window's update_chat)
+            Message::Send
+            | Message::Stop
+            | Message::SendSuggestion(_)
+            | Message::RowAction(_, _)
+            | Message::OpenUrl(_)
+            | Message::Attach
+            | Message::Detach(_)
+            | Message::Paste
+            | Message::AttachContent(_)
+            | Message::RemoveQueued(_)
+            | Message::SendQueuedNow
+            | Message::RestoreVersion(_) => {}
         }
         Task::none()
     }

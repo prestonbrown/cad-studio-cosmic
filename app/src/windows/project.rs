@@ -46,6 +46,7 @@ use engine::watch::{ReloadKind, WatchHandle, watch_directory};
 use viewer::render::camera::Preset;
 
 use crate::activity::{self, Activity, IssueKind};
+use crate::app::AppCommand;
 use crate::attachments::ClipboardContent;
 use crate::bridge::{self, Bridge};
 use crate::chat::ChatState;
@@ -150,11 +151,11 @@ impl MenuAction for Command {
     }
 }
 
-impl MenuAction for AppRequest {
+impl MenuAction for AppCommand {
     type Message = Message;
 
     fn message(&self) -> Message {
-        Message::App(*self)
+        Message::App(AppRequest::Command(*self))
     }
 }
 
@@ -165,13 +166,6 @@ pub enum Message {
     Viewer(crate::viewer_pane::Message),
     Schematic(crate::schematic::Message),
     Bridge(bridge::Message),
-    /// A bridge refusal asked for the Python setup sheet — the app layer
-    /// owns the sheet's presentation (it overlays whichever window shows).
-    PresentSetupSheet,
-    /// A chat row's "Configura l'agente…" action — the app layer presents
-    /// the agent-missing sheet over whichever window shows (upstream
-    /// ChatView.swift:101-102; the sheet, not the settings window).
-    PresentAgentSheet,
     /// The shell's output watcher saw a settled change.
     OutputReload(ReloadKind),
     /// The pane grid's laid-out size (the resize clamp's input).
@@ -203,18 +197,8 @@ pub enum Message {
     ToggleIssues(Option<IssueKind>),
     /// An outside click dismissed whichever header card was open.
     CloseCards,
-    /// A row of the Open Recent card: open that project (the app layer).
-    OpenRecentPath(PathBuf),
-    /// The Open Recent card's "Cancella menu" (the app layer clears the
-    /// store and empties the card).
-    ClearRecents,
-    /// The header's close button (the app layer closes the window).
-    CloseRequested,
-    /// A window-chrome gesture on the header (the app layer owns the
-    /// window id the platform call needs).
-    Window(WindowOp),
-    /// An app-level request bubbled from the File menu (the window cannot
-    /// act on windows or portals itself).
+    /// A request only the app layer can perform. The app takes every
+    /// `App` message before the window's [`ProjectWindow::update`] runs.
     App(AppRequest),
     /// A version menu entry was picked (VersionMenu.swift:14): restore that
     /// snapshot.
@@ -236,21 +220,29 @@ pub enum WindowOp {
     Menu,
 }
 
-/// App-level commands the project window's File menu bubbles up
-/// (upstream's global CommandGroups; the recents list itself lives in the
-/// welcome window, so "Open Recent" focuses it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the project window asks of the app layer, which owns the windows,
+/// the portals, the sheets and the recents store.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppRequest {
-    NewProject,
-    OpenProject,
-    OpenRecent,
-    Welcome,
-    /// Open the settings window (upstream's Settings scene; the port's
-    /// placement is the File root — there is no app menu to hold it).
-    Settings,
-    /// Open the About window (upstream's app-info command group,
-    /// Commands.swift:10-14; same placement note as Settings).
-    About,
+    /// A File-menu command (the same commands the app-wide shortcuts fire).
+    Command(AppCommand),
+    /// The header's close button.
+    Close,
+    /// A window-chrome gesture on the header (the platform call needs the
+    /// window id the app holds).
+    Window(WindowOp),
+    /// A bridge refusal asked for the Python setup sheet, which overlays
+    /// whichever window shows.
+    PresentSetupSheet,
+    /// A chat row's "Configura l'agente…" action: the agent-missing sheet
+    /// over whichever window shows (upstream ChatView.swift:101-102; the
+    /// sheet, not the settings window).
+    PresentAgentSheet,
+    /// A row of the Open Recent card: open that project.
+    OpenRecentPath(PathBuf),
+    /// The Open Recent card's "Cancella menu": clear the store and empty
+    /// the card.
+    ClearRecents,
 }
 
 /// One open project's window state.
@@ -589,88 +581,17 @@ impl ProjectWindow {
         self.grid = panes::from_layout(&panes::displayed(&self.layout, self.chat_visible));
     }
 
+    /// The window's own messages. [`Message::App`] never arrives here: the
+    /// app layer takes it first (it alone holds the window id, the sheets
+    /// and the recents store).
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Chat(msg) => self.update_chat(msg),
-            // the shell owns the compare state (parameters_view docs): the
-            // picker's report reaches BOTH halves — the bridge stores the
-            // selection (and parses the version's parameter values), and
-            // the pane stages the version's MESH as the ghost from the
-            // version-store directory the history writes (upstream
-            // `compare(with:)`, Project.swift:363-368)
-            Message::Viewer(crate::viewer_pane::Message::Parameters(
-                parameters_view::Message::Compare(number),
-            )) => {
-                self.bridge.compare_with(number);
-                let version = number.map(|n| (n, folder::version_dir(&self.root, n)));
-                self.viewer.set_compare(version);
-                Task::none()
-            }
-            // the slider/field commit the pane emits (the pane's local
-            // half — value snap, draft clear — already ran): the bridge
-            // rewrites model.py and starts the build, and the working
-            // activity crosses to the window the moment it does
-            Message::Viewer(crate::viewer_pane::Message::ParameterCommit(name, value)) => {
-                let _ = self.bridge.set_parameter(&name, value);
-                self.set_activity(self.bridge.activity());
-                Task::none()
-            }
-            // the ask-the-agent "Crea animazione" button
-            // (ModelPane.swift:138-146): one ordinary turn carrying the
-            // localized prompt — the button is disabled while busy
-            // (upstream `.disabled(project.isBusy)`); this guard is the
-            // belt over the bridge's own busy refusal
-            Message::Viewer(crate::viewer_pane::Message::RequestMotionStudy) => {
-                if !self.is_busy() {
-                    let _ = self.bridge.enqueue(
-                        fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
-                        Vec::new(),
-                    );
-                    self.set_activity(self.bridge.activity());
-                }
-                Task::none()
-            }
-            // the overlay's collapse toggle persists through the engine
-            // settings (parameters_view's documented contract: the shell
-            // intercepts, persists, then forwards — the ONE-writer law's
-            // sanctioned path, the AgentMissingSheet custom-path precedent)
-            Message::Viewer(crate::viewer_pane::Message::Parameters(
-                crate::parameters_view::Message::Collapse(collapsed),
-            )) => {
-                let _ = self
-                    .settings
-                    .update(|settings| settings.parameters_collapsed = collapsed);
-                self.viewer
-                    .update(crate::viewer_pane::Message::Parameters(
-                        crate::parameters_view::Message::Collapse(collapsed),
-                    ))
-                    .map(Message::Viewer)
-            }
-            Message::Viewer(msg) => self.viewer.update(msg).map(Message::Viewer),
+            Message::Viewer(msg) => self.update_viewer(msg),
             Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
             Message::Bridge(msg) => self.update_bridge(msg),
             Message::OutputReload(kind) => {
-                match kind {
-                    ReloadKind::Schematic => {
-                        let files = drawing_pages(&self.output_dir());
-                        let manifest =
-                            Manifest::load(&self.output_dir().join(folder::MANIFEST)).ok();
-                        self.schematic.reload(&files, manifest.as_ref());
-                    }
-                    // the 3D pane's own watch rebuilds the scene; the shell
-                    // refreshes the activity model's warnings
-                    ReloadKind::Mesh | ReloadKind::Plate => {
-                        self.refresh_missing_outputs();
-                    }
-                    // a manifest change re-reads the parameters, whoever
-                    // wrote it (ProjectOutput.swift:48-51)
-                    ReloadKind::Manifest => {
-                        self.refresh_missing_outputs();
-                        let parameters = bridge::refresh_parameters(&self.root);
-                        self.viewer.sync_parameters(&parameters);
-                    }
-                    ReloadKind::Motion => {}
-                }
+                self.output_reload(kind);
                 Task::none()
             }
             Message::GridResized(size) => {
@@ -682,20 +603,8 @@ impl ProjectWindow {
                 Task::none()
             }
             Message::Command(command) => self.update_command(command),
-            Message::Resized(ResizeEvent { split, ratio }) => {
-                // EVERY drag goes through the clamp before State::resize —
-                // iced enforces only a global min (the banked review law)
-                let (width, height) = self.size;
-                let clamped =
-                    panes::clamp_resize(&self.grid, &split, ratio, width, height, GRID_SPACING);
-                self.grid.resize(split, clamped);
-                if self.chat_visible {
-                    // upstream setFraction: memory only until an
-                    // established save point
-                    let node = panes::to_layout(&self.grid);
-                    panes::set_fraction(&mut self.metadata, &node);
-                    self.layout = node;
-                }
+            Message::Resized(event) => {
+                self.resize_split(event);
                 Task::none()
             }
             Message::GripPressed(kind) => {
@@ -707,32 +616,11 @@ impl ProjectWindow {
                 Task::none()
             }
             Message::PaneDragMoved(position) => {
-                if let Some(pane) = self.grip_held {
-                    // the grid sits under the header band and its hairline
-                    let point =
-                        cosmic::iced::Point::new(position.x, position.y - HEADER_HEIGHT - 1.0);
-                    let regions = self.grid.layout().pane_regions(
-                        GRID_SPACING,
-                        GRID_MIN_PANE,
-                        Size::new(self.size.0, self.size.1),
-                    );
-                    let hit = panes::locate(
-                        regions
-                            .into_iter()
-                            .filter_map(|(id, bounds)| Some((*self.grid.panes.get(&id)?, bounds))),
-                        point,
-                    );
-                    self.pane_drag = Some(panes::drag_to(pane, hit));
-                }
+                self.pane_drag_moved(position);
                 Task::none()
             }
             Message::PaneDragEnded => {
-                self.grip_held = None;
-                if let Some(drag) = self.pane_drag.take() {
-                    if let Some(node) = panes::drop(&self.layout, &drag) {
-                        self.apply_layout_persist(node);
-                    }
-                }
+                self.pane_drag_ended();
                 Task::none()
             }
             Message::AttachChosen(Ok(paths)) => {
@@ -744,31 +632,8 @@ impl ProjectWindow {
                 Task::none()
             }
             Message::AttachChosen(Err(_cancelled)) => Task::none(),
-            // upstream exportPackage's body, Project.swift:436-444: a
-            // cancelled panel returns; the chosen destination zips
-            // model.py + the non-dot outputs (the spawn is the app
-            // layer's — argv only, destination removed first)
-            Message::ExportChosen(Err(_cancelled)) => Task::none(),
-            Message::ExportChosen(Ok(destination)) => {
-                let files = export_files(&self.root);
-                CosmicTask::future(async move {
-                    Message::ExportDone(crate::app::zip_package(destination, files).await)
-                })
-            }
-            // status 0 → the succeeded row + the reveal
-            // (activateFileViewerSelecting); anything else → the failed
-            // row — including zip not being installed
-            Message::ExportDone(Some(destination)) => {
-                self.set_activity(Activity::Succeeded(fl!("pacchetto-esportato")));
-                CosmicTask::future(async move {
-                    crate::app::reveal_path(destination).await;
-                    Message::Tick
-                })
-            }
-            Message::ExportDone(None) => {
-                self.set_activity(Activity::Failed(fl!("esportazione-non-riuscita")));
-                Task::none()
-            }
+            Message::ExportChosen(result) => self.export_chosen(result),
+            Message::ExportDone(destination) => self.export_done(destination),
             Message::ToggleIssues(kind) => {
                 self.shown_issues = kind;
                 // the window's popover is a single slot: the two cards are
@@ -789,26 +654,182 @@ impl ProjectWindow {
                 }
                 Task::none()
             }
-            // the app layer acts (PresentSetupSheet's one producer — the
-            // bridge's PythonSheetRequested forward — already lands there;
-            // re-emitting it here would loop the variant back into itself)
             Message::CloseCards => {
                 self.version_card = None;
                 self.shown_issues = None;
                 self.recent_card = None;
                 Task::none()
             }
-            Message::CloseRequested
-            | Message::Window(_)
-            | Message::OpenRecentPath(_)
-            | Message::ClearRecents
-            | Message::App(_)
-            | Message::PresentSetupSheet
-            | Message::PresentAgentSheet => Task::none(),
             Message::Restore(number) => {
                 // restoring dismisses the card it was picked from
                 self.version_card = None;
                 self.restore(number)
+            }
+            // the app layer handles every request before this update runs;
+            // bouncing one back up here would loop it through the app
+            Message::App(_) => Task::none(),
+        }
+    }
+
+    /// The 3D pane: the shell-owned messages act on the bridge (and settings)
+    /// first, then everything reaches the pane's own update.
+    fn update_viewer(&mut self, msg: crate::viewer_pane::Message) -> Task<Message> {
+        use crate::viewer_pane::Message as Viewer;
+        match msg {
+            // the shell owns the compare state (parameters_view docs): the
+            // picker's report reaches BOTH halves — the bridge stores the
+            // selection (and parses the version's parameter values), and
+            // the pane stages the version's MESH as the ghost from the
+            // version-store directory the history writes (upstream
+            // `compare(with:)`, Project.swift:363-368)
+            Viewer::Parameters(parameters_view::Message::Compare(number)) => {
+                self.bridge.compare_with(number);
+                let version = number.map(|n| (n, folder::version_dir(&self.root, n)));
+                self.viewer.set_compare(version);
+                Task::none()
+            }
+            // the slider/field commit the pane emits (the pane's local
+            // half — value snap, draft clear — already ran): the bridge
+            // rewrites model.py and starts the build, and the working
+            // activity crosses to the window the moment it does
+            Viewer::ParameterCommit(name, value) => {
+                let _ = self.bridge.set_parameter(&name, value);
+                self.set_activity(self.bridge.activity());
+                Task::none()
+            }
+            // the ask-the-agent "Crea animazione" button
+            // (ModelPane.swift:138-146): one ordinary turn carrying the
+            // localized prompt — the button is disabled while busy
+            // (upstream `.disabled(project.isBusy)`); this guard is the
+            // belt over the bridge's own busy refusal
+            Viewer::RequestMotionStudy => {
+                if !self.is_busy() {
+                    let _ = self.bridge.enqueue(
+                        fl!("anima-il-movimento-di-questo-meccanismo-con-una-simulazione-fisica"),
+                        Vec::new(),
+                    );
+                    self.set_activity(self.bridge.activity());
+                }
+                Task::none()
+            }
+            // the overlay's collapse toggle persists through the engine
+            // settings (parameters_view's documented contract: the shell
+            // intercepts, persists, then forwards — the ONE-writer law's
+            // sanctioned path, the AgentMissingSheet custom-path precedent)
+            Viewer::Parameters(parameters_view::Message::Collapse(collapsed)) => {
+                let _ = self
+                    .settings
+                    .update(|settings| settings.parameters_collapsed = collapsed);
+                self.viewer
+                    .update(Viewer::Parameters(parameters_view::Message::Collapse(
+                        collapsed,
+                    )))
+                    .map(Message::Viewer)
+            }
+            msg => self.viewer.update(msg).map(Message::Viewer),
+        }
+    }
+
+    /// The shell's output watcher saw a settled change.
+    fn output_reload(&mut self, kind: ReloadKind) {
+        match kind {
+            ReloadKind::Schematic => {
+                let files = drawing_pages(&self.output_dir());
+                let manifest = Manifest::load(&self.output_dir().join(folder::MANIFEST)).ok();
+                self.schematic.reload(&files, manifest.as_ref());
+            }
+            // the 3D pane's own watch rebuilds the scene; the shell
+            // refreshes the activity model's warnings
+            ReloadKind::Mesh | ReloadKind::Plate => {
+                self.refresh_missing_outputs();
+            }
+            // a manifest change re-reads the parameters, whoever
+            // wrote it (ProjectOutput.swift:48-51)
+            ReloadKind::Manifest => {
+                self.refresh_missing_outputs();
+                let parameters = bridge::refresh_parameters(&self.root);
+                self.viewer.sync_parameters(&parameters);
+            }
+            ReloadKind::Motion => {}
+        }
+    }
+
+    /// A pane-grid divider drag.
+    fn resize_split(&mut self, ResizeEvent { split, ratio }: ResizeEvent) {
+        // EVERY drag goes through the clamp before State::resize —
+        // iced enforces only a global min (the banked review law)
+        let (width, height) = self.size;
+        let clamped = panes::clamp_resize(&self.grid, &split, ratio, width, height, GRID_SPACING);
+        self.grid.resize(split, clamped);
+        if self.chat_visible {
+            // upstream setFraction: memory only until an
+            // established save point
+            let node = panes::to_layout(&self.grid);
+            panes::set_fraction(&mut self.metadata, &node);
+            self.layout = node;
+        }
+    }
+
+    /// The cursor moved while a grab handle is held: retarget the drop.
+    fn pane_drag_moved(&mut self, position: cosmic::iced::Point) {
+        let Some(pane) = self.grip_held else {
+            return;
+        };
+        // the grid sits under the header band and its hairline
+        let point = cosmic::iced::Point::new(position.x, position.y - HEADER_HEIGHT - 1.0);
+        let regions = self.grid.layout().pane_regions(
+            GRID_SPACING,
+            GRID_MIN_PANE,
+            Size::new(self.size.0, self.size.1),
+        );
+        let hit = panes::locate(
+            regions
+                .into_iter()
+                .filter_map(|(id, bounds)| Some((*self.grid.panes.get(&id)?, bounds))),
+            point,
+        );
+        self.pane_drag = Some(panes::drag_to(pane, hit));
+    }
+
+    /// The mouse button came up while a handle is held: drop.
+    fn pane_drag_ended(&mut self) {
+        self.grip_held = None;
+        if let Some(drag) = self.pane_drag.take() {
+            if let Some(node) = panes::drop(&self.layout, &drag) {
+                self.apply_layout_persist(node);
+            }
+        }
+    }
+
+    /// upstream exportPackage's body, Project.swift:436-444: a cancelled
+    /// panel returns; the chosen destination zips model.py + the non-dot
+    /// outputs (the spawn is the app layer's — argv only, destination
+    /// removed first)
+    fn export_chosen(&mut self, result: Result<PathBuf, String>) -> Task<Message> {
+        let Ok(destination) = result else {
+            return Task::none();
+        };
+        let files = export_files(&self.root);
+        CosmicTask::future(async move {
+            Message::ExportDone(crate::app::zip_package(destination, files).await)
+        })
+    }
+
+    /// status 0 → the succeeded row + the reveal
+    /// (activateFileViewerSelecting); anything else → the failed row —
+    /// including zip not being installed
+    fn export_done(&mut self, destination: Option<PathBuf>) -> Task<Message> {
+        match destination {
+            Some(destination) => {
+                self.set_activity(Activity::Succeeded(fl!("pacchetto-esportato")));
+                CosmicTask::future(async move {
+                    crate::app::reveal_path(destination).await;
+                    Message::Tick
+                })
+            }
+            None => {
+                self.set_activity(Activity::Failed(fl!("esportazione-non-riuscita")));
+                Task::none()
             }
         }
     }
@@ -890,9 +911,11 @@ impl ProjectWindow {
                 self.bridge.remove_queued(id);
             }
             chat_view::Message::SendQueuedNow => self.bridge.resume_queue(),
-            // the app layer runs the attach portal and feeds the result
-            // back as AttachChosen
-            chat_view::Message::Attach => {}
+            // the file portal; its answer comes back as AttachChosen
+            chat_view::Message::Attach => {
+                let future = crate::app::choose_files("Attach reference images or files");
+                return CosmicTask::future(async move { Message::AttachChosen(future.await) });
+            }
             // upstream's keyDown monitor (ChatInputView.swift:62-73): read
             // the clipboard's CONTENT; files or an image attach and the
             // press is swallowed, anything else falls through to the
@@ -957,27 +980,26 @@ impl ProjectWindow {
             // is no settings route off the action or off that sheet
             // (Ruling 6). The app layer owns the sheet.
             chat_view::Message::RowAction(_, Action::ConfigureClaude) => {
-                return CosmicTask::done(Message::PresentAgentSheet);
+                return CosmicTask::done(Message::App(AppRequest::PresentAgentSheet));
             }
             // a markdown link: the system opener (upstream NSWorkspace.open)
             chat_view::Message::OpenUrl(url) => {
                 let url = url.clone();
                 crate::app::open_url(&url);
             }
-            _ => {}
+            // the pane's own widget state
+            chat_view::Message::Draft(_)
+            | chat_view::Message::SetDraft(_)
+            | chat_view::Message::ToggleToolRow(_)
+            | chat_view::Message::ToggleFullOutput(_)
+            | chat_view::Message::ToggleDetail(_)
+            | chat_view::Message::CopyCode(_) => {}
         }
         let task = self.chat_pane.update(msg).map(Message::Chat);
         if self.chat.draft != self.chat_pane.draft() {
             self.chat.draft = self.chat_pane.draft();
         }
         task
-    }
-
-    /// The app layer's attach entry point: runs the file portal and feeds
-    /// the result back as [`Message::AttachChosen`].
-    pub fn attach(&self) -> Task<Message> {
-        let future = crate::app::choose_files("Attach reference images or files");
-        CosmicTask::future(async move { Message::AttachChosen(future.await) })
     }
 
     fn update_bridge(&mut self, msg: bridge::Message) -> Task<Message> {
@@ -1019,7 +1041,16 @@ impl ProjectWindow {
                         // a turn end is an established layout save point
                         self.save_metadata();
                     }
-                    _ => {}
+                    // the chat reducer above is their whole effect
+                    EngineEvent::Started { .. }
+                    | EngineEvent::Thinking { .. }
+                    | EngineEvent::ThinkingStarted
+                    | EngineEvent::ThinkingFinished
+                    | EngineEvent::TextStreaming { .. }
+                    | EngineEvent::TextConfirmed { .. }
+                    | EngineEvent::ToolInput { .. }
+                    | EngineEvent::ToolFinished { .. }
+                    | EngineEvent::System { .. } => {}
                 }
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
@@ -1086,7 +1117,7 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
-                CosmicTask::future(async move { Message::PresentSetupSheet })
+                CosmicTask::future(async move { Message::App(AppRequest::PresentSetupSheet) })
             }
         }
     }
@@ -1556,12 +1587,12 @@ impl ProjectWindow {
 
         let bar: Element<'_, Message> = cosmic::widget::header_bar()
             .focused(focused)
-            .on_close(Message::CloseRequested)
-            .on_minimize(Message::Window(WindowOp::Minimize))
-            .on_maximize(Message::Window(WindowOp::ToggleMaximize))
-            .on_drag(Message::Window(WindowOp::Drag))
-            .on_double_click(Message::Window(WindowOp::ToggleMaximize))
-            .on_right_click(Message::Window(WindowOp::Menu))
+            .on_close(Message::App(AppRequest::Close))
+            .on_minimize(Message::App(AppRequest::Window(WindowOp::Minimize)))
+            .on_maximize(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+            .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
+            .on_double_click(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+            .on_right_click(Message::App(AppRequest::Window(WindowOp::Menu)))
             .start(start)
             .center(self.view_activity())
             .end(end)
@@ -1575,9 +1606,9 @@ impl ProjectWindow {
                 .height(Length::Fixed(HEADER_HEIGHT))
                 .align_y(cosmic::iced::alignment::Vertical::Center),
         )
-        .on_drag(Message::Window(WindowOp::Drag))
-        .on_double_press(Message::Window(WindowOp::ToggleMaximize))
-        .on_right_press(Message::Window(WindowOp::Menu));
+        .on_drag(Message::App(AppRequest::Window(WindowOp::Drag)))
+        .on_double_press(Message::App(AppRequest::Window(WindowOp::ToggleMaximize)))
+        .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
         Column::with_capacity(2)
             .push(band)
             .push(
@@ -1759,14 +1790,14 @@ impl ProjectWindow {
         use cosmic::widget::menu::{Item, ItemHeight, ItemWidth, items, root};
 
         let file_entries = vec![
-            Item::Button(fl!("crea-nuovo-progetto"), None, AppRequest::NewProject),
-            Item::Button(fl!("apri-progetto"), None, AppRequest::OpenProject),
-            Item::Button(fl!("apri-recenti"), None, AppRequest::OpenRecent),
+            Item::Button(fl!("crea-nuovo-progetto"), None, AppCommand::NewProject),
+            Item::Button(fl!("apri-progetto"), None, AppCommand::OpenProject),
+            Item::Button(fl!("apri-recenti"), None, AppCommand::OpenRecent),
             Item::Divider,
-            Item::Button(fl!("finestra-di-benvenuto"), None, AppRequest::Welcome),
+            Item::Button(fl!("finestra-di-benvenuto"), None, AppCommand::Welcome),
             Item::Divider,
-            Item::Button(fl!("settings"), None, AppRequest::Settings),
-            Item::Button(fl!("informazioni-su-cad-studio"), None, AppRequest::About),
+            Item::Button(fl!("settings"), None, AppCommand::Settings),
+            Item::Button(fl!("informazioni-su-cad-studio"), None, AppCommand::About),
         ];
         let file_binds = std::collections::HashMap::new();
         let file_tree = cosmic::widget::menu::Tree::with_children(
@@ -2009,7 +2040,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         list = list.push(row(
             name,
             Tone::Primary,
-            Some(Message::OpenRecentPath(path.clone())),
+            Some(Message::App(AppRequest::OpenRecentPath(path.clone()))),
         ));
     }
     if !paths.is_empty() {
@@ -2029,7 +2060,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
     list = list.push(row(
         fl!("cancella-menu"),
         clear_tone,
-        (!paths.is_empty()).then_some(Message::ClearRecents),
+        (!paths.is_empty()).then_some(Message::App(AppRequest::ClearRecents)),
     ));
     container(list)
         .class(surface::card(Corner::M, Shadow::Popover))

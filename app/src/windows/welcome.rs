@@ -11,12 +11,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use cosmic::Element;
 use cosmic::iced::Length;
 use cosmic::iced::widget::image::Handle;
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::menu::{Item, items};
 use cosmic::widget::{Column, Row, Space, button, container, scrollable, text, text_input};
-use cosmic::{Element, Task};
 use engine::project::store::{self, ProjectNameError};
 
 use crate::fl;
@@ -212,27 +212,12 @@ impl Welcome {
         Self::default()
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::NewProject => {
-                if self.creating.is_none() {
-                    self.creating = Some(new_project::NewProject::default());
-                }
-            }
-            Message::NewSheet(msg) => {
-                let Some(sheet) = self.creating.as_mut() else {
-                    return Task::none();
-                };
-                new_project::update(sheet, &msg);
-            }
-            // the app layer owns these (portals, windows, recents store)
-            Message::OpenExisting
-            | Message::OpenRecent(_)
-            | Message::RevealRecent(_)
-            | Message::RemoveRecent(_)
-            | Message::RecentMenu(_, _) => {}
+    /// Fold one new-project sheet message into the presented sheet (the
+    /// app layer routes every other welcome message itself).
+    pub fn update_sheet(&mut self, message: &new_project::Message) {
+        if let Some(sheet) = self.creating.as_mut() {
+            new_project::update(sheet, message);
         }
-        Task::none()
     }
 
     /// The window body (WelcomeWindow.swift:13-88): actions pane, divider,
