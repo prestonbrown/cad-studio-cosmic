@@ -41,28 +41,197 @@
 //!                                 # the ⌘, route without a keyboard
 //!                                 # (the :99 frame pass's per-tab capture)
 //! about                           # open the About window
+//! restore <n>                     # the version card's Ripristina on
+//!                                 # version n
+//! layout <Assembled|Exploded|Plate> # the parts overlay's layout picker
+//! cancel                          # the toolbar's Stop button
+//! attach <path>                   # add a file to the chat draft's
+//!                                 # attachments, as a drop does
+//! viewer Compare <n>              # the parameters overlay's compare
+//!                                 # picker on version n
+//! param <row> <value|*factor>     # commit the row-th parameter (1-based,
+//!                                 # the overlay's order) to a value, or
+//!                                 # scale its current value by a factor
+//! waitturn <secs>                 # wait until the project window's turn
+//!                                 # (or build) is over; past <secs> the
+//!                                 # script fails and stops
+//! mark <label>                    # log a capture point for the runner
+//!                                 # (scripts/rig/e2e/run.sh), with the
+//!                                 # project's activity kind
+//!                                 # (idle/working/succeeded/failed)
 //! noop                            # a no-op message (forces a view pass)
 //! sleep <ms>                      # pause before the next line
 //! ```
+//!
+//! Every log line goes to stderr as `<HH:MM:SS.mmm> CAD_STUDIO_DRIVE: …`;
+//! a failed script logs `FAIL …` and a finished one logs `DONE`.
 //!
 //! Parsing is pure and unit-tested; `startup_task` is the only impure
 //! seam (env + file read), called once from `init`.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use cosmic::Task;
+use engine::settings::PartsLayout;
 
+use crate::activity::Activity;
 use crate::app::Message;
 use crate::sheets;
 use crate::viewer_pane;
-use crate::windows::welcome;
+use crate::windows::{project, welcome};
 
-/// One parsed script line: a pause, or a message to feed the app.
+/// One parsed script line: a pause, a message to feed the app, a wait for
+/// the project's turn, or a capture point.
 #[derive(Debug, Clone)]
 pub enum Step {
     Sleep(Duration),
     Msg(Message),
+    WaitTurn(Duration),
+    Mark(String),
+}
+
+/// A `param` line's target value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamValue {
+    To(f64),
+    Times(f64),
+}
+
+impl ParamValue {
+    /// The committed value given the row's current one.
+    pub fn apply(self, current: f64) -> f64 {
+        match self {
+            ParamValue::To(value) => value,
+            ParamValue::Times(factor) => current * factor,
+        }
+    }
+}
+
+/// How long a project must have been idle before `waitturn` trusts it: a
+/// finished turn can hand straight over to a build.
+const SETTLE: Duration = Duration::from_millis(1500);
+/// How long `waitturn` waits for a just-sent turn to show up as busy before
+/// taking an idle project as "nothing started" (a refused send).
+const START_GRACE: Duration = Duration::from_secs(3);
+const POLL: Duration = Duration::from_millis(100);
+
+/// The app's side of `waitturn` and `mark`: the project window's activity
+/// kind, published after every update, and how many busy-to-idle edges
+/// (finished turns or builds) it has seen.
+#[derive(Debug, Default)]
+pub struct TurnProbe {
+    kind: AtomicU8,
+    finished: AtomicU64,
+}
+
+const IDLE: u8 = 0;
+const WORKING: u8 = 1;
+const SUCCEEDED: u8 = 2;
+const FAILED: u8 = 3;
+
+impl TurnProbe {
+    pub fn publish(&self, activity: &Activity) {
+        let kind = match activity {
+            Activity::Idle => IDLE,
+            Activity::Working(_) => WORKING,
+            Activity::Succeeded(_) => SUCCEEDED,
+            Activity::Failed(_) => FAILED,
+        };
+        if self.kind.swap(kind, Ordering::SeqCst) == WORKING && kind != WORKING {
+            self.finished.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub fn busy(&self) -> bool {
+        self.kind.load(Ordering::SeqCst) == WORKING
+    }
+
+    /// The activity kind as a `mark` line logs it.
+    pub fn activity(&self) -> &'static str {
+        match self.kind.load(Ordering::SeqCst) {
+            WORKING => "working",
+            SUCCEEDED => "succeeded",
+            FAILED => "failed",
+            _ => "idle",
+        }
+    }
+
+    pub fn finished(&self) -> u64 {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitVerdict {
+    Wait,
+    Idle,
+    TimedOut,
+}
+
+/// One `waitturn` poll: `turn_ended` is whether a busy-to-idle edge
+/// happened since the wait began, `idle_for` how long the project has been
+/// continuously idle as the waiter saw it.
+fn wait_verdict(
+    elapsed: Duration,
+    timeout: Duration,
+    busy: bool,
+    turn_ended: bool,
+    idle_for: Duration,
+) -> WaitVerdict {
+    if !busy && idle_for >= SETTLE && (turn_ended || elapsed >= START_GRACE) {
+        WaitVerdict::Idle
+    } else if elapsed >= timeout {
+        WaitVerdict::TimedOut
+    } else {
+        WaitVerdict::Wait
+    }
+}
+
+/// Poll the probe until [`wait_verdict`] settles; `Ok` carries the wait.
+async fn wait_turn(probe: &TurnProbe, timeout: Duration) -> Result<Duration, Duration> {
+    let start = Instant::now();
+    let before = probe.finished();
+    let mut idle_since = (!probe.busy()).then_some(start);
+    loop {
+        let now = Instant::now();
+        let busy = probe.busy();
+        idle_since = match (busy, idle_since) {
+            (true, _) => None,
+            (false, None) => Some(now),
+            (false, since) => since,
+        };
+        let idle_for = idle_since.map_or(Duration::ZERO, |since| now - since);
+        let elapsed = now - start;
+        match wait_verdict(elapsed, timeout, busy, probe.finished() > before, idle_for) {
+            WaitVerdict::Idle => return Ok(elapsed),
+            WaitVerdict::TimedOut => return Err(elapsed),
+            WaitVerdict::Wait => tokio::time::sleep(POLL).await,
+        }
+    }
+}
+
+/// A drive log line on stderr, timestamped.
+pub fn log(line: &str) {
+    eprintln!(
+        "{} CAD_STUDIO_DRIVE: {line}",
+        chrono::Local::now().format("%H:%M:%S%.3f")
+    );
+}
+
+/// `<command> <arg>` lines whose argument is required.
+fn required<'a>(rest: &'a str, number: usize, what: &str) -> Result<&'a str, String> {
+    if rest.is_empty() {
+        Err(format!("line {}: {what}", number + 1))
+    } else {
+        Ok(rest)
+    }
+}
+
+fn project_msg(message: project::Message) -> Step {
+    Step::Msg(Message::DriveProject(message))
 }
 
 /// Parse a drive script. Unknown commands are errors (a typo'd line
@@ -143,10 +312,10 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             }
             "versioncard" => Step::Msg(Message::DriveVersionCard),
             "build" => Step::Msg(Message::DriveBuild),
-            "viewer" => Step::Msg(Message::DriveViewer(viewer_toggle(rest).ok_or_else(
+            "viewer" => project_msg(project::Message::Viewer(viewer_toggle(rest).ok_or_else(
                 || {
                     format!(
-                        "line {}: viewer wants Parameters/Section/Animation/PartsCollapsed/Playback/Scrub <s>",
+                        "line {}: viewer wants Parameters/Section/Animation/PartsCollapsed/Playback/Scrub <s>/Compare <n>",
                         number + 1
                     )
                 },
@@ -176,6 +345,59 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 Step::Msg(Message::OpenSettings(tab))
             }
             "about" => Step::Msg(Message::OpenAbout),
+            "restore" => project_msg(project::Message::Restore(
+                rest.parse()
+                    .map_err(|_| format!("line {}: restore wants a version number", number + 1))?,
+            )),
+            "layout" => {
+                let layout = match rest {
+                    "Assembled" => PartsLayout::Assembled,
+                    "Exploded" => PartsLayout::Exploded,
+                    "Plate" => PartsLayout::Plate,
+                    _ => {
+                        return Err(format!(
+                            "line {}: layout wants Assembled/Exploded/Plate",
+                            number + 1
+                        ));
+                    }
+                };
+                project_msg(project::Message::Viewer(viewer_pane::Message::SetLayout(
+                    layout,
+                )))
+            }
+            "cancel" => {
+                if !rest.is_empty() {
+                    return Err(format!("line {}: cancel takes no argument", number + 1));
+                }
+                project_msg(project::Message::Command(project::Command::Stop))
+            }
+            "attach" => project_msg(project::Message::Chat(
+                crate::chat_view::Message::AttachContent(
+                    crate::attachments::ClipboardContent::Files(vec![PathBuf::from(required(
+                        rest,
+                        number,
+                        "attach wants a file path",
+                    )?)]),
+                ),
+            )),
+            "param" => {
+                let wants = || format!("line {}: param wants <row ≥ 1> <value|*factor>", number + 1);
+                let (row, value) = rest.split_once(' ').ok_or_else(wants)?;
+                let row: usize = row.parse().ok().filter(|row| *row >= 1).ok_or_else(wants)?;
+                let value = value.trim();
+                let value = match value.strip_prefix('*') {
+                    Some(factor) => ParamValue::Times(factor.parse().map_err(|_| wants())?),
+                    None => ParamValue::To(value.parse().map_err(|_| wants())?),
+                };
+                Step::Msg(Message::DriveParameter(row, value))
+            }
+            "waitturn" => {
+                let seconds: u64 = rest.parse().ok().filter(|s| *s > 0).ok_or_else(|| {
+                    format!("line {}: waitturn wants a timeout in seconds", number + 1)
+                })?;
+                Step::WaitTurn(Duration::from_secs(seconds))
+            }
+            "mark" => Step::Mark(required(rest, number, "mark wants a label")?.to_string()),
             _ => return Err(format!("line {}: unknown command `{command}`", number + 1)),
         };
         steps.push(step);
@@ -192,6 +414,11 @@ fn viewer_toggle(name: &str) -> Option<viewer_pane::Message> {
         "PartsCollapsed" => viewer_pane::Message::TogglePartsCollapsed,
         "Playback" => viewer_pane::Message::TogglePlayback,
         _ => {
+            if let Some(version) = name.strip_prefix("Compare ") {
+                return Some(viewer_pane::Message::Parameters(
+                    crate::parameters_view::Message::Compare(Some(version.trim().parse().ok()?)),
+                ));
+            }
             let seconds = name.strip_prefix("Scrub ")?.trim().parse().ok()?;
             viewer_pane::Message::Scrub(seconds)
         }
@@ -199,26 +426,29 @@ fn viewer_toggle(name: &str) -> Option<viewer_pane::Message> {
 }
 
 /// The `init` seam: when `CAD_STUDIO_DRIVE` names a script, stream its
-/// steps into the update loop (a `sleep` line delays the next message).
-pub fn startup_task() -> Task<Message> {
+/// steps into the update loop (a `sleep` line delays the next message, a
+/// `waitturn` line polls the returned probe, which the app publishes into).
+pub fn startup_task() -> (Task<Message>, Option<Arc<TurnProbe>>) {
     let Some(path) = std::env::var_os("CAD_STUDIO_DRIVE") else {
-        return Task::none();
+        return (Task::none(), None);
     };
     let script = match std::fs::read_to_string(&path) {
         Ok(script) => script,
         Err(why) => {
-            eprintln!("CAD_STUDIO_DRIVE: cannot read {}: {why}", path.display());
-            return Task::none();
+            log(&format!("FAIL cannot read {}: {why}", path.display()));
+            return (Task::none(), None);
         }
     };
     let steps = match parse(&script) {
         Ok(steps) => steps,
         Err(why) => {
-            eprintln!("CAD_STUDIO_DRIVE: {why}");
-            return Task::none();
+            log(&format!("FAIL {why}"));
+            return (Task::none(), None);
         }
     };
-    Task::stream(cosmic::iced::stream::channel(
+    let probe = Arc::new(TurnProbe::default());
+    let waiter = probe.clone();
+    let task = Task::stream(cosmic::iced::stream::channel(
         16,
         async move |mut sender| {
             for step in steps {
@@ -227,15 +457,35 @@ pub fn startup_task() -> Task<Message> {
                     Step::Msg(message) => {
                         let _ = sender.try_send(message);
                     }
+                    Step::WaitTurn(timeout) => match wait_turn(&waiter, timeout).await {
+                        Ok(waited) => {
+                            log(&format!("waitturn idle after {:.1}s", waited.as_secs_f64()))
+                        }
+                        Err(waited) => {
+                            log(&format!(
+                                "FAIL waitturn: still busy after {:.1}s (timeout {}s)",
+                                waited.as_secs_f64(),
+                                timeout.as_secs()
+                            ));
+                            return;
+                        }
+                    },
+                    Step::Mark(label) => {
+                        log(&format!("MARK {label} activity={}", waiter.activity()))
+                    }
                 }
             }
+            log("DONE");
         },
-    ))
+    ));
+    (task, Some(probe))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::windows::project;
+    use engine::settings::PartsLayout;
 
     #[test]
     fn parses_the_smoke_flow() {
@@ -353,7 +603,9 @@ mod tests {
         let toggles: Vec<_> = steps
             .iter()
             .map(|step| match step {
-                Step::Msg(Message::DriveViewer(msg)) => format!("{msg:?}"),
+                Step::Msg(Message::DriveProject(project::Message::Viewer(msg))) => {
+                    format!("{msg:?}")
+                }
                 other => panic!("not a viewer step: {other:?}"),
             })
             .collect();
@@ -405,6 +657,222 @@ mod tests {
                 welcome::new_project::Message::Cancel
             )))
         ));
+    }
+
+    /// `restore <n>` is the version card's Ripristina for version n.
+    #[test]
+    fn restore_command_restores_a_version() {
+        let steps = parse("restore 1\nrestore 12\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::DriveProject(project::Message::Restore(1)))
+        ));
+        assert!(matches!(
+            steps[1],
+            Step::Msg(Message::DriveProject(project::Message::Restore(12)))
+        ));
+        assert!(parse("restore x").is_err());
+        assert!(parse("restore").is_err());
+    }
+
+    /// `layout <name>` is the parts overlay's layout picker.
+    #[test]
+    fn layout_command_names_each_layout() {
+        let steps = parse("layout Assembled\nlayout Exploded\nlayout Plate\n").unwrap();
+        let layouts: Vec<_> = steps
+            .iter()
+            .map(|step| match step {
+                Step::Msg(Message::DriveProject(project::Message::Viewer(
+                    viewer_pane::Message::SetLayout(layout),
+                ))) => *layout,
+                other => panic!("not a layout step: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            layouts,
+            [
+                PartsLayout::Assembled,
+                PartsLayout::Exploded,
+                PartsLayout::Plate
+            ]
+        );
+        assert!(parse("layout Foo").is_err());
+        assert!(parse("layout").is_err());
+    }
+
+    /// `cancel` is the toolbar's Stop button.
+    #[test]
+    fn cancel_command_presses_stop() {
+        let steps = parse("cancel\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::DriveProject(project::Message::Command(
+                project::Command::Stop
+            )))
+        ));
+        assert!(parse("cancel now").is_err());
+    }
+
+    /// `waitturn <secs>` waits for the project's turn with a timeout in
+    /// whole seconds; the seconds are required.
+    #[test]
+    fn waitturn_command_carries_its_timeout() {
+        let steps = parse("waitturn 600\n").unwrap();
+        assert!(matches!(steps[0], Step::WaitTurn(d) if d == Duration::from_secs(600)));
+        assert!(parse("waitturn").is_err());
+        assert!(parse("waitturn soon").is_err());
+        assert!(
+            parse("waitturn 0").is_err(),
+            "a zero timeout can never pass"
+        );
+    }
+
+    /// `mark <label>` names a capture point; the label is required.
+    #[test]
+    fn mark_command_carries_its_label() {
+        let steps = parse("mark 03-plate\n").unwrap();
+        assert!(matches!(&steps[0], Step::Mark(label) if label == "03-plate"));
+        assert!(parse("mark").is_err());
+    }
+
+    /// `attach <path>` adds a file to the chat draft's attachments, as a
+    /// drop on the chat pane does.
+    #[test]
+    fn attach_command_attaches_a_file() {
+        let steps = parse("attach /tmp/e2e/sketch.png\n").unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::Msg(Message::DriveProject(project::Message::Chat(
+                crate::chat_view::Message::AttachContent(
+                    crate::attachments::ClipboardContent::Files(paths)
+                )
+            ))) if paths == &vec![PathBuf::from("/tmp/e2e/sketch.png")]
+        ));
+        assert!(parse("attach").is_err());
+    }
+
+    /// `viewer Compare <n>` is the parameters overlay's compare picker.
+    #[test]
+    fn viewer_compare_picks_a_version() {
+        let steps = parse("viewer Compare 1\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::DriveProject(project::Message::Viewer(
+                viewer_pane::Message::Parameters(crate::parameters_view::Message::Compare(Some(1)))
+            )))
+        ));
+        assert!(parse("viewer Compare one").is_err());
+    }
+
+    /// `param <row> <value>` commits the n-th parameter row (1-based, the
+    /// overlay's order) to a value, or scales it with a `*` factor.
+    #[test]
+    fn param_command_targets_a_row() {
+        let steps = parse("param 1 25\nparam 2 *1.5\n").unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Msg(Message::DriveParameter(1, ParamValue::To(v))) if v == 25.0
+        ));
+        assert!(matches!(
+            steps[1],
+            Step::Msg(Message::DriveParameter(2, ParamValue::Times(f))) if f == 1.5
+        ));
+        assert_eq!(ParamValue::To(25.0).apply(20.0), 25.0);
+        assert_eq!(ParamValue::Times(1.5).apply(20.0), 30.0);
+        assert!(parse("param 0 5").is_err(), "rows are 1-based");
+        assert!(parse("param 1").is_err());
+        assert!(parse("param x 5").is_err());
+        assert!(parse("param 1 *big").is_err());
+    }
+
+    /// The real-agent end-to-end script (scripts/rig/e2e/e2e.drive) parses
+    /// once run.sh renders its paths, and waits for every turn it sends.
+    #[test]
+    fn the_e2e_script_parses() {
+        let script = include_str!("../../scripts/rig/e2e/e2e.drive")
+            .replace("@PROJECT@", "/tmp/e2e/e2e-cubo")
+            .replace("@PNG@", "/tmp/e2e/schizzo.png")
+            .replace("@ZIP@", "/tmp/e2e/e2e-cubo.zip");
+        let steps = parse(&script).unwrap();
+        let chats = steps
+            .iter()
+            .filter(|step| matches!(step, Step::Msg(Message::DriveChat(_))))
+            .count();
+        let waits = steps
+            .iter()
+            .filter(|step| matches!(step, Step::WaitTurn(_)))
+            .count();
+        assert_eq!(chats, 5, "the five agent turns");
+        assert!(waits >= chats, "every turn is waited for");
+    }
+
+    /// The probe counts busy-to-idle edges: each one is a finished turn
+    /// (or build); repeated reports and settled-to-settled changes are not
+    /// edges. It names the activity kind a `mark` logs.
+    #[test]
+    fn turn_probe_counts_finished_turns() {
+        let working = Activity::Working("turn".into());
+        let probe = TurnProbe::default();
+        assert!(!probe.busy());
+        assert_eq!(probe.activity(), "idle");
+        probe.publish(&Activity::Idle);
+        assert_eq!(probe.finished(), 0);
+        probe.publish(&working);
+        probe.publish(&working);
+        assert!(probe.busy());
+        assert_eq!(probe.activity(), "working");
+        assert_eq!(probe.finished(), 0);
+        probe.publish(&Activity::Succeeded("done".into()));
+        probe.publish(&Activity::Failed("build".into()));
+        assert!(!probe.busy());
+        assert_eq!(probe.activity(), "failed");
+        assert_eq!(probe.finished(), 1);
+    }
+
+    /// `waitturn` returns once the project has been idle for the settle
+    /// time AND either a turn ended since the wait began or the start grace
+    /// passed without one starting (a refused send never goes busy); it
+    /// fails once the timeout passes first.
+    #[test]
+    fn wait_verdicts() {
+        let s = Duration::from_secs;
+        let ms = Duration::from_millis;
+        let t = s(60);
+        // just sent: idle, nothing ended, inside the grace — keep waiting
+        assert_eq!(
+            wait_verdict(ms(200), t, false, false, ms(200)),
+            WaitVerdict::Wait
+        );
+        // the turn is running
+        assert_eq!(
+            wait_verdict(s(30), t, true, false, ms(0)),
+            WaitVerdict::Wait
+        );
+        // the turn ended, but idle only briefly (a build may follow)
+        assert_eq!(
+            wait_verdict(s(31), t, false, true, ms(300)),
+            WaitVerdict::Wait
+        );
+        // the turn ended and the project settled idle
+        assert_eq!(
+            wait_verdict(s(33), t, false, true, SETTLE),
+            WaitVerdict::Idle
+        );
+        // nothing ever started: idle past the grace
+        assert_eq!(
+            wait_verdict(START_GRACE, t, false, false, START_GRACE),
+            WaitVerdict::Idle
+        );
+        // still busy at the timeout
+        assert_eq!(
+            wait_verdict(t, t, true, false, ms(0)),
+            WaitVerdict::TimedOut
+        );
+        // idle at the timeout but not yet settled after an ended turn
+        assert_eq!(
+            wait_verdict(t, t, false, true, ms(100)),
+            WaitVerdict::TimedOut
+        );
     }
 
     /// `recent` clicks a recents row; `python`/`agent` Close their

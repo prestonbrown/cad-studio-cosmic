@@ -1,0 +1,75 @@
+# Criterion-3 real-agent run (scripts/rig/e2e/run.sh renders the @…@ paths).
+# Each `mark` is a capture point: run.sh screenshots the screen and runs the
+# check.sh steps the spec names for it; the sleep after a mark holds the
+# frame still while the capture lands.
+setup Continue
+sleep 1500
+recent @PROJECT@
+sleep 7000
+
+# 1-2: the first turn in an empty project; the model and the drawing show
+chat Crea un cubo di 20 mm con un foro passante da 5 mm.
+waitturn 900
+sleep 3000
+mark 01-cubo
+sleep 2500
+
+# 3: the print plate
+layout Plate
+sleep 3000
+mark 02-piatto
+sleep 2500
+layout Exploded
+sleep 1000
+
+# 4: a follow-up makes version 2
+chat Aumenta il lato a 30 mm.
+waitturn 900
+sleep 3000
+mark 03-lato30
+sleep 2500
+
+# 5: back to version 1
+restore 1
+waitturn 300
+sleep 3000
+mark 04-ripristino
+sleep 2500
+
+# 6: a fillet larger than the part, so build123d raises
+chat Aggiungi un raccordo di 50 mm su tutti gli spigoli.
+waitturn 900
+sleep 3000
+mark 05-raccordo
+sleep 2500
+
+# 7: a turn stopped 5 s in
+chat Aggiungi una scanalatura larga 2 mm su ogni faccia laterale.
+sleep 5000
+cancel
+waitturn 120
+sleep 3000
+mark 06-annullato
+sleep 2500
+
+# 8: the rest of criterion 1 on the same project
+param 1 *1.25
+waitturn 300
+sleep 3000
+mark 07-parametro
+sleep 2500
+viewer Compare 1
+sleep 3000
+mark 08-confronto
+sleep 2500
+attach @PNG@
+sleep 1000
+chat Descrivi in una frase l'immagine allegata, senza modificare il modello.
+waitturn 900
+sleep 3000
+mark 09-allegato
+sleep 2500
+saveas @ZIP@
+sleep 4000
+mark 10-zip
+sleep 2500

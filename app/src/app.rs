@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use cosmic::app::ApplicationExt;
@@ -100,10 +101,14 @@ pub enum Message {
     /// The drive harness's Build: the toolbar Build Model button's own
     /// command on the focused project window (CAD_STUDIO_DRIVE's `build`).
     DriveBuild,
-    /// The drive harness's viewer toggles (CAD_STUDIO_DRIVE's `viewer`
-    /// command): a viewer-pane message delivered to the project window, as
-    /// the toolbar button or overlay chevron that sends it would.
-    DriveViewer(crate::viewer_pane::Message),
+    /// The drive harness's project-window message (CAD_STUDIO_DRIVE's
+    /// `viewer`, `restore`, `layout`, `cancel` and `attach`): delivered to
+    /// the project window as the control that sends it would.
+    DriveProject(project::Message),
+    /// The drive harness's parameter commit (CAD_STUDIO_DRIVE's `param`):
+    /// the project window's n-th parameter row (1-based) committed as a
+    /// slider release would.
+    DriveParameter(usize, crate::drive::ParamValue),
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -185,6 +190,9 @@ pub struct CadStudio {
     /// `PythonEnvironment.shared`: the state exists from launch, the sheet
     /// presents on top of it).
     python: sheets::PythonSetup,
+    /// The drive harness's probe (only with CAD_STUDIO_DRIVE): the project
+    /// window's activity, published after every update.
+    drive_probe: Option<Arc<crate::drive::TurnProbe>>,
 }
 
 impl Application for CadStudio {
@@ -223,6 +231,10 @@ impl Application for CadStudio {
         // their events, so Checking is the app's own preset
         python.state.begin_checking();
 
+        // the optional UI drive harness (CAD_STUDIO_DRIVE): a script of
+        // user-action messages streamed into the loop — the smoke-run
+        // replacement for synthetic input, which COSMIC 1.6 gates
+        let (drive, drive_probe) = crate::drive::startup_task();
         let app = CadStudio {
             windows: HashMap::from([(
                 core.main_window_id()
@@ -237,6 +249,7 @@ impl Application for CadStudio {
             agent_missing: None,
             setup,
             python,
+            drive_probe,
         };
 
         // locate the agent off the UI thread; a miss presents the sheet
@@ -252,10 +265,7 @@ impl Application for CadStudio {
         // state (a missing/failed venv presents the sheet once first-run
         // setup is done)
         let python_check = python_events(check(&venv_dir(), &streaming_spawn()));
-        // the optional UI drive harness (CAD_STUDIO_DRIVE): a script of
-        // user-action messages streamed into the loop — the smoke-run
-        // replacement for synthetic input, which COSMIC 1.6 gates
-        let drive = crate::drive::startup_task().map(Action::App);
+        let drive = drive.map(Action::App);
         (app, Task::batch([locate, sigterm, python_check, drive]))
     }
 
@@ -307,11 +317,12 @@ impl Application for CadStudio {
                 })
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
-            Message::DriveViewer(msg) => self
+            Message::DriveProject(msg) => self
                 .project_window()
-                .map(|id| Task::done(Message::Project(id, project::Message::Viewer(msg))))
+                .map(|id| Task::done(Message::Project(id, msg)))
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
+            Message::DriveParameter(row, value) => self.drive_parameter(row, value),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),
             Message::SetupSheet(msg) => self.update_setup_sheet(msg),
             Message::PythonSheet(msg) => self.update_python_sheet(msg),
@@ -425,6 +436,9 @@ impl Application for CadStudio {
             }
             Message::Noop => Task::none(),
         };
+        if let Some(probe) = &self.drive_probe {
+            probe.publish(&self.project_activity());
+        }
         // a sheet coming up over a project releases the focused text
         // widget: the sheet's shade blocks only the pointer, and a focused
         // chat editor would otherwise eat the sheet's Return/Esc
@@ -561,6 +575,51 @@ impl CadStudio {
             .keys()
             .find(|id| matches!(self.windows.get(id), Some(WindowKind::Project(_))))
             .copied()
+    }
+
+    /// The project window's activity (idle without one).
+    fn project_activity(&self) -> crate::activity::Activity {
+        match self.project_window().and_then(|id| self.windows.get(&id)) {
+            Some(WindowKind::Project(project)) => project.activity.clone(),
+            _ => crate::activity::Activity::Idle,
+        }
+    }
+
+    /// The drive `param` line: resolve the row against the project window's
+    /// parameter rows and commit it; a row past the end fails the script.
+    fn drive_parameter(
+        &mut self,
+        row: usize,
+        value: crate::drive::ParamValue,
+    ) -> Task<Action<Message>> {
+        let Some(id) = self.project_window() else {
+            crate::drive::log("FAIL param: no project window");
+            return Task::none();
+        };
+        let Some(WindowKind::Project(project)) = self.windows.get(&id) else {
+            return Task::none();
+        };
+        let rows = project.bridge.parameters();
+        let Some(parameter) = rows.get(row - 1) else {
+            crate::drive::log(&format!(
+                "FAIL param: row {row} of {} parameters",
+                rows.len()
+            ));
+            return Task::none();
+        };
+        let committed = value.apply(parameter.value);
+        crate::drive::log(&format!(
+            "param {} {} -> {committed}",
+            parameter.name, parameter.value
+        ));
+        Task::done(Message::Project(
+            id,
+            project::Message::Viewer(crate::viewer_pane::Message::ParameterCommit(
+                parameter.name.clone(),
+                committed,
+            )),
+        ))
+        .map(Action::App)
     }
 
     fn update_welcome(&mut self, msg: welcome::Message) -> Task<Action<Message>> {
@@ -1944,6 +2003,7 @@ mod shell_behavior {
             agent_missing: None,
             setup: None,
             python: sheets::PythonSetup::default(),
+            drive_probe: None,
         };
         Fixture { app, welcome, dir }
     }
@@ -2184,6 +2244,37 @@ mod shell_behavior {
             panic!("the project window is gone");
         };
         assert_eq!(window.viewer.unit, MeasurementUnit::Inches);
+    }
+
+    /// With a drive script running, every update publishes the project
+    /// window's activity to the drive probe, so a working-to-settled
+    /// activity reads as one finished turn and a `mark` can log the kind.
+    #[tokio::test]
+    async fn updates_publish_project_activity_to_the_drive_probe() {
+        let mut f = fixture();
+        let project = open_real_project(&mut f, "Staffa");
+        let probe = Arc::new(crate::drive::TurnProbe::default());
+        f.app.drive_probe = Some(probe.clone());
+        let set = |app: &mut CadStudio, activity: crate::activity::Activity| {
+            let Some(WindowKind::Project(window)) = app.windows.get_mut(&project) else {
+                panic!("the project window is gone");
+            };
+            window.activity = activity;
+            let _ = app.update(Message::Noop);
+        };
+        set(
+            &mut f.app,
+            crate::activity::Activity::Working("turn".into()),
+        );
+        assert!(probe.busy());
+        assert_eq!(probe.finished(), 0);
+        set(
+            &mut f.app,
+            crate::activity::Activity::Failed("build".into()),
+        );
+        assert!(!probe.busy());
+        assert_eq!(probe.activity(), "failed");
+        assert_eq!(probe.finished(), 1);
     }
 
     /// Settings a project window writes (the parameters overlay's collapse

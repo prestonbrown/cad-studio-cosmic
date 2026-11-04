@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"00000000-0000-0000-0000-00000000a007","tools":[],"mcp_servers":[],"model":"claude-opus-5-5","permissionMode":"acceptEdits"}
+{"type":"assistant","message":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"text","text":"first"}]},"parent_tool_use_id":null,"session_id":"00000000-0000-0000-0000-00000000a007"}
+{"type":"brand_new_thing"}
+{"type":"assistant","message":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"text","text":"second"}]},"parent_tool_use_id":null,"session_id":"00000000-0000-0000-0000-00000000a007"}
+{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"00000000-0000-0000-0000-00000000a007"}
