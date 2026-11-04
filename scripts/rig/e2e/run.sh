@@ -72,8 +72,11 @@ case "${1:-}" in
     fi
     if ! chmod +x "$bindir/claude" 2>/dev/null || ! is_stub "$bindir/claude"; then
       # never leave the rig without a claude: put the real one back
-      [ -n "$moved" ] && mv "$bindir/claude.real" "$bindir/claude"
-      swap_die "could not install the stub at $bindir/claude; claude left as it was"
+      if [ -n "$moved" ]; then
+        mv "$bindir/claude.real" "$bindir/claude"
+        swap_die "could not install the stub at $bindir/claude; the real claude is back in place"
+      fi
+      swap_die "could not install the stub at $bindir/claude; no claude is installed (there was none before)"
     fi
     echo "stub restored at $bindir/claude"
     exit 0 ;;
@@ -109,20 +112,42 @@ if [ ! -x /usr/bin/zip ]; then
     || die "/usr/bin/zip not installed (the app's export runs it): sudo apt install zip"
 fi
 
-# one theme's processes and config copy; empty between themes
-ap=; xp=; cfg=
+# one theme's processes, registry and config copy; empty between themes
+ap=; xp=; cfg=; registry=
+# Signal every child the app registered in this run's registry that is
+# still the process registered (same start time, as the engine's own sweep
+# checks): what a SIGKILLed app could not terminate itself.
+sweep_registry() {
+  local line pid started
+  [ -n "$registry" ] && [ -e "$registry" ] || return 0
+  while IFS= read -r line; do
+    pid=${line%%:*}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    started=${line#*:}
+    case "${started%%:*}" in *[!0-9]*|'') ;; *) started=${started#*:} ;; esac
+    [ "$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//; s/ *$//')" = "$started" ] || continue
+    kill -TERM "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null
+    echo "$(ts) run.sh: killed leftover child $pid" >&2
+  done < "$registry"
+}
 cleanup() {
+  # a second Ctrl-C or SIGTERM must not cut the cleanup short
+  trap '' INT TERM HUP
   if [ -n "$ap" ] && kill -0 "$ap" 2>/dev/null; then
     # SIGTERM is the app's quit path: it terminates the engine's children
     # (a running agent turn included) before exiting
     kill -TERM "$ap" 2>/dev/null
     for _ in $(seq 20); do kill -0 "$ap" 2>/dev/null || break; sleep 0.5; done
-    kill -KILL "$ap" 2>/dev/null
+    if kill -0 "$ap" 2>/dev/null; then
+      kill -KILL "$ap" 2>/dev/null
+      sweep_registry
+    fi
   fi
   [ -n "$xp" ] && kill "$xp" 2>/dev/null
   wait 2>/dev/null
   [ -n "$cfg" ] && rm -rf "$cfg"
   ap=; xp=; cfg=
+  trap 'echo "$(ts) run.sh: interrupted" >&2; exit 130' INT TERM HUP
 }
 trap cleanup EXIT
 trap 'echo "$(ts) run.sh: interrupted" >&2; exit 130' INT TERM HUP
