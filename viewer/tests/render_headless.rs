@@ -2462,39 +2462,29 @@ fn ghost_uses_the_current_scene_pin() {
     );
 }
 
-/// A static part renders translucent at upstream's 0.22: an sRGB attachment
-/// blends in LINEAR space (decode → blend → re-encode — the fixed-function
-/// sRGB rule), so the stored byte is
-/// `encode(0.22·decode(opaque_byte) + 0.78·decode(bg_byte))` — NOT raw-u8
-/// arithmetic (the white facet's opaque 165 over bg 89 stores 112; the raw
-/// lerp reads 106, six counts beyond the ±2 tolerance).
-///
-/// The translucent sample part is a SINGLE white triangle, not the golden
-/// box: the blend pipelines keep upstream's `faceCulling = .none`
-/// (ModelViewer.swift:412), under which a closed translucent box
-/// composites its far faces over its near ones at EVERY interior pixel
-/// (no depth write, no cull — two-plus order-dependent layers), so no box
-/// pixel carries the one-fragment blend this exact expectation describes.
-/// A lone facet has exactly one fragment per covered pixel — the sampled
-/// centroid is interior by construction, its normal the +y top-face one
-/// (staged winding below), so the opaque reference reads the same lit
-/// white on every channel.
-#[test]
-fn translucent_part_blends_at_upstream_opacity() {
+/// One translucent facet over the viewport, its premultiplied
+/// [`lights::glass`] color over 0.22 coverage, and the opaque reference.
+/// `flip` winds the facet away from the camera.
+fn translucent_facet(flip: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
     let (device, queue) = gpu::device_queue();
-    // one white triangle, MODEL z=10 flat, wound for the +z MODEL normal
-    // that remaps to scene +y (the 0.374-lit top-face lighting)
+    // one dark-blue triangle, MODEL z=10 flat, wound for the +z MODEL
+    // normal that remaps to scene +y (the top-face lighting); dark enough
+    // that the glass color stays below saturation on every channel
+    let mut positions = vec![[-40.0, -40.0, 10.0], [40.0, -40.0, 10.0], [0.0, 40.0, 10.0]];
+    if flip {
+        positions.swap(1, 2);
+    }
     let part = engine::parsing::Part {
         name: "facet".into(),
-        positions: vec![[-40.0, -40.0, 10.0], [40.0, -40.0, 10.0], [0.0, 40.0, 10.0]],
-        triangle_colors: vec![Some([255, 255, 255])],
+        positions,
+        triangle_colors: vec![Some([20, 40, 90])],
     };
     let scene = PartScene::from_parts(std::slice::from_ref(&part), NEUTRAL);
     let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let cam = default_camera(&scene, 800.0 / 600.0);
     let poses = identity_poses(&scene);
     let plain = vec![PartAppearance::default(); scene.parts.len()];
-    let px_opaque = render_frame_appearances(
+    let opaque = render_frame_appearances(
         device,
         queue,
         &mut pipeline,
@@ -2509,7 +2499,7 @@ fn translucent_part_blends_at_upstream_opacity() {
         translucent: true,
         ..PartAppearance::default()
     }];
-    let px_blend = render_frame_appearances(
+    let blend = render_frame_appearances(
         device,
         queue,
         &mut pipeline,
@@ -2529,16 +2519,43 @@ fn translucent_part_blends_at_upstream_opacity() {
     let p = project_px(cam.view_proj, centroid, 800.0, 600.0)
         .expect("facet centroid projects inside the frame");
     let idx = (p.1 as usize * 800 + p.0 as usize) * 4;
+    let at = |px: &[u8]| -> [u8; 4] { px[idx..idx + 4].try_into().unwrap() };
+    (at(&opaque), at(&blend), bg)
+}
+
+/// A static part renders as upstream's translucent material: its
+/// premultiplied glass color ([`lights::glass`] of its opaque display
+/// color) plus 0.78 of what lies behind. An sRGB attachment blends in
+/// LINEAR space (decode → blend → re-encode), so the stored byte is
+/// `encode(decode(glass) + 0.78·decode(bg))`.
+#[test]
+fn translucent_part_draws_upstream_glass() {
+    let (opaque, blend, bg) = translucent_facet(false);
+    let lit = [0, 1, 2].map(|c| opaque[c] as f32 / 255.0);
+    let glass = lights::glass(lit, [0.0, 1.0, 0.0]);
     for c in 0..3 {
-        // decode → lerp → encode in f32: the sRGB attachment blends linearized
-        let expected =
-            encode_srgb(0.22 * srgb_to_linear(px_opaque[idx + c]) + 0.78 * srgb_to_linear(bg[c]));
+        assert!(glass[c] < 1.0, "glass channel {c} saturates: {glass:?}");
+        let expected = encode_srgb(
+            viewer::render::srgb_to_linear_f(glass[c])
+                + (1.0 - viewer::render::TRANSLUCENT_ALPHA) * srgb_to_linear(bg[c]),
+        );
         assert!(
-            (px_blend[idx + c] as i32 - expected as i32).abs() <= 2,
-            "channel {c}: {} vs linear-blended {expected}",
-            px_blend[idx + c]
+            (blend[c] as i32 - expected as i32).abs() <= 2,
+            "channel {c}: {} vs glass over bg {expected}",
+            blend[c]
         );
     }
+    // brighter than a plain 0.22 blend of the opaque color would be
+    let plain = encode_srgb(0.22 * srgb_to_linear(opaque[0]) + 0.78 * srgb_to_linear(bg[0]));
+    assert!(blend[0] > plain + 20, "{} vs plain {plain}", blend[0]);
+}
+
+/// The translucent material draws one layer: a face turned away from the
+/// camera is culled, leaving the viewport untouched.
+#[test]
+fn translucent_back_face_is_culled() {
+    let (_, blend, bg) = translucent_facet(true);
+    assert_eq!(blend[..3], bg[..3]);
 }
 
 /// A colliding part renders FLAT red — unlit, the same value from every

@@ -39,6 +39,11 @@ const AMBIENT: f32 = @AMBIENT@;
 const SPECULAR: f32 = @SPECULAR@;
 const SHININESS: f32 = @SHININESS@;
 const SHOULDER_START: f32 = @SHOULDER_START@;
+// The translucent static-parts material (lights::glass): a
+// premultiplied, display-encoded color over model.alpha's coverage.
+const GLASS_LIT: f32 = @GLASS_LIT@;
+const GLASS_UP: f32 = @GLASS_UP@;
+const GLASS_TINT: vec3<f32> = @GLASS_TINT@;
 const COLLISION_R: f32 = @COLLISION_R@;
 const COLLISION_G: f32 = @COLLISION_G@;
 const COLLISION_B: f32 = @COLLISION_B@;
@@ -113,5 +118,28 @@ fn fs_main(in: Vout) -> @location(0) vec4<f32> {
     let h = hv * inverseSqrt(max(dot(hv, hv), 1e-12));
     let spec = SPECULAR * pow(max(dot(n, h), 1e-6), SHININESS) * n_key;
     let lit = in.color * diffuse + vec3<f32>(spec);
-    return vec4<f32>(to_target(vec3<f32>(shoulder(lit.r), shoulder(lit.g), shoulder(lit.b))), model.alpha);
+    let shaded = vec3<f32>(shoulder(lit.r), shoulder(lit.g), shoulder(lit.b));
+    if (model.alpha < 1.0) {
+        // the translucent material (lights::glass), premultiplied: the
+        // blend pipeline keeps (1 - alpha) of what lies behind
+        let display = vec3<f32>(encode_target(shaded.r), encode_target(shaded.g), encode_target(shaded.b));
+        let glass = clamp(
+            GLASS_LIT * display + vec3<f32>(GLASS_UP * max(n.y, 0.0)) + GLASS_TINT,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        return vec4<f32>(from_display(glass), model.alpha);
+    }
+    return vec4<f32>(to_target(shaded), 1.0);
+}
+
+// A display-encoded color in the target's space: as-is for a plain
+// target, decoded for an sRGB-tagged one (whose hardware re-encodes).
+fn from_display(rgb: vec3<f32>) -> vec3<f32> {
+    if (SRGB_ENCODE > 0.5) { return rgb; }
+    return vec3<f32>(decode_display(rgb.r), decode_display(rgb.g), decode_display(rgb.b));
+}
+
+fn decode_display(c: f32) -> f32 {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
 }

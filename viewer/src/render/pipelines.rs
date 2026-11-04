@@ -89,6 +89,8 @@ pub(super) struct PipelineSpec<'a> {
     pub(super) attributes: &'a [wgpu::VertexAttribute],
     pub(super) topology: wgpu::PrimitiveTopology,
     pub(super) blend: Option<wgpu::BlendState>,
+    /// Which faces are culled; `None` rasterizes both windings.
+    pub(super) cull_mode: Option<wgpu::Face>,
     pub(super) depth_stencil: wgpu::DepthStencilState,
 }
 
@@ -123,7 +125,7 @@ pub(super) fn build_pipeline(
         }),
         primitive: wgpu::PrimitiveState {
             topology: spec.topology,
-            cull_mode: None,
+            cull_mode: spec.cull_mode,
             ..Default::default()
         },
         depth_stencil: Some(spec.depth_stencil),
@@ -191,7 +193,7 @@ pub(super) fn build(
     let mesh_shader = module("mesh.wgsl", mesh_wgsl_source(target_format));
     // The four part pipelines share the mesh shader and the part vertex,
     // and differ in topology, blend, and depth/stencil.
-    let part = |label, topology, blend, depth_stencil| {
+    let part = |label, topology, blend, cull_mode, depth_stencil| {
         build(PipelineSpec {
             label,
             layout: part_layout,
@@ -202,6 +204,7 @@ pub(super) fn build(
             attributes: &PART_ATTRS,
             topology,
             blend,
+            cull_mode,
             depth_stencil,
         })
     };
@@ -217,6 +220,7 @@ pub(super) fn build(
     let mesh = part(
         "mesh",
         TriangleList,
+        None,
         None,
         depth_stencil(
             true,
@@ -235,24 +239,36 @@ pub(super) fn build(
         "wireframe lines",
         LineList,
         None,
+        None,
         depth_stencil(true, Less, STENCIL_INERT, STENCIL_INERT),
     );
     // The translucent part set (motion playback, ModelViewer.swift:410):
-    // the mesh and line materials with ALPHA_BLENDING and the overlay
-    // depth stance — depth-TESTED so the opaque set orders correctly,
-    // never WRITING depth so a translucent part occludes nothing after
-    // it. The blend pipelines never participate in section winding
-    // parity: section ∩ animation is empty by mutual exclusion (the
-    // pane's isAnimating excludes sectioning). fs_main applies
-    // model.alpha identically to fill and lines.
-    let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
-    let mesh_blend = part("mesh blend", TriangleList, blend, overlay_depth_stencil());
+    // the mesh and line materials with PREMULTIPLIED blending (fs_main's
+    // glass branch writes lights::glass over model.alpha's coverage) and
+    // the overlay depth stance — depth-TESTED so the opaque set orders
+    // correctly, never WRITING depth so a translucent part occludes
+    // nothing after it. Back faces are culled: upstream's playback
+    // captures read one glass layer over the viewport (glass + 0.78 of
+    // what lies behind, the same 0.78 in light and dark), never the far
+    // faces composited under the near ones. The blend pipelines never
+    // participate in section winding parity: section ∩ animation is empty
+    // by mutual exclusion (the pane's isAnimating excludes sectioning).
+    let glass = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+    let mesh_blend = part(
+        "mesh blend",
+        TriangleList,
+        glass,
+        Some(wgpu::Face::Back),
+        overlay_depth_stencil(),
+    );
     let line_blend = part(
         "wireframe lines blend",
         LineList,
-        blend,
+        glass,
+        None,
         overlay_depth_stencil(),
     );
+    let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
     // The cap quad fills the cut face where the mesh pass left winding
     // parity. Its stencil test is read-only (all ops Keep) so the mesh's
     // inc/dec stays in the attachment; depth is read-only too (the quad
@@ -274,6 +290,7 @@ pub(super) fn build(
         attributes: &POSITION_ATTR,
         topology: TriangleStrip,
         blend: None,
+        cull_mode: None,
         depth_stencil: depth_stencil(false, LessEqual, not_zero, not_zero),
     });
     // Grid / bed / tripod / markers overlay (facts #34/#37): unlit
@@ -290,6 +307,7 @@ pub(super) fn build(
         attributes: &OVERLAY_ATTRS,
         topology: TriangleList,
         blend,
+        cull_mode: None,
         depth_stencil: overlay_depth_stencil(),
     });
     // The compare ghost (ModelViewer.swift:371-378): unlit systemOrange
@@ -311,6 +329,7 @@ pub(super) fn build(
         attributes: &POSITION_ATTR,
         topology: LineList,
         blend,
+        cull_mode: None,
         depth_stencil: overlay_depth_stencil(),
     });
     Pipelines {

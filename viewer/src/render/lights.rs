@@ -78,6 +78,40 @@ pub fn specular(normal: [f32; 3], to_eye: [f32; 3]) -> f32 {
     SPECULAR * n.dot(h).max(0.0).powf(SHININESS) * n.dot(key).max(0.0)
 }
 
+/// The translucent static-parts material (ModelViewer.swift:408-413,
+/// `.transparent(opacity: 0.22)`) as RealityKit draws it: the opacity only
+/// governs how much of what lies behind shows through (0.78 of it); the
+/// part itself adds a premultiplied color that is much brighter than
+/// 0.22 of its lit color, with a warm environment sheen strongest on
+/// up-facing faces. Fitted, in DISPLAY-encoded values, to upstream's
+/// playback captures (playback.png and playback-dark.png, the blue base
+/// static under the lifting lid): every visible face reads
+/// `glass + 0.78·behind` with ONE `glass` per face in both appearances
+/// (white over the light viewport, lilac over the dark one), within
+/// ~7 sRGB units of
+/// `glass = GLASS_LIT·lit + GLASS_UP·max(n·up, 0) + GLASS_TINT`, `lit`
+/// the face's opaque shaded color, display-encoded.
+pub const GLASS_LIT: f32 = 0.5;
+/// The up-facing sheen (display-encoded).
+pub const GLASS_UP: f32 = 42.0 / 255.0;
+/// The warm environment sheen on every face (display-encoded rgb).
+pub const GLASS_TINT: [f32; 3] = [57.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0];
+
+/// The translucent material's premultiplied, display-encoded color for a
+/// face whose opaque display-encoded color is `lit` and whose scene normal
+/// is `normal` (scene +y up). mesh.wgsl's glass branch is its twin.
+pub fn glass(lit: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+    let up = glam::Vec3::from_array(normal)
+        .normalize_or_zero()
+        .y
+        .max(0.0);
+    let mut out = [0.0; 3];
+    for i in 0..3 {
+        out[i] = (GLASS_LIT * lit[i] + GLASS_UP * up + GLASS_TINT[i]).clamp(0.0, 1.0);
+    }
+    out
+}
+
 /// The highlight shoulder on one linear channel.
 pub fn shoulder(c: f32) -> f32 {
     if c < SHOULDER_START {
@@ -151,6 +185,40 @@ mod tests {
                 shaded[i] >= lo[i] - 3 && shaded[i] <= hi[i] + 3,
                 "base top {shaded:?} outside upstream's gradient {lo:?}..{hi:?}"
             );
+        }
+    }
+
+    /// The glass fit reproduces upstream's playback ghost: each visible
+    /// face of the static blue base, its opaque display color from
+    /// project-model.png, against the premultiplied color read off
+    /// playback-dark.png (pixel − 0.78 × the #212121 viewport), within
+    /// 8 sRGB units. Light mode is the same glass over #F0F0F0, which
+    /// saturates to upstream's near-white.
+    #[test]
+    fn glass_matches_upstream_playback_faces() {
+        let faces: [([f32; 3], [f32; 3], [f32; 3]); 3] = [
+            (
+                [0.0, 1.0, 0.0],
+                [102.0, 156.0, 206.0],
+                [143.0, 130.0, 160.0],
+            ),
+            ([0.0, 0.0, 1.0], [71.0, 129.0, 183.0], [93.0, 74.0, 100.0]),
+            ([1.0, 0.0, 0.0], [50.0, 92.0, 135.0], [89.0, 56.0, 73.0]),
+        ];
+        for (normal, opaque, ghost) in faces {
+            let glass = lights::glass(opaque.map(|c| c / 255.0), normal);
+            for c in 0..3 {
+                let got = glass[c] * 255.0;
+                assert!(
+                    (got - ghost[c]).abs() <= 8.0,
+                    "normal {normal:?} channel {c}: {got} vs upstream {}",
+                    ghost[c]
+                );
+            }
+            // over the light viewport: at least upstream's 242 on every channel
+            for c in 0..3 {
+                assert!(glass[c] * 255.0 + 0.78 * 240.0 >= 238.0);
+            }
         }
     }
 }

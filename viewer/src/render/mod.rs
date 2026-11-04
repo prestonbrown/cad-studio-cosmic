@@ -197,8 +197,9 @@ impl Default for Options {
 pub type PartPose = Option<[[f32; 4]; 4]>;
 
 /// One part's motion-appearance flags for a frame (upstream's playback
-/// materials, ModelViewer.swift:263-266): `translucent` draws the part
-/// alpha-blended at [`TRANSLUCENT_ALPHA`] (the static-parts material),
+/// materials, ModelViewer.swift:263-266): `translucent` draws the part as
+/// the static-parts glass ([`lights::glass`] over [`TRANSLUCENT_ALPHA`]
+/// coverage),
 /// `collision` replaces the whole material with the flat-red emissive one
 /// — opaque, unlit, winning over `translucent` exactly as upstream's
 /// material-array swap does. The default `{ false, false }` draws the
@@ -261,7 +262,8 @@ struct CapVertex {
 }
 
 /// The translucent static-parts material's opacity
-/// (ModelViewer.swift:410: `.transparent(opacity: 0.22)`).
+/// (ModelViewer.swift:410: `.transparent(opacity: 0.22)`): the glass
+/// keeps 1 − 0.22 of what lies behind it.
 pub const TRANSLUCENT_ALPHA: f32 = 0.22;
 
 /// World-space quad on the section plane: the cross-section of the
