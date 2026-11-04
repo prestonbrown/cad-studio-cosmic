@@ -139,6 +139,45 @@ pub fn fill(
     corner: Corner,
     stroke: Option<f32>,
 ) -> cosmic::theme::Container<'static> {
+    fill_stroked(tone, scale, corner, stroke.map(Stroke::even))
+}
+
+/// A wash's separator stroke, scaled per appearance: a stroke macOS draws
+/// stronger in dark mode (the grouped form box's border) names both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stroke {
+    pub light: f32,
+    pub dark: f32,
+}
+
+impl Stroke {
+    /// The same scale in both appearances.
+    pub const fn even(scale: f32) -> Self {
+        Self {
+            light: scale,
+            dark: scale,
+        }
+    }
+
+    /// The scale under `theme`'s appearance.
+    pub fn scale(self, theme: &cosmic::Theme) -> f32 {
+        if theme.cosmic().is_dark {
+            self.dark
+        } else {
+            self.light
+        }
+    }
+}
+
+/// [`fill`] with a [`Stroke`] whose scale follows the appearance. The
+/// quad snaps to the pixel grid, so a 1 px stroke or hairline below a
+/// fractional-height text stays one crisp pixel.
+pub fn fill_stroked(
+    tone: Tone,
+    scale: f32,
+    corner: Corner,
+    stroke: Option<Stroke>,
+) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| Style {
         background: Some(Background::Color(wash(
             theme,
@@ -148,12 +187,30 @@ pub fn fill(
             color: stroke.map_or(Color::TRANSPARENT, |stroke| {
                 wash(
                     theme,
-                    Tone::Separator.alpha(theme, Backdrop::Plain) * stroke,
+                    Tone::Separator.alpha(theme, Backdrop::Plain) * stroke.scale(theme),
                 )
             }),
             width: if stroke.is_some() { 1.0 } else { 0.0 },
             radius: corner.radius(theme),
         },
+        snap: true,
+        ..Default::default()
+    })
+}
+
+/// A sheet's card (SwiftUI `.sheet`): the text background (white in a
+/// light theme, the darkest surface in a dark one, as upstream's sheets
+/// read 255 over a 236 window and 29 over a 38 one), the menu radius
+/// class and the popover shadow, no stroke.
+pub fn sheet() -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(|theme| Style {
+        background: Some(Background::Color(text_background(theme))),
+        border: Border {
+            radius: Corner::M.radius(theme),
+            ..Default::default()
+        },
+        shadow: Shadow::Popover.iced(),
+        snap: true,
         ..Default::default()
     })
 }

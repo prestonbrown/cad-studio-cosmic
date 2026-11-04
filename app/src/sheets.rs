@@ -371,11 +371,13 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
         PrintPrefMessage::Unit(unit) => SetupMessage::Unit(unit),
     });
 
-    let actions = Row::new().push(Space::new().width(Length::Fill)).push(
-        button::text(fl!("continua"))
-            .class(cosmic::theme::Button::Suggested)
-            .on_press(SetupMessage::Continue),
-    );
+    let actions = Row::new()
+        .push(Space::new().width(Length::Fill))
+        .push(ui::button::push_as(
+            ui::button::PushRole::Default,
+            fl!("continua"),
+            Some(SetupMessage::Continue),
+        ));
     // the form's footer carries its own bottom gap before Continue
     let stack = Column::new()
         .push(head)
@@ -385,7 +387,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     container(stack)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(cosmic::theme::Container::Dialog(true))
+        .class(ui::surface::sheet())
         .into()
 }
 

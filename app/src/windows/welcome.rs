@@ -18,7 +18,7 @@ use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::menu::{Item, items};
-use cosmic::widget::{Column, Row, Space, button, container, scrollable, text, text_input};
+use cosmic::widget::{Column, Row, Space, container, scrollable, text, text_input};
 use engine::project::store::{self, ProjectNameError};
 
 use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
@@ -41,6 +41,47 @@ const ACTION_FILL: f32 = 0.7;
 /// The new-project sheet (NewProjectSheet.swift).
 pub mod new_project {
     use super::*;
+
+    /// Between Annulla and Avanti (an `HStack`'s default spacing).
+    const SHEET_BUTTON_GAP: f32 = 8.0;
+    /// The name field's padding: a 22 px field around body text, like
+    /// upstream's rounded-border `TextField`.
+    const FIELD_PADDING: [f32; 2] = [1.0, 6.0];
+
+    /// The name field's fill in a dark theme, against the window's `on`
+    /// color (upstream's field reads 40 on its 29 sheet).
+    const FIELD_DARK_FILL: f32 = 0.055;
+
+    /// The name field: COSMIC's text input in every state, on macOS's
+    /// field fill (the sheet's white in a light theme, a lift off the
+    /// sheet in a dark one).
+    fn field_style() -> cosmic::theme::TextInput {
+        use cosmic::widget::text_input::{Appearance, StyleSheet};
+        fn on_fill(theme: &cosmic::Theme, mut appearance: Appearance) -> Appearance {
+            let cosmic = theme.cosmic();
+            let sheet = ui::surface::text_background(theme);
+            let fill = if cosmic.is_dark {
+                ui::tone::mix(sheet, cosmic.background(false).on.into(), FIELD_DARK_FILL)
+            } else {
+                sheet
+            };
+            appearance.background = cosmic::iced::Background::Color(fill);
+            appearance
+        }
+        cosmic::theme::TextInput::Custom {
+            active: Box::new(|t| on_fill(t, t.active(&cosmic::theme::TextInput::Default))),
+            error: Box::new(|t| on_fill(t, t.error(&cosmic::theme::TextInput::Default))),
+            hovered: Box::new(|t| on_fill(t, t.hovered(&cosmic::theme::TextInput::Default))),
+            focused: Box::new(|t| on_fill(t, t.focused(&cosmic::theme::TextInput::Default))),
+            disabled: Box::new(|t| on_fill(t, t.disabled(&cosmic::theme::TextInput::Default))),
+        }
+    }
+
+    /// The name field's widget id: the app focuses it as the sheet comes
+    /// up, as a SwiftUI sheet focuses its first field.
+    pub fn name_field_id() -> cosmic::iced::widget::Id {
+        cosmic::iced::widget::Id::new("new-project-name")
+    }
 
     /// The sheet's messages; the portal/create effects are the app's — it
     /// acts on `Advance` (asking for the parent folder) and reports the
@@ -119,6 +160,9 @@ pub mod new_project {
                     .push(text(fl!("nome-progetto-2")))
                     .push(
                         text_input::text_input(fl!("staffa-a-l"), &sheet.name)
+                            .id(name_field_id())
+                            .padding(FIELD_PADDING)
+                            .style(field_style())
                             .on_input(Message::Name)
                             // Return runs Avanti (upstream `.onSubmit(create)`,
                             // NewProjectSheet.swift:27)
@@ -145,24 +189,18 @@ pub mod new_project {
         stack = stack.push(
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(
-                    button::text(fl!("annulla"))
-                        .class(cosmic::theme::Button::Standard)
-                        .on_press(Message::Cancel),
-                )
-                .push(Space::new().width(8))
-                .push(
-                    button::text(fl!("avanti"))
-                        .class(cosmic::theme::Button::Suggested)
-                        .on_press_maybe(valid.then_some(Message::Advance)),
-                )
-                .spacing(8),
+                .push(ui::button::push(fl!("annulla"), Some(Message::Cancel)))
+                .push(ui::button::push_as(
+                    ui::button::PushRole::Default,
+                    fl!("avanti"),
+                    valid.then_some(Message::Advance),
+                ))
+                .spacing(SHEET_BUTTON_GAP),
         );
-        // the sheet card: COSMIC's dialog surface, one step above the window
         container(stack)
             .padding(20)
             .width(460.0)
-            .class(cosmic::theme::Container::Dialog(true))
+            .class(ui::surface::sheet())
             .into()
     }
 }

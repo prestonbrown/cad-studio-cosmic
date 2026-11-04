@@ -141,26 +141,74 @@ fn push_face(theme: &cosmic::Theme) -> cosmic::iced::Color {
     }
 }
 
-/// The push button class: the face, a separator hairline, the `on` wash
-/// on hover and press.
-fn push_class() -> cosmic::theme::Button {
-    let style = |theme: &cosmic::Theme, fill: f32| {
-        let mut style = button::Style::new();
-        style.background = Some(Background::Color(super::tone::mix(
-            push_face(theme),
-            theme.cosmic().background(false).on.into(),
-            fill,
-        )));
-        style.border_radius = Corner::S.radius(theme);
-        style.border_width = 1.0;
-        style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
-        style
+/// A push button's interaction state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushState {
+    Rest,
+    Hover,
+    Press,
+    Disabled,
+}
+
+/// A push button's look in `role` and `state`: a plain one is the face, a
+/// separator hairline and the `on` wash on hover and press; an enabled
+/// default one is the theme's accent button face, a disabled one the
+/// plain face at rest.
+fn push_style(theme: &cosmic::Theme, role: PushRole, state: PushState) -> button::Style {
+    let mut style = button::Style::new();
+    style.border_radius = Corner::S.radius(theme);
+    let accent = &theme.cosmic().accent_button;
+    let accent_face = match (role, state) {
+        (PushRole::Default, PushState::Rest) => Some(accent.base),
+        (PushRole::Default, PushState::Hover) => Some(accent.hover),
+        (PushRole::Default, PushState::Press) => Some(accent.pressed),
+        _ => None,
     };
+    if let Some(face) = accent_face {
+        style.background = Some(Background::Color(face.into()));
+        return style;
+    }
+    let wash = match state {
+        PushState::Hover => HOVER,
+        PushState::Press => PRESS,
+        PushState::Rest | PushState::Disabled => 0.0,
+    };
+    style.background = Some(Background::Color(super::tone::mix(
+        push_face(theme),
+        theme.cosmic().background(false).on.into(),
+        wash,
+    )));
+    style.border_width = 1.0;
+    style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
+    style
+}
+
+/// The push button class for `role`.
+fn push_class(role: PushRole) -> cosmic::theme::Button {
     cosmic::theme::Button::Custom {
-        active: Box::new(move |_, theme| style(theme, 0.0)),
-        disabled: Box::new(move |theme| style(theme, 0.0)),
-        hovered: Box::new(move |_, theme| style(theme, HOVER)),
-        pressed: Box::new(move |_, theme| style(theme, PRESS)),
+        active: Box::new(move |_, theme| push_style(theme, role, PushState::Rest)),
+        disabled: Box::new(move |theme| push_style(theme, role, PushState::Disabled)),
+        hovered: Box::new(move |_, theme| push_style(theme, role, PushState::Hover)),
+        pressed: Box::new(move |_, theme| push_style(theme, role, PushState::Press)),
+    }
+}
+
+/// Which push button: a plain one, or the sheet's default action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushRole {
+    /// `Button("…")`: the push face, primary label.
+    Plain,
+    /// `.keyboardShortcut(.defaultAction)` / `.borderedProminent`: the
+    /// accent face, the label on the accent.
+    Default,
+}
+
+/// The tone a push button's label draws in for `role`, enabled or not.
+pub fn push_label_tone<M>(role: PushRole, on_press: &Option<M>) -> Tone {
+    match role {
+        PushRole::Plain => content_tone(Tone::Primary, on_press),
+        PushRole::Default if on_press.is_some() => Tone::OnAccent,
+        PushRole::Default => Tone::Tertiary,
     }
 }
 
@@ -168,14 +216,24 @@ fn push_class() -> cosmic::theme::Button {
 /// bordered push style): `label` in body text on the push face; disabled
 /// without a message.
 pub fn push<'a, M: Clone + 'a>(label: String, on_press: Option<M>) -> Element<'a, M> {
-    let tone = content_tone(Tone::Primary, &on_press);
+    push_as(PushRole::Plain, label, on_press)
+}
+
+/// A push button in `role`: the sheets' Cancel / Continue rows put the
+/// [`PushRole::Default`] one last.
+pub fn push_as<'a, M: Clone + 'a>(
+    role: PushRole,
+    label: String,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    let tone = push_label_tone(role, &on_press);
     button::custom(
         cosmic::widget::text(label)
             .size(typography::BODY)
             .class(tone.text(Backdrop::Plain)),
     )
     .padding(PUSH_PADDING)
-    .class(push_class())
+    .class(push_class(role))
     .on_press_maybe(on_press)
     .into()
 }
@@ -183,6 +241,23 @@ pub fn push<'a, M: Clone + 'a>(label: String, on_press: Option<M>) -> Element<'a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_push_labels_on_the_accent_until_disabled() {
+        assert_eq!(
+            push_label_tone(PushRole::Default, &Some(())),
+            Tone::OnAccent
+        );
+        assert_eq!(
+            push_label_tone(PushRole::Default, &None::<()>),
+            Tone::Tertiary
+        );
+        assert_eq!(push_label_tone(PushRole::Plain, &Some(())), Tone::Primary);
+        assert_eq!(
+            push_label_tone(PushRole::Plain, &None::<()>),
+            Tone::Tertiary
+        );
+    }
 
     #[test]
     fn a_button_without_a_message_draws_disabled() {

@@ -36,11 +36,18 @@ const FOOTER_BOTTOM: f32 = 16.0;
 const FOOTER_LEADING: f32 = 6.0;
 
 /// The box fill against [`Tone::Quaternary`] (upstream's box sits 4
-/// levels off its surface: 232 on 236, 251 on 255).
-const FILL: f32 = 0.3;
-/// The box stroke and row hairlines against [`Tone::Separator`] (10
-/// levels off the surface).
+/// levels off its surface in either appearance: 232 on 236, 251 on 255,
+/// 42 on 38).
+const FILL: f32 = 0.2;
+/// The row hairlines against [`Tone::Separator`] (9 levels off the box
+/// in either appearance).
 const HAIRLINE: f32 = 0.5;
+/// The box stroke against [`Tone::Separator`]: 10 levels off the surface
+/// in light mode, 20 in dark (226 on 236, 58 on 38).
+const BOX_STROKE: surface::Stroke = surface::Stroke {
+    light: 0.5,
+    dark: 1.0,
+};
 
 /// One grouped section: `rows` in the rounded box, hairlines between them.
 pub fn section<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
@@ -56,11 +63,11 @@ pub fn section<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
     container(column)
         .padding(1)
         .width(Length::Fill)
-        .class(surface::fill(
+        .class(surface::fill_stroked(
             Tone::Quaternary,
             FILL,
             Corner::S,
-            Some(HAIRLINE),
+            Some(BOX_STROKE),
         ))
         .into()
 }
