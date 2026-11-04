@@ -1211,6 +1211,13 @@ impl CadStudio {
         if let Some(command) = project::project_shortcut(&key, &modifiers) {
             return self.update_project(id, project::Message::Command(command));
         }
+        // anything else is the key window's pane's (Space, Esc)
+        if matches!(self.windows.get(&id), Some(WindowKind::Project(_))) {
+            return self.update_project(
+                id,
+                project::Message::Viewer(crate::viewer_pane::Message::Key(key, modifiers)),
+            );
+        }
         Task::none()
     }
 
@@ -1952,6 +1959,53 @@ mod shell_behavior {
         f.app
             .project_window()
             .expect("the project window registered")
+    }
+
+    /// Two project windows: an editor-unfocused Space tagged with one
+    /// window toggles playback in that window's pane only.
+    #[tokio::test]
+    async fn space_toggles_playback_only_in_the_key_window() {
+        use engine::watch::ReloadKind;
+        let mut f = fixture();
+        let mut ids = Vec::new();
+        for name in ["A", "B"] {
+            store::create_project(&f.dir, name).unwrap();
+            let root = f.dir.join(name);
+            std::fs::create_dir_all(root.join("output")).unwrap();
+            std::fs::copy(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/golden/animation.json"),
+                root.join("output/animation.json"),
+            )
+            .unwrap();
+            let _ = f.app.open_project(root.clone());
+            let id = f
+                .app
+                .windows
+                .iter()
+                .find_map(|(id, kind)| match kind {
+                    WindowKind::Project(p) if p.root == root => Some(*id),
+                    _ => None,
+                })
+                .expect("the project window registered");
+            let Some(WindowKind::Project(p)) = f.app.windows.get_mut(&id) else {
+                unreachable!()
+            };
+            let _ = p.viewer.update(crate::viewer_pane::Message::Reload(ReloadKind::Motion));
+            let _ = p.viewer.update(crate::viewer_pane::Message::ToggleAnimation);
+            ids.push(id);
+        }
+        let playing = |app: &CadStudio, id| match app.windows.get(&id) {
+            Some(WindowKind::Project(p)) => p.viewer.tools.player.is_playing,
+            _ => panic!("project window"),
+        };
+        let before = (playing(&f.app, ids[0]), playing(&f.app, ids[1]));
+        let _ = f.app.update(Message::KeyPressed(
+            ids[0],
+            Key::Character(" ".into()),
+            Modifiers::empty(),
+        ));
+        assert_ne!(playing(&f.app, ids[0]), before.0, "the key window toggled");
+        assert_eq!(playing(&f.app, ids[1]), before.1, "the other window did not");
     }
 
     /// 2.17 / 11.2: the new-project parent panel opens at Settings'
