@@ -125,19 +125,25 @@ pub fn text<M: Clone + 'static>(
 /// The push button's padding: 20 px tall around body text, like
 /// upstream's form buttons (shots/upstream/settings-general.png, 1x).
 const PUSH_PADDING: [f32; 2] = [1.0, 9.0];
-/// The push button's face in a dark theme, against the window's `on`
-/// color (macOS dark controls sit a step above their surface).
-const PUSH_DARK_FACE: f32 = 0.2;
+/// The push button's face in a dark theme: the `on` color at this alpha.
+/// macOS dark controls are a translucent white lift, so the face carries
+/// the surface under it (95 gray on a settings box, the orange wash on a
+/// chat error row in shots/upstream/*-dark.png).
+const PUSH_DARK_LIFT: f32 = 0.25;
 
-/// The push button face: the lightest neutral in a light theme (macOS's
-/// white control), a lift off the window in a dark one.
-fn push_face(theme: &cosmic::Theme) -> cosmic::iced::Color {
+/// The push button face under `wash` (0 at rest, `HOVER`, `PRESS`): the
+/// lightest neutral in a light theme (macOS's white control) washed toward
+/// `on`; a translucent `on` lift in a dark one, more opaque as it is washed.
+fn push_face(theme: &cosmic::Theme, wash: f32) -> cosmic::iced::Color {
     let cosmic = theme.cosmic();
+    let on: cosmic::iced::Color = cosmic.background(false).on.into();
     if cosmic.is_dark {
-        let background = cosmic.background(false);
-        super::tone::mix(background.base.into(), background.on.into(), PUSH_DARK_FACE)
+        cosmic::iced::Color {
+            a: PUSH_DARK_LIFT + wash,
+            ..on
+        }
     } else {
-        cosmic.palette.neutral_0.into()
+        super::tone::mix(cosmic.palette.neutral_0.into(), on, wash)
     }
 }
 
@@ -173,11 +179,7 @@ fn push_style(theme: &cosmic::Theme, role: PushRole, state: PushState) -> button
         PushState::Press => PRESS,
         PushState::Rest | PushState::Disabled => 0.0,
     };
-    style.background = Some(Background::Color(super::tone::mix(
-        push_face(theme),
-        theme.cosmic().background(false).on.into(),
-        wash,
-    )));
+    style.background = Some(Background::Color(push_face(theme, wash)));
     style.border_width = 1.0;
     style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
     style
@@ -298,6 +300,17 @@ mod tests {
             push_label_tone(PushRole::Plain, &None::<()>),
             Tone::Tertiary
         );
+    }
+
+    #[test]
+    fn a_dark_push_face_is_a_translucent_lift_that_hover_raises() {
+        let dark = cosmic::Theme::dark();
+        let rest = push_face(&dark, 0.0);
+        let hover = push_face(&dark, HOVER);
+        assert!(rest.a < 1.0, "a dark face must let the surface show through");
+        assert!(hover.a > rest.a);
+        let light = cosmic::Theme::light();
+        assert_eq!(push_face(&light, 0.0).a, 1.0);
     }
 
     #[test]
