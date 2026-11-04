@@ -281,8 +281,9 @@ minors, each with its owner:
   holds the speeds and Ripeti in one menu; a cosmic menu with
   `Item::CheckBox` entries and a root titled by the current speed survives
   200 open-menu rebuilds (docs/research/libcosmic-menu-dynamic-items-bug.md,
-  probes b and b'), so real ✓ marks are certified safe. The swap from the
-  pull-down's text ✓ is open: see the gallery-2 ✓-marks entry.
+  probes b and b'), so real ✓ marks are certified safe. CERTIFIED SAFE,
+  DEFERRED (Preston 2026-11-04: the remaining visual differences stay for
+  now); see the gallery-2 ✓-marks entry.
 - Translucent parts composite in slot order (no sort among translucents,
   depth-write off) where SceneKit sorts transparents back-to-front —
   cosmetic; the offscreen playback shots are the eyeball-verdict venue
@@ -486,7 +487,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
     certified a cosmic `Item::CheckBox` menu safe (single-root bar, root
     label = current speed; the record's probes b and b'); swapping the
     pull-down for it is a kit component plus a playback capture against
-    upstream, not yet done.
+    upstream. CERTIFIED SAFE, DEFERRED (Preston 2026-11-04: remaining
+    visual differences stay for now).
   - The lid's specular falloff is missing. In dark playback the ghost's
     side faces read 10-19 low in red, because the opaque side shading is
     darker. ACCEPTED (M9 Ruling 4; Preston 2026-11-04: remaining visual

@@ -78,6 +78,12 @@ with the changed content. 200 rebuilds 75 ms apart, `ItemHeight::Dynamic`
 The version history stays a popover: it grows and shrinks with the
 project and its leaves are custom.
 
+The motion capsule's speed menu stays the kit's pull-down with text ✓
+marks. A single-root cosmic menu with `Item::CheckBox` entries and the
+current speed as its root label is certified safe (probes b and b'); the
+swap is deferred (Preston 2026-11-04: remaining visual differences stay
+for now).
+
 ## The original claim (superseded by the boundary above)
 
 A `cosmic::widget::menu` whose ITEMS change between view rebuilds (a
