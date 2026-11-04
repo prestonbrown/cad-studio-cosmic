@@ -2301,7 +2301,7 @@ fn markers_render_orange_at_projected_points() {
     // ±30); ±25 corners clear the lid's ±20 x/y footprint
     let model_points = [[-25.0, -25.0, 4.0], [25.0, 25.0, 4.0]];
     let scene_points: Vec<[f32; 3]> = model_points.iter().map(|p| scene.to_scene(*p)).collect();
-    let radius = markers::marker_radius(camera::framing_radius(scene.aabb_min, scene.aabb_max));
+    let radius = markers::marker_radius(camera::framing_radius(scene.aabb()));
     let mesh = markers::geometry(&scene_points, radius);
     let poses = identity_poses(&scene);
     // orange-chroma ink within 12px of each point's projection

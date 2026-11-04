@@ -1516,7 +1516,7 @@ impl ViewerPane {
 
     /// Fire the measure pick: click-driven and OFF-THREAD per spec §5 — a
     /// named std thread runs [`picking::first_hit`] over an immutable
-    /// snapshot (the scene `Arc`, the poses, the section tuple, the ray),
+    /// snapshot (the scene `Arc`, the poses, the section plane, the ray),
     /// never the cosmic executor — and the answer returns as
     /// [`PaneEvent::Picked`] through the pane's relay. The caller gates:
     /// primary click, measuring, no pick in flight.
@@ -1563,10 +1563,7 @@ impl ViewerPane {
     /// bounded cosmetic drift across layouts, an accepted
     /// divergence.
     fn rebuild_markers(&mut self) {
-        let radius = markers::marker_radius(camera::framing_radius(
-            self.scene.scene.aabb_min,
-            self.scene.scene.aabb_max,
-        ));
+        let radius = markers::marker_radius(camera::framing_radius(self.scene.scene.aabb()));
         let points = self
             .tools
             .measure_points
@@ -2509,13 +2506,13 @@ mod tests {
         // spread model frames at its pre-explode size
         let _ = pane.update(Message::SetExplode(2.0));
         let _ = pane.update(Message::Fit);
-        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb.min, pane.frame_aabb.max);
+        let (_, spread) = viewer::render::camera::frame(pane.frame_aabb);
         assert!(
             (pane.scene.orbit.distance - spread).abs() < 1e-4,
             "Fit frames the exploded arrangement, not the pre-explode reference"
         );
         let (_, staged) =
-            viewer::render::camera::frame(pane.scene.scene.aabb_min, pane.scene.scene.aabb_max);
+            viewer::render::camera::frame(pane.scene.scene.aabb());
         assert!(
             (spread - staged).abs() > 1e-4,
             "this fixture's spread and staged boxes differ (else the pin is void)"

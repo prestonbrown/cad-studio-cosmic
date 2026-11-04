@@ -234,10 +234,10 @@ impl CameraInput {
     /// remap permutes extents).
     fn reframe_to(&mut self, aabb: Box3, frame_too: bool) {
         self.aabb = aabb;
-        self.radius = camera::framing_radius(aabb.min, aabb.max);
+        self.radius = camera::framing_radius(aabb);
         self.framed_diagonal = aabb.diagonal();
         if frame_too {
-            let (target, distance) = camera::frame(aabb.min, aabb.max);
+            let (target, distance) = camera::frame(aabb);
             self.orbit.target = target;
             self.orbit.distance = distance;
         }
@@ -278,7 +278,7 @@ mod tests {
         // height above the pinned floor, distance = radius/sin(fov/2)*1.15
         // with radius = diagonal/2 = 25 — not max-extent/2 (facts #23).
         let cam = input();
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
         approx(cam.orbit.distance, distance);
         approx(distance, 25.0 / (FOV / 2.0).sin() * 1.15);
         approx3(cam.orbit.target, [0.0, 20.0, 0.0]); // half the scene height
@@ -458,7 +458,7 @@ mod tests {
             cam.preset(preset);
             approx(cam.orbit.yaw, yaw);
             approx(cam.orbit.pitch, pitch);
-            let (target, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
+            let (target, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
             approx(cam.orbit.distance, distance);
             approx3(cam.orbit.target, target);
         }
@@ -471,7 +471,7 @@ mod tests {
         cam.scroll(0.0, 24.0, true, false); // zoom off the preset distance
         cam.fit();
         approx(cam.orbit.yaw, FRAC_PI_2); // angles kept
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 40.0, 0.0]);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 40.0, 0.0]));
         approx(cam.orbit.distance, distance); // distance reset
     }
 
@@ -491,7 +491,7 @@ mod tests {
 
         // diagonal 60 -> 120: ratio 1.0, over threshold
         assert!(cam.mesh_changed(Box3::new([0.0; 3], [96.0, 48.0, 0.0])));
-        let (_, distance) = camera::frame([0.0; 3], [96.0, 48.0, 0.0]);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [96.0, 48.0, 0.0]));
         approx(cam.orbit.distance, distance);
         approx3(cam.orbit.target, [0.0, 24.0, 0.0]);
     }
@@ -507,7 +507,7 @@ mod tests {
             "ratio 0.36 stays under 0.5"
         );
         cam.scroll(0.0, -f32::MAX / 12.0, true, false); // zoom out hard
-        let radius = camera::framing_radius(min, max);
+        let radius = camera::framing_radius(Box3::new(min, max));
         approx(cam.orbit.distance, radius * 200.0); // the NEW radius, not 25
     }
 
@@ -519,7 +519,7 @@ mod tests {
         let mut cam = input();
         assert!(!cam.mesh_changed(Box3::new([0.0; 3], [30.0, 40.0, 0.0])));
         assert!(cam.mesh_changed(Box3::new([0.0; 3], [300.0, 400.0, 0.0])));
-        let (_, distance) = camera::frame([0.0; 3], [300.0, 400.0, 0.0]);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [300.0, 400.0, 0.0]));
         approx(cam.orbit.distance, distance);
     }
 
@@ -540,7 +540,7 @@ mod tests {
         approx(cam.orbit.distance, distance_before); // reference only, camera held
 
         cam.preset(Preset::Front);
-        let (_, distance) = camera::frame([0.0; 3], [30.0, 48.0, 0.0]);
+        let (_, distance) = camera::frame(Box3::new([0.0; 3], [30.0, 48.0, 0.0]));
         approx(cam.orbit.distance, distance); // framed at the pushed aabb
     }
 }

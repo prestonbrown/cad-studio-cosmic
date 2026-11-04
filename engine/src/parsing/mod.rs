@@ -96,7 +96,7 @@ impl Box3 {
         s[0] * s[1] * s[2]
     }
 
-    /// `(min, max)`, the tuple form older call sites carry.
+    /// `(min, max)`, the pair `Scene::set_overlay_frame` and the grid take.
     pub fn pair(self) -> ([f32; 3], [f32; 3]) {
         (self.min, self.max)
     }

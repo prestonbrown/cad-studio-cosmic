@@ -53,9 +53,8 @@ pub fn eye_dir(yaw: f32, pitch: f32) -> glam::Vec3 {
 /// Framing radius: half the aabb DIAGONAL, floored at 1
 /// (ModelViewer.swift:330) — a long-thin part frames by its diagonal,
 /// not its longest extent.
-pub fn framing_radius(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
-    let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
-    (size.length() / 2.0).max(1.0)
+pub fn framing_radius(aabb: Box3) -> f32 {
+    (aabb.diagonal() / 2.0).max(1.0)
 }
 
 /// frame() (ModelViewer.swift:328-337), aspect-free by construction:
@@ -63,10 +62,9 @@ pub fn framing_radius(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
 /// distance fits the radius through the FOV with 15% headroom. The
 /// x/z zeros assume the PartScene's floor pin already centered the
 /// model horizontally.
-pub fn frame(aabb_min: [f32; 3], aabb_max: [f32; 3]) -> ([f32; 3], f32) {
-    let size = glam::Vec3::from_array(aabb_max) - glam::Vec3::from_array(aabb_min);
-    let target = [0.0, size.y / 2.0, 0.0];
-    let distance = framing_radius(aabb_min, aabb_max) / (FOV / 2.0).sin() * 1.15;
+pub fn frame(aabb: Box3) -> ([f32; 3], f32) {
+    let target = [0.0, aabb.size()[1] / 2.0, 0.0];
+    let distance = framing_radius(aabb) / (FOV / 2.0).sin() * 1.15;
     (target, distance)
 }
 
@@ -92,7 +90,7 @@ impl Orbit {
     /// `preset`'s angles at [`frame`]'s target and distance for `aabb`
     /// (upstream's preset re-frame, ModelViewer.swift:322-337).
     pub fn framed(aabb: Box3, preset: Preset) -> Orbit {
-        let (target, distance) = frame(aabb.min, aabb.max);
+        let (target, distance) = frame(aabb);
         let (yaw, pitch) = preset.yaw_pitch();
         Orbit {
             yaw,
@@ -218,7 +216,7 @@ pub fn default_camera(scene: &PartScene, aspect: f32) -> Camera {
 #[cfg(test)]
 mod tests {
     use crate::render::test_support::golden_3mf_parts;
-    use crate::render::{NEUTRAL, PartScene};
+    use crate::render::{Box3, NEUTRAL, PartScene};
     use crate::render::{camera, lights};
     use camera::Orbit;
 
@@ -237,8 +235,8 @@ mod tests {
         // diagonal at √102/2 ≈ 5.05 (facts #1: ModelViewer.swift:328-337)
         let (min, max) = ([0.0, 0.0, 0.0], [10.0, 1.0, 1.0]);
         let r = f32::sqrt(102.0) / 2.0;
-        assert!((camera::framing_radius(min, max) - r).abs() < 1e-5);
-        let (target, distance) = camera::frame(min, max);
+        assert!((camera::framing_radius(Box3::new(min, max)) - r).abs() < 1e-5);
+        let (target, distance) = camera::frame(Box3::new(min, max));
         // aspect-free: half the height; x/z zero assumes the pinned scene
         assert_eq!(target, [0.0, 0.5, 0.0]);
         let expected = r / f32::sin(17.5f32.to_radians()) * 1.15;
@@ -247,7 +245,7 @@ mod tests {
             "distance {distance} vs r/sin(17.5°)·1.15 = {expected}"
         );
         // the radius floors at 1 so a degenerate model still frames
-        assert_eq!(camera::framing_radius([0.0; 3], [0.0; 3]), 1.0);
+        assert_eq!(camera::framing_radius(Box3::new([0.0; 3], [0.0; 3])), 1.0);
     }
 
     #[test]
@@ -445,7 +443,7 @@ mod tests {
         let scene = PartScene::from_parts(&golden_3mf_parts(), NEUTRAL);
         let iso = Orbit::framed(scene.aabb(), camera::Preset::Iso);
         let distance = iso.distance;
-        let radius = camera::framing_radius(scene.aabb_min, scene.aabb_max);
+        let radius = camera::framing_radius(scene.aabb());
         let half_fov = camera::FOV / 2.0;
         let angular_fill = (radius / distance).asin() / half_fov;
         assert!(

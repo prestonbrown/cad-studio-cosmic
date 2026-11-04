@@ -209,7 +209,7 @@ impl ModelScene {
         // of from_parts_with_pin), so it cannot survive the pin change —
         // the app re-stages it if the comparison is still active
         self.ghost = None;
-        let (target, distance) = camera::frame(scene.aabb_min, scene.aabb_max);
+        let (target, distance) = camera::frame(scene.aabb());
         self.orbit.target = target;
         self.orbit.distance = distance;
         self.poses = identity_poses(scene.parts.len());
