@@ -5,11 +5,12 @@
 <component type="desktop-application">
   <id>net.brownhouse.CadStudio</id>
   <name>CAD Studio</name>
-  <summary>Describe a part, get a printable model</summary>
+  <summary>CAD Studio for COSMIC: describe a part, get a printable model</summary>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <description>
     <p>Describe a part, get a printable model. CAD Studio drives your locally installed Claude Code (or Codex) and build123d to turn a description into a printable 3D model and its technical drawing.</p>
+    <p>Based on cad-studio 1.2.0 by Filippo Finke.</p>
   </description>
   <developer id="net.brownhouse">
     <name>Preston Brown</name>

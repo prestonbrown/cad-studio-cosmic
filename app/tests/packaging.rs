@@ -214,9 +214,10 @@ fn metainfo_parses_and_carries_the_app_identity() {
         Some("Preston Brown"),
         "the metainfo names its developer"
     );
-    assert!(
-        meta.texts.get("summary").is_some_and(|s| !s.is_empty()),
-        "appstream requires a summary"
+    assert_eq!(
+        meta.texts.get("summary").map(String::as_str),
+        Some("CAD Studio for COSMIC: describe a part, get a printable model"),
+        "appstream requires a summary; it names the COSMIC port"
     );
     assert!(
         meta.texts.get("p").is_some_and(|p| !p.is_empty()),

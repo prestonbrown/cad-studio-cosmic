@@ -158,7 +158,11 @@ mod tests {
                 value.push('\n');
                 value.push_str(rest);
             } else {
-                let (key, value) = line.split_once(" = ").expect("`key = value` lines");
+                // `key =` alone opens a block value made of continuation lines.
+                let (key, value) = line
+                    .split_once(" = ")
+                    .or_else(|| line.strip_suffix(" =").map(|k| (k, "")))
+                    .expect("`key = value` lines");
                 out.push((key.to_string(), value.to_string()));
             }
         }

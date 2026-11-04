@@ -281,7 +281,7 @@ separa-dal-resto = Vom Rest lösen
 sezione = Schnitt
 sistema-i-file = Ordnet Dateien
 software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Open-Source-Software unter der MIT-Lizenz.
-    Entwickelt von Filippo Finke.
+    Ursprüngliche App von Filippo Finke. COSMIC/Linux-Portierung von Preston Brown.
 solo-immagini = Nur Bilder
 sposta-il-pannello = Bereich verschieben
 sta-ragionando-circa-token = Denkt nach · etwa {$tokens} Token
@@ -375,6 +375,7 @@ version-month-nov = Nov.
 version-month-dec = Dez.
 
 # About window
+about-upstream-base = Basiert auf cad-studio {$base}
 about-copyright =
     © 2024 Filippo Finke
     © 2026 Preston Brown

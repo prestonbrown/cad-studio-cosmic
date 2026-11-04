@@ -71,6 +71,9 @@ pub fn height(tab: Tab, engine: AgentKind) -> f32 {
 /// its text runs; the copyright block is three lines (both LICENSE holders
 /// and the license name), which the 284 px width cannot hold on one.
 pub const ABOUT_WIDTH: f32 = 284.0;
+/// The upstream cad-studio release this port is based on; About and the
+/// metainfo description both state it.
+pub const UPSTREAM_BASE: &str = "1.2.0";
 pub const ABOUT_HEIGHT: f32 = 306.0;
 /// The About content's top inset under the header: the icon's frame
 /// starts 8 px below the titlebar, as under AppKit's.
@@ -869,6 +872,10 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         .push(
             small(fl!("versione", version = env!("CARGO_PKG_VERSION")))
                 .class(Tone::Primary.text(Backdrop::Plain)),
+        )
+        .push(
+            small(fl!("about-upstream-base", base = UPSTREAM_BASE))
+                .class(Tone::Secondary.text(Backdrop::Plain)),
         )
         .push(Space::new().height(6))
         .push(

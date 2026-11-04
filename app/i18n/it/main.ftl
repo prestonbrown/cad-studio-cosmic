@@ -281,7 +281,7 @@ separa-dal-resto = Separa dal resto
 sezione = Sezione
 sistema-i-file = Sistema i file
 software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Software open source rilasciato con licenza MIT.
-    Sviluppato da Filippo Finke.
+    App originale di Filippo Finke. Port COSMIC/Linux di Preston Brown.
 solo-immagini = Solo immagini
 sposta-il-pannello = Sposta il pannello
 sta-ragionando-circa-token = Sta ragionando · circa {$tokens} token
@@ -375,6 +375,7 @@ version-month-nov = nov
 version-month-dec = dic
 
 # About window
+about-upstream-base = Basato su cad-studio {$base}
 about-copyright =
     © 2024 Filippo Finke
     © 2026 Preston Brown

@@ -281,7 +281,7 @@ separa-dal-resto = Detach from the rest
 sezione = Section
 sistema-i-file = Tidying up files
 software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Open source software released under the MIT License.
-    Developed by Filippo Finke.
+    Original app by Filippo Finke. COSMIC/Linux port by Preston Brown.
 solo-immagini = Images only
 sposta-il-pannello = Move panel
 sta-ragionando-circa-token = Thinking · about {$tokens} tokens
@@ -375,6 +375,7 @@ version-month-nov = Nov
 version-month-dec = Dec
 
 # About window
+about-upstream-base = Based on cad-studio {$base}
 about-copyright =
     © 2024 Filippo Finke
     © 2026 Preston Brown

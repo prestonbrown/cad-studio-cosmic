@@ -281,7 +281,7 @@ separa-dal-resto = Détacher du reste
 sezione = Coupe
 sistema-i-file = Range les fichiers
 software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Logiciel open source publié sous licence MIT.
-    Développé par Filippo Finke.
+    Application originale de Filippo Finke. Portage COSMIC/Linux par Preston Brown.
 solo-immagini = Images uniquement
 sposta-il-pannello = Déplacer le panneau
 sta-ragionando-circa-token = Réfléchit · environ {$tokens} tokens
@@ -375,6 +375,7 @@ version-month-nov = nov.
 version-month-dec = déc.
 
 # About window
+about-upstream-base = Basé sur cad-studio {$base}
 about-copyright =
     © 2024 Filippo Finke
     © 2026 Preston Brown
