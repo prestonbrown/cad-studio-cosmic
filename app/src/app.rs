@@ -2343,7 +2343,9 @@ mod shell_behavior {
             custom_path: "/opt/tools/claude".to_string(),
             ..sheets::AgentMissing::default()
         });
-        let _ = f.app.update(Message::AgentSheet(sheets::AgentMessage::Verify));
+        let _ = f
+            .app
+            .update(Message::AgentSheet(sheets::AgentMessage::Verify));
         assert_eq!(settings_state(&f, id).custom_paths[0], "/opt/tools/claude");
     }
 
