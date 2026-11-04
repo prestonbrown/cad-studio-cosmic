@@ -806,8 +806,11 @@ fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
 /// The Python tab's interpreter line: the venv's interpreter,
 /// `~/`-abbreviated against `home`.
 fn interpreter_label(home: &str) -> String {
-    let interpreter = engine::python::env::interpreter_path(&engine::python::env::venv_dir());
-    abbreviate_with_tilde(&interpreter, home)
+    interpreter_label_for(&engine::python::env::venv_dir(), home)
+}
+
+fn interpreter_label_for(venv: &Path, home: &str) -> String {
+    abbreviate_with_tilde(&engine::python::env::interpreter_path(venv), home)
 }
 
 /// Avanzate (SettingsView.swift:217-242).
@@ -1380,14 +1383,11 @@ mod tests {
     /// absolute home path.
     #[test]
     fn the_interpreter_line_is_tilde_abbreviated() {
-        let home = engine::storage::data_dir()
-            .ancestors()
-            .nth(3)
-            .expect("the data dir sits under the home directory")
-            .display()
-            .to_string();
         assert_eq!(
-            interpreter_label(&home),
+            interpreter_label_for(
+                Path::new("/home/me/.local/share/cad-studio/venv"),
+                "/home/me"
+            ),
             "~/.local/share/cad-studio/venv/bin/python"
         );
     }

@@ -1006,8 +1006,8 @@ impl CadStudio {
         Task::batch([spawn.map(|_id| Action::App(Message::Noop)), title])
     }
 
-    /// One settings-window message: fold the mirror, perform the write
-    /// (load-modify-save, the ONE-writer law), then the effects.
+    /// One settings-window message: the write (load-modify-save, the
+    /// ONE-writer law), the mirror fold on success, then the effects.
     fn update_settings(&mut self, id: window::Id, msg: settings::Message) -> Task<Action<Message>> {
         if !matches!(self.windows.get(&id), Some(WindowKind::Settings(_))) {
             return Task::none();

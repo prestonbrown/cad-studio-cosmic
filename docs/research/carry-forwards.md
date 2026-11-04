@@ -523,7 +523,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   (app/src/windows/settings.rs:779-780 `Message::PythonCheck`, disabled
   only while installing; handled at app/src/app.rs:1083-1086). Pinned
   by `app::shell_behavior::verifica_after_a_failed_check_reruns_the_check`
-  (app/src/app.rs, `Message::PythonCheck` → `begin_checking`). ~~The synchronous busy-rise half (Send arm set no local activity where
+  (app/src/app.rs, `Message::PythonCheck` → `begin_checking`).
+  ~~The synchronous busy-rise half (Send arm set no local activity where
   upstream's send() does, Project.swift:192-208).~~ Struck: the Send arm folds
   the bridge's activity in the same update, pinned by
   `windows::project::tests::successful_send_flips_busy_in_the_same_update`
@@ -647,8 +648,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   `app::tests::an_agent_missing_turn_presents_the_agent_sheet` (app.rs:2254)
   and `engine_text::tests::turn_markers_append_localized_system_rows` (engine_text.rs:226). (b) ~~the empty-transcript placeholder engine name
   seeds at window build~~ Struck: the project window passes the engine
-  setting read at render (`ProjectWindow::placeholder_engine`,
-  app/src/windows/project.rs, into `chat_view::view_chat`), pinned by
+  setting read at render (`chat_view::empty_state_engine`,
+  called by `chat_view::view_chat`), pinned by
   `windows::project::tests::empty_transcript_names_the_current_engine`;
   (c) ~~an open settings window doesn't re-seed when the agent sheet writes
   agent_path~~ Struck: the sheet's Verify calls

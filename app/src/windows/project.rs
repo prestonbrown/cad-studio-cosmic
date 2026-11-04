@@ -1339,12 +1339,6 @@ impl ProjectWindow {
         base
     }
 
-    /// The engine the empty transcript's placeholder names: the setting as
-    /// it is now, read at render (upstream reads `AgentEngine.current`).
-    fn placeholder_engine(&self) -> engine::agent::locator::AgentKind {
-        self.settings.load().agent_kind()
-    }
-
     /// The resizable pane grid (rebuilt per layout — iced elements are
     /// single-use), filling the window below the header.
     fn view_grid(&self) -> Element<'_, Message> {
@@ -1363,7 +1357,7 @@ impl ProjectWindow {
                         &self.queue,
                         self.queue_paused,
                         &self.root,
-                        self.placeholder_engine(),
+                        &self.settings,
                     )
                     .map(Message::Chat),
                     |content: Option<ClipboardContent>, _action| {
@@ -3191,7 +3185,8 @@ mod tests {
     }
 
     /// The empty transcript's placeholder names the engine setting as it is
-    /// at render, so a flip made after the window opened shows on the next
+    /// at render (`view_chat` calls `empty_state_engine` with the window's
+    /// store), so a flip made after the window opened shows on the next
     /// view.
     #[tokio::test]
     async fn empty_transcript_names_the_current_engine() {
@@ -3204,14 +3199,14 @@ mod tests {
         let settings = SettingsStore::in_temp_dir();
         let (window, _bridge_task) = ProjectWindow::new(root, &settings);
         assert_eq!(
-            window.placeholder_engine(),
+            chat_view::empty_state_engine(&window.settings),
             engine::agent::locator::AgentKind::Claude
         );
         settings
             .update(|stored| stored.agent_engine = "codex".to_string())
             .unwrap();
         assert_eq!(
-            window.placeholder_engine(),
+            chat_view::empty_state_engine(&window.settings),
             engine::agent::locator::AgentKind::Codex,
             "read at render, not at window build"
         );

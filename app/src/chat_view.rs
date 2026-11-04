@@ -58,6 +58,7 @@ use crate::attachments::{self, ClipboardContent};
 use crate::chat::{self, ChatState, MarkerAffordance};
 use crate::fl;
 use crate::markdown::{self, MdStyle};
+use crate::settings_store::SettingsStore;
 use crate::typography;
 
 /// This module's text widget, pinned to cosmic's theme/renderer (the bare
@@ -281,14 +282,14 @@ pub fn view_chat<'a>(
     queue: &'a [QueueItem],
     queue_paused: bool,
     root: &'a Path,
-    placeholder_engine: engine::agent::locator::AgentKind,
+    settings: &SettingsStore,
 ) -> Element<'a, Message> {
     // The transcript area is ALWAYS a scrollable — swapping an empty-state
     // column into the slot and back lands a stateful scrollable on a
     // stateless widget tree on the first message, which iced's positional
     // tree diff cannot reconcile (panic: "Downcast on stateless state").
     let body: Element<'_, Message> = if chat.messages.is_empty() {
-        container(empty_state(placeholder_engine))
+        container(empty_state(empty_state_engine(settings)))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Horizontal::Center)
@@ -873,6 +874,12 @@ const EMPTY_STATE_ICON: u16 = 44;
 /// the groups, padding 20. The engine line names the engine that will run
 /// the first turn (upstream reads `AgentEngine.current` at render; the
 /// caller passes the engine setting as it is now).
+/// The engine the empty transcript names: the engine setting as it is on
+/// disk now, never a copy taken when the window was built.
+pub fn empty_state_engine(settings: &SettingsStore) -> engine::agent::locator::AgentKind {
+    settings.load().agent_kind()
+}
+
 fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Message> {
     let suggestions = [
         fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
@@ -1605,7 +1612,7 @@ mod tests {
             &[],
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
         let _ = view_chat(
             &pane,
@@ -1614,7 +1621,7 @@ mod tests {
             &[],
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
 
         // a user row with both attachment forms: the relative copy names
@@ -1643,7 +1650,7 @@ mod tests {
             &queue,
             true,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
         let _ = view_chat(
             &pane,
@@ -1652,7 +1659,7 @@ mod tests {
             &queue,
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
 
         // the decoded thumbnail cached the real PNG and recorded the
@@ -1693,7 +1700,7 @@ mod tests {
             &[],
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
     }
 
@@ -1731,7 +1738,7 @@ mod tests {
             &[],
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
         let _ = view_chat(
             &pane,
@@ -1740,7 +1747,7 @@ mod tests {
             &[],
             false,
             &root,
-            engine::agent::locator::AgentKind::Claude,
+            &SettingsStore::in_temp_dir(),
         );
     }
 }
