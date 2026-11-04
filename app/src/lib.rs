@@ -1,6 +1,6 @@
 //! CAD Studio app crate: the libcosmic shell around the engine and viewer,
 //! plus the pure, GUI-free logic modules that shell maps onto widgets. Every
-//! behavior module (camera_input, chat, panes, parameters, schematic,
+//! behavior module (chat, panes, parameters, schematic,
 //! viewer_tools) stays
 //! free of cosmic/iced types so it is unit-testable without a window; widget
 //! files are thin mapping layers and register here as their tasks land.
@@ -20,7 +20,6 @@
 //!   startup reap + SIGTERM, portals, DBus reveal.
 //! - [`bridge`] — turn driving over the engine session: the send queue,
 //!   the drain loop, chat.json persistence.
-//! - [`camera_input`] — the 3D camera state machine (orbit/pan/zoom/clamps).
 //! - [`chat`] — the chat-row reducer over engine events (pure).
 //! - [`chat_view`] — the chat pane widgets over [`chat`]'s state.
 //! - [`compare_pane`] — the compare-ghost half of [`viewer_pane`]: staging
@@ -63,7 +62,6 @@ pub mod activity;
 pub mod app;
 pub mod attachments;
 pub mod bridge;
-pub mod camera_input;
 pub mod chat;
 pub mod chat_view;
 pub mod compare_pane;

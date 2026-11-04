@@ -18,11 +18,13 @@
 //! face orientation, or the stencil parity the cap quad uses — so a
 //! flipped-STL part sections identically (carry-forward M6 line 1).
 //!
-//! The returned plane is stated in RAW-remap scene coordinates. Staged
-//! vertices carry the scene's floor pin, so the caller feeding the Camera
-//! uniform must translate the plane by the pin along its scene axis — a
-//! point on the plane mapped through `PartScene::to_scene` carries exactly
-//! that offset; the headless tests pin this against an identity-pin scene.
+//! [`scene_plane`] states the plane in RAW-remap scene coordinates;
+//! [`pinned_plane`] adds the scene's floor pin along that axis and the cap
+//! box, giving the [`SectionPlane`] the renderer draws.
+
+use engine::parsing::Box3;
+
+use crate::render::{PartScene, SceneAxis, SectionPlane};
 
 /// The slider's upstream range (ModelPane.swift:191): 0.001..0.999, never
 /// touching either end, so the cut always leaves geometry on the kept side.
@@ -64,9 +66,9 @@ pub const ALL: [SectionAxis; 3] = [SectionAxis::X, SectionAxis::Y, SectionAxis::
 /// The MODEL-space plane value (ModelViewerState.swift:119): `position`
 /// (the slider, 0..1) interpolated along the axis of the effective —
 /// arranged, hidden-filtered — MODEL aabb.
-pub fn plane_value(axis: SectionAxis, position: f32, model_aabb: ([f32; 3], [f32; 3])) -> f32 {
+pub fn plane_value(axis: SectionAxis, position: f32, model_aabb: Box3) -> f32 {
     let a = axis.index();
-    model_aabb.0[a] + (model_aabb.1[a] - model_aabb.0[a]) * position
+    model_aabb.min[a] + model_aabb.size()[a] * position
 }
 
 /// The plane as the mesh shader's discard consumes it (mesh.wgsl,
@@ -75,16 +77,30 @@ pub fn plane_value(axis: SectionAxis, position: f32, model_aabb: ([f32; 3], [f32
 /// onto scene z so keep-MODEL-above becomes the shader's keep-scene-below —
 /// upstream's `keepsBelow = axis != .y` (ModelViewerState.swift:120) in
 /// full.
-pub fn scene_plane(
-    axis: SectionAxis,
-    position: f32,
-    model_aabb: ([f32; 3], [f32; 3]),
-) -> (u32, f32) {
+pub fn scene_plane(axis: SectionAxis, position: f32, model_aabb: Box3) -> (SceneAxis, f32) {
     let v = plane_value(axis, position, model_aabb);
     match axis {
-        SectionAxis::X => (0, v),
-        SectionAxis::Z => (1, v),
-        SectionAxis::Y => (2, -v),
+        SectionAxis::X => (SceneAxis::X, v),
+        SectionAxis::Z => (SceneAxis::Y, v),
+        SectionAxis::Y => (SceneAxis::Z, -v),
+    }
+}
+
+/// The section the renderer draws for the tool state over `scene`: the
+/// [`scene_plane`] moved by the scene's floor pin along its axis, carrying
+/// `model_aabb` (the effective, arranged box) in scene space as the cap's
+/// extent.
+pub fn pinned_plane(
+    axis: SectionAxis,
+    position: f32,
+    model_aabb: Box3,
+    scene: &PartScene,
+) -> SectionPlane {
+    let (axis, raw) = scene_plane(axis, position, model_aabb);
+    SectionPlane {
+        axis,
+        pos: raw + scene.pin[axis.index()],
+        cap: scene.model_box_to_scene(model_aabb),
     }
 }
 
@@ -92,7 +108,10 @@ pub fn scene_plane(
 mod tests {
     use super::*;
 
-    const AABB: ([f32; 3], [f32; 3]) = ([-10.0, -6.0, 0.0], [10.0, 6.0, 20.0]);
+    const AABB: Box3 = Box3 {
+        min: [-10.0, -6.0, 0.0],
+        max: [10.0, 6.0, 20.0],
+    };
 
     #[test]
     fn plane_value_interpolates_the_model_aabb() {
@@ -105,10 +124,41 @@ mod tests {
     fn scene_plane_maps_all_three_model_axes() {
         // X and Z keep below at the plain value on their scene axes;
         // Y keeps MODEL-above = scene-below at the NEGATED value on scene z.
-        assert_eq!(scene_plane(SectionAxis::X, 0.5, AABB), (0, 0.0));
-        assert_eq!(scene_plane(SectionAxis::Z, 0.25, AABB), (1, 5.0));
+        assert_eq!(scene_plane(SectionAxis::X, 0.5, AABB), (SceneAxis::X, 0.0));
+        assert_eq!(scene_plane(SectionAxis::Z, 0.25, AABB), (SceneAxis::Y, 5.0));
         assert!((scene_plane(SectionAxis::Y, 0.75, AABB).1 - (-3.0)).abs() < 1e-6);
-        assert_eq!(scene_plane(SectionAxis::Y, 0.75, AABB).0, 2);
+        assert_eq!(scene_plane(SectionAxis::Y, 0.75, AABB).0, SceneAxis::Z);
+    }
+
+    /// The pinned plane lands where a MODEL point on the plane lands
+    /// through `to_scene`, on all three axes, and carries the effective box
+    /// in scene space. The box sits off-center so the pin is nonzero on
+    /// every axis.
+    #[test]
+    fn pinned_plane_adds_the_scene_pin_and_the_cap_box() {
+        let part = engine::parsing::Part {
+            name: "p".into(),
+            positions: vec![[3.0, 1.0, 5.0], [9.0, 4.0, 12.0], [5.0, 2.0, 7.0]],
+            triangle_colors: vec![None],
+        };
+        let scene = PartScene::from_parts(&[part], crate::render::NEUTRAL);
+        assert!(scene.pin.iter().all(|&p| p != 0.0), "pin {:?}", scene.pin);
+        // an effective box wider than the staged one (an exploded push)
+        let eff = Box3::new([3.0, 1.0, 5.0], [9.0, 4.0, 30.0]);
+        for (axis, at) in [
+            (SectionAxis::X, [6.0, 0.0, 0.0]),
+            (SectionAxis::Y, [0.0, 2.5, 0.0]),
+            (SectionAxis::Z, [0.0, 0.0, 17.5]),
+        ] {
+            let plane = pinned_plane(axis, 0.5, eff, &scene);
+            let want = scene.to_scene(at)[plane.axis.index()];
+            assert!(
+                (plane.pos - want).abs() < 1e-5,
+                "{axis:?}: {} vs {want}",
+                plane.pos
+            );
+            assert_eq!(plane.cap, scene.model_box_to_scene(eff));
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ fn golden_two_named_colored_parts() {
 fn component_transform_spec_order() {
     let parts = parse("handmade/component.3mf");
     assert_eq!(parts.len(), 1);
-    let (_, mx) = parts[0].aabb();
+    let (_, mx) = parts[0].aabb().unwrap().pair();
     assert!(
         (mx[0] - 11.0).abs() < 1e-4,
         "+10mm x translate at tokens 9-11"
@@ -40,7 +40,7 @@ fn component_transform_spec_order() {
 fn unit_centimeter_scales_x10() {
     let parts = parse("handmade/units.3mf");
     assert_eq!(parts.len(), 1);
-    let (_, mx) = parts[0].aabb();
+    let (_, mx) = parts[0].aabb().unwrap().pair();
     assert!((mx[0] - 10.0).abs() < 1e-4, "1cm cube -> 10mm");
 }
 
@@ -62,7 +62,7 @@ fn nested_components_compose_and_name_falls_through() {
     let parts = parse("handmade/nested.3mf");
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].name, "cube", "name from first descendant mesh");
-    let (_, mx) = parts[0].aabb();
+    let (_, mx) = parts[0].aabb().unwrap().pair();
     assert!((mx[0] - 6.0).abs() < 1e-4, "inner +5 x then cube span");
     assert!((mx[1] - 8.0).abs() < 1e-4, "outer +7 y then cube span");
 }

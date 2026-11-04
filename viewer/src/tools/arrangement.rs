@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use engine::parsing::Part;
+use engine::parsing::{Box3, Part};
 use engine::settings::PartsLayout;
 
 /// One row of the parts tree / legend: a base name shared by >1 part with
@@ -169,14 +169,15 @@ pub fn arrange(
             let assembled_floor = model_parts
                 .iter()
                 .filter(|p| p.triangle_count() > 0)
-                .map(|p| p.aabb().0[2])
+                .filter_map(|p| p.aabb())
+                .map(|b| b.min[2])
                 .reduce(f32::min)
                 .unwrap_or(0.0);
             let exploded_min = model_parts
                 .iter()
                 .enumerate()
                 .filter(|(slot, p)| visible[*slot] && p.triangle_count() > 0)
-                .map(|(slot, p)| p.aabb().0[2] + offsets[slot][2])
+                .filter_map(|(slot, p)| Some(p.aabb()?.min[2] + offsets[slot][2]))
                 .reduce(f32::min)
                 .unwrap_or(0.0);
             let lift = assembled_floor - exploded_min;
@@ -213,7 +214,7 @@ pub fn arrange(
 /// in on unhiding; section/cap/grid positions stay visible-only domains.
 /// An empty scene keeps a finite zero box for the camera math (the
 /// `PartScene` rule).
-pub fn effective_model_aabb(parts: &[Part], arranged: &Arranged) -> ([f32; 3], [f32; 3]) {
+pub fn effective_model_aabb(parts: &[Part], arranged: &Arranged) -> Box3 {
     assert_eq!(
         arranged.offsets.len(),
         parts.len(),
@@ -224,26 +225,15 @@ pub fn effective_model_aabb(parts: &[Part], arranged: &Arranged) -> ([f32; 3], [
     if slots.is_empty() {
         slots = (0..parts.len()).collect();
     }
-    let mut mn = [f32::MAX; 3];
-    let mut mx = [f32::MIN; 3];
-    let mut any = false;
-    for i in slots {
-        if parts[i].triangle_count() == 0 {
-            continue; // upstream's mesh holds triangles only
-        }
-        let (a, b) = parts[i].aabb();
-        let o = &arranged.offsets[i];
-        for k in 0..3 {
-            mn[k] = mn[k].min(a[k] + o[k]);
-            mx[k] = mx[k].max(b[k] + o[k]);
-        }
-        any = true;
-    }
-    if any { (mn, mx) } else { ([0.0; 3], [0.0; 3]) }
+    // upstream's mesh holds triangles only
+    Box3::union_all(slots.into_iter().filter_map(|i| {
+        (parts[i].triangle_count() > 0)
+            .then(|| parts[i].aabb())
+            .flatten()
+            .map(|b| b.translated(arranged.offsets[i]))
+    }))
+    .unwrap_or(Box3::ZERO)
 }
-
-/// An axis-aligned box: (min, max), MODEL space.
-type Box3 = ([f32; 3], [f32; 3]);
 
 /// Per-group explode offsets (PartArrangement.swift:95-140), keyed by group
 /// name — every member of a group rides its group's offset. Groups whose
@@ -264,16 +254,11 @@ fn exploded_offsets(
             .get(&part.name)
             .cloned()
             .unwrap_or_else(|| group_name(&part.name));
-        let (mn, mx) = part.aabb();
+        let Some(b) = part.aabb() else { continue };
         match bounds.get_mut(&name) {
-            Some((gmn, gmx)) => {
-                for a in 0..3 {
-                    gmn[a] = gmn[a].min(mn[a]);
-                    gmx[a] = gmx[a].max(mx[a]);
-                }
-            }
+            Some(g) => *g = g.union(b),
             None => {
-                bounds.insert(name.clone(), (mn, mx));
+                bounds.insert(name.clone(), b);
                 order.push(name);
             }
         }
@@ -283,25 +268,18 @@ fn exploded_offsets(
     // the last, so the fold is explicit
     let mut anchor: Option<(&str, Box3)> = None;
     for name in &order {
-        let v = box_volume(&bounds[name]);
-        if anchor.as_ref().map_or(true, |(_, b)| v > box_volume(b)) {
+        let v = bounds[name].volume();
+        if anchor.as_ref().map_or(true, |(_, b)| v > b.volume()) {
             anchor = Some((name, bounds[name]));
         }
     }
     let Some((anchor, anchor_box)) = anchor else {
         return HashMap::new();
     };
-    let anchor_center = box_center(&anchor_box);
+    let anchor_center = anchor_box.center();
     // gap from the overall diagonal (:116-117)
-    let mut overall = anchor_box;
-    for b in bounds.values() {
-        for a in 0..3 {
-            overall.0[a] = overall.0[a].min(b.0[a]);
-            overall.1[a] = overall.1[a].max(b.1[a]);
-        }
-    }
-    let diag = glam::Vec3::from_array(overall.1) - glam::Vec3::from_array(overall.0);
-    let gap = (diag.length() * 0.06).max(2.0);
+    let overall = bounds.values().fold(anchor_box, |o, b| o.union(*b));
+    let gap = (overall.diagonal() * 0.06).max(2.0);
     let mut placed: Vec<Box3> = vec![anchor_box];
     let mut offsets = HashMap::new();
     // others ascending by center distance to the anchor center (:120-122);
@@ -321,8 +299,8 @@ fn exploded_offsets(
             placed.push(box3); // placed as-is, no offset (:125-128)
             continue;
         }
-        let direction = dominant_axis(sub(box_center(&box3), anchor_center));
-        let step = (length(box_size(&box3)) * 0.05).max(0.5);
+        let direction = dominant_axis(sub(box3.center(), anchor_center));
+        let step = (box3.diagonal() * 0.05).max(0.5);
         let mut travel = 0.0f32;
         while travel < 10_000.0
             && placed
@@ -332,7 +310,7 @@ fn exploded_offsets(
             travel += step;
         }
         let shift = scaled(direction, travel + gap);
-        placed.push((add(box3.0, shift), add(box3.1, shift)));
+        placed.push(box3.translated(shift));
         offsets.insert(name.to_string(), scaled(shift, explode));
     }
     offsets
@@ -348,21 +326,17 @@ fn flat_offsets(parts: &[Part]) -> Vec<[f32; 3]> {
         .iter()
         .enumerate()
         .filter(|(_, p)| p.triangle_count() > 0)
-        .map(|(i, p)| (i, p.aabb()))
+        .filter_map(|(i, p)| Some((i, p.aabb()?)))
         .collect();
     let area: f32 = items
         .iter()
-        .map(|(_, b)| (b.1[0] - b.0[0] + gap) * (b.1[1] - b.0[1] + gap))
+        .map(|(_, b)| (b.size()[0] + gap) * (b.size()[1] + gap))
         .sum();
-    let row_width = (area.sqrt() * 1.3).max(
-        items
-            .iter()
-            .map(|(_, b)| b.1[0] - b.0[0])
-            .fold(0.0, f32::max),
-    );
+    let row_width =
+        (area.sqrt() * 1.3).max(items.iter().map(|(_, b)| b.size()[0]).fold(0.0, f32::max));
     // descending by size.y (:184); stable, so equal depths keep
     // first-appearance order
-    items.sort_by(|a, b| box_size(&b.1)[1].total_cmp(&box_size(&a.1)[1]));
+    items.sort_by(|a, b| b.1.size()[1].total_cmp(&a.1.size()[1]));
     let mut offsets = vec![[0.0f32; 3]; parts.len()];
     let mut cursor = [0.0f32; 2];
     let mut row_depth = 0.0f32;
@@ -370,7 +344,7 @@ fn flat_offsets(parts: &[Part]) -> Vec<[f32; 3]> {
     // the final centering shift
     let mut max_placed = [0.0f32; 3];
     for (slot, b) in items {
-        let size = box_size(&b);
+        let size = b.size();
         if cursor[0] > 0.0 && cursor[0] + size[0] > row_width {
             cursor = [0.0, cursor[1] + row_depth + gap];
             row_depth = 0.0;
@@ -378,9 +352,9 @@ fn flat_offsets(parts: &[Part]) -> Vec<[f32; 3]> {
         // (cursor.x − min.x, cursor.y − min.y, −min.z): the z term FLOORS
         // the part onto the plate — a part floating at MODEL z 40..60
         // drops to 0..20 (:191)
-        let off = [cursor[0] - b.0[0], cursor[1] - b.0[1], -b.0[2]];
+        let off = [cursor[0] - b.min[0], cursor[1] - b.min[1], -b.min[2]];
         for a in 0..3 {
-            max_placed[a] = max_placed[a].max(b.1[a] + off[a]);
+            max_placed[a] = max_placed[a].max(b.max[a] + off[a]);
         }
         offsets[slot] = off;
         cursor[0] += size[0] + gap;
@@ -395,25 +369,9 @@ fn flat_offsets(parts: &[Part]) -> Vec<[f32; 3]> {
     offsets
 }
 
-/// Box volume, the anchor criterion (:142-146).
-fn box_volume(b: &Box3) -> f32 {
-    let s = box_size(b);
-    s[0] * s[1] * s[2]
-}
-
-/// Box extents per axis.
-fn box_size(b: &Box3) -> [f32; 3] {
-    sub(b.1, b.0)
-}
-
 /// Distance from a box's center to a point (:148-151).
 fn center_distance(b: &Box3, point: [f32; 3]) -> f32 {
-    length(sub(box_center(b), point))
-}
-
-/// Box center.
-fn box_center(b: &Box3) -> [f32; 3] {
-    scaled(add(b.0, b.1), 0.5)
+    length(sub(b.center(), point))
 }
 
 /// Unit axis of `v`, z-priority ladder: z wins ties with x/y, then x wins
@@ -438,11 +396,7 @@ fn dominant_axis(v: [f32; 3]) -> [f32; 3] {
 /// (PartArrangement.swift:165-174).
 fn overlaps(b: &Box3, other: &Box3, shift: [f32; 3], margin: f32) -> bool {
     let m = margin * 0.5;
-    (0..3).all(|a| b.0[a] + shift[a] < other.1[a] + m && b.1[a] + shift[a] > other.0[a] - m)
-}
-
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    (0..3).all(|a| b.min[a] + shift[a] < other.max[a] + m && b.max[a] + shift[a] > other.min[a] - m)
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -539,17 +493,9 @@ mod tests {
         );
         // travel marches until clear of the anchor box + gap: offset.z >= gap,
         // gap = max(length(overall diagonal) * 0.06, 2)
-        let (mn, mx) = parts.iter().map(|p| p.aabb()).fold(
-            ([f32::MAX; 3], [f32::MIN; 3]),
-            |(mut mn, mut mx), (a, b)| {
-                for i in 0..3 {
-                    mn[i] = mn[i].min(a[i]);
-                    mx[i] = mx[i].max(b[i]);
-                }
-                (mn, mx)
-            },
-        );
-        let diag = (mx[0] - mn[0]).hypot(mx[1] - mn[1]).hypot(mx[2] - mn[2]);
+        let diag = Box3::union_all(parts.iter().filter_map(|p| p.aabb()))
+            .unwrap()
+            .diagonal();
         let gap = (diag * 0.06).max(2.0);
         assert!(
             off[2] >= gap - 1e-3,
@@ -596,7 +542,7 @@ mod tests {
         );
         let aabb = effective_model_aabb(&parts, &arranged);
         assert!(
-            (aabb.0[2] - (-20.0)).abs() < 1e-3,
+            (aabb.min[2] - (-20.0)).abs() < 1e-3,
             "exploded floor re-pinned to the assembled floor: {:?}",
             aabb
         );
@@ -609,7 +555,7 @@ mod tests {
             &BTreeSet::new(),
         );
         let a2 = effective_model_aabb(&parts, &assembled);
-        assert!((a2.0[2] - (-20.0)).abs() < 1e-3);
+        assert!((a2.min[2] - (-20.0)).abs() < 1e-3);
         // hidden-lowest: the assembled floor reads the hidden part's z too
         // (:78 iterates ALL parts), so the pile re-pins to -40, not the
         // visible -20; the exploded-min side stays visible-only (the mesh,
@@ -624,9 +570,9 @@ mod tests {
         let h = arrange(&parts_h, &[], PL::Exploded, 1.0, &hidden, &BTreeSet::new());
         let haabb = effective_model_aabb(&parts_h, &h);
         assert!(
-            (haabb.0[2] - (-40.0)).abs() < 1e-3,
+            (haabb.min[2] - (-40.0)).abs() < 1e-3,
             "hidden lowest part pins the lift: {:?}",
-            haabb.0
+            haabb.min
         );
     }
 
@@ -686,7 +632,7 @@ mod tests {
         );
         let haabb = effective_model_aabb(&parts, &h);
         assert!(
-            (haabb.1[2] - 10.0).abs() < 1e-4,
+            (haabb.max[2] - 10.0).abs() < 1e-4,
             "effective aabb excludes the hidden lid"
         );
     }
@@ -714,17 +660,17 @@ mod tests {
         );
         assert!(arranged.visible.iter().all(|v| *v));
         let aabb = effective_model_aabb(&parts, &arranged);
-        let sx = aabb.1[0] - aabb.0[0];
-        let sy = aabb.1[1] - aabb.0[1];
+        let sx = aabb.max[0] - aabb.min[0];
+        let sy = aabb.max[1] - aabb.min[1];
         assert!(
             (sx - 25.0).abs() < 1e-3,
             "two per row (0..10 + gap + 15..25): {sx}"
         );
         assert!((sy - 13.0).abs() < 1e-3, "two rows (4 + gap 5 + 4): {sy}");
-        assert!((aabb.0[0] + aabb.1[0]).abs() < 1e-3, "x centered");
-        assert!((aabb.0[1] + aabb.1[1]).abs() < 1e-3, "y centered");
+        assert!((aabb.min[0] + aabb.max[0]).abs() < 1e-3, "x centered");
+        assert!((aabb.min[1] + aabb.max[1]).abs() < 1e-3, "y centered");
         assert!(
-            (aabb.0[2] - 0.0).abs() < 1e-3,
+            (aabb.min[2] - 0.0).abs() < 1e-3,
             "z floored onto the plate (parts already at z=0)"
         );
         // a floating part discriminates the z flooring: MODEL z 40..60 drops to 0..20
@@ -742,12 +688,12 @@ mod tests {
         );
         let aabb2 = effective_model_aabb(&parts2, &arranged2);
         assert!(
-            (aabb2.0[2] - 0.0).abs() < 1e-3,
+            (aabb2.min[2] - 0.0).abs() < 1e-3,
             "floating part floored to the plate: {:?}",
-            aabb2.0
+            aabb2.min
         );
         assert!(
-            (aabb2.1[2] - 20.0).abs() < 1e-3,
+            (aabb2.max[2] - 20.0).abs() < 1e-3,
             "its height above the plate is preserved"
         );
     }
