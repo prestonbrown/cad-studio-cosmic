@@ -6,8 +6,10 @@
 #   1  output/model.stl and output/schematic.svg exist and are non-empty
 #   4  .cadstudio/versions/2/ exists
 #   5  .cadstudio/project.json has current_version 1
-#   6  after the last user row asking for the fillet, the last tool row in
-#      .cadstudio/chat.json is failed
+#   6  after the last user row asking for the fillet, .cadstudio/chat.json
+#      holds the app's failed-build row (role system, action askClaudeToFix);
+#      the agent's own last tool row is reported, not asserted. The failed
+#      activity is not on disk: run.sh asserts it from the mark's log line
 #   7  every pid in the process registry is alive and none is an agent turn
 #      (REGISTRY, default ~/.local/share/cad-studio/running-processes)
 #   8  the export ZIP (ZIP, default <project-dir>.zip) lists model.py and
@@ -59,13 +61,15 @@ asks = [i for i, r in enumerate(rows)
         if r.get("role") == "user" and "raccordo" in (r.get("text") or "")]
 if not asks:
     print("FAIL no user row asking for the fillet"); sys.exit()
-tools = [r for r in rows[asks[-1] + 1:] if r.get("role") == "tool" and r.get("tool")]
-if not tools:
-    print("FAIL no tool row after the fillet request"); sys.exit()
-last = tools[-1]["tool"]
-state = last.get("state")
-title = tools[-1].get("text") or last.get("name")
-print(("PASS" if state == "failed" else "FAIL") + f" last tool row '{title}' is {state}")
+after = rows[asks[-1] + 1:]
+# the app's own record of a failed model.py build (bridge.rs, BuildOutcome::Failed)
+failed = [r for r in after if r.get("role") == "system" and r.get("action") == "askClaudeToFix"]
+tools = [r for r in after if r.get("role") == "tool" and r.get("tool")]
+agent = f"; the agent's last tool row is {tools[-1]['tool'].get('state')}" if tools else ""
+if failed:
+    print(f"PASS failed-build row '{failed[-1].get('text')}' after the fillet request{agent}")
+else:
+    print(f"FAIL no failed-build row (system, askClaudeToFix) after the fillet request{agent}")
 PY
 )
   case "$verdict" in PASS*) pass 6 "${verdict#PASS }" ;; *) fail 6 "${verdict#FAIL }" ;; esac

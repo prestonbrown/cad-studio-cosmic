@@ -56,7 +56,9 @@
 //!                                 # (or build) is over; past <secs> the
 //!                                 # script fails and stops
 //! mark <label>                    # log a capture point for the runner
-//!                                 # (scripts/rig/e2e/run.sh)
+//!                                 # (scripts/rig/e2e/run.sh), with the
+//!                                 # project's activity kind
+//!                                 # (idle/working/succeeded/failed)
 //! noop                            # a no-op message (forces a view pass)
 //! sleep <ms>                      # pause before the next line
 //! ```
@@ -69,12 +71,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use cosmic::Task;
 use engine::settings::PartsLayout;
 
+use crate::activity::Activity;
 use crate::app::Message;
 use crate::sheets;
 use crate::viewer_pane;
@@ -115,24 +118,45 @@ const SETTLE: Duration = Duration::from_millis(1500);
 const START_GRACE: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(100);
 
-/// The app's side of `waitturn`: whether the project window is busy,
-/// published after every update, and how many busy-to-idle edges (finished
-/// turns or builds) it has seen.
+/// The app's side of `waitturn` and `mark`: the project window's activity
+/// kind, published after every update, and how many busy-to-idle edges
+/// (finished turns or builds) it has seen.
 #[derive(Debug, Default)]
 pub struct TurnProbe {
-    busy: AtomicBool,
+    kind: AtomicU8,
     finished: AtomicU64,
 }
 
+const IDLE: u8 = 0;
+const WORKING: u8 = 1;
+const SUCCEEDED: u8 = 2;
+const FAILED: u8 = 3;
+
 impl TurnProbe {
-    pub fn publish(&self, busy: bool) {
-        if self.busy.swap(busy, Ordering::SeqCst) && !busy {
+    pub fn publish(&self, activity: &Activity) {
+        let kind = match activity {
+            Activity::Idle => IDLE,
+            Activity::Working(_) => WORKING,
+            Activity::Succeeded(_) => SUCCEEDED,
+            Activity::Failed(_) => FAILED,
+        };
+        if self.kind.swap(kind, Ordering::SeqCst) == WORKING && kind != WORKING {
             self.finished.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     pub fn busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst)
+        self.kind.load(Ordering::SeqCst) == WORKING
+    }
+
+    /// The activity kind as a `mark` line logs it.
+    pub fn activity(&self) -> &'static str {
+        match self.kind.load(Ordering::SeqCst) {
+            WORKING => "working",
+            SUCCEEDED => "succeeded",
+            FAILED => "failed",
+            _ => "idle",
+        }
     }
 
     pub fn finished(&self) -> u64 {
@@ -288,7 +312,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             }
             "versioncard" => Step::Msg(Message::DriveVersionCard),
             "build" => Step::Msg(Message::DriveBuild),
-            "viewer" => Step::Msg(Message::DriveViewer(viewer_toggle(rest).ok_or_else(
+            "viewer" => project_msg(project::Message::Viewer(viewer_toggle(rest).ok_or_else(
                 || {
                     format!(
                         "line {}: viewer wants Parameters/Section/Animation/PartsCollapsed/Playback/Scrub <s>/Compare <n>",
@@ -446,7 +470,9 @@ pub fn startup_task() -> (Task<Message>, Option<Arc<TurnProbe>>) {
                             return;
                         }
                     },
-                    Step::Mark(label) => log(&format!("MARK {label}")),
+                    Step::Mark(label) => {
+                        log(&format!("MARK {label} activity={}", waiter.activity()))
+                    }
                 }
             }
             log("DONE");
@@ -577,7 +603,9 @@ mod tests {
         let toggles: Vec<_> = steps
             .iter()
             .map(|step| match step {
-                Step::Msg(Message::DriveViewer(msg)) => format!("{msg:?}"),
+                Step::Msg(Message::DriveProject(project::Message::Viewer(msg))) => {
+                    format!("{msg:?}")
+                }
                 other => panic!("not a viewer step: {other:?}"),
             })
             .collect();
@@ -729,8 +757,8 @@ mod tests {
         let steps = parse("viewer Compare 1\n").unwrap();
         assert!(matches!(
             steps[0],
-            Step::Msg(Message::DriveViewer(viewer_pane::Message::Parameters(
-                crate::parameters_view::Message::Compare(Some(1))
+            Step::Msg(Message::DriveProject(project::Message::Viewer(
+                viewer_pane::Message::Parameters(crate::parameters_view::Message::Compare(Some(1)))
             )))
         ));
         assert!(parse("viewer Compare one").is_err());
@@ -779,20 +807,25 @@ mod tests {
     }
 
     /// The probe counts busy-to-idle edges: each one is a finished turn
-    /// (or build); repeated idle or busy reports are not edges.
+    /// (or build); repeated reports and settled-to-settled changes are not
+    /// edges. It names the activity kind a `mark` logs.
     #[test]
     fn turn_probe_counts_finished_turns() {
+        let working = Activity::Working("turn".into());
         let probe = TurnProbe::default();
         assert!(!probe.busy());
-        probe.publish(false);
+        assert_eq!(probe.activity(), "idle");
+        probe.publish(&Activity::Idle);
         assert_eq!(probe.finished(), 0);
-        probe.publish(true);
-        probe.publish(true);
+        probe.publish(&working);
+        probe.publish(&working);
         assert!(probe.busy());
+        assert_eq!(probe.activity(), "working");
         assert_eq!(probe.finished(), 0);
-        probe.publish(false);
-        probe.publish(false);
+        probe.publish(&Activity::Succeeded("done".into()));
+        probe.publish(&Activity::Failed("build".into()));
         assert!(!probe.busy());
+        assert_eq!(probe.activity(), "failed");
         assert_eq!(probe.finished(), 1);
     }
 

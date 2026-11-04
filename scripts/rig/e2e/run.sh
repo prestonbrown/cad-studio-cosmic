@@ -9,11 +9,21 @@
 #                          and put back a real install kept at claude.real
 #   run.sh --restore-stub  keep a real install at ~/.local/bin/claude.real and
 #                          put the stub back as ~/.local/bin/claude
+# The two swaps run only on the rig (hostname cad-dev).
 #
 # Output per theme in <outdir>/<theme>/: <mark>.png per spec line, app.log,
 # checks.log, summary.txt, the project (e2e-cubo/) and its export ZIP.
-# E2E_TIMEOUT (seconds, default 5400) bounds each theme's run. Exits non-zero
-# when the drive fails, a check fails, a mark is missing, or the app dies.
+# Exits non-zero when the drive fails, a check fails, a mark is missing or
+# logs the wrong activity, or the app dies. However the script ends (done,
+# failed, Ctrl-C, SIGTERM, a dropped ssh), the theme's app is quit with
+# SIGTERM (which interrupts a running turn), its Xvfb killed, and its config
+# copy removed.
+#
+#   E2E_TIMEOUT=<s>        bounds each theme's run (default 5400)
+#   E2E_AGENT_PATH=<file>  the claude the app runs (written as the run's
+#                          claudePath setting) instead of the login PATH's
+#   E2E_NO_ZIP_OK=1        a missing /usr/bin/zip warns instead of stopping
+#                          (dry runs that never reach the export)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 bindir=$HOME/.local/bin
@@ -21,21 +31,50 @@ stub_src=$here/../claude-stub
 ts() { date +%H:%M:%S; }
 is_stub() { head -c 300 "$1" 2>/dev/null | grep -q 'Rig stub'; }
 
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+swap_die() { echo "run.sh: $*" >&2; exit 1; }
+case "${1:-}" in
+  --unstub|--restore-stub)
+    [ "$(hostname)" = cad-dev ] || swap_die "the stub swap runs only on the rig (cad-dev), not $(hostname)" ;;
+esac
 case "${1:-}" in
   --unstub)
-    if [ -e "$bindir/claude" ] && is_stub "$bindir/claude"; then
-      mv "$bindir/claude" "$bindir/claude.stub" && echo "stub moved to $bindir/claude.stub"
+    if exists "$bindir/claude" && is_stub "$bindir/claude"; then
+      exists "$bindir/claude.stub" && swap_die "$bindir/claude.stub already exists; not overwriting it"
+      mv "$bindir/claude" "$bindir/claude.stub" || swap_die "cannot move the stub aside"
+      echo "stub moved to $bindir/claude.stub"
     fi
-    if [ -e "$bindir/claude.real" ] || [ -L "$bindir/claude.real" ]; then
-      mv "$bindir/claude.real" "$bindir/claude" && echo "real claude restored from claude.real"
+    if exists "$bindir/claude"; then
+      # a real install is already in place: never replace it with an older kept one
+      exists "$bindir/claude.real" && echo "claude is a real install; leaving $bindir/claude.real alone"
+      echo "claude: $(readlink -f "$bindir/claude")"
+    elif exists "$bindir/claude.real"; then
+      mv "$bindir/claude.real" "$bindir/claude" || swap_die "cannot restore claude.real"
+      echo "real claude restored from claude.real"
+    else
+      echo "no claude installed now: run the installer, then claude login"
     fi
     exit 0 ;;
   --restore-stub)
-    if { [ -e "$bindir/claude" ] || [ -L "$bindir/claude" ]; } && ! is_stub "$bindir/claude"; then
-      mv "$bindir/claude" "$bindir/claude.real" && echo "real claude kept at $bindir/claude.real"
+    moved=
+    if exists "$bindir/claude" && ! is_stub "$bindir/claude"; then
+      exists "$bindir/claude.real" && swap_die "$bindir/claude.real already exists; not overwriting it"
+      mv "$bindir/claude" "$bindir/claude.real" || swap_die "cannot move the real claude aside"
+      moved=1; echo "real claude kept at $bindir/claude.real"
     fi
-    if [ -e "$bindir/claude.stub" ]; then mv "$bindir/claude.stub" "$bindir/claude"
-    else mkdir -p "$bindir" && cp "$stub_src" "$bindir/claude" && chmod +x "$bindir/claude"; fi
+    if exists "$bindir/claude" && is_stub "$bindir/claude"; then
+      echo "stub already at $bindir/claude"; exit 0
+    fi
+    if exists "$bindir/claude.stub"; then
+      mv "$bindir/claude.stub" "$bindir/claude"
+    else
+      mkdir -p "$bindir" && cp "$stub_src" "$bindir/claude" && chmod +x "$bindir/claude"
+    fi
+    if [ $? -ne 0 ] || ! is_stub "$bindir/claude"; then
+      # never leave the rig without a claude: put the real one back
+      [ -n "$moved" ] && mv "$bindir/claude.real" "$bindir/claude"
+      swap_die "could not install the stub at $bindir/claude; claude left as it was"
+    fi
     echo "stub restored at $bindir/claude"
     exit 0 ;;
 esac
@@ -53,14 +92,40 @@ drive_marks=$(awk '$1 == "mark" { print $2 }' "$here/e2e.drive" | sort)
 spec_marks=$(grep -v '^#' "$here/spec" | awk 'NF { print $1 }' | sort)
 [ -n "$spec_marks" ] || die "empty spec at $here/spec"
 [ "$drive_marks" = "$spec_marks" ] || die "e2e.drive marks and spec lines differ: $(diff <(echo "$drive_marks") <(echo "$spec_marks") | grep '^[<>]' | tr '\n' ' ')"
-claude=$(bash -lc 'command -v claude' 2>/dev/null)
+if [ -n "${E2E_AGENT_PATH:-}" ]; then
+  claude=$E2E_AGENT_PATH
+  [ -x "$claude" ] || die "E2E_AGENT_PATH $claude is not executable"
+else
+  claude=$(bash -lc 'command -v claude' 2>/dev/null)
+fi
 [ -n "$claude" ] || die "no claude on the login PATH; log in first"
 is_stub "$claude" && die "claude is the rig stub ($claude); log in first (run.sh --unstub, then claude login)"
 version=$("$claude" --version 2>&1) || die "claude --version failed: $version"
 for tool in Xvfb xdotool xwd convert python3; do
   command -v $tool >/dev/null || die "$tool not installed"
 done
-[ -x /usr/bin/zip ] || die "/usr/bin/zip not installed (the app's export runs it): sudo apt install zip"
+if [ ! -x /usr/bin/zip ]; then
+  [ "${E2E_NO_ZIP_OK:-}" = 1 ] && echo "run.sh: warning: no /usr/bin/zip; the export step will fail" >&2 \
+    || die "/usr/bin/zip not installed (the app's export runs it): sudo apt install zip"
+fi
+
+# one theme's processes and config copy; empty between themes
+ap=; xp=; cfg=
+cleanup() {
+  if [ -n "$ap" ] && kill -0 "$ap" 2>/dev/null; then
+    # SIGTERM is the app's quit path: it terminates the engine's children
+    # (a running agent turn included) before exiting
+    kill -TERM "$ap" 2>/dev/null
+    for _ in $(seq 20); do kill -0 "$ap" 2>/dev/null || break; sleep 0.5; done
+    kill -KILL "$ap" 2>/dev/null
+  fi
+  [ -n "$xp" ] && kill "$xp" 2>/dev/null
+  wait 2>/dev/null
+  [ -n "$cfg" ] && rm -rf "$cfg"
+  ap=; xp=; cfg=
+}
+trap cleanup EXIT
+trap 'echo "$(ts) run.sh: interrupted" >&2; exit 130' INT TERM HUP
 
 status=0
 for theme in $themes; do
@@ -80,6 +145,20 @@ for theme in $themes; do
   [ "$theme" = dark ] && echo true > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark" \
                       || echo false > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark"
   echo '[]' > "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents"
+  if [ -n "${E2E_AGENT_PATH:-}" ]; then
+    python3 - "$cfg/cad-studio/settings.json" "$E2E_AGENT_PATH" <<'PY'
+import json, os, sys
+path, agent = sys.argv[1], sys.argv[2]
+settings = json.load(open(path)) if os.path.exists(path) else {}
+settings["claudePath"] = agent
+settings["agentEngine"] = "claude"
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump(settings, open(path, "w"), indent=2)
+PY
+  fi
+  # the run's own registry (the engine honours CAD_STUDIO_RUNNING_PROCESSES),
+  # so check.sh step 7 sees only this run's children and an absent file
+  # means nothing of this run is left
   registry=$work/running-processes
 
   n=300; while [ -e /tmp/.X$n-lock ] || [ -e /tmp/.X11-unix/X$n ]; do n=$((n + 1)); done
@@ -98,13 +177,17 @@ for theme in $themes; do
   failed=0; done_=0; seen=0; marks=
   deadline=$((SECONDS + ${E2E_TIMEOUT:-5400}))
   note() { echo "$(ts) $*" | tee -a "$summary"; }
-  on_mark() {
-    local label=$1 steps
+  on_mark() {  # <label> activity=<kind>
+    local label=$1 activity=${2#activity=} steps want
     DISPLAY=$disp xwd -root -silent | convert xwd:- png:"$work/$label.png"
     marks="$marks $label"
     steps=$(awk -v m="$label" '$1 == m { print $2 }' "$here/spec")
+    want=$(awk -v m="$label" '$1 == m { print $3 }' "$here/spec")
     if [ -z "$steps" ]; then note "FAIL mark $label is not in the spec"; failed=1; return; fi
-    note "mark $label captured"
+    note "mark $label captured (activity $activity)"
+    if [ -n "$want" ] && [ "$activity" != "$want" ]; then
+      note "FAIL mark $label: activity is $activity, want $want"; failed=1
+    fi
     [ "$steps" = - ] && return
     local result
     result=$(REGISTRY=$registry ZIP=$zip "$here/check.sh" "$proj" ${steps//,/ }) || failed=1
@@ -115,7 +198,7 @@ for theme in $themes; do
     if [ "$total" -gt "$seen" ]; then
       while IFS= read -r line; do
         case "$line" in
-          *"CAD_STUDIO_DRIVE: MARK "*) on_mark "${line##*MARK }" ;;
+          *"CAD_STUDIO_DRIVE: MARK "*) on_mark ${line##*MARK } ;;
           *"CAD_STUDIO_DRIVE: FAIL"*) note "drive ${line#*CAD_STUDIO_DRIVE: }"; failed=1; done_=1 ;;
           *"CAD_STUDIO_DRIVE: DONE"*) done_=1 ;;
           *"CAD_STUDIO_DRIVE: waitturn"*|*"CAD_STUDIO_DRIVE: param"*) note "${line#*CAD_STUDIO_DRIVE: }" ;;
@@ -135,14 +218,11 @@ for theme in $themes; do
     case " $marks " in *" $want "*) ;; *) note "FAIL mark $want never reached"; failed=1 ;; esac
   done
 
-  # quit as a session logout does (SIGTERM: terminate the engine's children),
-  # then the registry must hold nothing of this run
-  kill -TERM $ap 2>/dev/null
-  for _ in $(seq 20); do kill -0 $ap 2>/dev/null || break; sleep 0.5; done
-  kill -KILL $ap 2>/dev/null; kill $xp 2>/dev/null; wait 2>/dev/null
+  # quit as a session logout does, then the registry must hold nothing of
+  # this run
+  cleanup
   result=$(REGISTRY=$registry "$here/check.sh" "$proj" 7) || failed=1
   printf '%s\n' "$result" | sed "s/^/$(ts) after-quit /" | tee -a "$checks" >> "$summary"
-  rm -rf "$cfg"
   if [ $failed = 0 ]; then note "$theme: PASS"; else note "$theme: FAIL"; status=1; fi
 done
 exit $status

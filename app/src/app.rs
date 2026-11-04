@@ -101,13 +101,9 @@ pub enum Message {
     /// The drive harness's Build: the toolbar Build Model button's own
     /// command on the focused project window (CAD_STUDIO_DRIVE's `build`).
     DriveBuild,
-    /// The drive harness's viewer toggles (CAD_STUDIO_DRIVE's `viewer`
-    /// command): a viewer-pane message delivered to the project window, as
-    /// the toolbar button or overlay chevron that sends it would.
-    DriveViewer(crate::viewer_pane::Message),
     /// The drive harness's project-window message (CAD_STUDIO_DRIVE's
-    /// `restore`, `layout`, `cancel` and `attach`): delivered to the project
-    /// window as the control that sends it would.
+    /// `viewer`, `restore`, `layout`, `cancel` and `attach`): delivered to
+    /// the project window as the control that sends it would.
     DriveProject(project::Message),
     /// The drive harness's parameter commit (CAD_STUDIO_DRIVE's `param`):
     /// the project window's n-th parameter row (1-based) committed as a
@@ -194,8 +190,8 @@ pub struct CadStudio {
     /// `PythonEnvironment.shared`: the state exists from launch, the sheet
     /// presents on top of it).
     python: sheets::PythonSetup,
-    /// The drive harness's `waitturn` probe (only with CAD_STUDIO_DRIVE):
-    /// the project window's busy state, published after every update.
+    /// The drive harness's probe (only with CAD_STUDIO_DRIVE): the project
+    /// window's activity, published after every update.
     drive_probe: Option<Arc<crate::drive::TurnProbe>>,
 }
 
@@ -321,11 +317,6 @@ impl Application for CadStudio {
                 })
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
-            Message::DriveViewer(msg) => self
-                .project_window()
-                .map(|id| Task::done(Message::Project(id, project::Message::Viewer(msg))))
-                .unwrap_or_else(Task::none)
-                .map(Action::App),
             Message::DriveProject(msg) => self
                 .project_window()
                 .map(|id| Task::done(Message::Project(id, msg)))
@@ -448,7 +439,7 @@ impl Application for CadStudio {
             Message::Noop => Task::none(),
         };
         if let Some(probe) = &self.drive_probe {
-            probe.publish(self.project_busy());
+            probe.publish(&self.project_activity());
         }
         // a sheet coming up over a project releases the focused text
         // widget: the sheet's shade blocks only the pointer, and a focused
@@ -588,11 +579,12 @@ impl CadStudio {
             .copied()
     }
 
-    /// Whether the project window has a turn or build running.
-    fn project_busy(&self) -> bool {
-        self.windows
-            .values()
-            .any(|kind| matches!(kind, WindowKind::Project(project) if project.is_busy()))
+    /// The project window's activity (idle without one).
+    fn project_activity(&self) -> crate::activity::Activity {
+        match self.project_window().and_then(|id| self.windows.get(&id)) {
+            Some(WindowKind::Project(project)) => project.activity.clone(),
+            _ => crate::activity::Activity::Idle,
+        }
     }
 
     /// The drive `param` line: resolve the row against the project window's
@@ -2182,10 +2174,10 @@ mod shell_behavior {
     }
 
     /// With a drive script running, every update publishes the project
-    /// window's busy state to the `waitturn` probe, so a working-to-idle
-    /// activity reads as one finished turn.
+    /// window's activity to the drive probe, so a working-to-settled
+    /// activity reads as one finished turn and a `mark` can log the kind.
     #[tokio::test]
-    async fn updates_publish_project_busy_to_the_drive_probe() {
+    async fn updates_publish_project_activity_to_the_drive_probe() {
         let mut f = fixture();
         let project = open_real_project(&mut f, "Staffa");
         let probe = Arc::new(crate::drive::TurnProbe::default());
@@ -2205,9 +2197,10 @@ mod shell_behavior {
         assert_eq!(probe.finished(), 0);
         set(
             &mut f.app,
-            crate::activity::Activity::Succeeded("done".into()),
+            crate::activity::Activity::Failed("build".into()),
         );
         assert!(!probe.busy());
+        assert_eq!(probe.activity(), "failed");
         assert_eq!(probe.finished(), 1);
     }
 
