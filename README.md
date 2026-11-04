@@ -8,6 +8,8 @@ installed Claude Code (or Codex). The agent writes a parametric
 renders the result in 3D, shows the technical drawings, and hands the print
 plate to your slicer.
 
+Homepage: <https://prestonbrown.github.io/cad-studio-cosmic/>
+
 ![Project window, light](docs/images/project-light.png)
 
 ![Project window, dark](docs/images/project-dark.png)
