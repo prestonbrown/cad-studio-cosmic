@@ -513,8 +513,9 @@ impl Application for CadStudio {
                 self.decorate(id, focused, body, &state.tab.title())
             }
             Some(WindowKind::About) => {
+                // AppKit's About panel: a titlebar with no title
                 let body: cosmic::Element<'_, Message> = settings::view_about();
-                self.decorate(id, focused, body, &fl!("informazioni-su-cad-studio"))
+                self.decorate(id, focused, body, "")
             }
             Some(WindowKind::LoadError(error)) => {
                 self.decorate(id, focused, view_load_error(error), &fl!("cad-studio"))
@@ -607,10 +608,16 @@ impl CadStudio {
     /// welcome window carrying it is on screen (upstream ⌘N:
     /// openWindow(id: WelcomeWindow.id) + isCreatingProject = true).
     fn new_project(&mut self) -> Task<Action<Message>> {
-        if self.welcome.creating.is_none() {
-            self.welcome.creating = Some(welcome::new_project::NewProject::default());
+        if self.welcome.creating.is_some() {
+            return self.show_welcome();
         }
-        self.show_welcome()
+        self.welcome.creating = Some(welcome::new_project::NewProject::default());
+        // the sheet comes up with its name field focused, as a SwiftUI
+        // sheet focuses its first field
+        Task::batch([
+            self.show_welcome(),
+            cosmic::widget::text_input::focus(welcome::new_project::name_field_id()),
+        ])
     }
 
     fn update_new_project_sheet(

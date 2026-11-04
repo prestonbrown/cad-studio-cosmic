@@ -51,10 +51,13 @@ pub fn picker<'a, M: Clone + 'a>(
         .enumerate()
         .map(|(index, label)| Choice { index, label })
         .collect();
-    // the list's own selection stays empty: a selected label would draw
-    // in the list's face under the right-aligned one, and the pinned
-    // theme's pick_list class is `()` (no text color to hide it with)
-    let list = PickList::new(choices, None::<Choice>, move |chosen: Choice| {
+    // the list's selection is the current option with an empty label: it
+    // equals that option (choices compare by index), so the open menu
+    // starts on it highlighted, while the list's own face draws nothing
+    // under the right-aligned one (the pinned theme's pick_list class is
+    // `()`, src/theme/style/iced.rs:827, so no style can hide the label)
+    let current = selected.map(Choice::marker);
+    let list = PickList::new(choices, current, move |chosen: Choice| {
         on_select(chosen.index)
     })
     .placeholder("")
@@ -84,11 +87,29 @@ pub fn picker<'a, M: Clone + 'a>(
 }
 
 /// One option: its label, shown in the list, and its index, which the
-/// selection reports (so a label never has to be looked up again).
-#[derive(Debug, Clone, PartialEq)]
+/// selection reports (so a label never has to be looked up again). Two
+/// choices are the same option when their indices match.
+#[derive(Debug, Clone)]
 struct Choice {
     index: usize,
     label: String,
+}
+
+impl Choice {
+    /// The option at `index` with no label: the list's selection, which
+    /// marks that option in the menu and draws nothing in the face.
+    fn marker(index: usize) -> Self {
+        Self {
+            index,
+            label: String::new(),
+        }
+    }
+}
+
+impl PartialEq for Choice {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
 }
 
 impl std::fmt::Display for Choice {
@@ -125,5 +146,24 @@ mod tests {
         };
         assert_eq!(choice.to_string(), "Deutsch");
         assert_eq!(choice.index, 2);
+    }
+
+    /// The selection marker is the current option (the menu opens on it)
+    /// and shows no label (the list's face stays blank under the value).
+    #[test]
+    fn the_marker_is_its_option_without_a_label() {
+        let option = Choice {
+            index: 1,
+            label: "English".to_string(),
+        };
+        let marker = Choice::marker(1);
+        assert_eq!(marker, option);
+        assert_ne!(Choice::marker(0), option);
+        assert_eq!(marker.to_string(), "");
+        let options = [Choice::marker(0), option.clone(), Choice::marker(2)].map(|c| Choice {
+            label: format!("o{}", c.index),
+            ..c
+        });
+        assert_eq!(options.iter().position(|o| *o == marker), Some(1));
     }
 }

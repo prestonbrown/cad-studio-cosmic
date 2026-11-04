@@ -16,6 +16,7 @@
 #     ownfix    run against a private copy of $FIXTURES (default ~/fixtures-cap): the drive
 #               file's fixture paths are rewritten to it, so a shot that writes to its
 #               project (a chat send) leaves the shared fixture untouched
+#     norecents start with an empty recents list (overrides RECENTS)
 # RECENTS (env, optional): a file copied in as each shot's recents list, so
 # welcome captures show a fixed set. MAXJOBS (env, default 8): shots in flight;
 # software rendering makes first paint slow when too many start at once.
@@ -42,7 +43,10 @@ while read -r shot geom mode wait drive opts; do
     mkdir -p "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1"
     [ "$mode" = dark ] && echo true > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark" \
                        || echo false > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark"
-    [ -n "${RECENTS:-}" ] && cp "$RECENTS" "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents"
+    case "$opts" in
+      *,norecents,*) echo '[]' > "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents" ;;
+      *) [ -n "${RECENTS:-}" ] && cp "$RECENTS" "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents" ;;
+    esac
     case "$opts" in *,fresh,*) rm -f "$cfg/cosmic/net.brownhouse.CadStudio/v1/first-run-complete" ;; esac
     envs=()
     IFS=, read -ra fields <<<"$opts"

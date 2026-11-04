@@ -1,8 +1,9 @@
 project-light 1320x840 light 7 open.drive
 vcard-light 1320x840 light 9 vcard.drive
 welcome-light 780x460 light 4 welcome.drive
-setup-light 780x460 light 4 idle.drive fresh
-newproj-light 780x460 light 5 newproj.drive
+welcome-empty-light 780x460 light 4 welcome.drive norecents
+setup-light 780x460 light 4 idle.drive fresh,norecents
+newproj-light 780x460 light 5 newproj.drive norecents
 set-Generale-light 900x900 light 5 set-Generale.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Agente-light 900x900 light 5 set-Agente.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Python-light 900x900 light 5 set-Python.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
@@ -11,8 +12,9 @@ about-light 900x900 light 5 about.drive nosize,win=About
 project-dark 1320x840 dark 7 open.drive
 vcard-dark 1320x840 dark 9 vcard.drive
 welcome-dark 780x460 dark 4 welcome.drive
-setup-dark 780x460 dark 4 idle.drive fresh
-newproj-dark 780x460 dark 5 newproj.drive
+welcome-empty-dark 780x460 dark 4 welcome.drive norecents
+setup-dark 780x460 dark 4 idle.drive fresh,norecents
+newproj-dark 780x460 dark 5 newproj.drive norecents
 set-Generale-dark 900x900 dark 5 set-Generale.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Agente-dark 900x900 dark 5 set-Agente.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Python-dark 900x900 dark 5 set-Python.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate

@@ -18,6 +18,7 @@ done <<'EOF'
 project-light project-model.png
 vcard-light version-menu.png
 welcome-light welcome-recents.png
+welcome-empty-light welcome.png
 setup-light setup-sheet.png
 set-Generale-light settings-general.png
 set-Agente-light settings-agent.png
@@ -28,6 +29,7 @@ newproj-light new-project.png
 project-dark project-model-dark.png
 vcard-dark version-menu-dark.png
 welcome-dark welcome-recents-dark.png
+welcome-empty-dark welcome-dark.png
 setup-dark setup-sheet-dark.png
 newproj-dark new-project-dark.png
 set-Generale-dark settings-general-dark.png

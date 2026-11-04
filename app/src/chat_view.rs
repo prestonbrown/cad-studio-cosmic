@@ -617,10 +617,10 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     }
     if let Some(action) = message.action {
         // .controlSize(.small): the small push button
-        stack = stack.push(ui::button::push_with(
-            action_title(action),
-            ui::button::PushRole::Normal,
+        stack = stack.push(ui::button::push_sized(
+            ui::button::PushRole::Plain,
             ui::button::PushSize::Small,
+            action_title(action),
             Some(Message::RowAction(message.id, action)),
         ));
     }
@@ -926,7 +926,11 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         .spacing(16)
         // `.font(.system(size: 40, weight: .light))`: the symbol's ink
         // stands 44 px tall at that point size (shots/upstream/build-error.png)
-        .push(sf_icon(Symbol::CubeTransparent, EMPTY_STATE_ICON, Tone::Tertiary))
+        .push(sf_icon(
+            Symbol::CubeTransparent,
+            EMPTY_STATE_ICON,
+            Tone::Tertiary,
+        ))
         .push(heading)
         .push(list)
         .width(Length::Fill)

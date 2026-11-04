@@ -28,13 +28,13 @@ use std::path::PathBuf;
 
 use cosmic::iced::Length;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::widget::{Column, Row, Space, button, container, scrollable, text_input};
+use cosmic::widget::{Column, Row, Space, container, scrollable, text_input};
 use cosmic::{Element, Task};
 use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
-use crate::ui::button::{PushRole, PushSize, push_with};
+use crate::ui::button::{PushRole, push_as};
 use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
 use crate::{fl, typography};
 
@@ -198,10 +198,9 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         ))
         .push(Space::new().width(Length::Fill))
         .push(ui::button::push(fl!("chiudi"), Some(AgentMessage::Close)))
-        .push(push_with(
-            fl!("verifica"),
+        .push(push_as(
             PushRole::Default,
-            PushSize::Regular,
+            fl!("verifica"),
             (!sheet.checking).then_some(AgentMessage::Verify),
         ));
     // The sheet card: opaque, rounded, shadowed, so the dimmed body never
@@ -214,7 +213,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
     container(card)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(ui::surface::sheet_card())
+        .class(ui::surface::sheet())
         .into()
 }
 
@@ -379,11 +378,13 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
         PrintPrefMessage::Unit(unit) => SetupMessage::Unit(unit),
     });
 
-    let actions = Row::new().push(Space::new().width(Length::Fill)).push(
-        button::text(fl!("continua"))
-            .class(cosmic::theme::Button::Suggested)
-            .on_press(SetupMessage::Continue),
-    );
+    let actions = Row::new()
+        .push(Space::new().width(Length::Fill))
+        .push(ui::button::push_as(
+            ui::button::PushRole::Default,
+            fl!("continua"),
+            Some(SetupMessage::Continue),
+        ));
     // the form's footer carries its own bottom gap before Continue
     let stack = Column::new()
         .push(head)
@@ -393,7 +394,7 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
     container(stack)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(cosmic::theme::Container::Dialog(true))
+        .class(ui::surface::sheet())
         .into()
 }
 
@@ -684,7 +685,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
     container(card)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(ui::surface::sheet_card())
+        .class(ui::surface::sheet())
         .into()
 }
 
@@ -692,20 +693,17 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
 /// button carries no press handler, matching upstream's `.disabled(true)`.
 fn python_buttons(state: &EnvState) -> Element<'static, PythonMessage> {
     match buttons(state) {
-        SetupButtons::Done => push_with(
-            fl!("fine"),
-            PushRole::Default,
-            PushSize::Regular,
-            Some(PythonMessage::Close),
-        ),
+        SetupButtons::Done => push_as(PushRole::Default, fl!("fine"), Some(PythonMessage::Close)),
         SetupButtons::Busy => ui::button::push(fl!("installazione-in-corso"), None),
         SetupButtons::LaterAndInstall => Row::new()
             .spacing(8)
-            .push(ui::button::push(fl!("pi-tardi"), Some(PythonMessage::Close)))
-            .push(push_with(
-                fl!("installa"),
+            .push(ui::button::push(
+                fl!("pi-tardi"),
+                Some(PythonMessage::Close),
+            ))
+            .push(push_as(
                 PushRole::Default,
-                PushSize::Regular,
+                fl!("installa"),
                 Some(PythonMessage::Install),
             ))
             .into(),
