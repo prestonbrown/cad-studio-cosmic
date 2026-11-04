@@ -13,15 +13,16 @@
 #     win=Text  capture only the window whose title contains Text (default: the screen)
 #     env=K=V   launch the app with K=V in its environment (repeatable)
 #     json=K:V  set string key K to V in the shot's cad-studio/settings.json (repeatable)
-#     ownfix    run against a private copy of $FIXTURES (default ~/fixtures-cap): the drive
-#               file's fixture paths are rewritten to it, so a shot that writes to its
-#               project (a chat send) leaves the shared fixture untouched
+#     ownfix    run against a private copy of $FIXTURES (default ~/fixtures-cap): the
+#               ~/fixtures-cap paths the drive files name are rewritten to the copy, so a
+#               shot that writes to its project (a chat send) leaves the shared fixture
+#               untouched
 #     norecents start with an empty recents list (overrides RECENTS)
 # RECENTS (env, optional): a file copied in as each shot's recents list, so
 # welcome captures show a fixed set. MAXJOBS (env, default 8): shots in flight;
 # software rendering makes first paint slow when too many start at once.
-# Each shot keeps its own process registry: the app's SIGTERM handler kills every
-# registered process, which would end the other shots' python checks.
+# Each shot keeps its own process registry, so one shot's leftover children never
+# reach another shot's launch reap or the rig user's own registry.
 # Each shot waits for the drive time, then until the frame is no longer blank.
 # Drive files are CAD_STUDIO_DRIVE scripts (app/src/drive.rs); a relative path
 # resolves against the spec file's directory.
@@ -54,7 +55,7 @@ while read -r shot geom mode wait drive opts; do
       case "$f" in
         env=*) envs+=("${f#env=}") ;;
         json=*) kv=${f#json=}
-          sed -i "s#\"${kv%%:*}\": [^,]*#\"${kv%%:*}\": \"${kv#*:}\"#" "$cfg/cad-studio/settings.json" ;;
+          sed -i "s#\"${kv%%:*}\": *\"[^\"]*\"#\"${kv%%:*}\": \"${kv#*:}\"#" "$cfg/cad-studio/settings.json" ;;
       esac
     done
     fx=
