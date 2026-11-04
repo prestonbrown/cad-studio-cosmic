@@ -23,3 +23,9 @@ sed -e "s|@CARGO_PKG_VERSION@|$version|" "$root/app/resources/packaging/$app_id.
 install -m 644 "$root/app/resources/app-icon-128.png" "$share/icons/hicolor/128x128/apps/$app_id.png"
 install -m 644 "$root/app/resources/app-icon.png" "$share/icons/hicolor/256x256/apps/$app_id.png"
 install -m 644 "$root/app/resources/app-icon@2x.png" "$share/icons/hicolor/512x512/apps/$app_id.png"
+
+# Debian changelog for cargo-deb (lintian requires one for a non-native
+# package); it sits beside usr/, outside the installed tree.
+printf '%s\n' "cad-studio-cosmic ($version-1) unstable; urgency=medium" "" \
+    "  * Release $version." "" \
+    " -- Preston Brown <pbrown@brown-house.net>  $(date -R)" > "$dest/changelog"

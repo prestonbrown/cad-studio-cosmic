@@ -82,6 +82,7 @@ extended-description = """\
 Describe a part, get a printable model. CAD Studio drives your locally \
 installed Claude Code (or Codex) and build123d to turn a description into a \
 printable 3D model and its technical drawing, on the COSMIC desktop."""
+changelog = "../dist/stage/changelog"
 assets = [
     ["target/release/cad-studio", "usr/bin/cad-studio", "755"],
     ["../dist/stage/usr/share/applications/net.brownhouse.CadStudio.desktop", "usr/share/applications/", "644"],
