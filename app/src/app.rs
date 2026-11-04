@@ -348,16 +348,7 @@ impl Application for CadStudio {
                 // stored value), and no red missing line: this action
                 // rides an auth-failed row, whose engine by definition
                 // ran.
-                if self.agent_missing.is_none() {
-                    let settings = self.settings.load();
-                    let kind = settings.agent_kind();
-                    self.agent_missing = Some(sheets::AgentMissing {
-                        kind,
-                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
-                        ..sheets::AgentMissing::default()
-                    });
-                }
-                Task::none()
+                self.present_agent_missing(false)
             }
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
@@ -368,23 +359,13 @@ impl Application for CadStudio {
             Message::AgentLocated(found) => {
                 if found {
                     self.agent_missing = None;
-                } else if self.agent_missing.is_none() {
+                    Task::none()
+                } else {
                     // the missing line shows from first presentation
                     // (AgentMissingSheet.swift:42 gates on
                     // `locator.state == .missing`, not on a Verify)
-                    let settings = self.settings.load();
-                    let kind = settings.agent_kind();
-                    self.agent_missing = Some(sheets::AgentMissing {
-                        kind,
-                        // the field opens on the persisted custom path
-                        // (upstream's @AppStorage binding), so an untouched
-                        // Verify cannot clear a stored path
-                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
-                        last_verified_missing: true,
-                        ..sheets::AgentMissing::default()
-                    });
+                    self.present_agent_missing(true)
                 }
-                Task::none()
             }
             Message::ParentFolderChosen(Ok(parents)) => {
                 let Some(sheet) = self.welcome.creating.as_mut() else {
@@ -611,6 +592,27 @@ impl CadStudio {
             }
             welcome::Message::NewSheet(msg) => self.update_new_project_sheet(msg),
         }
+    }
+
+    /// Present the agent-missing sheet, its path field focused as a SwiftUI
+    /// sheet focuses its first field. A sheet already up keeps its state
+    /// and only takes the focus again: one raised at launch, before any
+    /// window drew it, gets its focus when a later send presents it. A new
+    /// sheet's field opens on the persisted custom path (upstream's
+    /// @AppStorage binding, so an untouched Verify cannot clear a stored
+    /// path); `missing` shows the red missing line from the start.
+    fn present_agent_missing(&mut self, missing: bool) -> Task<Action<Message>> {
+        if self.agent_missing.is_none() {
+            let settings = self.settings.load();
+            let kind = settings.agent_kind();
+            self.agent_missing = Some(sheets::AgentMissing {
+                kind,
+                custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
+                last_verified_missing: missing,
+                ..sheets::AgentMissing::default()
+            });
+        }
+        cosmic::widget::text_input::focus(sheets::agent_path_field_id())
     }
 
     /// The new-project command presents the sheet AND makes sure the

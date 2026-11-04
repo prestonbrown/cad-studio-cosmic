@@ -128,6 +128,11 @@ pub fn update_agent_missing(
     Task::none()
 }
 
+/// The agent sheet's path field: focused as the sheet comes up.
+pub fn agent_path_field_id() -> cosmic::iced::widget::Id {
+    cosmic::iced::widget::Id::new("agent-path")
+}
+
 /// AgentMissingSheet (AgentMissingSheet.swift:21-73): warning head, the
 /// instruction paragraph, the engine's install command blocks, the
 /// custom-path field, the missing line, and Terminal / Close / Verify.
@@ -178,6 +183,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                         &sheet.custom_path,
                         typography::CALLOUT,
                     )
+                    .id(agent_path_field_id())
                     .on_input(AgentMessage::CustomPath)
                     // Return runs Verify (upstream's default action)
                     .on_submit(|_| AgentMessage::Verify)
