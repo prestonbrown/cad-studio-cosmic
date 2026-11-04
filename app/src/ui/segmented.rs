@@ -16,7 +16,7 @@ use cosmic::widget::{Row, Space, button, container, text};
 
 use super::surface::{Corner, Shadow as SurfaceShadow, material, text_background};
 use super::tone::{Backdrop, Tone, mix, wash};
-use crate::typography;
+use crate::typography::{self, Advance};
 
 /// Upstream metrics in points, scaled by the toolkit's body ratio.
 const fn pt(points: f32) -> f32 {
@@ -55,11 +55,6 @@ impl Size {
     /// The hairline between two unselected segments.
     const fn divider_height(self) -> f32 {
         self.height() / 2.0
-    }
-
-    /// A label's average advance (5 pt at 11 pt labels).
-    const fn char_width(self) -> f32 {
-        pt(5.0) * self.label() / typography::SMALL_CONTROL
     }
 
     /// A segment's side padding (AppKit pads 6 pt each side of the widest
@@ -109,10 +104,9 @@ const TINTED_FACE: f32 = 0.38;
 pub fn segment_width<S: AsRef<str>>(labels: &[S], size: Size) -> f32 {
     let widest = labels
         .iter()
-        .map(|label| label.as_ref().chars().count())
-        .max()
-        .unwrap_or(0);
-    widest as f32 * size.char_width() + 2.0 * size.side_padding()
+        .map(|label| typography::estimated_width(label.as_ref(), size.label(), Advance::Letters))
+        .fold(0.0, f32::max);
+    widest + 2.0 * size.side_padding()
 }
 
 /// The track under the segments.
@@ -153,13 +147,8 @@ fn face(theme: &cosmic::Theme, look: Look) -> Style {
             shadow: SurfaceShadow::Control.iced(),
             ..Default::default()
         },
-        // the track pressed toward `on`: 178 on 242 in light mode
         Look::Filled | Look::Tinted => Style {
-            background: Some(Background::Color(if look == Look::Tinted {
-                mix(material(theme), Tone::Primary.solid(theme), TINTED_FACE)
-            } else {
-                mix(track(theme, look), Tone::Primary.solid(theme), 0.26)
-            })),
+            background: Some(Background::Color(fill(theme, look))),
             border: Border {
                 radius,
                 ..Default::default()
@@ -169,18 +158,27 @@ fn face(theme: &cosmic::Theme, look: Look) -> Style {
     }
 }
 
-/// A disabled control's selected label on the filled face: nearly lost in
+/// The selected face's fill for the looks that [fill](Look::fills) it.
+fn fill(theme: &cosmic::Theme, look: Look) -> cosmic::iced::Color {
+    match look {
+        Look::Tinted => mix(material(theme), Tone::Primary.solid(theme), TINTED_FACE),
+        // the track pressed toward `on`: 178 on 242 in light mode
+        Look::Filled | Look::Raised => mix(track(theme, look), Tone::Primary.solid(theme), 0.26),
+    }
+}
+
+/// A disabled control's selected label on a filled face: nearly lost in
 /// the face, a touch toward white (upstream, playback-dark.png: 80 on a
 /// 74 face; playback.png: 190 on 178).
-const HELD_LABEL_LIFT: f32 = 0.08;
+const DISABLED_SELECTED_LIFT: f32 = 0.08;
 
-fn held_label(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    let face = match face(theme, Look::Filled).background {
-        Some(Background::Color(color)) => color,
-        _ => track(theme, Look::Filled),
-    };
+fn disabled_selected_label(theme: &cosmic::Theme, look: Look) -> cosmic::iced::widget::text::Style {
     cosmic::iced::widget::text::Style {
-        color: Some(mix(face, cosmic::iced::Color::WHITE, HELD_LABEL_LIFT)),
+        color: Some(mix(
+            fill(theme, look),
+            cosmic::iced::Color::WHITE,
+            DISABLED_SELECTED_LIFT,
+        )),
         ..super::tone::text_style(theme, Tone::OnFill, Backdrop::Material)
     }
 }
@@ -226,8 +224,12 @@ pub fn segmented<M: Clone + 'static>(
             (true, true, look) if look.fills() => Tone::OnFill,
             (true, _, _) => Tone::Primary,
         };
-        let class = if message.is_none() && is_selected && look == Look::Filled {
-            cosmic::theme::Text::Custom(held_label)
+        let class = if message.is_none() && is_selected && look.fills() {
+            cosmic::theme::Text::Custom(if look == Look::Tinted {
+                |theme| disabled_selected_label(theme, Look::Tinted)
+            } else {
+                |theme| disabled_selected_label(theme, Look::Filled)
+            })
         } else {
             tone.text(backdrop)
         };
@@ -317,16 +319,19 @@ mod tests {
         let (card, track) = (gray(material(&light)), gray(filled_track(&light)));
         assert!(track > card, "light track {track} on card {card}");
         for theme in [dark, light] {
-            // a disabled selection's label nearly vanishes into its face
-            let held = held_label(&theme).color.map(gray).unwrap();
-            let face_gray = match face(&theme, Look::Filled).background {
-                Some(Background::Color(c)) => gray(c),
-                other => panic!("{other:?}"),
-            };
-            assert!(
-                (1..=20).contains(&(held - face_gray)),
-                "{held} on {face_gray}"
-            );
+            // a disabled selection's label nearly vanishes into its face,
+            // whichever look fills it
+            for look in [Look::Filled, Look::Tinted] {
+                let label = disabled_selected_label(&theme, look)
+                    .color
+                    .map(gray)
+                    .unwrap();
+                let face_gray = gray(fill(&theme, look));
+                assert!(
+                    (1..=20).contains(&(label - face_gray)),
+                    "{look:?}: {label} on {face_gray}"
+                );
+            }
             let face = match face(&theme, Look::Filled).background {
                 Some(Background::Color(c)) => gray(c),
                 other => panic!("{other:?}"),

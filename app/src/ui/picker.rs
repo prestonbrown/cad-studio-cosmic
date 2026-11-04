@@ -46,11 +46,7 @@ pub fn picker<'a, M: Clone + 'a>(
         .and_then(|index| options.get(index))
         .cloned()
         .unwrap_or_default();
-    let choices: Vec<Choice> = options
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| Choice { index, label })
-        .collect();
+    let choices = Choice::list(options);
     // the list's selection is the current option with an empty label: it
     // equals that option (choices compare by index), so the open menu
     // starts on it highlighted, while the list's own face draws nothing
@@ -86,11 +82,6 @@ pub fn picker<'a, M: Clone + 'a>(
     .into()
 }
 
-/// A label glyph's average advance in ems, for placing the pull-down's
-/// chevron after a label the list is wider than (iced measures no text at
-/// view time; a digit's advance in the interface families is ~0.57 em).
-const ADVANCE: f32 = 0.57;
-
 /// A borderless pull-down (`.menuStyle(.borderlessButton)`): `label` at
 /// `size` followed by a `chevron` px `chevron.down`, opening `items`;
 /// `on_select` gets the chosen item's index. The label is the list's
@@ -108,11 +99,7 @@ pub fn pulldown<'a, M: Clone + 'a>(
     on_select: impl Fn(usize) -> M + 'a,
 ) -> Element<'a, M> {
     let offset = chevron_offset(&items, &label, size);
-    let choices: Vec<Choice> = items
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| Choice { index, label })
-        .collect();
+    let choices = Choice::list(items);
     let list = PickList::new(choices, None::<Choice>, move |chosen: Choice| {
         on_select(chosen.index)
     })
@@ -147,7 +134,9 @@ const PULLDOWN_LEAD: f32 = 4.0;
 fn chevron_offset(items: &[String], label: &str, size: f32) -> Option<f32> {
     let chars = |text: &str| text.chars().count();
     let widest = items.iter().map(|item| chars(item)).max().unwrap_or(0);
-    (widest > chars(label)).then(|| PULLDOWN_LEAD + chars(label) as f32 * size * ADVANCE + 2.0)
+    (widest > chars(label)).then(|| {
+        PULLDOWN_LEAD + typography::estimated_width(label, size, typography::Advance::Digits) + 2.0
+    })
 }
 
 /// One option: its label, shown in the list, and its index, which the
@@ -160,6 +149,15 @@ struct Choice {
 }
 
 impl Choice {
+    /// One choice per label, indexed in order.
+    fn list(labels: Vec<String>) -> Vec<Self> {
+        labels
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| Self { index, label })
+            .collect()
+    }
+
     /// The option at `index` with no label: the list's selection, which
     /// marks that option in the menu and draws nothing in the face.
     fn marker(index: usize) -> Self {
@@ -213,7 +211,7 @@ mod tests {
             "\u{2002}\u{2002}Loop".to_string(),
         ];
         let offset = chevron_offset(&speeds, "1×", 12.0).unwrap();
-        assert!((offset - (PULLDOWN_LEAD + 2.0 * 12.0 * ADVANCE + 2.0)).abs() < 1e-4);
+        assert!((offset - (PULLDOWN_LEAD + 2.0 * 12.0 * 0.57 + 2.0)).abs() < 1e-4);
     }
 
     #[test]

@@ -54,6 +54,32 @@ pub const CAPTION2: f32 = scaled(10.0);
 /// The small control size's label (`.controlSize(.small)`: 11 pt).
 pub const SMALL_CONTROL: f32 = scaled(11.0);
 
+/// An average glyph advance, for estimating a label's width (iced measures
+/// no text at view time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Advance {
+    /// Words in the interface font: upstream's segment labels advance
+    /// 5 pt per 11 pt.
+    Letters,
+    /// Digit-heavy labels (`1/2 · Assembly`, `1.5×`): a digit advances
+    /// ~0.57 em in the interface families.
+    Digits,
+}
+
+impl Advance {
+    const fn em(self) -> f32 {
+        match self {
+            Self::Letters => 5.0 / 11.0,
+            Self::Digits => 0.57,
+        }
+    }
+}
+
+/// `text`'s estimated width at `size`.
+pub fn estimated_width(text: &str, size: f32, advance: Advance) -> f32 {
+    text.chars().count() as f32 * size * advance.em()
+}
+
 /// The interface font at the weight an upstream `.fontWeight(_)` asks for,
 /// resolved against the faces the user's interface family actually carries.
 ///

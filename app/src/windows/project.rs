@@ -1542,12 +1542,10 @@ impl ProjectWindow {
         .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
         Column::with_capacity(2)
             .push(band)
-            .push(
-                container(Space::new().width(Length::Fill).height(1.0))
-                    .width(Length::Fill)
-                    .height(1.0)
-                    .class(hairline_class(HAIRLINE_SCALE, HAIRLINE_SHADE)),
-            )
+            .push(ui::surface::divider_with(
+                ui::surface::Axis::Horizontal,
+                hairline_class(HAIRLINE_SCALE, HAIRLINE_SHADE),
+            ))
             .into()
     }
 
