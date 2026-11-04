@@ -47,7 +47,7 @@ use engine::watch::{ReloadKind, watch_directory};
 /// The fakes read their env at spawn time and parallel #[tokio::test]s
 /// share one process: every setter/clearer of a CAD_FAKE_* or
 /// CAD_TEST_CLAUDE var holds this lock for the whole test (house pattern
-/// — build_pipeline.rs, vertical_slice.rs).
+/// — build_pipeline.rs, prompt_to_model.rs).
 static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -162,7 +162,7 @@ fn collect_reloads(
 
 /// Forward one reload of each kind to the window, as its two relays would
 /// (the viewer pane's watch feeds Message::Viewer, the shell's feeds
-/// Message::OutputReload — vertical_slice.rs's mapping).
+/// Message::OutputReload — prompt_to_model.rs's mapping).
 fn forward_reloads(window: &mut ProjectWindow, kinds: &[ReloadKind]) {
     let mut seen = Vec::new();
     for kind in kinds {

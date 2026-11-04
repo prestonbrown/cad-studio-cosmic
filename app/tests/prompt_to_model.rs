@@ -1,4 +1,4 @@
-//! The vertical slice: one prompt driven end to end through the whole
+//! One prompt driven end to end through the whole
 //! shell — `create_project` scaffolds a real project, the bridge runs a
 //! turn against the fake agent (scenario `slice.jsonl`: thinking, a Write,
 //! a Bash whose `#copy-outputs` directive lands the golden outputs
@@ -75,17 +75,22 @@ async fn recv(messages: &mut UnboundedReceiver<BridgeMessage>, what: &str) -> Br
 }
 
 /// The slice's end state, as far as the assertions and the offscreen render
-/// need it: the project root and the driven window.
+/// need it: the project root and the driven window, the bridge's message
+/// stream (it ends when the driver shuts down), and ENV_LOCK, still held so
+/// the shutdown's registry reap reads the slice's registry.
 struct SliceRun {
     root: PathBuf,
     events: Vec<EngineEvent>,
     window: ProjectWindow,
+    messages: UnboundedReceiver<BridgeMessage>,
+    guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
 /// Drive the whole slice: project → window + bridge → one turn with every
 /// message folded into the window (the app layer's mapping, minus the iced
 /// runtime) → the watcher's kinds collected and forwarded as the window's
-/// two relays would. Holds ENV_LOCK across the whole [env → turn] window.
+/// two relays would. Holds ENV_LOCK from the env setup on; the caller
+/// releases it.
 async fn run_slice() -> SliceRun {
     let guard = ENV_LOCK.lock().await;
 
@@ -218,11 +223,12 @@ async fn run_slice() -> SliceRun {
         let _ = window.update(Message::OutputReload(*kind));
     }
 
-    drop(guard);
     SliceRun {
         root,
         events,
         window,
+        messages,
+        guard,
     }
 }
 
@@ -234,6 +240,8 @@ async fn prompt_to_rendered_model() {
         root,
         events,
         window,
+        mut messages,
+        guard,
     } = run_slice().await;
 
     // ── the turn streamed every row kind ────────────────────────────────
@@ -404,11 +412,21 @@ async fn prompt_to_rendered_model() {
 
     // ── the window assembly: one frame builds in the full shape ────────
     let _ = window.view();
+
+    // ── shutdown: the window owns the bridge, so dropping it is the
+    // driver's shutdown signal; the driver reaps the registry and ends ──
+    drop(window);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while messages.next().await.is_some() {}
+    })
+    .await
+    .expect("the driver shut down once its window was gone");
+    drop(guard);
 }
 
 /// The offscreen render of the slice's final scene — Preston's screenshot.
 /// Thelio-only (GPU surfaceless context; the laptop test policy): run with
-/// `cargo test -p app --test vertical_slice -- --ignored` and read the PNG
+/// `cargo test -p app --test prompt_to_model -- --ignored` and read the PNG
 /// path it prints. Renders the scene the pane actually staged (the same
 /// `ModelScene` the reload path rebuilt) through the viewer's headless
 /// harness — the render_headless.rs pattern.

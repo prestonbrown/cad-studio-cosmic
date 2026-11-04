@@ -5,8 +5,8 @@
 //! free of cosmic/iced types so it is unit-testable without a window; widget
 //! files are thin mapping layers registered here.
 //!
-//! Module map (`app/tests/vertical_slice.rs` drives one prompt through all
-//! of it; `app/tests/m5_slice.rs` adds the python check, slider rebuild,
+//! Module map (`app/tests/prompt_to_model.rs` drives one prompt through all
+//! of it; `app/tests/parameters_and_versions.rs` adds the python check, slider rebuild,
 //! version restore, and compare picker on top;
 //! `app/tests/viewer_tools_model.rs` + `app/tests/parts_overlay_model.rs`
 //! pin the viewer-tool state and the overlay's badge/section text;
