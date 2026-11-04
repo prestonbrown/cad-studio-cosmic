@@ -2,7 +2,7 @@
 # Lays the freedesktop part of a release package into <dest>/usr/share from
 # app/resources/packaging/ and the app rasters: the desktop entry with
 # @BIN@ -> $EXEC (default /usr/bin/cad-studio), the metainfo with the
-# workspace version, and the 128/256/512 hicolor icons. The binary itself is
+# workspace version, the 128/256/512 hicolor icons and the LICENSE. The binary itself is
 # placed by each packager. `just install` renders the same templates.
 #   stage.sh <dest>
 set -eu
@@ -23,6 +23,7 @@ sed -e "s|@CARGO_PKG_VERSION@|$version|" "$root/app/resources/packaging/$app_id.
 install -m 644 "$root/app/resources/app-icon-128.png" "$share/icons/hicolor/128x128/apps/$app_id.png"
 install -m 644 "$root/app/resources/app-icon.png" "$share/icons/hicolor/256x256/apps/$app_id.png"
 install -m 644 "$root/app/resources/app-icon@2x.png" "$share/icons/hicolor/512x512/apps/$app_id.png"
+install -D -m 644 "$root/LICENSE" "$share/licenses/cad-studio-cosmic/LICENSE"
 
 # Debian changelog for cargo-deb (lintian requires one for a non-native
 # package); it sits beside usr/, outside the installed tree.

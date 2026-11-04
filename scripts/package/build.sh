@@ -36,6 +36,7 @@ install -D -m 755 "$bin" "$appdir/usr/bin/cad-studio"
 ln -s usr/bin/cad-studio "$appdir/AppRun"
 cp "$appdir/usr/share/applications/$app_id.desktop" "$appdir/"
 cp "$appdir/usr/share/icons/hicolor/512x512/apps/$app_id.png" "$appdir/"
+cp "$root/LICENSE" "$appdir/LICENSE"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "${APPIMAGETOOL:-appimagetool}" --no-appstream \
     "$appdir" "$dist/CAD_Studio-$version-x86_64.AppImage"
 

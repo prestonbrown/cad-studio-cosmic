@@ -21,15 +21,13 @@ optdepends=('uv: creates the build123d virtual environment'
 provides=('cad-studio')
 conflicts=('cad-studio-cosmic')
 options=('!strip')
-source=("cad-studio-cosmic-$pkgver-x86_64.tar.gz::https://github.com/prestonbrown/cad-studio-cosmic/releases/download/v$pkgver/cad-studio-cosmic-$pkgver-x86_64.tar.gz"
-        "LICENSE-$pkgver::https://raw.githubusercontent.com/prestonbrown/cad-studio-cosmic/v$pkgver/LICENSE")
-sha256sums=('SKIP'
-            'SKIP')
+source=("cad-studio-cosmic-$pkgver-x86_64.tar.gz::https://github.com/prestonbrown/cad-studio-cosmic/releases/download/v$pkgver/cad-studio-cosmic-$pkgver-x86_64.tar.gz")
+sha256sums=('SKIP')
 
 package() {
     cd "$srcdir"
     # usr/bin/cad-studio, the desktop entry (Exec=/usr/bin/cad-studio),
-    # the metainfo and the 128/256/512 hicolor icons.
+    # the metainfo, the 128/256/512 hicolor icons and the LICENSE.
     cp -a usr "$pkgdir/"
-    install -Dm644 "LICENSE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    mv "$pkgdir/usr/share/licenses/cad-studio-cosmic" "$pkgdir/usr/share/licenses/$pkgname"
 }

@@ -72,7 +72,7 @@ quick-xml.workspace = true
 [package.metadata.deb]
 name = "cad-studio-cosmic"
 maintainer = "Preston Brown <pbrown@brown-house.net>"
-copyright = "Preston Brown"
+copyright = "2024 Filippo Finke, 2026 Preston Brown"
 license-file = ["../LICENSE", "0"]
 section = "graphics"
 priority = "optional"

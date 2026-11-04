@@ -375,7 +375,7 @@ version-month-nov = Nov
 version-month-dec = Dec
 
 # About window
-about-copyright = © 2026 Filippo Finke · MIT License
+about-copyright = © 2024 Filippo Finke · © 2026 Preston Brown · MIT License
 
 # Settings store
 settings-unreadable = The settings file cannot be read, so changes are not saved.

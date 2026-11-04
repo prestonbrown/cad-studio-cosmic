@@ -50,6 +50,8 @@ for size in 128 256 512; do
     icon=/usr/share/icons/hicolor/${size}x${size}/apps/$app_id.png
     if [ -f "$icon" ] && [ "$(identify -format '%w' "$icon" 2>/dev/null)" = "$size" ]; then ok "icon ${size}px"; else bad "icon ${size}px"; fi
 done
+has_license() { grep -q 'MIT License' "$1" && grep -q 'Filippo Finke' "$1" && grep -q 'Preston Brown' "$1"; }
+if has_license "/usr/share/doc/$pkg/copyright"; then ok ".deb copyright carries MIT License and both holders"; else bad ".deb copyright lacks MIT License or a holder"; fi
 out=$(env -u DISPLAY -u WAYLAND_DISPLAY /usr/bin/cad-studio --version)
 [ "$out" = "cad-studio $version" ] && ok "--version: $out" || bad "--version printed: $out"
 
@@ -69,6 +71,7 @@ if [ -x "$appimage" ] && (cd "$work" && "$root/$appimage" --appimage-extract >/d
     out=$(env -u DISPLAY -u WAYLAND_DISPLAY "$work/squashfs-root/AppRun" --version)
     [ "$out" = "cad-studio $version" ] && ok "AppImage --version: $out" || bad "AppImage --version printed: $out"
     desktop-file-validate "$work/squashfs-root/$app_id.desktop" && ok "AppImage desktop entry validates" || bad "AppImage desktop entry"
+    has_license "$work/squashfs-root/LICENSE" && ok "AppImage ships LICENSE with both holders" || bad "AppImage LICENSE"
     [ -f "$work/squashfs-root/$app_id.png" ] && ok "AppImage icon embedded" || bad "AppImage icon"
 else
     bad "AppImage missing or does not extract: $appimage"
@@ -78,6 +81,8 @@ rm -rf "$work"
 # --- tarball and PKGBUILD ---
 tarball=dist/$pkg-$version-x86_64.tar.gz
 tar -tzf "$tarball" | grep -qx 'usr/bin/cad-studio' && ok "tarball carries usr/bin/cad-studio" || bad "tarball content"
+tar -xzOf "$tarball" usr/share/licenses/cad-studio-cosmic/LICENSE > "$files"
+has_license "$files" && ok "tarball ships LICENSE with both holders" || bad "tarball LICENSE"
 pkgbuild=packaging/aur/PKGBUILD
 if [ -f "$pkgbuild" ]; then
     bash -n "$pkgbuild" && ok "PKGBUILD parses" || bad "PKGBUILD syntax"
