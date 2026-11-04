@@ -43,7 +43,7 @@ use engine::project::manifest::Manifest;
 
 use crate::typography;
 use crate::ui::tone::mix;
-use crate::ui::{Backdrop, Symbol, Tone, button, icon::icon};
+use crate::ui::{Backdrop, Symbol, Tone, button};
 
 /// The footer and empty state sit on the plain under-page backdrop.
 const BACKDROP: Backdrop = Backdrop::Plain;
@@ -1236,40 +1236,26 @@ impl SchematicPane {
             .current()
             .map(|page| page.title.as_str())
             .unwrap_or_default();
-        let items: Vec<PageItem> = self
+        let items: Vec<String> = self
             .tabs
             .pages
             .iter()
             .enumerate()
-            .map(|(index, page)| PageItem {
-                index,
-                label: fl!("lld-2", page = index + 1, title = page.title.clone()),
-            })
+            .map(|(index, page)| fl!("lld-2", page = index + 1, title = page.title.clone()))
             .collect();
-        const CHEVRON: f32 = 12.0;
-        let list = cosmic::iced::widget::pick_list::PickList::new(
+        let menu = crate::ui::picker::pulldown(
             items,
-            None::<PageItem>,
-            |item: PageItem| Message::SelectPage(item.index),
-        )
-        .placeholder(fl!(
-            "lld-lld",
-            page = index + 1,
-            total = pages,
-            title = title
-        ))
-        .text_size(SMALL_CONTROL_TEXT)
-        // the list reserves one text size for its own (hidden) handle
-        .padding([0.0, CHEVRON + 2.0 - SMALL_CONTROL_TEXT, 0.0, 4.0])
-        .handle(cosmic::iced::widget::pick_list::Handle::None);
-        let menu = cosmic::iced::widget::stack![
-            list,
-            container(icon(Symbol::ChevronDown, CHEVRON, Tone::Primary, BACKDROP))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::End)
-                .align_y(Alignment::Center),
-        ];
+            fl!(
+                "lld-lld",
+                page = index + 1,
+                total = pages,
+                title = title
+            ),
+            SMALL_CONTROL_TEXT,
+            12.0,
+            BACKDROP,
+            Message::SelectPage,
+        );
         let menu = tooltip(
             menu,
             text(fl!("scegli-la-pagina-della-tavola")),
@@ -1299,29 +1285,21 @@ impl SchematicPane {
     }
 }
 
-/// One entry of the page menu: "n. title", selecting page `index`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PageItem {
-    index: usize,
-    label: String,
-}
-
-impl std::fmt::Display for PageItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
-    }
-}
-
 /// The pane's backdrop behind the page (upstream
-/// `.underPageBackgroundColor`): the window base pressed 26 % toward
-/// black — 159 under a 215 base, the gallery's mid gray; near-black in
-/// dark mode.
+/// `.underPageBackgroundColor`). Light: the window base pressed 26 %
+/// toward black, 159 under a 215 base, the gallery's mid gray. Dark: a
+/// gray level with the floating cards, just above the viewport (upstream
+/// reads 40 against a 33 viewport and 37 cards), not a well below it.
 fn under_page(theme: &cosmic::Theme) -> cosmic::iced::Color {
-    mix(
-        cosmic::iced::Color::from(theme.cosmic().background(false).base),
-        cosmic::iced::Color::BLACK,
-        0.26,
-    )
+    if theme.cosmic().is_dark {
+        crate::ui::surface::material(theme)
+    } else {
+        mix(
+            cosmic::iced::Color::from(theme.cosmic().background(false).base),
+            cosmic::iced::Color::BLACK,
+            0.26,
+        )
+    }
 }
 
 /// The files "Open in Preview" hands to the system viewer, from the
@@ -1409,6 +1387,17 @@ mod tests {
     use super::*;
     use cosmic::iced::futures::FutureExt;
     use std::io::Cursor;
+
+    /// The backdrop behind the page: the light gallery's mid gray, and in
+    /// dark mode a gray above the viewport (sRGB 33), not below it.
+    #[test]
+    fn under_page_sits_above_the_dark_viewport() {
+        let gray = |c: cosmic::iced::Color| (c.g * 255.0).round() as i32;
+        let light = gray(under_page(&cosmic::Theme::light()));
+        assert!((light - 159).abs() <= 2, "light under-page {light}");
+        let dark = gray(under_page(&cosmic::Theme::dark()));
+        assert!((34..=44).contains(&dark), "dark under-page {dark}");
+    }
 
     /// A fresh output folder holding `files` (empty contents), and the
     /// two drawing pages living in it.

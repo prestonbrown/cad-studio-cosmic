@@ -12,12 +12,13 @@ use super::tone::{Backdrop, Tone, mix};
 
 /// The small macOS slider: a 4 px rounded rail (accent fill, faint `on`
 /// remainder) and a 16 px round knob — white with a hairline ring in
-/// light mode, a light neutral in dark mode.
+/// light mode, a mid neutral in dark mode (upstream's dark knob reads 146
+/// on a 38 card, project-model-dark.png).
 pub fn small_slider_class() -> cosmic::theme::iced::Slider {
     let style = Rc::new(|theme: &cosmic::Theme| {
         let on = Tone::Primary.solid(theme);
         let knob = if theme.cosmic().is_dark {
-            mix(on, Color::BLACK, 0.15)
+            mix(on, Color::BLACK, DARK_KNOB_SHADE)
         } else {
             Color::WHITE
         };
@@ -49,6 +50,9 @@ pub fn small_slider_class() -> cosmic::theme::iced::Slider {
         dragging: style,
     }
 }
+
+/// The dark knob: the `on` color pressed this far toward black.
+const DARK_KNOB_SHADE: f32 = 0.37;
 
 /// The small slider's knob diameter (and row height).
 pub const KNOB: f32 = 16.0;

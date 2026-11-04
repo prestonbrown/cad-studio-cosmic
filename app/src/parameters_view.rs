@@ -66,6 +66,17 @@ const ROW_SPACING: f32 = 10.0;
 const POPUP_BADGE: f32 = 13.0;
 const POPUP_GAP: f32 = 7.0;
 const POPUP_TEXT: f32 = typography::SMALL_CONTROL;
+/// The pop-up button's bezel (shots/upstream/project-model(-dark).png):
+/// 16 px tall, the label 6 px in from its leading edge, the badge 1 px
+/// from its trailing one.
+const POPUP_HEIGHT: f32 = 16.0;
+const POPUP_LEAD: f32 = 6.0;
+const POPUP_TRAIL: f32 = 1.0;
+/// The bezel's fill: the card pulled toward the text background in light
+/// mode (upstream 229 on a 225 card) and toward `on` in dark mode (61 on
+/// 38).
+const POPUP_LIGHT_LIFT: f32 = 0.16;
+const POPUP_DARK_LIFT: f32 = 0.12;
 
 // ─── messages ──────────────────────────────────────────────────────────────
 
@@ -436,6 +447,11 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
             .align_x(Alignment::End)
             .align_y(Alignment::Center),
     ];
+    let popup = container(popup)
+        .height(POPUP_HEIGHT)
+        .padding([0.0, POPUP_TRAIL, 0.0, POPUP_LEAD])
+        .align_y(Alignment::Center)
+        .class(cosmic::theme::Container::custom(popup_bezel));
     Row::new()
         .spacing(0)
         .align_y(Alignment::Center)
@@ -448,6 +464,26 @@ fn compare_footer(ctx: &OverlayContext<'_>) -> Element<'static, Message> {
         .push(popup)
         .padding([8.0, 12.0, bottom, 12.0])
         .into()
+}
+
+/// The pop-up button's bezel: a faint raised face on the card with the
+/// control shadow under it.
+fn popup_bezel(theme: &cosmic::Theme) -> cosmic::iced::widget::container::Style {
+    let card = surface::material(theme);
+    let fill = if theme.cosmic().is_dark {
+        crate::ui::tone::mix(card, Tone::Primary.solid(theme), POPUP_DARK_LIFT)
+    } else {
+        crate::ui::tone::mix(card, surface::text_background(theme), POPUP_LIGHT_LIFT)
+    };
+    cosmic::iced::widget::container::Style {
+        background: Some(fill.into()),
+        border: cosmic::iced::Border {
+            radius: Corner::Xs.radius(theme),
+            ..Default::default()
+        },
+        shadow: Shadow::Control.iced(),
+        ..Default::default()
+    }
 }
 
 /// The caption under the footer while comparing
@@ -515,4 +551,28 @@ fn rich_text_element(span: Span<'_, String>) -> Element<'_, Message> {
         .font(cosmic::font::default())
         .wrapping(Wrapping::Word)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compare pop-up's bezel stands just off the card: about 23
+    /// levels up in dark mode (61 on 38), a few toward the text
+    /// background in light mode (229 on 225).
+    #[test]
+    fn popup_bezel_lifts_off_the_card() {
+        let gray = |c: cosmic::iced::Color| (c.g * 255.0).round() as i32;
+        for (theme, low, high) in [
+            (cosmic::Theme::dark(), 18, 28),
+            (cosmic::Theme::light(), 3, 12),
+        ] {
+            let card = gray(surface::material(&theme));
+            let bezel = match popup_bezel(&theme).background {
+                Some(cosmic::iced::Background::Color(c)) => gray(c),
+                other => panic!("{other:?}"),
+            };
+            assert!((low..=high).contains(&(bezel - card)), "{bezel} on {card}");
+        }
+    }
 }

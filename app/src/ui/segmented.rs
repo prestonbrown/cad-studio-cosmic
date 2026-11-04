@@ -105,10 +105,19 @@ pub fn segment_width<S: AsRef<str>>(labels: &[S], size: Size) -> f32 {
 fn track(theme: &cosmic::Theme, look: Look) -> cosmic::iced::Color {
     match look {
         Look::Raised => wash(theme, 0.05),
-        // an inset on the material, pulled toward the text background
-        // (lighter than the card in light mode, recessed in dark mode)
-        Look::Filled => mix(material(theme), text_background(theme), 0.3),
+        Look::Filled => filled_track(theme),
     }
+}
+
+/// The filled look's track: an inset on the material, pulled toward the
+/// palette's far neutral (`neutral_0`: white in a light theme, black in a
+/// dark one). Upstream's track is a light well in light mode (242 on a
+/// 230 card) but a deep one in dark mode (13 on a 37 card), so the dark
+/// pull is the stronger.
+fn filled_track(theme: &cosmic::Theme) -> cosmic::iced::Color {
+    let cosmic = theme.cosmic();
+    let pull = if cosmic.is_dark { 0.65 } else { 0.3 };
+    mix(material(theme), cosmic.palette.neutral_0.into(), pull)
 }
 
 /// The selected segment's face.
@@ -256,6 +265,29 @@ mod tests {
         assert!((Size::Small.divider_height() - 9.0 * scale).abs() < 1e-4);
         assert!((Size::Regular.height() - 22.0 * scale).abs() < 1e-4);
         assert_eq!(Size::Regular.label(), typography::BODY);
+    }
+
+    /// The filled track is a light well on the card in a light theme and a
+    /// deep one in a dark theme (upstream: 242 on 230, 13 on 37), and the
+    /// selected face stands off the track in both.
+    #[test]
+    fn filled_track_recesses_deeper_in_dark() {
+        let gray = |c: cosmic::iced::Color| (c.g * 255.0).round() as i32;
+        let dark = cosmic::Theme::dark();
+        let (card, track) = (gray(material(&dark)), gray(filled_track(&dark)));
+        assert!(card - track >= 20, "dark track {track} on card {card}");
+        assert!(track <= 16, "dark track {track}");
+        let light = cosmic::Theme::light();
+        let (card, track) = (gray(material(&light)), gray(filled_track(&light)));
+        assert!(track > card, "light track {track} on card {card}");
+        for theme in [dark, light] {
+            let face = match face(&theme, Look::Filled).background {
+                Some(Background::Color(c)) => gray(c),
+                other => panic!("{other:?}"),
+            };
+            let track = gray(filled_track(&theme));
+            assert!((face - track).abs() >= 40, "face {face} on track {track}");
+        }
     }
 
     #[test]
