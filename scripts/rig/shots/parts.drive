@@ -1,0 +1,10 @@
+setup Continue
+sleep 1200
+recent /home/pbrown/fixtures-cap/box-fixture
+sleep 5000
+viewer Parameters
+sleep 1200
+# a python check that times out under rig load presents its sheet
+python Close
+sleep 300
+noop

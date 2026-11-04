@@ -97,6 +97,10 @@ pub enum Message {
     /// command) — the toolbar clock button's own message, so the frame
     /// pass can capture the card presented.
     DriveVersionCard,
+    /// The drive harness's viewer toggles (CAD_STUDIO_DRIVE's `viewer`
+    /// command): a viewer-pane message delivered to the project window, as
+    /// the toolbar button or overlay chevron that sends it would.
+    DriveViewer(crate::viewer_pane::Message),
     /// The agent-missing sheet (presented over the focused window).
     AgentSheet(sheets::AgentMessage),
     /// The first-run setup sheet.
@@ -288,6 +292,11 @@ impl Application for CadStudio {
             Message::DriveVersionCard => self
                 .project_window()
                 .map(|id| Task::done(Message::Project(id, project::Message::ToggleVersionCard)))
+                .unwrap_or_else(Task::none)
+                .map(Action::App),
+            Message::DriveViewer(msg) => self
+                .project_window()
+                .map(|id| Task::done(Message::Project(id, project::Message::Viewer(msg))))
                 .unwrap_or_else(Task::none)
                 .map(Action::App),
             Message::AgentSheet(msg) => self.update_agent_sheet(msg),

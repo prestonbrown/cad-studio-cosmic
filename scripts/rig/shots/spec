@@ -18,3 +18,11 @@ set-Agente-dark 900x900 dark 5 set-Agente.drive nosize,win=Settings|General|Agen
 set-Python-dark 900x900 dark 5 set-Python.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 set-Avanzate-dark 900x900 dark 5 set-Avanzate.drive nosize,win=Settings|General|Agent|Python|Advanced|Generale|Agente|Avanzate
 about-dark 900x900 dark 5 about.drive nosize,win=About
+parts-light 1320x840 light 10 parts.drive
+section-light 1320x840 light 10 section.drive
+playback-light 1320x840 light 12 playback.drive
+partscol-light 1320x840 light 10 partscol.drive
+parts-dark 1320x840 dark 10 parts.drive
+section-dark 1320x840 dark 10 section.drive
+playback-dark 1320x840 dark 12 playback.drive
+partscol-dark 1320x840 dark 10 partscol.drive

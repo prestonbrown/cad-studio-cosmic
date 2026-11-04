@@ -35,5 +35,12 @@ set-Agente-dark settings-agent-dark.png
 set-Python-dark settings-python-dark.png
 set-Avanzate-dark settings-advanced-dark.png
 about-dark about-dark.png
+parts-light parts.png
+section-light section.png
+playback-light playback.png
+partscol-light parts-collapsed.png
+parts-dark parts-dark.png
+section-dark section-dark.png
+playback-dark playback-dark.png
 EOF
 rm -f "$out/.up.png"
