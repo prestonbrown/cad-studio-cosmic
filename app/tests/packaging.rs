@@ -158,18 +158,28 @@ fn metainfo_parses_and_carries_the_app_identity() {
     let mut reader = Reader::from_str(&xml);
     reader.config_mut().trim_text(true);
     let mut meta = Metainfo::default();
-    let mut element = String::new();
+    // Open elements, outermost first. Text under <developer> is keyed
+    // "developer/<name>" so it cannot shadow the component's own fields.
+    let mut open: Vec<String> = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                element = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                open.push(String::from_utf8_lossy(e.local_name().as_ref()).into_owned());
                 meta.note(&e);
+            }
+            Ok(Event::End(_)) => {
+                open.pop();
             }
             // <release …/> arrives self-closing
             Ok(Event::Empty(e)) => meta.note(&e),
             Ok(Event::Text(t)) => {
                 let text = t.xml10_content().expect("metainfo text").into_owned();
-                meta.texts.insert(element.clone(), text);
+                let element = open.last().cloned().unwrap_or_default();
+                let key = match open.len().checked_sub(2).map(|i| open[i].as_str()) {
+                    Some("developer") => format!("developer/{element}"),
+                    _ => element,
+                };
+                meta.texts.insert(key, text);
             }
             Ok(Event::Eof) => break,
             Err(e) => panic!("metainfo is not well-formed XML: {e}"),
@@ -181,6 +191,11 @@ fn metainfo_parses_and_carries_the_app_identity() {
     assert_eq!(
         meta.texts.get("name").map(String::as_str),
         Some("CAD Studio")
+    );
+    assert_eq!(
+        meta.texts.get("developer/name").map(String::as_str),
+        Some("Preston Brown"),
+        "the metainfo names its developer"
     );
     assert!(
         meta.texts.get("summary").is_some_and(|s| !s.is_empty()),
