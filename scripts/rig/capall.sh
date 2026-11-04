@@ -11,6 +11,7 @@
 #     fresh     start without first-run-complete (the setup sheet shows)
 #     nosize    keep the app's own window sizes (default: every window fills the screen)
 #     win=Text  capture only the window whose title contains Text (default: the screen)
+#     norecents start with an empty recents list (overrides RECENTS)
 # RECENTS (env, optional): a file copied in as each shot's recents list, so
 # welcome captures show a fixed set. MAXJOBS (env, default 8): shots in flight;
 # software rendering makes first paint slow when too many start at once.
@@ -35,7 +36,10 @@ while read -r shot geom mode wait drive opts; do
     mkdir -p "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1"
     [ "$mode" = dark ] && echo true > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark" \
                        || echo false > "$cfg/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark"
-    [ -n "${RECENTS:-}" ] && cp "$RECENTS" "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents"
+    case "$opts" in
+      *,norecents,*) echo '[]' > "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents" ;;
+      *) [ -n "${RECENTS:-}" ] && cp "$RECENTS" "$cfg/cosmic/net.brownhouse.CadStudio/v1/recents" ;;
+    esac
     case "$opts" in *,fresh,*) rm -f "$cfg/cosmic/net.brownhouse.CadStudio/v1/first-run-complete" ;; esac
     Xvfb $disp -screen 0 ${geom}x24 -nolisten tcp >/dev/null 2>&1 & xp=$!
     sleep 0.5

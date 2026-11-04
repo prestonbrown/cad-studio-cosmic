@@ -1,5 +1,7 @@
 setup Continue
 sleep 600
 welcome NewProject
-sleep 800
+sleep 400
+sheet Name Staffa a L
+sleep 400
 noop
