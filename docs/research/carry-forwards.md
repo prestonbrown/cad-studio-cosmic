@@ -701,3 +701,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   `name_validation_wires_the_engine_rules` (welcome.rs:506) and the valid
   path by `create_failure_lands_in_the_alert`, and `Advance` with an empty or invalid name is pinned by
   `windows::welcome::tests::an_invalid_name_does_not_advance_the_new_project_sheet`.
+- About window size: 284x306 against upstream's 284x270 (shots/upstream/about.png).
+  The copyright block is three lines (`© 2024 Filippo Finke`, `© 2026 Preston Brown`,
+  `MIT License`) naming both LICENSE holders; the one-line form is about 320 px wide and
+  clips in the 284 px window. `ABOUT_HEIGHT` in app/src/windows/settings.rs carries the
+  extra 36 px. Pinned by `license_holders.rs`.

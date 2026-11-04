@@ -49,6 +49,7 @@ uninstall:
     rm -f $HOME/.local/bin/cad-studio \
         $HOME/.local/share/applications/{{app-id}}.desktop \
         $HOME/.local/share/metainfo/{{app-id}}.metainfo.xml \
+        $HOME/.local/share/licenses/cad-studio-cosmic/LICENSE \
         $HOME/.local/share/icons/hicolor/128x128/apps/{{app-id}}.png \
         $HOME/.local/share/icons/hicolor/256x256/apps/{{app-id}}.png \
         $HOME/.local/share/icons/hicolor/512x512/apps/{{app-id}}.png
