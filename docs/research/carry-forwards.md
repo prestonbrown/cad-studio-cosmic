@@ -365,7 +365,7 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   52 values carry % placeholders needing fluent placeable conversion; 2 values
   per file carry literal \n; esc()'s `\"` branch would emit literal backslash
   if the xcstrings is ever re-vendored (fluent has no backslash escapes).
-- Install `just` on any machine expected to run recipes (present on thelio).
+- Install `just` on any machine expected to run recipes (present on thelio). **Owner: M9 Task 7.**
 
 M8 convergence wave 2 (2026-11-02) — accepted divergences. Parity here is
 structure, layout, proportions, icons and semantic colors; the user's COSMIC
@@ -473,7 +473,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
     scrub slider by ~25 px. **Owner: M9 Task 5** (✓ marks).
   - The lid's specular falloff is missing. In dark playback the ghost's
     side faces read 10-19 low in red, because the opaque side shading is
-    darker. (No M9 owner; cosmetic, awaiting a ruling.)
+    darker. ACCEPTED (M9 Ruling 4; Preston 2026-11-04: remaining visual
+    differences stay).
   - A focused sheet field's ring sits inside the field; libcosmic's outside
     ring leaves a 1 px gap.
   - The agent-missing sheet lists only the npm install line (`brew --cask`
@@ -518,9 +519,16 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   site folds the bridge activity. Two follow-ups: the status-line naming
   is an upstream ADDITION (upstream refuses sheet-only,
   Project.swift:192-196 — recorded divergence), and a FAILED venv check
-  has no retry (owner: M8 settings/Python tab or wave 2). The
-  synchronous busy-rise half (Send arm sets no local activity where
-  upstream's send() does, Project.swift:192-208) remains M8 plan Task 0.
+  has no retry. The Python tab's Verifica re-runs the check
+  (app/src/windows/settings.rs:779-780 `Message::PythonCheck`, disabled
+  only while installing; handled at app/src/app.rs:1083-1086). OPEN, no
+  test: settings.rs:1009 only asserts the message persists nothing, and no
+  test drives the re-run after a failed check. **Owner: M9 Task 4** (pin
+  it). ~~The synchronous busy-rise half (Send arm set no local activity where
+  upstream's send() does, Project.swift:192-208).~~ Struck: the Send arm folds
+  the bridge's activity in the same update, pinned by
+  `windows::project::tests::successful_send_flips_busy_in_the_same_update`
+  (project.rs:2582).
 - Version-history chrome divergence (2026-10-28, 16ea45e): upstream's
   VersionMenu is a SwiftUI `Menu` dropdown; the port renders a popover
   card (the issue-list pattern) because cosmic's menu overlay corrupts
@@ -609,7 +617,8 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
 - Welcome window height diverges from upstream's 460 (WelcomeWindow.swift)
   to 560: macOS sheets may exceed their window; popovers/content cannot,
   and 460 clipped the setup card. Documented at WINDOW_HEIGHT.
-- Desktop entry + icon (`net.brownhouse.CadStudio`) installed USER-LOCAL
+- **Owner: M9 Task 7** (install-check.sh validates the installed entry, icons
+  and the `just install`/`uninstall` recipes). Desktop entry + icon (`net.brownhouse.CadStudio`) installed USER-LOCAL
   on thelio only (~/.local/share/{applications,icons}) for the dock;
   needs a real packaging story (and the APP_ID sign-off below) in M8.
 - ~~M4: watcher debounce can split a burst into two emissions under extreme backend starvation (observed once under 40G fio, T1 forensics) — coalescing or idempotent reload needed in the app wiring; the watch test's 300ms negative window deliberately avoids gating on it.~~ (landed M4 — T5's idempotent re-parse-and-replace reload, split-burst test in `viewer_pane`)
@@ -642,7 +651,7 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   (upstream reads at render) — **Owner: M9 Task 4**; (c) an open settings window
   doesn't re-seed when the agent sheet writes agent_path underneath it (stale
   display, no lost write) — **Owner: M9 Task 4**. Cosmetic notes: mirror-fold
-  on a failed persist save (no M9 owner); Python tab interpreter not
+  on a failed persist save (**Owner: M9 Task 4**); Python tab interpreter not
   tilde-abbreviated and About unreachable from welcome-only — **Owner: M9
   Task 4**.
 
