@@ -52,7 +52,9 @@ impl SettingsStore {
         match settings.save(&self.path) {
             Ok(()) => Ok(()),
             Err(why) => {
-                let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
+                let now = OffsetDateTime::now_utc()
+                    .format(&Rfc3339)
+                    .unwrap_or_default();
                 eprintln!(
                     "{now} cad-studio: settings save to {} failed: {why}",
                     self.path.display()

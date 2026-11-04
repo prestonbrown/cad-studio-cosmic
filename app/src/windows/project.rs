@@ -927,19 +927,18 @@ impl ProjectWindow {
             // Wayland (data-control); where a backend answers nothing the
             // None arm IS the fall-through
             chat_view::Message::Paste => {
-                return cosmic::iced::clipboard::read_data::<ClipboardContent>()
-                    .then(|content| match content {
-                        Some(content) => Task::done(Message::Chat(
-                            chat_view::Message::AttachContent(content),
-                        )),
+                return cosmic::iced::clipboard::read_data::<ClipboardContent>().then(|content| {
+                    match content {
+                        Some(content) => {
+                            Task::done(Message::Chat(chat_view::Message::AttachContent(content)))
+                        }
                         None => cosmic::iced::clipboard::read().map(|text| {
-                            Message::Chat(chat_view::Message::Draft(
-                                text_editor::Action::Edit(text_editor::Edit::Paste(
-                                    Arc::new(text.unwrap_or_default()),
-                                )),
-                            ))
+                            Message::Chat(chat_view::Message::Draft(text_editor::Action::Edit(
+                                text_editor::Edit::Paste(Arc::new(text.unwrap_or_default())),
+                            )))
                         }),
-                    });
+                    }
+                });
             }
             // pasted or dropped content becomes draft attachments — raw
             // image bytes via upstream's savedImage temp file
@@ -2476,7 +2475,8 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         // the bridge opens unverified: the app-level check has not landed
         assert!(!window.bridge.python_ready());
         assert!(!window.is_busy());
@@ -2658,7 +2658,8 @@ mod tests {
             r#"{"parameters": {"wall": 3}}"#,
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         // 7.21: the overlay opens populated from the manifest
         assert_eq!(
             window.viewer.parameters.sliders.len(),
@@ -2784,7 +2785,8 @@ mod tests {
         metadata.current_version = Some(2);
         store::save_metadata(&root, &metadata).unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         window.bridge.mark_python_ready_for_test();
         assert_eq!(window.chat.versions, vec![1, 2], "mirrored at open");
         assert_eq!(window.chat.current_version, Some(2));
@@ -2842,7 +2844,8 @@ mod tests {
             root.file_name().unwrap().to_str().unwrap(),
         )
         .unwrap();
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         window.bridge.mark_python_ready_for_test();
 
         let model_bare = describe(&window.model_entries());
@@ -2991,7 +2994,8 @@ mod tests {
         metadata.current_version = Some(1);
         store::save_metadata(&root, &metadata).unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
 
         // the driver's second record + the engine's mid-turn session write,
         // landing straight on disk BEHIND the window's back: v2 current, a
@@ -3079,7 +3083,8 @@ mod tests {
         )
         .unwrap();
 
-        let (mut window, _bridge_task) = ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
+        let (mut window, _bridge_task) =
+            ProjectWindow::new(root.clone(), &SettingsStore::in_temp_dir());
         assert!(!window.viewer.comparing);
 
         let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Parameters(

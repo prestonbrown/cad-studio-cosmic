@@ -332,10 +332,7 @@ impl Application for CadStudio {
                     let kind = settings.agent_kind();
                     self.agent_missing = Some(sheets::AgentMissing {
                         kind,
-                        custom_path: settings
-                            .agent_path(kind)
-                            .unwrap_or_default()
-                            .to_string(),
+                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
                         ..sheets::AgentMissing::default()
                     });
                 }
@@ -361,10 +358,7 @@ impl Application for CadStudio {
                         // the field opens on the persisted custom path
                         // (upstream's @AppStorage binding), so an untouched
                         // Verify cannot clear a stored path
-                        custom_path: settings
-                            .agent_path(kind)
-                            .unwrap_or_default()
-                            .to_string(),
+                        custom_path: settings.agent_path(kind).unwrap_or_default().to_string(),
                         last_verified_missing: true,
                         ..sheets::AgentMissing::default()
                     });
@@ -781,7 +775,9 @@ impl CadStudio {
                 // persist the custom path first — locate consults it
                 let mut settings = self.settings.load();
                 sheet.stage_custom_path(&mut settings);
-                let _ = self.settings.update(|stored| sheet.stage_custom_path(stored));
+                let _ = self
+                    .settings
+                    .update(|stored| sheet.stage_custom_path(stored));
                 sheet.checking = true;
                 let engine = settings.agent_kind();
                 let future = locate_agent(engine, settings.agent_path(engine).map(str::to_string));
@@ -2164,8 +2160,12 @@ mod shell_behavior {
         };
         let over = cosmic::iced::Point::new(1300.0, 700.0);
         let size = Size::new(1320.0, 787.0);
-        let _ = f.app.update_project(id, project::Message::GridResized(size));
-        let _ = f.app.update_project(id, project::Message::GripPressed(PaneKind::Chat));
+        let _ = f
+            .app
+            .update_project(id, project::Message::GridResized(size));
+        let _ = f
+            .app
+            .update_project(id, project::Message::GripPressed(PaneKind::Chat));
 
         let moved = |window| project::Message::PaneDragMoved(window, over);
         let _ = f.app.update_project(id, moved(other));
@@ -2174,7 +2174,9 @@ mod shell_behavior {
         let _ = f.app.update_project(id, moved(id));
         let own = "the window's own cursor drives the drag";
         assert!(drag(&f.app).is_some(), "{own}");
-        let _ = f.app.update_project(id, project::Message::PaneDragEnded(other));
+        let _ = f
+            .app
+            .update_project(id, project::Message::PaneDragEnded(other));
         let foreign = "another window's release drops nothing";
         assert!(drag(&f.app).is_some(), "{foreign}");
     }

@@ -211,7 +211,11 @@ mod tests {
             Activity::Working("Claude Code is working…".into())
         );
         assert_eq!(
-            next(Signal::ToolOpened("Writing model.py"), false, AgentKind::Claude),
+            next(
+                Signal::ToolOpened("Writing model.py"),
+                false,
+                AgentKind::Claude
+            ),
             Activity::Working("Claude Code is working… · Writing model.py".into())
         );
         assert_eq!(
@@ -261,7 +265,11 @@ mod tests {
             Activity::Failed("Claude Code error".into())
         );
         assert_eq!(
-            next(Signal::TurnFinished(&TurnOutcome::Cancelled), true, AgentKind::Claude),
+            next(
+                Signal::TurnFinished(&TurnOutcome::Cancelled),
+                true,
+                AgentKind::Claude
+            ),
             Activity::Failed("Stopped".into())
         );
         assert_eq!(
@@ -360,7 +368,13 @@ mod tests {
     #[test]
     fn motion_issues_render_both_upstream_branches() {
         let _lang = crate::localize::pin_en();
-        let issues = crate::activity::issues(None, &[], &[], Some("animation.json is not valid: expected a comma"), 0);
+        let issues = crate::activity::issues(
+            None,
+            &[],
+            &[],
+            Some("animation.json is not valid: expected a comma"),
+            0,
+        );
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, IssueKind::Warning);
         assert_eq!(
@@ -404,7 +418,9 @@ mod tests {
         assert!(all[4].message.contains("not valid"), "motion error follows");
         assert!(all[5].message.contains("3 frames"), "collision count last");
         assert!(
-            all[1..].iter().all(|issue| issue.kind == IssueKind::Warning),
+            all[1..]
+                .iter()
+                .all(|issue| issue.kind == IssueKind::Warning),
             "everything but the build error is a warning"
         );
     }

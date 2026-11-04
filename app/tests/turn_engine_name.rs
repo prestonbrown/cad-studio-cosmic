@@ -34,7 +34,10 @@ async fn a_mid_turn_picker_flip_does_not_rename_the_running_turn() {
     // SAFETY: all setters and readers of the CAD_* variables hold ENV_LOCK.
     unsafe {
         std::env::set_var("CAD_TEST_CLAUDE", fixture_fake("fake_claude.py"));
-        std::env::set_var("CAD_FAKE_SCENARIO", fixture_fake("scenarios/tool-use.jsonl"));
+        std::env::set_var(
+            "CAD_FAKE_SCENARIO",
+            fixture_fake("scenarios/tool-use.jsonl"),
+        );
         std::env::set_var("CAD_STUDIO_RUNNING_PROCESSES", root.join("registry"));
         std::env::set_var("CAD_FAKE_ARGV_OUT", root.join("argv-dump.jsonl"));
         std::env::remove_var("CAD_FAKE_STDERR");
@@ -83,7 +86,8 @@ async fn a_mid_turn_picker_flip_does_not_rename_the_running_turn() {
         "every working line names the turn's engine: {seen:?}"
     );
     assert!(
-        seen.iter().all(|activity| !activity.text().contains("Codex")),
+        seen.iter()
+            .all(|activity| !activity.text().contains("Codex")),
         "nothing names the flipped-to engine: {seen:?}"
     );
 

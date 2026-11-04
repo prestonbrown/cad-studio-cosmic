@@ -9,8 +9,8 @@
 //!   DYN_MENU_LEAVES=static → never grows (the control)
 //! Run under a display (Xvfb :99 works); panic or survival prints to stderr.
 use cosmic::app::{self, Core, Settings};
-use cosmic::iced::Task;
 use cosmic::iced::Length;
+use cosmic::iced::Task;
 use cosmic::widget::{button, container, menu, text};
 use cosmic::{Action, Element};
 
@@ -86,7 +86,14 @@ impl app::Application for Demo {
                 move |()| Message::Grow,
             )
         };
-        (Self { core, items: 2, leaves }, first.map(Action::App))
+        (
+            Self {
+                core,
+                items: 2,
+                leaves,
+            },
+            first.map(Action::App),
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Action<Message>> {
@@ -116,8 +123,13 @@ impl app::Application for Demo {
                     // Mutate: every EXISTING item's subtitle changes each
                     // rebuild (the version menu's live per-frame time-ago)
                     let churn = match self.leaves {
-                        Leaves::Mutate => format!("· {} ms ago", std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis()),
+                        Leaves::Mutate => format!(
+                            "· {} ms ago",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .subsec_millis()
+                        ),
                         _ => "· just now · Jan 1, 2027 at 1:00 PM".to_string(),
                     };
                     let body = cosmic::widget::Column::new()

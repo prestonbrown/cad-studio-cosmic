@@ -169,7 +169,10 @@ mod tests {
         );
         // empty and non-utf8 payloads read as no files
         assert!(parse_uri_list(b"").is_empty());
-        assert!(parse_uri_list(b"\xff\xfe").is_empty(), "lossy, still no urls");
+        assert!(
+            parse_uri_list(b"\xff\xfe").is_empty(),
+            "lossy, still no urls"
+        );
     }
 
     /// A stray `%` never fails the decode — it passes through verbatim.

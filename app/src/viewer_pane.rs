@@ -453,12 +453,7 @@ impl ViewerPane {
     /// (and no model) — the pane still works. Settings persist through the
     /// global settings file.
     pub fn new(project_root: &Path, unit: MeasurementUnit, printer_model: Option<String>) -> Self {
-        Self::new_with_settings(
-            project_root,
-            unit,
-            printer_model,
-            SettingsStore::global(),
-        )
+        Self::new_with_settings(project_root, unit, printer_model, SettingsStore::global())
     }
 
     /// [`ViewerPane::new`] over an explicit settings store — the pane's

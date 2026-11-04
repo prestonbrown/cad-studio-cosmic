@@ -371,13 +371,8 @@ impl Bridge {
             session = session.with_settings_file(settings_file);
         }
         tokio::spawn(
-            Drive::new(
-                root.clone(),
-                cmd_rx,
-                msg_tx.clone(),
-                Arc::clone(&pipeline),
-            )
-            .run(session.clone()),
+            Drive::new(root.clone(), cmd_rx, msg_tx.clone(), Arc::clone(&pipeline))
+                .run(session.clone()),
         );
         (
             Self {
@@ -2017,7 +2012,10 @@ mod tests {
         let mut after = None;
         run_until(&mut messages, |m| match m {
             Message::QueueChanged { queue, paused } if queue.len() != 2 || !paused => {
-                after = Some((queue.iter().map(|item| item.id).collect::<Vec<_>>(), *paused));
+                after = Some((
+                    queue.iter().map(|item| item.id).collect::<Vec<_>>(),
+                    *paused,
+                ));
                 true
             }
             _ => false,

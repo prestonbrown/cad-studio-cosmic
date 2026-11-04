@@ -299,10 +299,7 @@ mod tests {
     #[test]
     fn versioncard_command_toggles_the_card() {
         let steps = parse("versioncard\n").unwrap();
-        assert!(matches!(
-            steps[0],
-            Step::Msg(Message::DriveVersionCard)
-        ));
+        assert!(matches!(steps[0], Step::Msg(Message::DriveVersionCard)));
     }
 
     /// The arms the smoke-flow test executes but never asserts, plus

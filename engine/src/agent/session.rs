@@ -677,7 +677,6 @@ async fn run_attempt(ctx: &mut TurnCtx, resume_sid: Option<&str>) -> Attempt {
     }
 }
 
-
 /// Upstream's classification text: the result line's text joined with the
 /// process's whole stdout and stderr (AgentSession.swift:307).
 fn combined_text(attempt: &Attempt) -> String {
