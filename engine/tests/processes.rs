@@ -445,7 +445,10 @@ async fn terminate_all_spares_another_instances_children() {
     register_at(&registry, theirs);
 
     let killed = engine::processes::terminate_all_at(&registry);
-    assert!(killed.is_empty(), "another process's child is not signalled");
+    assert!(
+        killed.is_empty(),
+        "another process's child is not signalled"
+    );
     assert!(alive(theirs));
     assert_eq!(
         std::fs::read_to_string(&registry)
@@ -462,3 +465,171 @@ async fn terminate_all_spares_another_instances_children() {
 /// SIGTERM's signal number without a libc dependency (the tests otherwise
 /// avoid one, matching the engine's `/bin/kill` approach).
 const TERM_SIG: i32 = 15;
+
+/// `ps -o lstart=` for a pid: the start time a registry line carries.
+fn lstart_of(pid: u32) -> String {
+    let out = Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A `sleep` parented by its own `sh` (not this process): `(owner, sleep)`.
+fn foreign_child() -> (Child, u32) {
+    let mut owner = Command::new("/bin/sh")
+        .args(["-c", "sleep 5 & echo $!; wait"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(owner.stdout.as_mut().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    let pid = first.trim().parse().unwrap();
+    (owner, pid)
+}
+
+/// A line whose start time is not its pid's is a recycled pid: terminate_all
+/// neither signals it (even under init) nor keeps it, so its start time is
+/// never re-derived for the new occupant.
+#[tokio::test(flavor = "multi_thread")]
+async fn terminate_all_drops_recycled_pids() {
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    let (mut owner, theirs) = foreign_child();
+    let pidfile = dir.join("orphan.pid");
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("sleep 5 & echo $! > '{}'", pidfile.display()))
+        .status()
+        .unwrap();
+    let under_init: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(eventually(|| ppid_of(under_init) == Some(1), Duration::from_secs(2)).await);
+    std::fs::write(
+        &registry,
+        format!(
+            "{theirs}:{}:WRONG-START\n{under_init}:WRONG-START",
+            owner.id()
+        ),
+    )
+    .unwrap();
+
+    let killed = engine::processes::terminate_all_at(&registry);
+    assert!(killed.is_empty(), "recycled pids are not signalled");
+    assert!(alive(theirs) && alive(under_init));
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        "",
+        "recycled pids drop instead of healing"
+    );
+    for pid in [theirs, under_init] {
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    }
+    let _ = owner.wait();
+}
+
+/// Under a child subreaper (`systemd --user` on a COSMIC session) a dead
+/// instance's children reparent to the subreaper, not init: an entry whose
+/// parent is no longer its registered owner is an orphan all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn reap_kills_a_child_whose_owner_is_gone() {
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    let mut gone = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead_owner = gone.id();
+    gone.wait().unwrap();
+    // this test process stands in for the subreaper that adopted it
+    let mut adopted = Command::new("/bin/sleep")
+        .arg("5")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = adopted.id();
+    std::fs::write(&registry, format!("{pid}:{dead_owner}:{}", lstart_of(pid))).unwrap();
+
+    assert_eq!(reap_orphans_at(&registry), vec![pid]);
+    let status = adopted.wait().unwrap();
+    assert_eq!(status.signal(), Some(TERM_SIG));
+    assert_eq!(std::fs::read_to_string(&registry).unwrap(), "");
+}
+
+/// Registry writers in separate processes: each worker re-runs this test
+/// binary's `registry_worker` and churns its own pid in and out of the
+/// shared file. Every worker's final entry must survive the others'
+/// rewrites.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_instances_never_lose_entries() {
+    const WORKERS: usize = 6;
+    let dir = tmp_dir();
+    let registry = dir.join("running-processes");
+    let mut workers: Vec<Child> = (0..WORKERS)
+        .map(|i| {
+            Command::new(std::env::current_exe().unwrap())
+                .args(["registry_worker", "--exact", "--test-threads=1"])
+                .env(WORKER_REGISTRY, &registry)
+                .env(WORKER_DONE, dir.join(format!("done-{i}")))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let all_done = eventually(
+        || (0..WORKERS).all(|i| dir.join(format!("done-{i}")).exists()),
+        Duration::from_secs(60),
+    )
+    .await;
+    let text = std::fs::read_to_string(&registry).unwrap_or_default();
+    let listed: Vec<u32> = text
+        .lines()
+        .filter_map(|line| line.split_once(':')?.0.parse().ok())
+        .collect();
+    let missing: Vec<u32> = workers
+        .iter()
+        .map(Child::id)
+        .filter(|pid| !listed.contains(pid))
+        .collect();
+    for worker in &mut workers {
+        drop(worker.stdin.take());
+        let _ = worker.wait();
+    }
+    assert!(all_done, "every worker finished");
+    assert!(missing.is_empty(), "lost entries {missing:?} in {text:?}");
+}
+
+const WORKER_REGISTRY: &str = "CAD_PROCS_WORKER_REGISTRY";
+const WORKER_DONE: &str = "CAD_PROCS_WORKER_DONE";
+
+/// The worker side of [`concurrent_instances_never_lose_entries`]; a no-op in
+/// a normal test run. It ends registered, marks itself done, and stays alive
+/// (blocked on stdin) until the parent has read the registry.
+#[test]
+fn registry_worker() {
+    let (Some(registry), Some(done)) = (
+        std::env::var_os(WORKER_REGISTRY),
+        std::env::var_os(WORKER_DONE),
+    ) else {
+        return;
+    };
+    let registry = PathBuf::from(registry);
+    let me = std::process::id();
+    for _ in 0..40 {
+        register_at(&registry, me);
+        reap_orphans_at(&registry);
+    }
+    register_at(&registry, me);
+    std::fs::write(done, "").unwrap();
+    let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+}

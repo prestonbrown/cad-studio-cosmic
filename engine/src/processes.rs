@@ -9,16 +9,20 @@
 //!   (ProcessRunner.swift:172-179). Upstream gates the escalation on the
 //!   in-memory pid set; the port asks the kernel instead (`kill -0`), which
 //!   tracks the same "still running" fact without shared state.
-//! - The registry persists one `pid:starttime` line per live child, where
-//!   starttime is `ps -o lstart=` — the portable shape of upstream's
-//!   `pbi_start_tvsec` (and of `/proc/<pid>/stat`'s starttime on Linux). A
-//!   pid whose current start time differs from the registry line is a
-//!   recycled pid, not our orphan. After a reap the entries that still
-//!   resolve with an unchanged start time and were not signalled stay
-//!   listed — mismatched recycled pids are dropped, never healed to the
-//!   pid's new occupant — where upstream persists `[]`
-//!   (ProcessRunner.swift:157), so a child this process cancelled that
-//!   outlives the app stays known to a later launch's reap.
+//! - The registry persists one `pid:owner:starttime` line per live child,
+//!   where owner is the child's parent at registration and starttime is
+//!   `ps -o lstart=` — the portable shape of upstream's `pbi_start_tvsec`
+//!   (and of `/proc/<pid>/stat`'s starttime on Linux). A pid whose current
+//!   start time differs from its line is a recycled pid, not our child: it
+//!   is dropped, never signalled and never healed to the pid's new
+//!   occupant. A child whose parent is no longer its owner is an orphan,
+//!   whoever adopted it. After a sweep the entries that still resolve and
+//!   were not signalled stay listed, where upstream persists `[]`
+//!   (ProcessRunner.swift:157): the file is shared by every running
+//!   instance, and a child this process cancelled that outlives the app
+//!   stays known to a later launch's reap. Every rewrite holds an advisory
+//!   lock on a sibling `.lock` file, so concurrent instances never lose
+//!   each other's entries.
 //! - Signals and process info go through `/bin/kill` and `/bin/ps` via
 //!   [`std::process::Command`] — no libc/nix dependency, and exactly what
 //!   reaches the child stays visible under `ps` while debugging. Unix only.
@@ -27,12 +31,10 @@
 //! upstream `ProcessRunner.run`'s insert/defer-remove; the launch-time
 //! orphan reap (`CADStudioApp.swift:41`) is app wiring.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
@@ -41,10 +43,6 @@ use tokio::sync::{mpsc, oneshot};
 /// Selects the registry file, for tests and embedders that must not touch
 /// the shared default (`data_dir/running-processes`).
 const ENV_OVERRIDE: &str = "CAD_STUDIO_RUNNING_PROCESSES";
-
-/// Serializes registry read-modify-write cycles (the in-process stand-in for
-/// upstream's `Mutex`-guarded pid set).
-static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
 /// One streamed output line, decoded lossily and stripped of its newline.
 pub enum Line {
@@ -165,22 +163,21 @@ pub fn registry_path() -> PathBuf {
     crate::storage::data_dir().join("running-processes")
 }
 
-/// Kill processes the registry still lists whose parent is now init and
-/// whose start time still matches the registered one, then rewrite the
-/// registry to the entries that still resolve with an unchanged start time
-/// and were not signalled. Returns the pids that were signalled.
+/// Kill the orphans the registry still lists (see [`orphaned`]) whose start
+/// time still matches the registered one, then rewrite the registry to the
+/// entries that still resolve with an unchanged start time and were not
+/// signalled. Returns the pids that were signalled.
 pub fn reap_orphans() -> Vec<u32> {
     let path = registry_path();
     reap_orphans_at(&path)
 }
 
 /// SIGTERM every registered pid this process owns — its own children and
-/// orphans (parent now init) — then rewrite the registry to the entries a
-/// different live process still parents (upstream
-/// `RunningProcesses.terminateAll`, run on SIGTERM and at app termination).
-/// The registry file is per user, not per instance: a second running app
-/// keeps its agent, build and python children across this one's quit.
-/// Returns the pids that were signalled.
+/// orphans — then rewrite the registry to the entries a different live
+/// process still parents (upstream `RunningProcesses.terminateAll`, run on
+/// SIGTERM and at app termination). The registry file is per user, not per
+/// instance: a second running app keeps its agent, build and python
+/// children across this one's quit. Returns the pids that were signalled.
 pub fn terminate_all() -> Vec<u32> {
     let path = registry_path();
     terminate_all_at(&path)
@@ -188,106 +185,161 @@ pub fn terminate_all() -> Vec<u32> {
 
 /// [`terminate_all`] against an explicit registry file.
 pub fn terminate_all_at(path: &Path) -> Vec<u32> {
-    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let me = std::process::id();
-    let mut killed = Vec::new();
-    let mut others = BTreeSet::new();
-    for pid in registered_pids(path) {
-        match ps(pid) {
-            Some((ppid, _)) if ppid == me || ppid == 1 => {
-                let _ = signal(pid, "-TERM");
-                killed.push(pid);
-            }
-            Some(_) => {
-                others.insert(pid);
-            }
-            None => {}
-        }
-    }
-    persist(path, &others);
-    killed
-}
-
-/// [`register`] against an explicit registry file.
-pub fn register_at(path: &Path, pid: u32) {
-    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut pids = registered_pids(path);
-    pids.insert(pid);
-    persist(path, &pids);
+    sweep(path, |entry, ppid| ppid == me || orphaned(entry, ppid))
 }
 
 /// [`reap_orphans`] against an explicit registry file. A missing file has
 /// nothing to reap and is left uncreated; a present file is rewritten to
 /// the still-resolving, start-time-matching, un-signalled entries.
 pub fn reap_orphans_at(path: &Path) -> Vec<u32> {
-    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
+    sweep(path, orphaned)
+}
+
+/// Register a live pid, recording its current parent as its owner. A line
+/// already listing the pid is replaced. Other lines stay verbatim: their
+/// start times are never re-derived, so a recycled pid cannot be healed to
+/// its new occupant here.
+pub fn register_at(path: &Path, pid: u32) {
+    let Some((owner, started)) = ps(pid) else {
+        return;
     };
-    let mut killed = Vec::new();
-    // what survives the reap: live pids whose start time still matches their
-    // line and that this pass did not signal
-    let mut remaining = BTreeSet::new();
-    for line in text.lines() {
-        let Some((pid_text, started)) = line.split_once(':') else {
-            continue;
-        };
-        let Ok(pid) = pid_text.trim().parse::<u32>() else {
-            continue;
-        };
-        let Some((ppid, starts_now)) = ps(pid) else {
-            continue;
-        };
-        if starts_now != started {
-            // a recycled pid: not ours to signal and not ours to keep —
-            // the line must drop, because persist re-derives start times
-            // from ps and would otherwise heal it to the new occupant,
-            // making a later reap adopt (and kill) that process
-            continue;
-        }
-        if ppid == 1 {
-            let _ = signal(pid, "-TERM");
-            killed.push(pid);
-        } else {
-            remaining.insert(pid);
-        }
-    }
-    persist(path, &remaining);
-    killed
+    let _lock = lock(path);
+    let mut entries = entries(path);
+    entries.retain(|entry| entry.pid != pid);
+    entries.push(Entry {
+        pid,
+        owner: Some(owner),
+        started,
+    });
+    write(path, &entries);
 }
 
 /// Drop a pid from its registry. No rewrite happens when the pid is not
 /// listed, so unregistering an already-forgotten child is a no-op.
 fn unregister_at(path: &Path, pid: u32) {
-    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut pids = registered_pids(path);
-    if pids.remove(&pid) {
-        persist(path, &pids);
+    let _lock = lock(path);
+    let mut entries = entries(path);
+    let before = entries.len();
+    entries.retain(|entry| entry.pid != pid);
+    if entries.len() != before {
+        write(path, &entries);
     }
 }
 
-/// Pids currently listed in the registry file.
-fn registered_pids(path: &Path) -> BTreeSet<u32> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return BTreeSet::new();
-    };
-    text.lines()
-        .filter_map(|line| line.split_once(':'))
-        .filter_map(|(pid, _)| pid.trim().parse().ok())
-        .collect()
+/// One registry line: `pid:owner:starttime`, where `owner` is the pid's
+/// parent when it was registered. Lines without the owner field
+/// (`pid:starttime`) parse with `owner: None`.
+struct Entry {
+    pid: u32,
+    owner: Option<u32>,
+    started: String,
 }
 
-/// Rewrite the registry, one `pid:starttime` line per still-live pid, pids
-/// that no longer resolve are dropped (upstream's persist does the same via
-/// compactMap over proc info).
-fn persist(path: &Path, pids: &BTreeSet<u32>) {
-    let lines: Vec<String> = pids
-        .iter()
-        .filter_map(|pid| ps(*pid).map(|(_, started)| format!("{pid}:{started}")))
-        .collect();
+impl Entry {
+    fn parse(line: &str) -> Option<Entry> {
+        let (pid, rest) = line.split_once(':')?;
+        let pid = pid.trim().parse().ok()?;
+        // starttime itself holds colons (`Wed Nov  4 10:22:01 2026`), so only
+        // an all-digit field before the first one is an owner
+        let (owner, started) = match rest.split_once(':') {
+            Some((owner, started)) if owner.parse::<u32>().is_ok() => (owner.parse().ok(), started),
+            _ => (None, rest),
+        };
+        Some(Entry {
+            pid,
+            owner,
+            started: started.to_string(),
+        })
+    }
+
+    fn line(&self) -> String {
+        match self.owner {
+            Some(owner) => format!("{}:{owner}:{}", self.pid, self.started),
+            None => format!("{}:{}", self.pid, self.started),
+        }
+    }
+}
+
+/// A registered pid whose owner is gone. A dead owner's children reparent
+/// to init or, under `systemd --user` and other child subreapers, to the
+/// subreaper, so the test is "the parent is no longer the owner", with
+/// `ppid == 1` covering lines that carry no owner. The reaper that adopts
+/// an orphan was alive alongside the dead owner, so it can never hold the
+/// owner's pid.
+fn orphaned(entry: &Entry, ppid: u32) -> bool {
+    ppid == 1 || entry.owner.is_some_and(|owner| owner != ppid)
+}
+
+/// The one read-check-rewrite pass behind [`reap_orphans_at`] and
+/// [`terminate_all_at`]: each line whose pid still resolves with its
+/// registered start time is signalled when `kill(entry, ppid)` says so and
+/// kept verbatim otherwise. Dead pids and recycled pids (start time
+/// changed) drop without a signal, never healed to the pid's new occupant,
+/// which a later sweep would then adopt and kill. A missing file is left
+/// uncreated.
+fn sweep(path: &Path, kill: impl Fn(&Entry, u32) -> bool) -> Vec<u32> {
+    let _lock = lock(path);
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut killed = Vec::new();
+    let mut kept = Vec::new();
+    for entry in text.lines().filter_map(Entry::parse) {
+        let Some((ppid, starts_now)) = ps(entry.pid) else {
+            continue;
+        };
+        if starts_now != entry.started {
+            continue;
+        }
+        if kill(&entry, ppid) {
+            let _ = signal(entry.pid, "-TERM");
+            killed.push(entry.pid);
+        } else {
+            kept.push(entry);
+        }
+    }
+    write(path, &kept);
+    killed
+}
+
+/// The registry's lines, unparseable ones skipped.
+fn entries(path: &Path) -> Vec<Entry> {
+    fs::read_to_string(path)
+        .map(|text| text.lines().filter_map(Entry::parse).collect())
+        .unwrap_or_default()
+}
+
+/// Rewrite the registry to exactly these entries.
+fn write(path: &Path, entries: &[Entry]) {
+    let lines: Vec<String> = entries.iter().map(Entry::line).collect();
     // best effort: a registry that cannot be written only weakens the next
     // launch's reap
     let _ = crate::storage::atomic_write(path, lines.join("\n").as_bytes());
+}
+
+/// An exclusive advisory lock on `<registry>.lock`, held until the returned
+/// file drops. Every read-modify-write takes it: the registry is shared by
+/// every running instance (and by threads within one, since each call opens
+/// its own file description), and without it one writer's rewrite erases
+/// another's concurrent entry. The lock lives on a sibling because
+/// [`crate::storage::atomic_write`] replaces the registry's inode. `None`
+/// when the lock cannot be taken: the registry is best effort, so the
+/// caller proceeds unlocked.
+fn lock(path: &Path) -> Option<fs::File> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(name))
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
 }
 
 /// `(ppid, start time)` of a pid, via `ps`. `None` when the pid is gone or
