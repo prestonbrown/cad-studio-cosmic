@@ -482,20 +482,18 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
 
 ## M9 / general
 
-- Attachments divergences (M8 T4 review, 2026-10-28):
+- ~~Attachments divergences (M8 T4 review, 2026-10-28):~~
   - (a) Paste reads uri-list + PNG only; upstream also pastes TIFF
-    (Attachments.swift:15-18) and TIFF paste falls through to text.
-    **ACCEPTED DIVERGENCE (M9 Ruling 2):** COSMIC screenshot tools and
-    browsers offer `image/png`, and the `image` crate's tiff decoder would be
-    a dependency for a path nobody on the target desktop takes.
-  - (b) Non-image tiles use the generic text-x-generic icon where upstream's
-    NSWorkspace.icon(forFile:) is per-file-type (cosmetic). **Owner: M9 Task 3.**
-  - (c) saved_image stages undecodable bytes with no decode gate (upstream's
-    NSImage(data:) refuses at paste), so a mislabeled paste ships to the agent
-    as a reference. **Owner: M9 Task 3** (decode gate).
-  - Queue-count nuance: upstream labels all attachments "N immagini"; the port
-    counts images only. **M9 Ruling 3: match upstream** (count every
-    attachment). **Owner: M9 Task 3** (`queue_label_counts_every_attachment`).
+    (Attachments.swift:15-18). **ACCEPTED DIVERGENCE (M9 Ruling 2), not
+    built:** COSMIC screenshot tools and browsers offer `image/png`, and the
+    `image` crate's tiff decoder would be a dependency for a path nobody on
+    the target desktop takes.
+  - ~~(b) Non-image tiles use the generic icon~~ **Done (M9 T3):** `tile_icon_name`
+    maps pdf, py, md, json, svg and zip to Cosmic mime icons; other types
+    (stl, 3mf, step, txt) keep `text-x-generic`, the theme having no better one.
+  - ~~(c) saved_image decode gate~~ **Done (M9 T3):** non-PNG bytes are refused.
+  - ~~Queue-count nuance~~ **Done (M9 Ruling 3):** every attachment counts
+    (`queue_label_counts_every_attachment`).
   - The frame pass owes one real COSMIC Files drag-drop (T4's own open probe).
     **Owner: M9 Task 8** (needs a COSMIC session).
 

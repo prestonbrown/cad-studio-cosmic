@@ -1377,6 +1377,26 @@ impl Drive {
 
 #[cfg(test)]
 mod tests {
+    /// The queue caption counts every attachment, a PDF included
+    /// (upstream's "N immagini" over all attachments).
+    #[test]
+    fn queue_label_counts_every_attachment() {
+        let send = QueuedSend::new(
+            String::new(),
+            vec!["a.png".into(), "b.jpg".into(), "spec.pdf".into()],
+        );
+        let item = QueuedItem::from(&send);
+        let row = crate::chat_view::QueueItem {
+            id: item.id,
+            text: item.text,
+            images: item.images,
+        };
+        assert_eq!(
+            crate::chat_view::queue_attachment_label(&row),
+            Some(fl!("lld-immagini", count = 3))
+        );
+    }
+
     use super::*;
     use cosmic::iced::futures::StreamExt;
     use engine::agent::tool_summary::live_title;
