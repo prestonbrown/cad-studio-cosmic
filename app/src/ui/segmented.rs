@@ -153,7 +153,7 @@ pub fn segmented<M: Clone + 'static>(
         };
         let mut label = text(label).size(LABEL_SIZE).class(tone.text(backdrop));
         if is_selected && look == Look::Filled {
-            label = label.font(cosmic::font::semibold());
+            label = label.font(typography::font(cosmic::iced::font::Weight::Semibold));
         }
         let face = container(label)
             .width(fixed.map_or(Length::Fill, Length::Fixed))

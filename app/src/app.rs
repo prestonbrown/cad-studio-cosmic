@@ -21,7 +21,7 @@ use cosmic::cosmic_config::Config;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::window;
 use cosmic::iced::{Length, Subscription, Task};
-use cosmic::widget::{Column, container, popover, text};
+use cosmic::widget::{Column, container, text};
 use cosmic::{Action, Application, Element};
 use engine::agent::locator::{self, AgentKind};
 use engine::agent::session::{EngineEvent, TurnOutcome};
@@ -432,7 +432,7 @@ impl Application for CadStudio {
             Message::Noop => Task::none(),
         };
         // a sheet coming up over a project releases the focused text
-        // widget: a modal popover blocks only the pointer, and a focused
+        // widget: the sheet's shade blocks only the pointer, and a focused
         // chat editor would otherwise eat the sheet's Return/Esc
         if !sheet_was_up && self.modal_sheet_up() {
             Task::batch([task, release_focus()])
@@ -933,15 +933,17 @@ impl CadStudio {
             .iter_mut()
             .find(|(_, kind)| matches!(kind, WindowKind::Settings(_)))
         {
+            let before = state.height();
             state.update(&settings::Message::Tab(tab));
             let focus = *id;
-            return window::gain_focus(focus).map(Action::App);
+            let resize = settings_resize(focus, before, state.height());
+            return Task::batch([resize, window::gain_focus(focus).map(Action::App)]);
         }
         let settings = self.settings.load();
         let mut state = SettingsState::new(&settings);
         state.update(&settings::Message::Tab(tab));
         let (id, spawn) = window::open(Self::window_settings(
-            cosmic::iced::Size::new(settings::WIDTH, settings::HEIGHT),
+            cosmic::iced::Size::new(settings::WIDTH, state.height()),
             None,
         ));
         self.windows.insert(id, WindowKind::Settings(state));
@@ -984,8 +986,21 @@ impl CadStudio {
             return Task::none();
         }
         let task = self.update_settings_any(msg.clone());
+        let before = self.settings_height();
         self.fold_settings_state(&msg);
-        task
+        let resize = match (before, self.settings_height()) {
+            (Some(before), Some(after)) => settings_resize(id, before, after),
+            _ => Task::none(),
+        };
+        Task::batch([task, resize])
+    }
+
+    /// The open settings window's content height, if one is open.
+    fn settings_height(&self) -> Option<f32> {
+        self.windows.values().find_map(|window| match window {
+            WindowKind::Settings(state) => Some(state.height()),
+            _ => None,
+        })
     }
 
     /// Fold one message into the open settings window's mirror (there is
@@ -1062,8 +1077,8 @@ impl CadStudio {
         }
     }
 
-    /// A python or agent-missing sheet is up (both present as modal
-    /// popovers over the project and welcome bodies).
+    /// A python or agent-missing sheet is up (both present over the
+    /// project and welcome bodies).
     fn modal_sheet_up(&self) -> bool {
         self.python.presented || self.agent_missing.is_some()
     }
@@ -1298,30 +1313,18 @@ impl CadStudio {
 
     /// Wrap a window's body with the app-level sheets (python setup, then
     /// agent-missing; ProjectWindow.swift:59-68 stacks python over
-    /// agent-missing). The first-run and new-project sheets are NOT here:
-    /// they present as a layer of the welcome view (see `view_window`)
-    /// because a modal popover captures mouse events window-wide, killing
-    /// the window chrome.
-    /// These two are modal gates over the project canvas — blocking the
-    /// content behind them is the intent.
+    /// agent-missing), each presented over the dimmed body like every
+    /// other sheet ([`sheets::present`]): the body takes no presses while
+    /// one is up, and the window chrome stays live.
     fn apply_sheets<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {
-        let mut pop = popover(body);
-        let mut presented = false;
-        if self.python.presented {
-            let sheet: Element<'_, Message> =
-                sheets::view_python_setup(&self.python).map(Message::PythonSheet);
-            pop = pop.popup(sheet);
-            presented = true;
+        let card: Element<'_, Message> = if self.python.presented {
+            sheets::view_python_setup(&self.python).map(Message::PythonSheet)
         } else if let Some(sheet) = &self.agent_missing {
-            let sheet: Element<'_, Message> =
-                sheets::view_agent_missing(sheet).map(Message::AgentSheet);
-            pop = pop.popup(sheet);
-            presented = true;
-        }
-        if presented {
-            pop = pop.modal(true);
-        }
-        pop.into()
+            sheets::view_agent_missing(sheet).map(Message::AgentSheet)
+        } else {
+            return body;
+        };
+        sheets::present(body, card, Message::Noop)
     }
 
     /// The welcome window's chrome (WelcomeWindow.swift: a full-size
@@ -1418,7 +1421,7 @@ fn view_load_error(error: &str) -> Element<'_, Message> {
             .push(
                 text(fl!("impossibile-aprire-il-progetto"))
                     .size(crate::typography::TITLE)
-                    .font(cosmic::font::bold()),
+                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold)),
             )
             .push(
                 text(error)
@@ -1456,6 +1459,15 @@ pub fn sheet_key_role(key: &Key, modifiers: &Modifiers) -> Option<SheetKey> {
         Key::Named(Named::Escape) => Some(SheetKey::Cancel),
         _ => None,
     }
+}
+
+/// Resize settings window `id` when its tab or engine changed the height
+/// its content calls for (upstream's per-tab window size).
+fn settings_resize(id: window::Id, before: f32, after: f32) -> Task<Action<Message>> {
+    if before == after {
+        return Task::none();
+    }
+    window::resize(id, cosmic::iced::Size::new(settings::WIDTH, after))
 }
 
 /// Drop keyboard focus from every focusable widget.

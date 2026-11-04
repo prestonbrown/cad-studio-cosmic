@@ -14,11 +14,11 @@
 //! and dismisses only when a working executable turns up.
 //!
 //! Cosmetic port notes: upstream's `CodeBlock` becomes a mono block with a
-//! copy button; pickers are compact dropdowns, and the print-preferences
+//! copy button; pickers are form pickers ([`ui::picker`]), and the print-preferences
 //! section renders as a grouped Form ([`ui::form`]). Sheets are COSMIC
-//! dialog cards: the welcome window's over its dimmed body ([`present`]),
-//! the python and agent-missing sheets in a modal popover with scrollable
-//! content and pinned action rows so nothing clips in a short window; the
+//! dialog cards over the window's dimmed body ([`present`]); the python
+//! and agent-missing sheets scroll their content above pinned action rows
+//! so nothing clips in a short window; the
 //! PythonSetupSheet's DisclosureGroup becomes a toggle button over the
 //! mono log. User-visible strings read through `fl!` at render time (the
 //! key names the en/main.ftl entry).
@@ -196,8 +196,8 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                 .class(cosmic::theme::Button::Suggested)
                 .on_press_maybe((!sheet.checking).then_some(AgentMessage::Verify)),
         );
-    // Dialog card: opaque, rounded, shadowed — a bare container in the
-    // popover let the window content behind bleed through the sheet.
+    // Dialog card: opaque, rounded, shadowed, so the dimmed body never
+    // shows through the sheet.
     // The content scrolls above the cap; the action row stays pinned.
     let card = Column::new()
         .spacing(14)
@@ -321,7 +321,7 @@ pub fn print_preferences_parts<'a>(
     let section = ui::form::section(vec![
         ui::form::row(
             fl!("tipo-di-stampante"),
-            cosmic::widget::dropdown(printer_types, Some(printer_type as usize), |index| {
+            ui::picker::picker(printer_types, Some(printer_type as usize), |index| {
                 PrintPrefMessage::PrinterType(PRINTER_TYPES[index])
             }),
         ),
@@ -336,7 +336,7 @@ pub fn print_preferences_parts<'a>(
         ),
         ui::form::row(
             fl!("unit-di-misura"),
-            cosmic::widget::dropdown(units, Some(unit as usize), |index| {
+            ui::picker::picker(units, Some(unit as usize), |index| {
                 PrintPrefMessage::Unit(MEASUREMENT_UNITS[index])
             }),
         ),
@@ -414,8 +414,9 @@ fn sheet_head<'a, M: 'a>(
 }
 
 /// `card` presented as a sheet over `body`: the body dimmed under the
-/// theme's dialog shade, the card centered on it. Presses that miss the
-/// card land on the shade (`swallow`), never on the body below.
+/// theme's dialog shade, the card centered on it. Presses and wheel
+/// scrolls that miss the card land on the shade (`swallow`), never on the
+/// body below.
 pub fn present<'a, M: Clone + 'a>(
     body: Element<'a, M>,
     card: Element<'a, M>,
@@ -434,7 +435,8 @@ pub fn present<'a, M: Clone + 'a>(
                 }
             })),
     )
-    .on_press(swallow);
+    .on_press(swallow.clone())
+    .on_scroll(move |_| swallow.clone());
     cosmic::iced::widget::Stack::new()
         .push(body)
         .push(shade)
@@ -739,10 +741,7 @@ fn body<'a>(label: impl Into<String>) -> Text<'a> {
 fn headline<'a>(label: impl Into<String>) -> Text<'a> {
     body(label)
         .size(typography::HEADLINE)
-        .font(cosmic::iced::font::Font {
-            weight: cosmic::iced::font::Weight::Semibold,
-            ..cosmic::font::default()
-        })
+        .font(typography::font(cosmic::iced::font::Weight::Semibold))
 }
 
 /// `.callout`.

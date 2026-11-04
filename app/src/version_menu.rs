@@ -259,7 +259,9 @@ pub fn view_versions<Message: Clone + 'static>(
             .wrapping(cosmic::iced::widget::text::Wrapping::None)
             .class(tone.text(MENU));
         if bold {
-            t = t.font(cosmic::font::semibold());
+            t = t.font(crate::typography::font(
+                cosmic::iced::font::Weight::Semibold,
+            ));
         }
         t
     };

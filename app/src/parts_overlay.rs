@@ -101,7 +101,9 @@ fn header(tools: &ViewerTools, groups: &[PartGroup]) -> Element<'static, Message
         .push(
             text(fl!("parti"))
                 .size(typography::CALLOUT)
-                .font(cosmic::font::semibold())
+                .font(crate::typography::font(
+                    cosmic::iced::font::Weight::Semibold,
+                ))
                 .class(Tone::Primary.text(BACKDROP)),
         );
     if groups.len() > 1 {

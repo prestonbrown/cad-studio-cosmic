@@ -1642,10 +1642,7 @@ impl ProjectWindow {
     /// side padding, 24 tall, 480 wide shrinking toward the 320 minimum as
     /// the header narrows, a `.quaternary` 6-radius fill (:7-37).
     fn view_activity(&self) -> Element<'_, Message> {
-        // `.fontWeight(.medium)` in SF; the interface font's Medium face is
-        // not installed (it falls back to Regular), Semibold is the nearest
-        // stroke weight it carries
-        let medium = cosmic::font::semibold();
+        let medium = crate::typography::font(cosmic::iced::font::Weight::Medium);
         let mut row = Row::new()
             .spacing(8)
             .align_y(cosmic::iced::Alignment::Center)
