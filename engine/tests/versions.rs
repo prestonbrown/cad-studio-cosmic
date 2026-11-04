@@ -1,4 +1,4 @@
-//! versions.rs tests (M5 T3): version.json on-disk shape, record's copy
+//! versions.rs tests: version.json on-disk shape, record's copy
 //! set, restore's swap semantics, change detection, comparison parameters,
 //! and the missing-files record gate.
 

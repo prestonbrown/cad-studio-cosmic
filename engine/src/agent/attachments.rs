@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Whether `path` names an image by extension: png/jpg/jpeg/tiff/webp/gif/
 /// bmp, case-insensitive. Upstream's UTType conformance also admits formats
 /// (heic, svg, …) the port's attach surfaces never produce; the allowlist
-/// is the recorded ruling, not a decode of the macOS registry.
+/// is a fixed decision, not a decode of the macOS registry.
 pub fn is_image(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) => matches!(

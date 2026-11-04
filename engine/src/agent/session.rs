@@ -283,7 +283,7 @@ impl Session {
         self
     }
 
-    /// The settings the next turn runs with (Ruling 1, M8 plan): upstream's
+    /// The settings the next turn runs with: upstream's
     /// `run()` re-reads every setting live, so flipping the engine picker
     /// mid-conversation changes the engine of the NEXT turn while the
     /// stored session id stays engine-blind. With a settings file attached

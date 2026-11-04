@@ -1,4 +1,4 @@
-//! Session-turn integration tests (task 7): one fake-agent turn per test,
+//! Session-turn integration tests: one fake-agent turn per test,
 //! driven end to end through `Session::run_turn` — spawn, event translation,
 //! tee logging, metadata persistence, cancellation. The fake agent is
 //! fixtures/fake-agent/fake_claude.py (reached through the `CAD_TEST_CLAUDE`
@@ -590,8 +590,8 @@ async fn cancel_mid_stream() {
 /// The app-wide venv interpreter the session names everywhere: the
 /// restricted-bash allowlist entry and the `{{PYTHON}}` substitution (the
 /// rendered system prompt) both carry python::env's canonical venv —
-/// `~/.local/share/cad-studio/venv/bin/python` on Linux, the venv M5
-/// creates there — and the child env carries ModelBuilder.toolEnvironment's
+/// `~/.local/share/cad-studio/venv/bin/python` on Linux, the venv
+/// python::env creates there — and the child env carries ModelBuilder.toolEnvironment's
 /// pair over the login env. A spaced canonical path (macOS data dir) is
 /// quoted inside the entry and the prompt lines.
 #[tokio::test(flavor = "multi_thread")]
@@ -718,7 +718,7 @@ fn append_system_prompt(dump: &Path) -> String {
     argv[pos + 1].as_str().unwrap().to_string()
 }
 
-// ─── classification surface for the lifecycle dance (task 8) ────────────────
+// ─── classification surface for the lifecycle dance ─────────────────────────
 
 #[test]
 fn classification_helpers_are_case_insensitive() {
@@ -750,7 +750,7 @@ fn classification_helpers_are_case_insensitive() {
     assert!(!is_authentication_error("model not found 404"));
 }
 
-// ─── shell parity extensions (M4 task 0) ─────────────────────────────────────
+// ─── shell parity extensions ─────────────────────────────────────────────────
 
 /// A thinking block opens a boundary pair at its `content_block_start` and
 /// closes it at the matching `content_block_stop` (upstream

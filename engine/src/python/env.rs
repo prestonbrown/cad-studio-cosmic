@@ -8,8 +8,7 @@
 //! `check`'s verification, [`Probe`] for `--version` discovery — so tests
 //! script fakes and never run real uv/pip/build123d.
 //!
-//! Two divergences from upstream, both forced by the plan's own test
-//! fixtures:
+//! Two divergences from upstream, both forced by the test fixtures:
 //! - uv discovery walks the same dirs [`find_executable`][locator] searches
 //!   but resolves the winner through the [`Probe`] seam (upstream's
 //!   `locate` is a plain file check). A test must be able to force the uv

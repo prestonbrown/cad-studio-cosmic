@@ -71,7 +71,7 @@ pub fn expand_tilde(path: &str, home: &str) -> String {
 }
 
 /// Fixed candidate executables for `kind`, in upstream order
-/// (AgentLocator.swift:53-61), adapted for Linux like the claude list was:
+/// (AgentLocator.swift:53-61), adapted for Linux:
 /// home-relative install dirs first, then the system locations —
 /// /opt/homebrew is macOS-only and does not port; /usr/bin joins. The codex
 /// set drops claude's `~/.claude/local` (claude's native installer's dir)

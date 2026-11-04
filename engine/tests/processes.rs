@@ -1,4 +1,4 @@
-//! Process supervision tests (task 6). Every spawn points the registry at a
+//! Process supervision tests. Every spawn points the registry at a
 //! per-test temp file via the `CAD_STUDIO_RUNNING_PROCESSES` override so the
 //! real `~/.local/share/cad-studio/running-processes` is never touched.
 

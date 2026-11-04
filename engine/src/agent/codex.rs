@@ -823,7 +823,7 @@ mod tests {
         );
     }
 
-    /// Claude's argv consumes NO images (Ruling 2 / upstream parity) — the
+    /// Claude's argv consumes NO images (upstream parity) — the
     /// filter is codex's `-i` arm alone, and it skips non-image attachments.
     #[test]
     fn argv_images_filter_is_image_only() {

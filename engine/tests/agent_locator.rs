@@ -41,8 +41,8 @@ fn kinds_carry_the_upstream_surface() {
     assert_eq!(AgentKind::default(), AgentKind::Claude);
 }
 
-/// The codex candidate set (AgentLocator.swift:57-58), adapted like the
-/// claude list was: home-relative dirs first, then the system locations —
+/// The codex candidate set (AgentLocator.swift:57-58), adapted for Linux
+/// the same way as the claude list: home-relative dirs first, then the system locations —
 /// /opt/homebrew is macOS-only and does not port; /usr/bin joins it.
 #[test]
 fn codex_candidates_under_fake_home() {

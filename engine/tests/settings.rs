@@ -162,7 +162,7 @@ fn print_guidelines_differ_per_printer_type() {
     assert_ne!(fdm, resin);
 }
 
-// ─── agent-engine readers (M8 Task 3) ───────────────────────────────────────
+// ─── agent-engine readers ───────────────────────────────────────────────────
 
 /// The engine readers the session, locator, and app share: the parsed
 /// engine, its custom path, its model, and the writer the agent-missing

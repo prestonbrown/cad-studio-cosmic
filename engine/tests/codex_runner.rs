@@ -1,8 +1,8 @@
-//! Codex-runner integration tests (M8 Task 3): one fake-agent turn per
+//! Codex-runner integration tests: one fake-agent turn per
 //! test, driven end to end through `Session::run_turn` — engine dispatch,
 //! the codex argv, per-line translation onto the SAME StreamEvent pipeline
 //! claude uses, metadata persistence, and the mid-conversation engine flip
-//! (Ruling 1: the engine is re-read per turn; the stored session id is
+//! (the engine is re-read per turn; the stored session id is
 //! engine-blind). The fake codex is fixtures/fake-agent/fake_codex.py
 //! (reached through the `CAD_TEST_CLAUDE` seam, never the locator, so no
 //! `--version` probe runs against it); scenarios are recorded codex-JSON
@@ -324,7 +324,7 @@ async fn codex_argv_carries_upstream_flags() {
     }
 }
 
-/// Ruling 1 / plan Review Focus 2: flipping the engine setting between
+/// Flipping the engine setting between
 /// turns switches the runner mid-conversation — turn 2 spawns the CODEX
 /// argv while resuming the session id turn 1's CLAUDE run stored (the sid
 /// is engine-blind), and the codex lines translate through the codex

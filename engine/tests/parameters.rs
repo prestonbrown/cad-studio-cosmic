@@ -1,4 +1,4 @@
-//! parameters.rs tests (M5 T1): ordering, the rewrite regex against a
+//! parameters.rs tests: ordering, the rewrite regex against a
 //! corpus of adversarial lines, integer formatting, and the atomic
 //! set_parameter round-trip.
 
