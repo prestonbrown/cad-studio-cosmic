@@ -13,8 +13,6 @@
 
 use engine::agent::locator::AgentKind;
 use engine::agent::session::TurnOutcome;
-#[cfg(test)]
-use engine::project::outputs::expected_outputs;
 
 use crate::fl;
 
@@ -181,12 +179,6 @@ pub fn elapsed_text(seconds: u64) -> String {
 mod tests {
     use super::*;
 
-    fn output_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("cad-activity-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
     /// The activity transitions match AgentSession's: working on start,
     /// working·title on each tool, and every end classification. The engine
     /// is the caller's input — the claude rows here, the codex pair below.
@@ -311,25 +303,15 @@ mod tests {
         assert_eq!(elapsed_text(3600), "60:00", "no third field: minutes roll");
     }
 
-    /// The warning names exactly the missing expected outputs, in upstream
-    /// report order; a full output directory produces none.
+    /// The warning names exactly the missing outputs it is given; none
+    /// missing produces no issue (which files are missing is the engine's
+    /// `outputs::missing_files`, tested there).
     #[test]
     fn missing_output_warning_lists_absent_files() {
-        use engine::project::outputs::missing_files as missing_output_files;
         let _lang = crate::localize::pin_en();
-        let dir = output_dir("missing");
-        assert_eq!(missing_output_files(&dir).len(), 7, "everything missing");
-        for name in expected_outputs() {
-            std::fs::write(dir.join(name), b"x").unwrap();
-        }
-        assert!(missing_output_files(&dir).is_empty());
+        assert!(issues(None, &[], &[], None, 0).is_empty());
 
-        let all_present = issues(None, &missing_output_files(&dir), &[], None, 0);
-        assert!(all_present.is_empty());
-
-        std::fs::remove_file(dir.join("model.3mf")).unwrap();
-        let missing = missing_output_files(&dir);
-        assert_eq!(missing, vec!["model.3mf".to_string()]);
+        let missing = vec!["model.3mf".to_string()];
         let warnings_only = issues(None, &missing, &[], None, 0);
         assert_eq!(warnings_only.len(), 1);
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);

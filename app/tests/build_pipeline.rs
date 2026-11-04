@@ -239,6 +239,11 @@ async fn turn_success_without_outputs_records_no_version() {
         matches!(m, Message::TurnSuccessBookkeeping)
     })
     .await;
+    assert_eq!(
+        bridge.missing_outputs(),
+        engine::project::outputs::expected_outputs(),
+        "the turn end names every output it did not write"
+    );
     assert_eq!(load_metadata(&root).unwrap().current_version, None);
     assert!(
         !load_chat(&root)
@@ -272,6 +277,11 @@ async fn build_with_missing_outputs_records_on_changes_alone() {
         matches!(m, Message::BuildFinished { .. })
     })
     .await;
+    assert_eq!(
+        bridge.missing_outputs(),
+        engine::project::outputs::expected_outputs(),
+        "the build end names every output it did not write"
+    );
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(1));
     assert_eq!(
         load_chat(&root).unwrap().last().unwrap().role,
@@ -300,12 +310,22 @@ async fn unchanged_model_py_records_no_second_version() {
         matches!(m, Message::BuildFinished { .. })
     })
     .await;
+    assert_eq!(
+        bridge.missing_outputs(),
+        engine::project::outputs::expected_outputs(),
+        "the build end names every output it did not write"
+    );
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(1));
     bridge.start_build(None).unwrap(); // same model.py bytes
     run_until(&mut messages, |m| {
         matches!(m, Message::BuildFinished { .. })
     })
     .await;
+    assert_eq!(
+        bridge.missing_outputs(),
+        engine::project::outputs::expected_outputs(),
+        "the build end names every output it did not write"
+    );
     assert_eq!(load_metadata(&root).unwrap().current_version, Some(1)); // still 1
     assert_eq!(
         load_chat(&root)
