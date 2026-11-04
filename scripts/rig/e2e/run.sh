@@ -17,7 +17,10 @@
 # logs the wrong activity, or the app dies. However the script ends (done,
 # failed, Ctrl-C, SIGTERM, a dropped ssh), the theme's app is quit with
 # SIGTERM (which interrupts a running turn), its Xvfb killed, and its config
-# copy removed.
+# copy removed. Run it in the foreground (or under setsid, for an ssh drop):
+# bash cannot trap a signal ignored when the script starts, and a
+# background job of a non-interactive shell starts with SIGINT ignored,
+# nohup with SIGHUP ignored.
 #
 #   E2E_TIMEOUT=<s>        bounds each theme's run (default 5400)
 #   E2E_AGENT_PATH=<file>  the claude the app runs (written as the run's
