@@ -24,5 +24,16 @@ set-Agente-light settings-agent.png
 set-Python-light settings-python.png
 set-Avanzate-light settings-advanced.png
 about-light about.png
+newproj-light new-project.png
+project-dark project-model-dark.png
+vcard-dark version-menu-dark.png
+welcome-dark welcome-recents-dark.png
+setup-dark setup-sheet-dark.png
+newproj-dark new-project-dark.png
+set-Generale-dark settings-general-dark.png
+set-Agente-dark settings-agent-dark.png
+set-Python-dark settings-python-dark.png
+set-Avanzate-dark settings-advanced-dark.png
+about-dark about-dark.png
 EOF
 rm -f "$out/.up.png"
