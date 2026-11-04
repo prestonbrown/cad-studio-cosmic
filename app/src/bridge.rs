@@ -125,7 +125,9 @@ impl Pipeline {
             versions: versions::load_versions(root),
             parameters: refresh_parameters(root),
             build_error: None,
-            missing_outputs: missing_files(&folder::output_dir(root)),
+            // empty until a turn or a successful build checks the outputs
+            // (Project.swift:86, :266, :398)
+            missing_outputs: Vec::new(),
             sheet_requested: false,
             draft: None,
             compare_version: None,

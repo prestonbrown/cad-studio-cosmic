@@ -237,6 +237,38 @@ fn field_style() -> cosmic::theme::TextInput {
     }
 }
 
+/// A standalone bordered `TextField` (a sheet's field, outside a grouped
+/// Form): the text background in a separator hairline, the accent ring
+/// while focused, the tertiary placeholder.
+pub fn boxed_field_style() -> cosmic::theme::TextInput {
+    fn appearance(theme: &cosmic::Theme, focused: bool) -> cosmic::widget::text_input::Appearance {
+        cosmic::widget::text_input::Appearance {
+            background: Background::Color(surface::text_background(theme)),
+            border_radius: Corner::Xs.radius(theme),
+            border_offset: None,
+            border_width: 1.0,
+            border_color: if focused {
+                Tone::Accent.solid(theme)
+            } else {
+                Tone::Separator.color(theme, Backdrop::Plain)
+            },
+            label_color: Tone::Primary.color(theme, Backdrop::Plain),
+            placeholder_color: Tone::Tertiary.color(theme, Backdrop::Plain),
+            selected_text_color: Tone::OnAccent.solid(theme),
+            icon_color: None,
+            text_color: Some(Tone::Primary.color(theme, Backdrop::Plain)),
+            selected_fill: Tone::Accent.solid(theme),
+        }
+    }
+    cosmic::theme::TextInput::Custom {
+        active: Box::new(|theme| appearance(theme, false)),
+        error: Box::new(|theme| appearance(theme, false)),
+        hovered: Box::new(|theme| appearance(theme, false)),
+        focused: Box::new(|theme| appearance(theme, true)),
+        disabled: Box::new(|theme| appearance(theme, false)),
+    }
+}
+
 /// A grouped Form's `Toggle`: macOS's small switch, 28 x 16 pt at the
 /// trailing edge (shots/upstream/settings-agent.png, the Restricted Bash
 /// row), a white knob over a gray track that fills with the accent when

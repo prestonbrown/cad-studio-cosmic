@@ -19,6 +19,8 @@
 # RECENTS (env, optional): a file copied in as each shot's recents list, so
 # welcome captures show a fixed set. MAXJOBS (env, default 8): shots in flight;
 # software rendering makes first paint slow when too many start at once.
+# Each shot keeps its own process registry: the app's SIGTERM handler kills every
+# registered process, which would end the other shots' python checks.
 # Each shot waits for the drive time, then until the frame is no longer blank.
 # Drive files are CAD_STUDIO_DRIVE scripts (app/src/drive.rs); a relative path
 # resolves against the spec file's directory.
@@ -59,7 +61,8 @@ while read -r shot geom mode wait drive opts; do
     sleep 0.5
     echo "$(ts) launch $shot on $disp" > "$out/$shot.log"
     DISPLAY=$disp WAYLAND_DISPLAY= XDG_CONFIG_HOME=$cfg LIBGL_ALWAYS_SOFTWARE=1 \
-      WGPU_BACKEND=${WGPU_BACKEND:-gl} CAD_STUDIO_DRIVE=$drive env "${envs[@]}" "$bin" >> "$out/$shot.log" 2>&1 & ap=$!
+      WGPU_BACKEND=${WGPU_BACKEND:-gl} CAD_STUDIO_DRIVE=$drive \
+      CAD_STUDIO_RUNNING_PROCESSES=$cfg/running-processes env "${envs[@]}" "$bin" >> "$out/$shot.log" 2>&1 & ap=$!
     sleep 2
     case "$opts" in *,nosize,*) ;; *)
       for w in $(DISPLAY=$disp xdotool search --pid $ap 2>/dev/null); do

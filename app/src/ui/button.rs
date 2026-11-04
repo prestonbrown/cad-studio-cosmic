@@ -125,35 +125,62 @@ pub fn text<M: Clone + 'static>(
 /// The push button's padding: 20 px tall around body text, like
 /// upstream's form buttons (shots/upstream/settings-general.png, 1x).
 const PUSH_PADDING: [f32; 2] = [1.0, 9.0];
-/// The push button's face in a dark theme, against the window's `on`
-/// color (macOS dark controls sit a step above their surface).
-const PUSH_DARK_FACE: f32 = 0.2;
+/// The push button's face in a dark theme: the `on` color at this alpha
+/// over whatever surface it sits on (macOS's dark control reads 86 on a
+/// 30 sheet and 106,102,96 on the chat's orange row: a 25 % white lift
+/// that keeps the surface's tint).
+const PUSH_DARK_FACE: f32 = 0.25;
 
 /// The push button face: the lightest neutral in a light theme (macOS's
-/// white control), a lift off the window in a dark one.
+/// white control), a translucent lift off the surface in a dark one.
 fn push_face(theme: &cosmic::Theme) -> cosmic::iced::Color {
     let cosmic = theme.cosmic();
     if cosmic.is_dark {
-        let background = cosmic.background(false);
-        super::tone::mix(background.base.into(), background.on.into(), PUSH_DARK_FACE)
+        let on: cosmic::iced::Color = cosmic.background(false).on.into();
+        cosmic::iced::Color {
+            a: PUSH_DARK_FACE,
+            ..on
+        }
     } else {
         cosmic.palette.neutral_0.into()
     }
 }
 
-/// The push button class: the face, a separator hairline, the `on` wash
-/// on hover and press.
-fn push_class() -> cosmic::theme::Button {
-    let style = |theme: &cosmic::Theme, fill: f32| {
+/// A push button's role: the bordered face, or the default action
+/// (`.keyboardShortcut(.defaultAction)`), drawn on the accent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushRole {
+    Normal,
+    Default,
+}
+
+/// The push button class: the face (or the accent, for the default
+/// action), a separator hairline on the face, the `on` wash on hover and
+/// press.
+fn push_class(role: PushRole) -> cosmic::theme::Button {
+    let style = move |theme: &cosmic::Theme, fill: f32| {
         let mut style = button::Style::new();
-        style.background = Some(Background::Color(super::tone::mix(
-            push_face(theme),
-            theme.cosmic().background(false).on.into(),
-            fill,
-        )));
+        let on = theme.cosmic().background(false).on.into();
+        let face = match role {
+            PushRole::Normal => push_face(theme),
+            PushRole::Default => Tone::Accent.solid(theme),
+        };
+        // a translucent face deepens its alpha on hover and press; an
+        // opaque one moves toward `on`
+        let face = if face.a < 1.0 {
+            cosmic::iced::Color {
+                a: face.a + fill,
+                ..face
+            }
+        } else {
+            super::tone::mix(face, on, fill)
+        };
+        style.background = Some(Background::Color(face));
         style.border_radius = Corner::S.radius(theme);
-        style.border_width = 1.0;
-        style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
+        if role == PushRole::Normal {
+            style.border_width = 1.0;
+            style.border_color = Tone::Separator.color(theme, Backdrop::Plain);
+        }
         style
     };
     cosmic::theme::Button::Custom {
@@ -168,14 +195,48 @@ fn push_class() -> cosmic::theme::Button {
 /// bordered push style): `label` in body text on the push face; disabled
 /// without a message.
 pub fn push<'a, M: Clone + 'a>(label: String, on_press: Option<M>) -> Element<'a, M> {
-    let tone = content_tone(Tone::Primary, &on_press);
+    push_with(label, PushRole::Normal, PushSize::Regular, on_press)
+}
+
+/// A push button's control size: regular (body text, 20 px tall) or
+/// `.controlSize(.small)` (the small control label, 18 px tall).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushSize {
+    Regular,
+    Small,
+}
+
+impl PushSize {
+    /// The label size and the padding around it.
+    pub const fn metrics(self) -> (f32, [f32; 2]) {
+        match self {
+            Self::Regular => (typography::BODY, PUSH_PADDING),
+            Self::Small => (typography::SMALL_CONTROL, [1.0, 7.0]),
+        }
+    }
+}
+
+/// A push button in `role` at `size`: the sheets' Later / Install and
+/// Close / Check rows, the chat row actions. Disabled without a message.
+pub fn push_with<'a, M: Clone + 'a>(
+    label: String,
+    role: PushRole,
+    size: PushSize,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    let tone = match role {
+        PushRole::Normal => Tone::Primary,
+        PushRole::Default => Tone::OnAccent,
+    };
+    let tone = content_tone(tone, &on_press);
+    let (text_size, padding) = size.metrics();
     button::custom(
         cosmic::widget::text(label)
-            .size(typography::BODY)
+            .size(text_size)
             .class(tone.text(Backdrop::Plain)),
     )
-    .padding(PUSH_PADDING)
-    .class(push_class())
+    .padding(padding)
+    .class(push_class(role))
     .on_press_maybe(on_press)
     .into()
 }

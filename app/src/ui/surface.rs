@@ -158,6 +158,21 @@ pub fn fill(
     })
 }
 
+/// A sheet's card: the text background (white in light mode, #1E1E1E
+/// in dark, as macOS draws a sheet), a small-control radius and a
+/// popover's drop shadow over the shaded window.
+pub fn sheet_card() -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(|theme| Style {
+        background: Some(Background::Color(text_background(theme))),
+        border: Border {
+            radius: Corner::S.radius(theme),
+            ..Default::default()
+        },
+        shadow: Shadow::Popover.iced(),
+        ..Default::default()
+    })
+}
+
 /// The text background as a container class, rounded by `corner`.
 pub fn text_background_class(corner: Corner) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| Style {

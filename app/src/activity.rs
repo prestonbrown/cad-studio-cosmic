@@ -11,7 +11,6 @@
 //! the pane-derived pair; the manifest warnings join through the pane's
 //! reload-fresh copy of the manifest.
 
-use std::path::Path;
 
 use engine::agent::locator::AgentKind;
 use engine::agent::session::TurnOutcome;
@@ -115,17 +114,6 @@ pub fn issues(
         });
     }
     out
-}
-
-/// Upstream `ProjectOutput.missingFiles` (ProjectOutput.swift:23-27): the
-/// expected outputs that do not exist yet, by file name. This is the
-/// ActivityViewer's warning — distinct from the richer prompt notes in
-/// [`engine::project::outputs::missing_requirements`]. Delegates to the
-/// engine's [`missing_files`][engine::project::outputs::missing_files]
-/// (the version-record gate's rule): one implementation, so the header's
-/// warning list and the record gate can never drift apart.
-pub fn missing_output_files(output_dir: &Path) -> Vec<String> {
-    engine::project::outputs::missing_files(output_dir)
 }
 
 /// What happened to the running turn, as the activity model hears it — one
@@ -328,6 +316,7 @@ mod tests {
     /// report order; a full output directory produces none.
     #[test]
     fn missing_output_warning_lists_absent_files() {
+        use engine::project::outputs::missing_files as missing_output_files;
         let _lang = crate::localize::pin_en();
         let dir = output_dir("missing");
         assert_eq!(missing_output_files(&dir).len(), 7, "everything missing");
@@ -346,15 +335,6 @@ mod tests {
         assert_eq!(warnings_only.len(), 1);
         assert_eq!(warnings_only[0].kind, IssueKind::Warning);
         assert_eq!(warnings_only[0].message, "Missing output files: model.3mf");
-
-        // the drift pin: the header's warning
-        // list IS the version-record gate's rule — one engine
-        // implementation — so the two can never disagree
-        assert_eq!(
-            missing,
-            engine::project::outputs::missing_files(&dir),
-            "the app twin delegates to the engine twin"
-        );
 
         let both = issues(Some("SyntaxError: invalid syntax"), &missing, &[], None, 0);
         assert_eq!(both[0].kind, IssueKind::Error, "the build error leads");

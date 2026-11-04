@@ -277,7 +277,6 @@ pub struct ProjectWindow {
     pub queue_paused: bool,
     pub activity: Activity,
     pub work_started_at: Option<Instant>,
-    pub missing_outputs: Vec<String>,
     /// The issue button's open list, if any.
     pub shown_issues: Option<IssueKind>,
     /// The version history card's open state, carrying the FROZEN clock its
@@ -490,7 +489,6 @@ impl ProjectWindow {
             queue_paused: false,
             activity: Activity::Idle,
             work_started_at: None,
-            missing_outputs: activity::missing_output_files(&output_dir),
             shown_issues: None,
             version_card: None,
             recent_card: None,
@@ -556,9 +554,17 @@ impl ProjectWindow {
         self.activity = activity;
     }
 
-    /// Re-read the missing-output list from `output/`.
-    fn refresh_missing_outputs(&mut self) {
-        self.missing_outputs = activity::missing_output_files(&self.output_dir());
+    /// The issue list (Project.swift:113-130): the bridge's build error
+    /// and missing outputs, then the viewer's manifest and motion
+    /// warnings.
+    fn issues(&self) -> Vec<activity::Issue> {
+        activity::issues(
+            self.bridge.build_error().as_deref(),
+            &self.bridge.missing_outputs(),
+            self.viewer.manifest_warnings(),
+            self.viewer.motion_error(),
+            self.viewer.collision_frames(),
+        )
     }
 
     /// Reload the transcript fresh from chat.json, keeping the input
@@ -747,15 +753,12 @@ impl ProjectWindow {
                 let manifest = Manifest::load(&self.output_dir().join(folder::MANIFEST)).ok();
                 self.schematic.reload(&files, manifest.as_ref());
             }
-            // the 3D pane's own watch rebuilds the scene; the shell
-            // refreshes the activity model's warnings
-            ReloadKind::Mesh | ReloadKind::Plate => {
-                self.refresh_missing_outputs();
-            }
+            // the 3D pane's own watch rebuilds the scene; the missing
+            // outputs wait for the turn or build to finish (Project.swift:266,398)
+            ReloadKind::Mesh | ReloadKind::Plate => {}
             // a manifest change re-reads the parameters, whoever
             // wrote it (ProjectOutput.swift:48-51)
             ReloadKind::Manifest => {
-                self.refresh_missing_outputs();
                 self.bridge.reload_parameters();
                 self.viewer.sync_parameters(&self.bridge.parameters());
             }
@@ -874,7 +877,6 @@ impl ProjectWindow {
         self.chat = ChatState::new(store::load_chat(&self.root).unwrap_or_default());
         self.chat.engine = engine;
         self.sync_version_markers();
-        self.missing_outputs.clear();
         let parameters = self.bridge.parameters();
         self.viewer.sync_parameters(&parameters);
         ChatPane::scroll_to_bottom().map(Message::Chat)
@@ -1044,7 +1046,6 @@ impl ProjectWindow {
                 match &event {
                     EngineEvent::ToolStarted { .. } => self.set_activity(self.bridge.activity()),
                     EngineEvent::TurnFinished(_) => {
-                        self.refresh_missing_outputs();
                         self.set_activity(self.bridge.activity());
                         // a turn end is an established layout save point
                         self.save_metadata();
@@ -1096,7 +1097,6 @@ impl ProjectWindow {
             // result, no per-line surface) — the events exist for the drain
             bridge::Message::BuildEventBridge(_) => Task::none(),
             bridge::Message::BuildFinished { .. } => {
-                self.refresh_missing_outputs();
                 self.reload_chat_rows();
                 // the driver's record_version moved current_version on
                 // disk; the version menu's checkmark and the root's label
@@ -1113,7 +1113,6 @@ impl ProjectWindow {
                 ChatPane::scroll_to_bottom().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
-                self.refresh_missing_outputs();
                 self.save_metadata();
                 self.reload_chat_rows();
                 // the turn's tail re-read the manifest (bridge
@@ -1700,13 +1699,7 @@ impl ProjectWindow {
         }
         row = row.push(Space::new().width(Length::Fill));
 
-        let issues = activity::issues(
-            self.bridge.build_error().as_deref(),
-            &self.missing_outputs,
-            self.viewer.manifest_warnings(),
-            self.viewer.motion_error(),
-            self.viewer.collision_frames(),
-        );
+        let issues = self.issues();
         for kind in [IssueKind::Error, IssueKind::Warning] {
             let count = issues.iter().filter(|i| i.kind == kind).count();
             if count == 0 {
@@ -1761,13 +1754,7 @@ impl ProjectWindow {
 
     /// The issue list popover (upstream `IssueList`).
     fn view_issue_list(&self, kind: IssueKind) -> Element<'_, Message> {
-        let issues = activity::issues(
-            self.bridge.build_error().as_deref(),
-            &self.missing_outputs,
-            self.viewer.manifest_warnings(),
-            self.viewer.motion_error(),
-            self.viewer.collision_frames(),
-        );
+        let issues = self.issues();
         // VStack(spacing: 8) of Labels, .callout, padding 12, width 360
         // (ActivityViewer.swift:104-124); the popover closes on an outside
         // click like upstream's

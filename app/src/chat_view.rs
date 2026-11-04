@@ -544,8 +544,20 @@ fn markdown_text(md: &str) -> Element<'static, Message> {
 
 /// One prose segment's inline spans as rich text at body size.
 fn markdown_spans(ir: Vec<markdown::MdSpan>) -> Element<'static, Message> {
-    let spans: Vec<Span<'_, String>> = ir
-        .into_iter()
+    rich_text(inline_spans(ir))
+        .on_link_click(Message::OpenUrl)
+        .font(cosmic::font::default())
+        .size(BODY.size)
+        .line_height(BODY.line_height())
+        .width(Length::Fill)
+        .wrapping(Wrapping::Word)
+        .into()
+}
+
+/// Inline markdown as rich-text spans: strong in bold, emphasis in
+/// italic, code in the monospaced font, links underlined.
+pub(crate) fn inline_spans(ir: Vec<markdown::MdSpan>) -> Vec<Span<'static, String>> {
+    ir.into_iter()
         .map(|span| {
             let mut out = Span::<String>::new(span.text);
             match span.style {
@@ -568,15 +580,7 @@ fn markdown_spans(ir: Vec<markdown::MdSpan>) -> Element<'static, Message> {
             }
             out
         })
-        .collect();
-    rich_text(spans)
-        .on_link_click(Message::OpenUrl)
-        .font(cosmic::font::default())
-        .size(BODY.size)
-        .line_height(BODY.line_height())
-        .width(Length::Fill)
-        .wrapping(Wrapping::Word)
-        .into()
+        .collect()
 }
 
 /// Upstream `SystemMessageView` (MessageView.swift:36-78): callout text
@@ -611,17 +615,13 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
         }
     }
     if let Some(action) = message.action {
-        // .controlSize(.small): the small push button's 11pt label
-        stack = stack.push(
-            button::custom(styled_text(
-                action_title(action),
-                CAPTION_LINK,
-                Tone::Primary,
-            ))
-            .padding([3.0, 9.0])
-            .class(cosmic::theme::Button::Standard)
-            .on_press(Message::RowAction(message.id, action)),
-        );
+        // .controlSize(.small): the small push button
+        stack = stack.push(ui::button::push_with(
+            action_title(action),
+            ui::button::PushRole::Normal,
+            ui::button::PushSize::Small,
+            Some(Message::RowAction(message.id, action)),
+        ));
     }
     container(stack)
         .padding(10)
@@ -784,11 +784,11 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
 /// when open) in a 13px leading column, then the label centered against
 /// it; the whole row is the tap target, and the chevron's column holds it
 /// at the AppKit disclosure row height at minimum.
-fn disclosure_label<'a>(
+pub(crate) fn disclosure_label<'a, M: Clone + 'a>(
     open: bool,
-    label: Element<'a, Message>,
-    on_press: Message,
-) -> Element<'a, Message> {
+    label: Element<'a, M>,
+    on_press: M,
+) -> Element<'a, M> {
     let chevron = container(sf_icon(
         if open {
             Symbol::ChevronDown
@@ -1308,7 +1308,7 @@ fn link_button<'a>(
 /// A symbol in a `size` px cell. The chat's glyphs are sized on a 16-unit
 /// grid; symbols the registry crops tighter draw at the grid glyph's
 /// height, centered in the cell.
-fn sf_icon<'a>(symbol: Symbol, size: u16, tone: Tone) -> Element<'a, Message> {
+pub(crate) fn sf_icon<'a, M: 'a>(symbol: Symbol, size: u16, tone: Tone) -> Element<'a, M> {
     let cell = f32::from(size);
     let height = cell
         * match symbol {
@@ -1348,9 +1348,12 @@ fn field_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_edito
     }
 }
 
+/// The system row's `.orange` wash: the palette's orange, which stays
+/// saturated in both appearances (the warning role darkens to a brown in
+/// the light theme, which would tint the row gray).
 fn warn_style() -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(|theme| {
-        let orange = Tone::Warning.solid(theme);
+        let orange: Color = theme.cosmic().palette.ext_orange.into();
         ContainerStyle {
             background: Some(cosmic::iced::Background::Color(Color { a: 0.08, ..orange })),
             border: cosmic::iced::Border {

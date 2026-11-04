@@ -34,6 +34,7 @@ use engine::agent::locator::{AgentKind, find_executable};
 use engine::python::env::{EnvEvent, EnvFailure, EnvState};
 use engine::settings::{MeasurementUnit, PrinterType, Settings};
 
+use crate::ui::button::{PushRole, PushSize, push_with};
 use crate::ui::{self, Backdrop, Corner, Symbol, Tone};
 use crate::{fl, typography};
 
@@ -132,21 +133,28 @@ pub fn update_agent_missing(
 /// custom-path field, the missing line, and Terminal / Close / Verify.
 pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
     let engine = sheet.kind.display_name();
+    // `Label` with a `.yellow` triangle at the label icon size
     let head = Row::new()
-        .spacing(8)
-        .push(ui::icon::icon(
-            Symbol::ExclamationmarkTriangleFill,
-            20.0,
-            Tone::Warning,
-            Backdrop::Plain,
+        .spacing(LABEL_SPACING)
+        .push(ui::icon::multicolor(
+            Symbol::ExclamationmarkTriangleFillMulticolor,
+            LABEL_ICON,
         ))
         .align_y(cosmic::iced::Alignment::Center)
         .push(headline(fl!("non-trovato", agent = engine)));
-    let intro = callout(fl!(
-        "cad-studio-usa-installato-su-questo-mac-installalo-dal-terminale-con-uno-dei-comandi-seguenti-poi-esegui-per-effettuare-l-accesso",
-        arg = engine,
-        arg_2 = sheet.kind.login_command()
-    ));
+    // the catalog string is a markdown LocalizedStringKey upstream: the
+    // backticked login command renders monospaced
+    let intro = cosmic::iced::widget::rich_text(crate::chat_view::inline_spans(
+        crate::markdown::to_ir(&fl!(
+            "cad-studio-usa-installato-su-questo-mac-installalo-dal-terminale-con-uno-dei-comandi-seguenti-poi-esegui-per-effettuare-l-accesso",
+            arg = engine,
+            arg_2 = sheet.kind.login_command()
+        )),
+    ))
+    .font(cosmic::font::default())
+    .size(typography::CALLOUT)
+    .width(Length::Fill)
+    .wrapping(Wrapping::Word);
 
     let mut stack = Column::new().spacing(14).push(head).push(intro);
     for command in install_commands(sheet.kind) {
@@ -171,6 +179,9 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
                         .on_submit(|_| AgentMessage::Verify)
                         .font(cosmic::font::mono())
                         .size(typography::CALLOUT)
+                        // macOS's regular text field: 22 px tall
+                        .padding([2.0, 6.0])
+                        .style(ui::form::boxed_field_style())
                         .width(Length::Fill),
                 ),
         )
@@ -180,23 +191,20 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
         }));
     let actions = Row::new()
         .spacing(8)
-        .push(
-            button::text(fl!("apri-il-terminale"))
-                .class(cosmic::theme::Button::Standard)
-                .on_press(AgentMessage::OpenTerminal),
-        )
+        .align_y(cosmic::iced::Alignment::Center)
+        .push(ui::button::push(
+            fl!("apri-il-terminale"),
+            Some(AgentMessage::OpenTerminal),
+        ))
         .push(Space::new().width(Length::Fill))
-        .push(
-            button::text(fl!("chiudi"))
-                .class(cosmic::theme::Button::Standard)
-                .on_press(AgentMessage::Close),
-        )
-        .push(
-            button::text(fl!("verifica"))
-                .class(cosmic::theme::Button::Suggested)
-                .on_press_maybe((!sheet.checking).then_some(AgentMessage::Verify)),
-        );
-    // Dialog card: opaque, rounded, shadowed, so the dimmed body never
+        .push(ui::button::push(fl!("chiudi"), Some(AgentMessage::Close)))
+        .push(push_with(
+            fl!("verifica"),
+            PushRole::Default,
+            PushSize::Regular,
+            (!sheet.checking).then_some(AgentMessage::Verify),
+        ));
+    // The sheet card: opaque, rounded, shadowed, so the dimmed body never
     // shows through the sheet.
     // The content scrolls above the cap; the action row stays pinned.
     let card = Column::new()
@@ -206,7 +214,7 @@ pub fn view_agent_missing(sheet: &AgentMissing) -> Element<'_, AgentMessage> {
     container(card)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(cosmic::theme::Container::Dialog(true))
+        .class(ui::surface::sheet_card())
         .into()
 }
 
@@ -391,6 +399,14 @@ pub fn view_setup(sheet: &Setup) -> Element<'_, SetupMessage> {
 
 /// The sheets' frame width (`.frame(width: 520)`).
 const SHEET_WIDTH: f32 = 520.0;
+
+/// A `Label`'s icon at callout and headline sizes: 13 px
+/// (shots/upstream/python-sheet.png and agent-missing.png, 1x).
+const LABEL_ICON: f32 = 13.0;
+/// One callout line's height (the text widget's 1.3 line height).
+const CALLOUT_LINE: f32 = typography::CALLOUT * 1.3;
+/// A `Label`'s gap between icon and title.
+const LABEL_SPACING: f32 = 8.0;
 
 /// The app-icon head the setup and python sheets open with: the 64 px icon
 /// beside the `.headline` title over the secondary `.callout` description
@@ -615,24 +631,29 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
     if let EnvState::Failed(message) = &state.state {
         stack = stack.push(
             Row::new()
-                .spacing(8)
-                .push(ui::icon::multicolor(
-                    Symbol::XmarkOctagonFillMulticolor,
-                    18.0,
-                ))
+                .spacing(LABEL_SPACING)
+                // the icon centered on the first line, as a Label does
+                .push(
+                    container(ui::icon::multicolor(
+                        Symbol::XmarkOctagonFillMulticolor,
+                        LABEL_ICON,
+                    ))
+                    .height(Length::Fixed(CALLOUT_LINE))
+                    .align_y(cosmic::iced::Alignment::Center),
+                )
                 .push(callout(message.clone()).class(Tone::Danger.text(Backdrop::Plain))),
         );
     }
-    // the disclosure (upstream DisclosureGroup): the label toggles the
-    // mono log's visibility and stays "Show Details" either way — the
-    // Text class, not Transparent: cosmic's transparent style carries a
-    // fully-transparent inherited text color, which renders
-    // button::text's self-colored label invisible
-    stack = stack.push(
-        button::text(fl!("mostra-dettagli"))
-            .class(cosmic::theme::Button::Text)
-            .on_press(PythonMessage::ToggleLog),
-    );
+    // the disclosure (upstream DisclosureGroup at `.callout`): a chevron
+    // and the primary label toggle the mono log; the label stays
+    // "Show Details" either way
+    stack = stack.push(crate::chat_view::disclosure_label(
+        sheet.shows_log,
+        callout(fl!("mostra-dettagli"))
+            .class(Tone::Primary.text(Backdrop::Plain))
+            .into(),
+        PythonMessage::ToggleLog,
+    ));
     if sheet.shows_log {
         stack = stack.push(
             container(
@@ -663,7 +684,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
     container(card)
         .padding(20)
         .width(SHEET_WIDTH)
-        .class(cosmic::theme::Container::Dialog(true))
+        .class(ui::surface::sheet_card())
         .into()
 }
 
@@ -671,23 +692,22 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
 /// button carries no press handler, matching upstream's `.disabled(true)`.
 fn python_buttons(state: &EnvState) -> Element<'static, PythonMessage> {
     match buttons(state) {
-        SetupButtons::Done => button::text(fl!("fine"))
-            .class(cosmic::theme::Button::Suggested)
-            .on_press(PythonMessage::Close)
-            .into(),
-        SetupButtons::Busy => button::text(fl!("installazione-in-corso")).into(),
+        SetupButtons::Done => push_with(
+            fl!("fine"),
+            PushRole::Default,
+            PushSize::Regular,
+            Some(PythonMessage::Close),
+        ),
+        SetupButtons::Busy => ui::button::push(fl!("installazione-in-corso"), None),
         SetupButtons::LaterAndInstall => Row::new()
             .spacing(8)
-            .push(
-                button::text(fl!("pi-tardi"))
-                    .class(cosmic::theme::Button::Standard)
-                    .on_press(PythonMessage::Close),
-            )
-            .push(
-                button::text(fl!("installa"))
-                    .class(cosmic::theme::Button::Suggested)
-                    .on_press(PythonMessage::Install),
-            )
+            .push(ui::button::push(fl!("pi-tardi"), Some(PythonMessage::Close)))
+            .push(push_with(
+                fl!("installa"),
+                PushRole::Default,
+                PushSize::Regular,
+                Some(PythonMessage::Install),
+            ))
             .into(),
     }
 }
