@@ -35,5 +35,13 @@ set-Agente-dark settings-agent-dark.png
 set-Python-dark settings-python-dark.png
 set-Avanzate-dark settings-advanced-dark.png
 about-dark about-dark.png
+pysheet-light python-sheet.png
+agentmiss-light agent-missing.png
+chaterr-light chat-error.png
+builderr-light build-error.png
+pysheet-dark python-sheet-dark.png
+agentmiss-dark agent-missing-dark.png
+chaterr-dark chat-error-dark.png
+builderr-dark build-error-dark.png
 EOF
 rm -f "$out/.up.png"

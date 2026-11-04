@@ -109,8 +109,9 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    /// The observed state a fresh project opens with: the version history,
-    /// the manifest's parameter list, and the outputs still missing. The
+    /// The observed state a fresh project opens with: the version history
+    /// and the manifest's parameter list (no missing outputs: only a
+    /// finished turn or a successful build checks them). The
     /// activity opens Idle by construction: nothing persists in-flight turn
     /// state (a mid-turn crash leaves only the chat's trailing user row and
     /// the stored session id), and a previous process's agent subprocess
@@ -1618,6 +1619,19 @@ mod tests {
             upstream.as_slice(),
             "the embedded resource is the upstream fixture verbatim"
         );
+    }
+
+    /// A project opens with no missing-output warning even when its
+    /// output folder is empty (an empty project's header shows no issue
+    /// count, shots/upstream/build-error.png): only a finished turn or a
+    /// successful build fills the list.
+    #[test]
+    fn a_fresh_project_lists_no_missing_outputs() {
+        let root = std::env::temp_dir().join(format!("cad-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(folder::output_dir(&root)).unwrap();
+        assert!(!missing_files(&folder::output_dir(&root)).is_empty());
+        assert!(Pipeline::load(&root).missing_outputs.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The activity the pipeline held when the driver sent its

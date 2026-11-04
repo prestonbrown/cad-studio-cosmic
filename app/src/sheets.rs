@@ -806,6 +806,14 @@ mod tests {
         assert_eq!(settings.codex_path, None);
     }
 
+    /// A Label's icon fits inside one callout line, so centering it on the
+    /// line puts it beside the first line of a wrapped failure message.
+    #[test]
+    fn label_icon_fits_the_callout_line() {
+        assert!(LABEL_ICON <= CALLOUT_LINE);
+        assert_eq!(LABEL_ICON, 13.0);
+    }
+
     /// The install command blocks per engine (AgentMissingSheet.swift:14-19)
     /// — the Claude pair verbatim; the codex arm upstream pairs
     /// `npm install -g @openai/codex` with `brew install --cask codex`,

@@ -245,6 +245,28 @@ pub fn push_with<'a, M: Clone + 'a>(
 mod tests {
     use super::*;
 
+    /// The dark push face is the `on` color at 25 % over its surface (so
+    /// the orange chat row's tint shows through); the light face is the
+    /// opaque white control.
+    #[test]
+    fn dark_push_face_is_a_translucent_lift() {
+        let dark = push_face(&cosmic::Theme::dark());
+        assert_eq!(dark.a, PUSH_DARK_FACE);
+        assert_eq!(PUSH_DARK_FACE, 0.25);
+        assert_eq!(push_face(&cosmic::Theme::light()).a, 1.0);
+    }
+
+    /// `.controlSize(.small)` sets a smaller label in less padding than
+    /// the regular push button.
+    #[test]
+    fn small_push_is_tighter_than_regular() {
+        let (regular_text, regular_pad) = PushSize::Regular.metrics();
+        let (small_text, small_pad) = PushSize::Small.metrics();
+        assert!(small_text < regular_text);
+        assert!(small_pad[1] < regular_pad[1]);
+        assert_eq!(regular_pad, PUSH_PADDING);
+    }
+
     #[test]
     fn a_button_without_a_message_draws_disabled() {
         assert_eq!(content_tone(Tone::Accent, &Some(())), Tone::Accent);

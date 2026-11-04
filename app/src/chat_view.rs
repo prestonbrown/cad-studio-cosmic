@@ -593,10 +593,11 @@ fn system_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, M
     let head = Row::new()
         .spacing(6)
         .align_y(Alignment::Start)
+        // a callout Label's symbol: 13 px (shots/upstream/chat-error.png)
         .push(if warns {
-            sf_icon(Symbol::ExclamationmarkTriangleFill, 14, Tone::Warning)
+            sf_icon(Symbol::ExclamationmarkTriangleFill, 13, Tone::Warning)
         } else {
-            sf_icon(Symbol::InfoCircleFill, 14, Tone::Secondary)
+            sf_icon(Symbol::InfoCircleFill, 13, Tone::Secondary)
         })
         // .textSelection(.enabled) (MessageView.swift:45)
         .push(styled_text(message.text.as_str(), CALLOUT, Tone::Primary).selectable());
@@ -860,6 +861,9 @@ fn streaming_indicator() -> Element<'static, Message> {
         .into()
 }
 
+/// The empty transcript's cube, at the 40 pt symbol's measured ink height.
+const EMPTY_STATE_ICON: u16 = 44;
+
 /// Upstream `ChatEmptyState` (ChatView.swift:107-154): the 40pt light
 /// `cube.transparent` symbol in tertiary, the title3-semibold title over
 /// the callout secondary subtitle (spacing 4), then the suggestion buttons
@@ -920,7 +924,9 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
         );
     Column::new()
         .spacing(16)
-        .push(sf_icon(Symbol::CubeTransparent, 40, Tone::Tertiary))
+        // `.font(.system(size: 40, weight: .light))`: the symbol's ink
+        // stands 44 px tall at that point size (shots/upstream/build-error.png)
+        .push(sf_icon(Symbol::CubeTransparent, EMPTY_STATE_ICON, Tone::Tertiary))
         .push(heading)
         .push(list)
         .width(Length::Fill)
