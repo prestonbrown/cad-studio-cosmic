@@ -146,7 +146,10 @@ pub fn fill(
         ))),
         border: Border {
             color: stroke.map_or(Color::TRANSPARENT, |stroke| {
-                wash(theme, Tone::Separator.alpha(theme, Backdrop::Plain) * stroke)
+                wash(
+                    theme,
+                    Tone::Separator.alpha(theme, Backdrop::Plain) * stroke,
+                )
             }),
             width: if stroke.is_some() { 1.0 } else { 0.0 },
             radius: corner.radius(theme),

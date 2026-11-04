@@ -1731,7 +1731,9 @@ impl ViewerPane {
                 .width(Length::Fill),
         )
         .width(Length::Fill)
-        .class(ui::surface::text_background_class(ui::surface::Corner::None))
+        .class(ui::surface::text_background_class(
+            ui::surface::Corner::None,
+        ))
         .into()
     }
 
@@ -1758,7 +1760,13 @@ impl ViewerPane {
             })
             .collect();
         let selected = PRESETS.iter().position(|preset| *preset == self.preset);
-        segmented(items, selected, Look::Raised, segmented::Size::Small, Length::Shrink)
+        segmented(
+            items,
+            selected,
+            Look::Raised,
+            segmented::Size::Small,
+            Length::Shrink,
+        )
     }
 }
 
@@ -2124,7 +2132,9 @@ fn content_unavailable<'a>(
     .height(Length::Fill)
     .align_x(cosmic::iced::alignment::Horizontal::Center)
     .align_y(cosmic::iced::alignment::Vertical::Center)
-    .class(ui::surface::text_background_class(ui::surface::Corner::None))
+    .class(ui::surface::text_background_class(
+        ui::surface::Corner::None,
+    ))
     .into()
 }
 
@@ -2511,8 +2521,7 @@ mod tests {
             (pane.scene.orbit.distance - spread).abs() < 1e-4,
             "Fit frames the exploded arrangement, not the pre-explode reference"
         );
-        let (_, staged) =
-            viewer::render::camera::frame(pane.scene.scene.aabb());
+        let (_, staged) = viewer::render::camera::frame(pane.scene.scene.aabb());
         assert!(
             (spread - staged).abs() > 1e-4,
             "this fixture's spread and staged boxes differ (else the pin is void)"

@@ -381,7 +381,12 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, Some(1.0)))
+        .class(ui::surface::fill(
+            Tone::Quaternary,
+            0.5,
+            Corner::S,
+            Some(1.0),
+        ))
         .into()
 }
 
@@ -424,7 +429,12 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
             .height(Length::Fixed(size))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(ui::surface::fill(Tone::Quaternary, 1.0, Corner::S, Some(1.0))),
+            .class(ui::surface::fill(
+                Tone::Quaternary,
+                1.0,
+                Corner::S,
+                Some(1.0),
+            )),
         file_name,
         cosmic::widget::tooltip::Position::FollowCursor,
     );

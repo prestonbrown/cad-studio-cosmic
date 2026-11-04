@@ -109,9 +109,9 @@ pub mod new_project {
         let valid = sheet.validation_error().is_none();
         let mut stack = Column::new()
             .spacing(16)
-            .push(
-                typography::headline(text(fl!("scegli-le-opzioni-per-il-nuovo-progetto"))),
-            )
+            .push(typography::headline(text(fl!(
+                "scegli-le-opzioni-per-il-nuovo-progetto"
+            ))))
             .push(
                 Row::new()
                     .spacing(8)
@@ -281,9 +281,10 @@ impl Welcome {
                     .class(cosmic::theme::Container::WindowBackground),
             )
             // `Divider()`: the separator hairline between the panes
-            .push(
-                ui::surface::divider_scaled(ui::surface::Axis::Vertical, 1.0),
-            )
+            .push(ui::surface::divider_scaled(
+                ui::surface::Axis::Vertical,
+                1.0,
+            ))
             .push(recents_list)
             .height(Length::Fill)
             .into()

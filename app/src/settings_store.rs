@@ -65,7 +65,10 @@ impl SettingsStore {
         };
         edit(&mut settings);
         settings.save(&self.path).inspect_err(|why| {
-            log(&format!("settings save to {} failed: {why}", self.path.display()));
+            log(&format!(
+                "settings save to {} failed: {why}",
+                self.path.display()
+            ));
         })
     }
 }
@@ -117,11 +120,15 @@ mod tests {
     #[test]
     fn an_unreadable_file_refuses_the_update_and_stays_byte_for_byte() {
         let store = SettingsStore::in_temp_dir();
-        let bytes = br#"{"recentProjects": null, "agentEngine": "codex", "claudePath": "/opt/claude"}"#;
+        let bytes =
+            br#"{"recentProjects": null, "agentEngine": "codex", "claudePath": "/opt/claude"}"#;
         std::fs::write(store.path(), bytes).unwrap();
         assert!(store.update(|s| s.parameters_collapsed = true).is_err());
         assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
-        assert!(store.load().claude_path.is_none(), "readers keep the defaults");
+        assert!(
+            store.load().claude_path.is_none(),
+            "readers keep the defaults"
+        );
     }
 
     /// A save that cannot land is reported, not swallowed.

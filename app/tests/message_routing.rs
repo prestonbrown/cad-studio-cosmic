@@ -326,24 +326,68 @@ fn the_scanner_sees_every_swallow_shape() {
         let body = fn_body(&source, "fn update(").expect("found");
         swallowing_arms(body, &source)
     };
-    let wrap = |arms: &str| format!("fn update(&mut self, message: Message) {{\n    match message {{\n{arms}\n    }}\n}}\n");
+    let wrap = |arms: &str| {
+        format!(
+            "fn update(&mut self, message: Message) {{\n    match message {{\n{arms}\n    }}\n}}\n"
+        )
+    };
 
-    assert_eq!(check(&wrap("        Message::A => {} // a \"{\" in a comment\n        _ => {}")).len(), 1);
-    assert_eq!(check(&wrap("        Message::A => {}\n        _msg => {}")).len(), 1);
-    assert_eq!(check(&wrap("        Message::A => {}\n        | _ => {}")).len(), 1);
-    assert_eq!(check(&wrap("        Message::A => x, _ => y,")).len(), 1, "two arms on a line");
-    assert_eq!(check(&wrap("        other => Task::none(),")).len(), 1, "binding dropped");
-    assert_eq!(check(&wrap("        Message::Viewer(_) => {}")).len(), 1, "nested catch-all");
-    assert_eq!(check(&wrap("        _ if ready => go(),")).len(), 1, "guarded wildcard");
+    assert_eq!(
+        check(&wrap(
+            "        Message::A => {} // a \"{\" in a comment\n        _ => {}"
+        ))
+        .len(),
+        1
+    );
+    assert_eq!(
+        check(&wrap("        Message::A => {}\n        _msg => {}")).len(),
+        1
+    );
+    assert_eq!(
+        check(&wrap("        Message::A => {}\n        | _ => {}")).len(),
+        1
+    );
+    assert_eq!(
+        check(&wrap("        Message::A => x, _ => y,")).len(),
+        1,
+        "two arms on a line"
+    );
+    assert_eq!(
+        check(&wrap("        other => Task::none(),")).len(),
+        1,
+        "binding dropped"
+    );
+    assert_eq!(
+        check(&wrap("        Message::Viewer(_) => {}")).len(),
+        1,
+        "nested catch-all"
+    );
+    assert_eq!(
+        check(&wrap("        _ if ready => go(),")).len(),
+        1,
+        "guarded wildcard"
+    );
 
-    assert!(check(&wrap("        msg => self.child.update(msg),")).is_empty(), "typed forward");
-    assert!(check(&wrap("        Message::Tab(_) => {}")).is_empty(), "a data payload");
     assert!(
-        check(&wrap("        Message::A => { let c = '{'; let s = r#\"_ => {\"#; /* _ => {} */ }")).is_empty(),
+        check(&wrap("        msg => self.child.update(msg),")).is_empty(),
+        "typed forward"
+    );
+    assert!(
+        check(&wrap("        Message::Tab(_) => {}")).is_empty(),
+        "a data payload"
+    );
+    assert!(
+        check(&wrap(
+            "        Message::A => { let c = '{'; let s = r#\"_ => {\"#; /* _ => {} */ }"
+        ))
+        .is_empty(),
         "literals and block comments are not code"
     );
     assert!(
-        check(&wrap("        Message::A => {\n            go();\n        }\n        Message::B => stop(),")).is_empty(),
+        check(&wrap(
+            "        Message::A => {\n            go();\n        }\n        Message::B => stop(),"
+        ))
+        .is_empty(),
         "block arms end at their brace"
     );
 }

@@ -58,11 +58,11 @@ use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
 use crate::typography;
-use engine::settings::SettingsError;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
 use crate::version_menu;
 use crate::viewer_pane::ViewerPane;
+use engine::settings::SettingsError;
 
 /// Upstream's default project window size (the WindowGroup
 /// `.defaultSize(1320, 840)`) and minimum (ProjectWorkspace's
@@ -2061,9 +2061,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
         ));
     }
     if !paths.is_empty() {
-        list = list.push(
-            container(surface::divider()).padding([5, 14]),
-        );
+        list = list.push(container(surface::divider()).padding([5, 14]));
     }
     let clear_tone = if paths.is_empty() {
         Tone::Tertiary
@@ -2212,7 +2210,10 @@ mod tests {
         std::fs::write(settings.path(), bytes).unwrap();
         let (mut window, _bridge_task) = ProjectWindow::new(root, &settings);
         let _ = window.update(Message::Command(Command::LayoutChatBottom));
-        assert_eq!(window.activity, Activity::Failed(fl!("settings-unreadable")));
+        assert_eq!(
+            window.activity,
+            Activity::Failed(fl!("settings-unreadable"))
+        );
         assert_eq!(std::fs::read(settings.path()).unwrap(), bytes);
     }
 
