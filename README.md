@@ -51,6 +51,19 @@ the macOS app or this one.
 
 ## Install
 
+Pick one. Release packages are on the
+[Releases page](https://github.com/prestonbrown/cad-studio-cosmic/releases).
+
+- **Debian, Ubuntu, Pop!_OS, Linux Mint.** Download the `.deb` and run
+  `sudo apt install ./cad-studio-cosmic_<version>_amd64.deb`. One package,
+  built on Ubuntu 24.04, covers all of them.
+- **Arch.** Install `cad-studio-cosmic-bin` from the AUR
+  (`yay -S cad-studio-cosmic-bin`).
+- **Any other distribution.** Download `CAD_Studio-<version>-x86_64.AppImage`,
+  `chmod +x` it and run it. It needs the system's Vulkan and Wayland/X11
+  libraries.
+- **From source.**
+
 ```bash
 just install      # build release, install into ~/.local
 just uninstall    # remove exactly what install laid down

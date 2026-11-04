@@ -62,6 +62,13 @@ footer{margin-top:3rem;color:var(--muted);font-size:.95rem}
 </ul>
 
 <h2>Install</h2>
+<p>Pick one. Release packages are on the <a href="https://github.com/prestonbrown/cad-studio-cosmic/releases">Releases page</a>.</p>
+<ul>
+<li><strong>Debian, Ubuntu, Pop!_OS, Linux Mint.</strong> Download the <code>.deb</code> and run <code>sudo apt install ./cad-studio-cosmic_&lt;version&gt;_amd64.deb</code>. One package, built on Ubuntu 24.04, covers all of them.</li>
+<li><strong>Arch.</strong> Install <code>cad-studio-cosmic-bin</code> from the AUR (<code>yay -S cad-studio-cosmic-bin</code>).</li>
+<li><strong>Any other distribution.</strong> Download <code>CAD_Studio-&lt;version&gt;-x86_64.AppImage</code>, <code>chmod +x</code> it and run it. It needs the system's Vulkan and Wayland/X11 libraries.</li>
+<li><strong>From source.</strong></li>
+</ul>
 <pre><code>git clone https://github.com/prestonbrown/cad-studio-cosmic
 cd cad-studio-cosmic
 just install      # build release, install into ~/.local
