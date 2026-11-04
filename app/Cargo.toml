@@ -64,3 +64,29 @@ zip.workspace = true
 # the packaging test parses the metainfo XML (engine's own pin — the tree
 # carries one copy)
 quick-xml.workspace = true
+
+# `cargo deb -p app` after `scripts/package/stage.sh dist/stage`: the staged
+# tree carries the desktop entry and metainfo rendered from
+# resources/packaging/ (the same templates `just install` renders) and the
+# hicolor icons. scripts/package/build.sh runs both steps.
+[package.metadata.deb]
+name = "cad-studio-cosmic"
+maintainer = "Preston Brown <pbrown@brown-house.net>"
+copyright = "Preston Brown"
+license-file = ["../LICENSE", "0"]
+section = "graphics"
+priority = "optional"
+depends = "$auto, libvulkan1, zip, xdg-utils"
+recommends = "python3-venv, mesa-vulkan-drivers"
+extended-description = """\
+Describe a part, get a printable model. CAD Studio drives your locally \
+installed Claude Code (or Codex) and build123d to turn a description into a \
+printable 3D model and its technical drawing, on the COSMIC desktop."""
+assets = [
+    ["target/release/cad-studio", "usr/bin/cad-studio", "755"],
+    ["../dist/stage/usr/share/applications/net.brownhouse.CadStudio.desktop", "usr/share/applications/", "644"],
+    ["../dist/stage/usr/share/metainfo/net.brownhouse.CadStudio.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../dist/stage/usr/share/icons/hicolor/128x128/apps/net.brownhouse.CadStudio.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["../dist/stage/usr/share/icons/hicolor/256x256/apps/net.brownhouse.CadStudio.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../dist/stage/usr/share/icons/hicolor/512x512/apps/net.brownhouse.CadStudio.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+]

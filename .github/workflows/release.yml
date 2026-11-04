@@ -1,0 +1,58 @@
+# Builds the release packages when a v* tag is pushed and attaches them to the
+# GitHub Release. The AUR package is published by hand (see
+# packaging/aur/PKGBUILD).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake libxkbcommon-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev \
+            libinput-dev libudev-dev libseat-dev libgbm-dev libegl-dev \
+            lintian desktop-file-utils appstream imagemagick squashfs-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag matches the crate version
+        run: |
+          version=$(cargo pkgid -p app | sed 's/.*[@#]//')
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != crate version $version"; exit 1; }
+
+      - name: App test suite
+        run: cargo test -p app
+
+      - name: Tools
+        run: |
+          cargo install cargo-deb --locked
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Packages
+        run: scripts/package/build.sh
+
+      - name: Package check
+        run: scripts/rig/package-check.sh
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            dist/*.deb dist/*.AppImage dist/*.tar.gz dist/SHA256SUMS

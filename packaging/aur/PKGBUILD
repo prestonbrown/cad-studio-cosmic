@@ -1,0 +1,35 @@
+# Maintainer: Preston Brown <pbrown@brown-house.net>
+#
+# AUR package cad-studio-cosmic-bin: installs the release tarball that
+# .github/workflows/release.yml attaches to the GitHub Release for tag v$pkgver.
+#
+# Publishing (manual; it needs the maintainer's AUR key):
+#   1. Set pkgver to the released version and pkgrel=1.
+#   2. updpkgsums            # fills sha256sums from the release assets
+#   3. makepkg --printsrcinfo > .SRCINFO
+#   4. Commit PKGBUILD and .SRCINFO to ssh://aur@aur.archlinux.org/cad-studio-cosmic-bin.git
+pkgname=cad-studio-cosmic-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Describe a part, get a printable model: CAD Studio for the COSMIC desktop'
+arch=('x86_64')
+url='https://prestonbrown.github.io/cad-studio-cosmic/'
+license=('MIT')
+depends=('zip' 'xdg-utils' 'vulkan-icd-loader' 'libxkbcommon' 'wayland')
+optdepends=('uv: creates the build123d virtual environment'
+            'python: fallback for creating the build123d virtual environment')
+provides=('cad-studio')
+conflicts=('cad-studio-cosmic')
+options=('!strip')
+source=("cad-studio-cosmic-$pkgver-x86_64.tar.gz::https://github.com/prestonbrown/cad-studio-cosmic/releases/download/v$pkgver/cad-studio-cosmic-$pkgver-x86_64.tar.gz"
+        "LICENSE-$pkgver::https://raw.githubusercontent.com/prestonbrown/cad-studio-cosmic/v$pkgver/LICENSE")
+sha256sums=('SKIP'
+            'SKIP')
+
+package() {
+    cd "$srcdir"
+    # usr/bin/cad-studio, the desktop entry (Exec=/usr/bin/cad-studio),
+    # the metainfo and the 128/256/512 hicolor icons.
+    cp -a usr "$pkgdir/"
+    install -Dm644 "LICENSE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
