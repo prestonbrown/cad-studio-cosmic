@@ -58,11 +58,11 @@ pub const WIDTH: f32 = 600.0;
 /// translation or a larger text scale run past it.
 pub fn height(tab: Tab, engine: AgentKind) -> f32 {
     match (tab, engine) {
-        (Tab::General, _) => 453.0,
-        (Tab::Agent, AgentKind::Claude) => 661.0,
+        (Tab::General, _) => 470.0,
+        (Tab::Agent, AgentKind::Claude) => 674.0,
         (Tab::Agent, AgentKind::Codex) => 618.0,
-        (Tab::Python, _) => 274.0,
-        (Tab::Advanced, _) => 354.0,
+        (Tab::Python, _) => 287.0,
+        (Tab::Advanced, _) => 365.0,
     }
 }
 
