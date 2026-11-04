@@ -323,12 +323,9 @@ async fn prompt_to_rendered_model() {
     );
     // the minimal status bar's warning count (missing_requirements)
     assert_eq!(window.viewer.warnings, 0, "a complete output set");
-    // the header's missing-output warnings (missing_output_files)
-    assert!(
-        window.missing_outputs.is_empty(),
-        "{:?}",
-        window.missing_outputs
-    );
+    // the header's missing-output warnings (checked at turn end)
+    let missing = window.bridge.missing_outputs();
+    assert!(missing.is_empty(), "{missing:?}");
     // the activity model's success classification ("Model generated" —
     // only when no output is missing at turn end)
     assert_eq!(
