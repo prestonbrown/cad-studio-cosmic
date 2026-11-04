@@ -418,10 +418,10 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
                 .content_fit(cosmic::iced::ContentFit::Cover)
                 .border_radius(Corner::S.radius(&cosmic::theme::active()))
                 .into(),
-            None => file_type_tile(&caption, size),
+            None => file_type_tile(&resolved, &caption, size),
         }
     } else {
-        file_type_tile(&caption, size)
+        file_type_tile(&resolved, &caption, size)
     };
     let tile = ui::button::with_help(
         container(body)
@@ -441,13 +441,38 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
     tile.into()
 }
 
+/// The Cosmic theme's mime icon for a file's extension (the per-type icon
+/// `NSWorkspace.icon(forFile:)` gives upstream); types the theme has no
+/// icon for take the generic document.
+fn tile_icon_name(path: &Path) -> &'static str {
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "pdf" => "application-pdf",
+        "py" => "text-x-python",
+        "md" => "text-x-markdown",
+        "json" => "text-x-json",
+        "svg" => "image-x-generic",
+        "zip" => "package-x-generic",
+        _ => "text-x-generic",
+    }
+}
+
+/// The queue row's attachment-count caption: every attachment counts, not
+/// only images (upstream's "N immagini", ChatInputView.swift:218-219).
+fn queue_attachment_label(item: &QueueItem) -> Option<String> {
+    (item.images > 0).then(|| fl!("lld-immagini", count = item.images))
+}
+
 /// The non-image tile — AttachmentThumbnail's else branch
 /// (ChatInputView.swift:167-175): the file-type icon at half size over the
 /// uppercase extension caption at max(8, size * 0.15).
-fn file_type_tile<'a>(caption: &str, size: f32) -> Element<'a, Message> {
+fn file_type_tile<'a>(path: &Path, caption: &str, size: f32) -> Element<'a, Message> {
     Column::new()
         .spacing(3)
-        .push(ui::icon::named("text-x-generic", (size * 0.5) as u16))
+        .push(ui::icon::named(tile_icon_name(path), (size * 0.5) as u16))
         .push(
             styled_text(
                 caption.to_string(),
@@ -1017,17 +1042,13 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             styled_text(preview, CALLOUT, Tone::Primary)
                 .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(2))),
         );
-        if item.images > 0 {
+        if let Some(label) = queue_attachment_label(item) {
             body = body.push(
                 Row::new()
                     .spacing(4)
                     .align_y(Alignment::Center)
                     .push(sf_icon(Symbol::Photo, 11, Tone::Secondary))
-                    .push(styled_text(
-                        fl!("lld-immagini", count = item.images),
-                        CAPTION,
-                        Tone::Secondary,
-                    )),
+                    .push(styled_text(label, CAPTION, Tone::Secondary)),
             );
         }
         let remove = ui::button::with_help(
@@ -1627,6 +1648,27 @@ mod tests {
         // missing file as known-failed (the tile, not a retry)
         assert!(decoded_thumbnail(&png).is_some());
         assert!(decoded_thumbnail(Path::new("/tmp/gone-missing.png")).is_none());
+    }
+
+    #[test]
+    fn file_tiles_use_the_mime_icon_for_their_type() {
+        assert_eq!(tile_icon_name(Path::new("a.pdf")), "application-pdf");
+        assert_eq!(tile_icon_name(Path::new("m.PY")), "text-x-python");
+        assert_eq!(tile_icon_name(Path::new("x.step")), "text-x-generic");
+        assert_eq!(tile_icon_name(Path::new("noext")), "text-x-generic");
+    }
+
+    #[test]
+    fn queue_label_counts_every_attachment() {
+        let from_send = crate::bridge::QueuedItem {
+            id: Uuid::new_v4(),
+            text: String::new(),
+            images: 3,
+        };
+        let item = QueueItem { id: from_send.id, text: from_send.text, images: from_send.images };
+        assert_eq!(queue_attachment_label(&item), Some(fl!("lld-immagini", count = 3)));
+        let none = QueueItem { images: 0, ..item };
+        assert_eq!(queue_attachment_label(&none), None);
     }
 
     /// The three spinner-bearing rows construct together — the active

@@ -121,6 +121,11 @@ fn percent_decode(text: &str) -> String {
 /// once threads exist — see `LOG_TIMESTAMP` in engine's agent/session.rs); the name only
 /// needs uniqueness and upstream's shape.
 pub fn saved_image(png: &[u8]) -> Option<PathBuf> {
+    // Upstream's NSImage(data:) refuses bytes that are not an image at paste;
+    // the clipboard offered `image/png`, so anything else is not staged.
+    if !matches!(image::guess_format(png), Ok(image::ImageFormat::Png)) {
+        return None;
+    }
     let folder = std::env::temp_dir().join("CAD Studio Attachments");
     std::fs::create_dir_all(&folder).ok()?;
     const STAMP: &[time::format_description::FormatItem] =
@@ -150,6 +155,18 @@ pub fn resolve_attachment(path: &str, root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_bytes_that_do_not_decode_are_refused() {
+        assert_eq!(saved_image(b"not an image"), None);
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let saved = saved_image(&png).expect("valid PNG bytes save");
+        assert_eq!(std::fs::read(&saved).unwrap(), png);
+        let _ = std::fs::remove_file(saved);
+    }
 
     /// uri-list parsing: file URLs decode (percent-escapes included),
     /// comments and other schemes drop, CRLF and LF both split
