@@ -56,7 +56,12 @@ pub fn section<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
     container(column)
         .padding(1)
         .width(Length::Fill)
-        .class(surface::fill(Tone::Quaternary, FILL, Corner::S, Some(HAIRLINE)))
+        .class(surface::fill(
+            Tone::Quaternary,
+            FILL,
+            Corner::S,
+            Some(HAIRLINE),
+        ))
         .into()
 }
 
@@ -91,15 +96,23 @@ pub fn styled_row<'a, M: 'a>(
         .into()
 }
 
-/// A row whose content spans the box (a buttons row, a bare note).
+/// A row whose content spans the box (a buttons row, a bare note): at
+/// least a row tall, and taller with a margin when the content wraps.
 pub fn full_row<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fixed(ROW_HEIGHT))
+    Row::new()
+        .push(Space::new().width(0.0).height(Length::Fixed(ROW_HEIGHT)))
+        .push(
+            container(content)
+                .width(Length::Fill)
+                .padding([FULL_ROW_MARGIN, 0.0]),
+        )
         .padding([0.0, INSET])
         .align_y(Alignment::Center)
         .into()
 }
+
+/// Above and below a full row's content once it outgrows the row.
+const FULL_ROW_MARGIN: f32 = 6.0;
 
 /// A row's leading label: body text, primary.
 pub fn label_text<'a>(label: String) -> cosmic::widget::Text<'a, cosmic::Theme> {

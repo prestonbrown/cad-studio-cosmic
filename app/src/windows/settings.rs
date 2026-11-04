@@ -58,11 +58,11 @@ pub const WIDTH: f32 = 600.0;
 /// translation or a larger text scale run past it.
 pub fn height(tab: Tab, engine: AgentKind) -> f32 {
     match (tab, engine) {
-        (Tab::General, _) => 474.0,
-        (Tab::Agent, AgentKind::Claude) => 682.0,
-        (Tab::Agent, AgentKind::Codex) => 613.0,
-        (Tab::Python, _) => 291.0,
-        (Tab::Advanced, _) => 365.0,
+        (Tab::General, _) => 453.0,
+        (Tab::Agent, AgentKind::Claude) => 661.0,
+        (Tab::Agent, AgentKind::Codex) => 618.0,
+        (Tab::Python, _) => 274.0,
+        (Tab::Advanced, _) => 354.0,
     }
 }
 
@@ -458,13 +458,11 @@ pub fn stage(message: &Message, settings: &mut Settings) {
         Message::Language(language) => {
             settings.language = language.as_setting().map(str::to_string);
         }
-        Message::PrintPref(pref) => {
-            match pref {
-                PrintPrefMessage::PrinterType(kind) => settings.printer_type = *kind,
-                PrintPrefMessage::PrinterModel(model) => settings.printer_model = trimmed(model),
-                PrintPrefMessage::Unit(unit) => settings.measurement_unit = *unit,
-            }
-        }
+        Message::PrintPref(pref) => match pref {
+            PrintPrefMessage::PrinterType(kind) => settings.printer_type = *kind,
+            PrintPrefMessage::PrinterModel(model) => settings.printer_model = trimmed(model),
+            PrintPrefMessage::Unit(unit) => settings.measurement_unit = *unit,
+        },
         Message::Engine(engine) => {
             settings.agent_engine = match engine {
                 AgentKind::Claude => "claude".to_string(),
@@ -994,13 +992,19 @@ mod tests {
             stage(message, settings);
             persists(message)
         };
-        assert!(!stage_and_persists(&Message::Tab(Tab::Python), &mut settings));
+        assert!(!stage_and_persists(
+            &Message::Tab(Tab::Python),
+            &mut settings
+        ));
         assert!(!stage_and_persists(
             &Message::ChooseLocation(PathBuf::from("/x")),
             &mut settings
         ));
         assert!(!stage_and_persists(&Message::PythonCheck, &mut settings));
-        assert!(!stage_and_persists(&Message::PythonReinstall, &mut settings));
+        assert!(!stage_and_persists(
+            &Message::PythonReinstall,
+            &mut settings
+        ));
         assert!(!stage_and_persists(
             &Message::Located(AgentKind::Claude, None),
             &mut settings
@@ -1049,7 +1053,10 @@ mod tests {
         ));
         assert_eq!(settings.language, None, "System clears the override");
 
-        assert!(stage_and_persists(&Message::Engine(AgentKind::Codex), &mut settings));
+        assert!(stage_and_persists(
+            &Message::Engine(AgentKind::Codex),
+            &mut settings
+        ));
         assert_eq!(settings.agent_engine, "codex");
 
         assert!(stage_and_persists(
@@ -1078,14 +1085,26 @@ mod tests {
         ));
         assert_eq!(settings.codex_model, None);
 
-        assert!(stage_and_persists(&Message::Effort(Effort::Low), &mut settings));
+        assert!(stage_and_persists(
+            &Message::Effort(Effort::Low),
+            &mut settings
+        ));
         assert_eq!(settings.claude_effort.as_deref(), Some("low"));
-        assert!(stage_and_persists(&Message::Effort(Effort::AgentDefault), &mut settings));
+        assert!(stage_and_persists(
+            &Message::Effort(Effort::AgentDefault),
+            &mut settings
+        ));
         assert_eq!(settings.claude_effort, None);
 
-        assert!(stage_and_persists(&Message::RestrictedBash(true), &mut settings));
+        assert!(stage_and_persists(
+            &Message::RestrictedBash(true),
+            &mut settings
+        ));
         assert!(settings.restricted_bash);
-        assert!(stage_and_persists(&Message::Streaming(false), &mut settings));
+        assert!(stage_and_persists(
+            &Message::Streaming(false),
+            &mut settings
+        ));
         assert!(!settings.streaming_output);
         assert!(stage_and_persists(&Message::Isolates(false), &mut settings));
         assert!(!settings.isolates_claude);

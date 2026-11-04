@@ -46,9 +46,16 @@ pub fn picker<'a, M: Clone + 'a>(
         .and_then(|index| options.get(index))
         .cloned()
         .unwrap_or_default();
-    let lookup = options.clone();
-    let list = PickList::new(options, None::<String>, move |chosen: String| {
-        on_select(index_of(&lookup, &chosen))
+    let choices: Vec<Choice> = options
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| Choice { index, label })
+        .collect();
+    // the list's own selection stays empty: a selected label would draw
+    // in the list's face under the right-aligned one, and the pinned
+    // theme's pick_list class is `()` (no text color to hide it with)
+    let list = PickList::new(choices, None::<Choice>, move |chosen: Choice| {
+        on_select(chosen.index)
     })
     .placeholder("")
     .text_size(typography::BODY)
@@ -76,13 +83,18 @@ pub fn picker<'a, M: Clone + 'a>(
     .into()
 }
 
-/// `chosen`'s index in `options` (the first match; option labels are
-/// distinct).
-fn index_of(options: &[String], chosen: &str) -> usize {
-    options
-        .iter()
-        .position(|option| option == chosen)
-        .unwrap_or(0)
+/// One option: its label, shown in the list, and its index, which the
+/// selection reports (so a label never has to be looked up again).
+#[derive(Debug, Clone, PartialEq)]
+struct Choice {
+    index: usize,
+    label: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 /// The rounded box holding the up/down chevron.
@@ -106,14 +118,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_chosen_label_maps_back_to_its_index() {
-        let options = vec![
-            "System".to_string(),
-            "English".to_string(),
-            "Deutsch".to_string(),
-        ];
-        assert_eq!(index_of(&options, "English"), 1);
-        assert_eq!(index_of(&options, "Deutsch"), 2);
-        assert_eq!(index_of(&options, "System"), 0);
+    fn a_choice_shows_its_label_and_keeps_its_index() {
+        let choice = Choice {
+            index: 2,
+            label: "Deutsch".to_string(),
+        };
+        assert_eq!(choice.to_string(), "Deutsch");
+        assert_eq!(choice.index, 2);
     }
 }
