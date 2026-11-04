@@ -277,6 +277,12 @@ minors, each with its owner:
   boundary is unpinned; struck plan Task 2, the bug record). Revisit only
   if M9 pins the boundary; motion_controls' module doc carries the ruling.
   **Owner: M9 Task 5** (speed menu single-menu shape and ✓ marks).
+  M9 Task 5 (2026-11-04): BOUNDARY PINNED. The port's pull-down already
+  holds the speeds and Ripeti in one menu; a cosmic menu with
+  `Item::CheckBox` entries and a root titled by the current speed survives
+  200 open-menu rebuilds (docs/research/libcosmic-menu-dynamic-items-bug.md,
+  probes b and b'), so real ✓ marks are certified safe. The swap from the
+  pull-down's text ✓ is open: see the gallery-2 ✓-marks entry.
 - Translucent parts composite in slot order (no sort among translucents,
   depth-write off) where SceneKit sorts transparents back-to-front —
   cosmetic; the offscreen playback shots are the eyeball-verdict venue
@@ -354,6 +360,12 @@ M8 T8 parameters menu entry divergence (2026-10-28):
   (docs/research/libcosmic-menu-dynamic-items-bug.md; the plan's struck
   Task 2 records why no probe can certify it today). Revisit only if M9
   pins the boundary (**owner: M9 Task 5**, the flipping parameters label).
+  RESOLVED M9 Task 5 (2026-11-04): the boundary is pinned (text changes
+  on fixed-height kit items are safe in any root, probe a), and the entry
+  now flips "Nascondi parametri"/"Mostra parametri" with
+  `parameters_visible` (`view_menu_parameters_label_follows_visibility`).
+  The chat entry's upstream flip (Commands.swift:52) is safe by the same
+  rule; it keeps its static toolbar label until someone restores it.
   ~~The pre-existing mostra/nascondi-chat View-root
   flip (M4 vintage) is the one remaining text-only flip against that
   ruling — untested hazard, same owner (M9 boundary pin or a fixwave
@@ -470,7 +482,11 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   - The version menu is clipped to the window; upstream's menu window can
     extend past it.
   - The playback speed menu's ✓ marks are text, and its width shortens the
-    scrub slider by ~25 px. **Owner: M9 Task 5** (✓ marks).
+    scrub slider by ~25 px. **Owner: M9 Task 5** (✓ marks). Task 5
+    certified a cosmic `Item::CheckBox` menu safe (single-root bar, root
+    label = current speed; the record's probes b and b'); swapping the
+    pull-down for it is a kit component plus a playback capture against
+    upstream, not yet done.
   - The lid's specular falloff is missing. In dark playback the ghost's
     side faces read 10-19 low in red, because the opaque side shading is
     darker. ACCEPTED (M9 Ruling 4; Preston 2026-11-04: remaining visual
