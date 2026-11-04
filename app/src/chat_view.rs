@@ -281,13 +281,14 @@ pub fn view_chat<'a>(
     queue: &'a [QueueItem],
     queue_paused: bool,
     root: &'a Path,
+    placeholder_engine: engine::agent::locator::AgentKind,
 ) -> Element<'a, Message> {
     // The transcript area is ALWAYS a scrollable — swapping an empty-state
     // column into the slot and back lands a stateful scrollable on a
     // stateless widget tree on the first message, which iced's positional
     // tree diff cannot reconcile (panic: "Downcast on stateless state").
     let body: Element<'_, Message> = if chat.messages.is_empty() {
-        container(empty_state(chat.engine))
+        container(empty_state(placeholder_engine))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Horizontal::Center)
@@ -871,8 +872,7 @@ const EMPTY_STATE_ICON: u16 = 44;
 /// 6pt rounded fill, spacing 6, at most 340pt wide; spacing 16 between
 /// the groups, padding 20. The engine line names the engine that will run
 /// the first turn (upstream reads `AgentEngine.current` at render; the
-/// port seeds ChatState's engine from the settings at window build — an
-/// empty transcript means no turn ran to re-seed it).
+/// caller passes the engine setting as it is now).
 fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Message> {
     let suggestions = [
         fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
@@ -1598,8 +1598,8 @@ mod tests {
 
         let pane = ChatPane::new();
         let empty = ChatState::new(Vec::new());
-        let _ = view_chat(&pane, &empty, false, &[], false, &root);
-        let _ = view_chat(&pane, &empty, true, &[], false, &root);
+        let _ = view_chat(&pane, &empty, false, &[], false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(&pane, &empty, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
 
         // a user row with both attachment forms: the relative copy names
         // current rows carry, and an absolute original (the legacy shape)
@@ -1620,8 +1620,8 @@ mod tests {
             text: "next up".into(),
             images: 1,
         }];
-        let _ = view_chat(&pane, &chat, true, &queue, true, &root);
-        let _ = view_chat(&pane, &chat, false, &queue, false, &root);
+        let _ = view_chat(&pane, &chat, true, &queue, true, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(&pane, &chat, false, &queue, false, &root, engine::agent::locator::AgentKind::Claude);
 
         // the decoded thumbnail cached the real PNG and recorded the
         // missing file as known-failed (the tile, not a retry)
@@ -1654,7 +1654,7 @@ mod tests {
         chat.append(user_row("make the wall 4 mm"));
 
         let pane = ChatPane::new();
-        let _ = view_chat(&pane, &chat, true, &[], false, &root);
+        let _ = view_chat(&pane, &chat, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
     }
 
     /// Version markers, fenced code cards and the plain summary caption
@@ -1684,7 +1684,7 @@ mod tests {
         chat.versions = vec![1, 2];
         chat.current_version = Some(2);
         let pane = ChatPane::new();
-        let _ = view_chat(&pane, &chat, false, &[], false, &root);
-        let _ = view_chat(&pane, &chat, true, &[], false, &root);
+        let _ = view_chat(&pane, &chat, false, &[], false, &root, engine::agent::locator::AgentKind::Claude);
+        let _ = view_chat(&pane, &chat, true, &[], false, &root, engine::agent::locator::AgentKind::Claude);
     }
 }

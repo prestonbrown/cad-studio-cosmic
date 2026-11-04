@@ -600,4 +600,22 @@ mod tests {
         .unwrap();
         assert!(load_thumbnail(&dir.join("schematic.png")).is_some());
     }
+
+    /// Return on an empty or invalid name leaves the sheet where it is; a
+    /// valid name advances to the parent-folder pick.
+    #[test]
+    fn an_invalid_name_does_not_advance_the_new_project_sheet() {
+        use new_project::{Message, NewProject, update};
+        let mut sheet = NewProject::default();
+        update(&mut sheet, &Message::Advance);
+        assert!(!sheet.awaiting_parent, "an empty name advances nothing");
+
+        sheet.name = ".hidden".into();
+        update(&mut sheet, &Message::Advance);
+        assert!(!sheet.awaiting_parent, "an invalid name advances nothing");
+
+        sheet.name = "Staffa".into();
+        update(&mut sheet, &Message::Advance);
+        assert!(sheet.awaiting_parent, "a valid name advances");
+    }
 }

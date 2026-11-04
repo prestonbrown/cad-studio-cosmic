@@ -339,6 +339,17 @@ impl SettingsState {
         }
     }
 
+    /// Replace every settings-derived field with `settings`, keeping the
+    /// selected tab and the locate rows.
+    pub fn reseed(&mut self, settings: &Settings) {
+        let fresh = Self::new(settings);
+        *self = Self {
+            tab: self.tab,
+            locate: std::mem::take(&mut self.locate),
+            ..fresh
+        };
+    }
+
     /// The window height this state's tab and engine call for ([`height`]).
     pub fn height(&self) -> f32 {
         height(self.tab, self.engine)
@@ -755,7 +766,6 @@ fn engine_section(state: &SettingsState) -> Element<'_, Message> {
 /// environment state, Verifica + Reinstalla… (disabled while installing,
 /// :206), the packages footer.
 fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
-    let interpreter = engine::python::env::interpreter_path(&engine::python::env::venv_dir());
     let home = std::env::var("HOME").unwrap_or_default();
     let build123d: Element<'_, Message> = match python {
         EnvState::Ready { build123d_version } => value_text(build123d_version.clone())
@@ -787,13 +797,20 @@ fn view_python(python: &EnvState) -> Vec<Element<'static, Message>> {
         form::section(vec![
             form::row(
                 fl!("interprete"),
-                path_text(abbreviate_with_tilde(&interpreter, &home)),
+                path_text(interpreter_label(&home)),
             ),
             form::row(fl!("build123d"), build123d),
             form::full_row(actions),
         ]),
         form::footer(fl!("pacchetti-build123d-matplotlib-numpy")),
     ]
+}
+
+/// The Python tab's interpreter line: the venv's interpreter,
+/// `~/`-abbreviated against `home`.
+fn interpreter_label(home: &str) -> String {
+    let interpreter = engine::python::env::interpreter_path(&engine::python::env::venv_dir());
+    abbreviate_with_tilde(&interpreter, home)
 }
 
 /// Avanzate (SettingsView.swift:217-242).
@@ -1360,5 +1377,36 @@ mod tests {
 
         // About
         let _: Element<'static, ()> = view_about();
+    }
+
+    /// The interpreter line shows the venv's python under `~`, not the
+    /// absolute home path.
+    #[test]
+    fn the_interpreter_line_is_tilde_abbreviated() {
+        let home = engine::storage::data_dir()
+            .ancestors()
+            .nth(3)
+            .expect("the data dir sits under the home directory")
+            .display()
+            .to_string();
+        assert_eq!(
+            interpreter_label(&home),
+            "~/.local/share/cad-studio/venv/bin/python"
+        );
+    }
+
+    /// A reseed replaces every settings-derived field and keeps the tab
+    /// and the locate rows.
+    #[test]
+    fn reseed_takes_the_settings_and_keeps_the_tab() {
+        let mut state = SettingsState::new(&Settings::default());
+        state.tab = Tab::Agent;
+        state.locate[0] = LocateState::Missing;
+        let mut changed = Settings::default();
+        changed.set_agent_path(AgentKind::Claude, Some("/opt/claude".to_string()));
+        state.reseed(&changed);
+        assert_eq!(state.custom_paths[0], "/opt/claude");
+        assert_eq!(state.tab, Tab::Agent);
+        assert_eq!(state.locate[0], LocateState::Missing);
     }
 }

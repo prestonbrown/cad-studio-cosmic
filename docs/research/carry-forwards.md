@@ -521,10 +521,9 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   Project.swift:192-196 — recorded divergence), and a FAILED venv check
   has no retry. The Python tab's Verifica re-runs the check
   (app/src/windows/settings.rs:779-780 `Message::PythonCheck`, disabled
-  only while installing; handled at app/src/app.rs:1083-1086). OPEN, no
-  test: settings.rs:1009 only asserts the message persists nothing, and no
-  test drives the re-run after a failed check. **Owner: M9 Task 4** (pin
-  it). ~~The synchronous busy-rise half (Send arm set no local activity where
+  only while installing; handled at app/src/app.rs:1083-1086). Pinned
+  by `app::shell_behavior::verifica_after_a_failed_check_reruns_the_check`
+  (app/src/app.rs, `Message::PythonCheck` → `begin_checking`). ~~The synchronous busy-rise half (Send arm set no local activity where
   upstream's send() does, Project.swift:192-208).~~ Struck: the Send arm folds
   the bridge's activity in the same update, pinned by
   `windows::project::tests::successful_send_flips_busy_in_the_same_update`
@@ -646,14 +645,28 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   (app/src/app.rs:712-723, :359-367, :604), and `ChatState` appends the
   Configure-agent system row (app/src/chat.rs:449-455). Pinned by
   `app::tests::an_agent_missing_turn_presents_the_agent_sheet` (app.rs:2254)
-  and `engine_text::tests::turn_markers_append_localized_system_rows` (engine_text.rs:226). (b) the empty-transcript placeholder engine name
-  seeds at window build, stale across a mid-session flip until the next turn
-  (upstream reads at render) — **Owner: M9 Task 4**; (c) an open settings window
-  doesn't re-seed when the agent sheet writes agent_path underneath it (stale
-  display, no lost write) — **Owner: M9 Task 4**. Cosmetic notes: mirror-fold
-  on a failed persist save (**Owner: M9 Task 4**); Python tab interpreter not
-  tilde-abbreviated and About unreachable from welcome-only — **Owner: M9
-  Task 4**.
+  and `engine_text::tests::turn_markers_append_localized_system_rows` (engine_text.rs:226). (b) ~~the empty-transcript placeholder engine name
+  seeds at window build~~ Struck: the project window passes the engine
+  setting read at render (`ProjectWindow::placeholder_engine`,
+  app/src/windows/project.rs, into `chat_view::view_chat`), pinned by
+  `windows::project::tests::empty_transcript_names_the_current_engine`;
+  (c) ~~an open settings window doesn't re-seed when the agent sheet writes
+  agent_path~~ Struck: the sheet's Verify calls
+  `reseed_settings_windows` (app/src/app.rs), pinned by
+  `app::shell_behavior::settings_window_reseeds_when_agent_path_changes_underneath`.
+  Cosmetic notes: ~~mirror-fold on a failed persist save~~ struck: a
+  refused save re-seeds the mirror from disk instead of folding
+  (`update_settings_any`, app/src/app.rs), pinned by
+  `app::shell_behavior::a_failed_settings_save_does_not_leave_the_mirror_ahead_of_the_file`;
+  ~~Python tab interpreter not tilde-abbreviated~~ struck: the line was
+  already abbreviated; `interpreter_label` now makes it testable
+  (`windows::settings::tests::the_interpreter_line_is_tilde_abbreviated`).
+  OPEN: About is unreachable from the welcome-only state. The welcome
+  window is borderless and has no menu root (`decorate_borderless`,
+  app/src/app.rs); upstream's About lives in the app menu of every window.
+  Smallest parity-faithful route: give the welcome window the same File
+  root the project windows carry (About, Settings, Welcome entries), a
+  decision for Task 5's menu ruling rather than a one-off menu here.
 
 - ~~Python-sheet progress steps stay English in every locale: sheets.rs
   rendered engine-side STEP_* consts verbatim.~~ Struck: the engine emits
@@ -669,7 +682,5 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   None (app/src/windows/welcome.rs:98-102), and the Avanti button is
   disabled on the same verdict (:159). The validity verdict is pinned by
   `name_validation_wires_the_engine_rules` (welcome.rs:506) and the valid
-  path by `create_failure_lands_in_the_alert`, but NO test drives `Advance`
-  with an invalid name, so the entry stays OPEN until one does.
-  **Owner: M9 Task 4** (pin `new_project_return_on_invalid_name_advances_nothing`
-  beside the welcome About work).
+  path by `create_failure_lands_in_the_alert`, and `Advance` with an empty or invalid name is pinned by
+  `windows::welcome::tests::an_invalid_name_does_not_advance_the_new_project_sheet`.
