@@ -2099,43 +2099,18 @@ fn tool_toggle(
     )
 }
 
-/// SwiftUI's `ContentUnavailableView` (ModelPane.swift:101-112): a
-/// tertiary glyph, the bold secondary title, the secondary description,
-/// centered in the pane.
+/// The model pane's `ContentUnavailableView` (ModelPane.swift:101-112)
+/// on the pane's text background.
 fn content_unavailable<'a>(
     symbol: Symbol,
     title: String,
     description: String,
 ) -> Element<'a, Message> {
-    let glyph = icon(symbol, 40.0, Tone::Tertiary, BACKDROP);
-    container(
-        Column::new()
-            .push(glyph)
-            .push(Space::new().height(Length::Fixed(14.0)))
-            .push(
-                text(title)
-                    .size(crate::typography::TITLE)
-                    .font(crate::typography::font(cosmic::iced::font::Weight::Bold))
-                    .class(Tone::Secondary.text(BACKDROP)),
-            )
-            .push(Space::new().height(Length::Fixed(6.0)))
-            .push(
-                text(description)
-                    .size(crate::typography::BODY)
-                    .align_x(cosmic::iced::alignment::Horizontal::Center)
-                    .class(Tone::Secondary.text(BACKDROP)),
-            )
-            .align_x(cosmic::iced::alignment::Alignment::Center),
-    )
-    .padding(20)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(cosmic::iced::alignment::Horizontal::Center)
-    .align_y(cosmic::iced::alignment::Vertical::Center)
-    .class(ui::surface::text_background_class(
-        ui::surface::Corner::None,
-    ))
-    .into()
+    ui::content_unavailable::content_unavailable(symbol, title, description, BACKDROP)
+        .class(ui::surface::text_background_class(
+            ui::surface::Corner::None,
+        ))
+        .into()
 }
 
 #[cfg(test)]

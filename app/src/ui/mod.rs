@@ -10,6 +10,8 @@
 //! - [`picker`]: the grouped Form's pop-up picker (value + up/down chevron).
 //! - [`button`]: borderless icon/text buttons and the toolbar look.
 //! - [`form`]: macOS's grouped Form — sections, rows, footers.
+//! - [`content_unavailable`]: the empty-pane placeholder (glyph, title,
+//!   description).
 //! - [`code_block`]: upstream's `CodeBlock`, mono text with a copy button.
 //! - [`slider`]: the small rail-and-knob slider of the overlay cards.
 //!
@@ -18,6 +20,7 @@
 
 pub mod button;
 pub mod code_block;
+pub mod content_unavailable;
 pub mod form;
 pub mod icon;
 pub mod picker;

@@ -43,7 +43,7 @@ use engine::project::manifest::Manifest;
 
 use crate::typography;
 use crate::ui::tone::mix;
-use crate::ui::{Backdrop, Symbol, Tone, button};
+use crate::ui::{self, Backdrop, Symbol, Tone, button};
 
 /// The footer and empty state sit on the plain under-page backdrop.
 const BACKDROP: Backdrop = Backdrop::Plain;
@@ -987,28 +987,13 @@ impl SchematicPane {
 
     pub fn view(&self) -> Element<'_, Message> {
         let content: Element<'_, Message> = if self.tabs.is_empty() {
-            // upstream ContentUnavailableView (SchematicPane.swift:43-47):
-            // icon + title + secondary description, centered mid-pane —
-            // `doc.text.image`; x-office-document is the Pop-theme stand-in
-            container(
-                Column::new()
-                    .push(
-                        cosmic::widget::icon::from_name("x-office-document")
-                            .size(40)
-                            .icon(),
-                    )
-                    .push(text(fl!("nessun-modello")).size(typography::TITLE2))
-                    .push(
-                        text(fl!("descrivi-un-oggetto-nella-chat-per-iniziare"))
-                            .class(Tone::Secondary.text(BACKDROP)),
-                    )
-                    .spacing(8)
-                    .align_x(Alignment::Center),
+            // upstream ContentUnavailableView (SchematicPane.swift:43-47)
+            ui::content_unavailable::content_unavailable(
+                Symbol::DocTextImage,
+                fl!("nessun-modello"),
+                fl!("descrivi-un-oggetto-nella-chat-per-iniziare"),
+                BACKDROP,
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(cosmic::iced::alignment::Vertical::Center)
             .into()
         } else {
             self.view_sheet()

@@ -76,6 +76,7 @@ symbols! {
     ChevronLeftForwardslashChevronRight => "chevron.left.forwardslash.chevron.right",
     DocBadgePlus => "doc.badge.plus",
     DocOnDoc => "doc.on.doc",
+    DocTextImage => "doc.text.image",
     DocTextMagnifyingglass => "doc.text.magnifyingglass",
     ExclamationmarkTriangle => "exclamationmark.triangle",
     ExclamationmarkTriangleFill => "exclamationmark.triangle.fill",
