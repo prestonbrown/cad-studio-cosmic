@@ -647,18 +647,7 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             .padding(8)
             .width(Length::Fill)
             // `textBackgroundColor` in a 6 pt rounded rectangle
-            .class(cosmic::theme::Container::custom(|theme| {
-                cosmic::iced::widget::container::Style {
-                    background: Some(cosmic::iced::Background::Color(
-                        ui::surface::text_background(theme),
-                    )),
-                    border: cosmic::iced::Border {
-                        radius: Corner::S.radius(theme),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            })),
+            .class(ui::surface::text_background_class(Corner::S)),
         );
     }
     let actions = Row::new()

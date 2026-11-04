@@ -132,12 +132,12 @@ pub fn material_fill(corner: Corner) -> cosmic::theme::Container<'static> {
 /// A translucent `on` wash: `tone`'s alpha scaled by `scale` (upstream's
 /// `.quaternary.opacity(0.5)` is `fill(Tone::Quaternary, 0.5, …)`; a
 /// measured wash names its scale against the role it reads as),
-/// optionally stroked with the separator.
+/// optionally stroked with the separator at `stroke` times its alpha.
 pub fn fill(
     tone: Tone,
     scale: f32,
     corner: Corner,
-    stroke: bool,
+    stroke: Option<f32>,
 ) -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(move |theme| Style {
         background: Some(Background::Color(wash(
@@ -145,30 +145,52 @@ pub fn fill(
             tone.alpha(theme, Backdrop::Plain) * scale,
         ))),
         border: Border {
-            color: if stroke {
-                Tone::Separator.color(theme, Backdrop::Plain)
-            } else {
-                Color::TRANSPARENT
-            },
-            width: if stroke { 1.0 } else { 0.0 },
+            color: stroke.map_or(Color::TRANSPARENT, |stroke| {
+                wash(theme, Tone::Separator.alpha(theme, Backdrop::Plain) * stroke)
+            }),
+            width: if stroke.is_some() { 1.0 } else { 0.0 },
             radius: corner.radius(theme),
         },
         ..Default::default()
     })
 }
 
-/// The text background as a container class.
-pub fn text_background_class() -> cosmic::theme::Container<'static> {
-    cosmic::theme::Container::custom(|theme| Style {
+/// The text background as a container class, rounded by `corner`.
+pub fn text_background_class(corner: Corner) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| Style {
         background: Some(Background::Color(text_background(theme))),
+        border: Border {
+            radius: corner.radius(theme),
+            ..Default::default()
+        },
         ..Default::default()
     })
 }
 
 /// SwiftUI's `Divider()`: a 1 px separator line across the width.
 pub fn divider<'a, M: 'a>() -> Element<'a, M> {
-    container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-        .width(Length::Fill)
-        .class(fill(Tone::Separator, 1.0, Corner::None, false))
+    divider_scaled(Axis::Horizontal, 1.0)
+}
+
+/// Which way a divider runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// Across the width, 1 px tall.
+    Horizontal,
+    /// Down the height, 1 px wide.
+    Vertical,
+}
+
+/// A 1 px separator line along `axis`, at `scale` times the separator's
+/// alpha (a grouped form's row hairlines read lighter than a `Divider()`).
+pub fn divider_scaled<'a, M: 'a>(axis: Axis, scale: f32) -> Element<'a, M> {
+    let (width, height) = match axis {
+        Axis::Horizontal => (Length::Fill, Length::Fixed(1.0)),
+        Axis::Vertical => (Length::Fixed(1.0), Length::Fill),
+    };
+    container(Space::new().width(width).height(height))
+        .width(width)
+        .height(height)
+        .class(fill(Tone::Separator, scale, Corner::None, None))
         .into()
 }

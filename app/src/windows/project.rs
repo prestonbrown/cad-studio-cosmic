@@ -1387,7 +1387,7 @@ impl ProjectWindow {
                 Tone::Separator,
                 DIVIDER_SCALE,
                 Corner::None,
-                false,
+                None,
             ))
             .into()
     }
@@ -1518,11 +1518,10 @@ impl ProjectWindow {
         .on_right_press(Message::App(AppRequest::Window(WindowOp::Menu)));
         Column::with_capacity(2)
             .push(band)
-            .push(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0))).class(
-                    surface::fill(Tone::Separator, HAIRLINE_SCALE, Corner::None, false),
-                ),
-            )
+            .push(surface::divider_scaled(
+                surface::Axis::Horizontal,
+                HAIRLINE_SCALE,
+            ))
             .into()
     }
 
@@ -1755,7 +1754,7 @@ impl ProjectWindow {
                 Tone::Quaternary,
                 CAPSULE_SCALE,
                 Corner::S,
-                false,
+                None,
             ))
             .into()
     }
@@ -2063,11 +2062,7 @@ fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
     }
     if !paths.is_empty() {
         list = list.push(
-            container(
-                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                    .class(surface::fill(Tone::Separator, 1.0, Corner::None, false)),
-            )
-            .padding([5, 14]),
+            container(surface::divider()).padding([5, 14]),
         );
     }
     let clear_tone = if paths.is_empty() {

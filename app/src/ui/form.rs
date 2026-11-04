@@ -14,13 +14,12 @@
 //! surface in either appearance.
 
 use cosmic::Element;
-use cosmic::iced::widget::container::Style;
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::iced::{Alignment, Background, Border, Length};
+use cosmic::iced::{Alignment, Background, Length};
 use cosmic::widget::{Column, Row, Space, container};
 
-use super::surface::Corner;
-use super::tone::{Backdrop, Tone, wash};
+use super::surface::{self, Axis, Corner};
+use super::tone::{Backdrop, Tone};
 
 /// A form row's height.
 pub const ROW_HEIGHT: f32 = 38.0;
@@ -55,46 +54,32 @@ pub fn section<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
     }
     container(column)
         .width(Length::Fill)
-        .class(cosmic::theme::Container::custom(|theme| Style {
-            background: Some(Background::Color(wash(
-                theme,
-                Tone::Quaternary.alpha(theme, Backdrop::Plain) * FILL,
-            ))),
-            border: Border {
-                color: wash(
-                    theme,
-                    Tone::Separator.alpha(theme, Backdrop::Plain) * HAIRLINE,
-                ),
-                width: 1.0,
-                radius: Corner::S.radius(theme),
-            },
-            ..Default::default()
-        }))
+        .class(surface::fill(Tone::Quaternary, FILL, Corner::S, Some(HAIRLINE)))
         .into()
 }
 
 /// The hairline between two rows, inset from both box edges.
 fn hairline<'a, M: 'a>() -> Element<'a, M> {
-    container(
-        container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-            .width(Length::Fill)
-            .class(cosmic::theme::Container::custom(|theme| Style {
-                background: Some(Background::Color(wash(
-                    theme,
-                    Tone::Separator.alpha(theme, Backdrop::Plain) * HAIRLINE,
-                ))),
-                ..Default::default()
-            })),
-    )
-    .padding([0.0, INSET])
-    .into()
+    container(surface::divider_scaled(Axis::Horizontal, HAIRLINE))
+        .padding([0.0, INSET])
+        .into()
 }
 
 /// A `LabeledContent` / `Picker` / `Toggle` row: `label` leading, `control`
 /// against the trailing edge, vertically centered.
 pub fn row<'a, M: 'a>(label: String, control: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    styled_row(label_text(label), control)
+}
+
+/// A [`row`] whose label the caller has styled (a monospaced label beside
+/// a monospaced field: `.fontDesign(.monospaced)` on a labeled `TextField`
+/// sets both).
+pub fn styled_row<'a, M: 'a>(
+    label: cosmic::widget::Text<'a, cosmic::Theme>,
+    control: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
     Row::new()
-        .push(label_text(label))
+        .push(label)
         .push(Space::new().width(Length::Fill))
         .push(control)
         .spacing(12.0)

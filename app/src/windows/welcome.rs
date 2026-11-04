@@ -284,12 +284,7 @@ impl Welcome {
             )
             // `Divider()`: the separator hairline between the panes
             .push(
-                container(Space::new().width(1).height(Length::Fill)).class(ui::surface::fill(
-                    Tone::Separator,
-                    1.0,
-                    Corner::None,
-                    false,
-                )),
+                ui::surface::divider_scaled(ui::surface::Axis::Vertical, 1.0),
             )
             .push(recents_list)
             .height(Length::Fill)
@@ -328,7 +323,7 @@ impl Welcome {
                 Tone::Quaternary,
                 RECENTS_FILL,
                 Corner::None,
-                false,
+                None,
             ))
             .into()
     }
@@ -496,7 +491,7 @@ fn action_button<'a>(symbol: Symbol, label: String, message: Message) -> Element
             Tone::Quaternary,
             ACTION_FILL,
             Corner::S,
-            false,
+            None,
         )),
         Some(message),
     )

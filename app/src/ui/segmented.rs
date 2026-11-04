@@ -1,10 +1,11 @@
-//! The macOS segmented control at the small control size
-//! (`.pickerStyle(.segmented)` + `.controlSize(.small)`), drawn from
-//! containers: libcosmic's segmented button draws its own 32 px
-//! pill-and-accent look and borrows a model.
+//! The macOS segmented control (`.pickerStyle(.segmented)`) at the small
+//! or the regular control size, drawn from containers: libcosmic's
+//! segmented button draws its own 32 px pill-and-accent look and borrows a
+//! model.
 //!
-//! Upstream measures 18 pt tall with 11 pt labels; the port keeps that
-//! proportion to its label size, so the control grows with the toolkit's
+//! Upstream measures 18 pt tall with 11 pt labels at the small size and
+//! 22 pt with 13 pt (body) labels at the regular one; the port keeps those
+//! proportions to its label sizes, so the control grows with the toolkit's
 //! text scale. Every segment is as wide as the widest label needs, as
 //! AppKit sizes them.
 
@@ -17,24 +18,56 @@ use super::surface::{Corner, Shadow as SurfaceShadow, material, text_background}
 use super::tone::{Backdrop, Tone, mix, wash};
 use crate::typography;
 
-/// The small control size's label: macOS's 11 pt small system font.
-pub const LABEL_SIZE: f32 = typography::SMALL_CONTROL;
-
-/// Upstream metrics in points, scaled by the label's ratio to 11 pt.
+/// Upstream metrics in points, scaled by the toolkit's body ratio.
 const fn pt(points: f32) -> f32 {
     points * typography::COSMIC_BODY / typography::MACOS_BODY
 }
 
-/// The control's height.
-pub const HEIGHT: f32 = pt(18.0);
 /// The selected face's inset from the track.
 const INSET: f32 = 1.0;
-/// The hairline between two unselected segments.
-const DIVIDER_HEIGHT: f32 = pt(9.0);
-/// A label's average advance and a segment's side padding (AppKit pads
-/// 6 pt each side of the widest label).
-const CHAR_WIDTH: f32 = pt(5.0);
-const SIDE_PADDING: f32 = pt(6.0);
+
+/// AppKit's control size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    /// `.controlSize(.small)`: the viewer bar and the overlay cards.
+    Small,
+    /// The default size: a grouped Form's picker row.
+    Regular,
+}
+
+impl Size {
+    /// The label: macOS's 11 pt small system font, or the body font.
+    pub const fn label(self) -> f32 {
+        match self {
+            Self::Small => typography::SMALL_CONTROL,
+            Self::Regular => typography::BODY,
+        }
+    }
+
+    /// The control's height.
+    pub const fn height(self) -> f32 {
+        match self {
+            Self::Small => pt(18.0),
+            Self::Regular => pt(22.0),
+        }
+    }
+
+    /// The hairline between two unselected segments.
+    const fn divider_height(self) -> f32 {
+        self.height() / 2.0
+    }
+
+    /// A label's average advance (5 pt at 11 pt labels).
+    const fn char_width(self) -> f32 {
+        pt(5.0) * self.label() / typography::SMALL_CONTROL
+    }
+
+    /// A segment's side padding (AppKit pads 6 pt each side of the widest
+    /// label at the small size).
+    const fn side_padding(self) -> f32 {
+        pt(6.0) * self.label() / typography::SMALL_CONTROL
+    }
+}
 
 /// How the selected segment shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,13 +92,13 @@ impl Look {
 /// One segment's width when the control sizes itself: the widest label's
 /// estimated advance plus the side padding (iced has no text measurement
 /// at view time).
-pub fn segment_width<S: AsRef<str>>(labels: &[S]) -> f32 {
+pub fn segment_width<S: AsRef<str>>(labels: &[S], size: Size) -> f32 {
     let widest = labels
         .iter()
         .map(|label| label.as_ref().chars().count())
         .max()
         .unwrap_or(0);
-    widest as f32 * CHAR_WIDTH + 2.0 * SIDE_PADDING
+    widest as f32 * size.char_width() + 2.0 * size.side_padding()
 }
 
 /// The track under the segments.
@@ -113,22 +146,24 @@ fn face(theme: &cosmic::Theme, look: Look) -> Style {
 }
 
 /// A segmented control over `items` (label, the message its press sends
-/// or `None` for a disabled segment), `selected` drawn per `look`.
+/// or `None` for a disabled segment), `selected` drawn per `look`, at
+/// `size`.
 /// `width` is `Length::Fill` for equal segments filling the space, or
 /// `Length::Shrink` for segments sized by [`segment_width`].
 pub fn segmented<M: Clone + 'static>(
     items: Vec<(String, Option<M>)>,
     selected: Option<usize>,
     look: Look,
+    size: Size,
     width: Length,
 ) -> Element<'static, M> {
     let fixed = (width == Length::Shrink).then(|| {
         let labels: Vec<&str> = items.iter().map(|(label, _)| label.as_str()).collect();
-        segment_width(&labels)
+        segment_width(&labels, size)
     });
     let backdrop = look.backdrop();
     let mut row = Row::new()
-        .height(Length::Fixed(HEIGHT - 2.0 * INSET))
+        .height(Length::Fixed(size.height() - 2.0 * INSET))
         .align_y(Alignment::Center);
     for (index, (label, message)) in items.into_iter().enumerate() {
         if index > 0 {
@@ -136,7 +171,7 @@ pub fn segmented<M: Clone + 'static>(
             // selected face the face itself is the boundary
             let shown = selected != Some(index - 1) && selected != Some(index);
             row = row.push(
-                container(Space::new().width(1.0).height(DIVIDER_HEIGHT)).class(
+                container(Space::new().width(1.0).height(size.divider_height())).class(
                     cosmic::theme::Container::custom(move |theme| Style {
                         background: shown
                             .then(|| Tone::Separator.color(theme, Backdrop::Plain).into()),
@@ -151,7 +186,7 @@ pub fn segmented<M: Clone + 'static>(
             (true, true, Look::Filled) => Tone::OnFill,
             (true, _, _) => Tone::Primary,
         };
-        let mut label = text(label).size(LABEL_SIZE).class(tone.text(backdrop));
+        let mut label = text(label).size(size.label()).class(tone.text(backdrop));
         if is_selected && look == Look::Filled {
             label = label.font(typography::font(cosmic::iced::font::Weight::Semibold));
         }
@@ -201,22 +236,26 @@ mod tests {
 
     #[test]
     fn segments_size_to_the_widest_label() {
-        let narrow = segment_width(&["Iso", "Top"]);
-        let wide = segment_width(&["Iso", "Fronte"]);
+        let small = Size::Small;
+        let narrow = segment_width(&["Iso", "Top"], small);
+        let wide = segment_width(&["Iso", "Fronte"], small);
         assert!(wide > narrow);
         assert_eq!(
-            segment_width(&["Iso", "Fronte"]),
-            segment_width(&["Fronte"])
+            segment_width(&["Iso", "Fronte"], small),
+            segment_width(&["Fronte"], small)
         );
         // upstream's "Front" segment: 37.5 pt at 11 pt labels
-        assert!((segment_width(&["Front"]) - pt(37.0)).abs() < 1.0);
+        assert!((segment_width(&["Front"], small) - pt(37.0)).abs() < 1.0);
+        assert!(segment_width(&["Front"], Size::Regular) > segment_width(&["Front"], small));
     }
 
     #[test]
     fn the_control_scales_with_its_label() {
         let scale = typography::COSMIC_BODY / typography::MACOS_BODY;
-        assert!((HEIGHT - 18.0 * scale).abs() < 1e-4);
-        assert!((DIVIDER_HEIGHT - 9.0 * scale).abs() < 1e-4);
+        assert!((Size::Small.height() - 18.0 * scale).abs() < 1e-4);
+        assert!((Size::Small.divider_height() - 9.0 * scale).abs() < 1e-4);
+        assert!((Size::Regular.height() - 22.0 * scale).abs() < 1e-4);
+        assert_eq!(Size::Regular.label(), typography::BODY);
     }
 
     #[test]
@@ -226,8 +265,10 @@ mod tests {
         for look in [Look::Raised, Look::Filled] {
             for width in [Length::Fill, Length::Shrink] {
                 let items = vec![("A".to_string(), Some(Pick)), ("B".to_string(), None)];
-                let _ = segmented(items, Some(0), look, width);
-                let _ = segmented::<Pick>(Vec::new(), None, look, width);
+                for size in [Size::Small, Size::Regular] {
+                    let _ = segmented(items.clone(), Some(0), look, size, width);
+                    let _ = segmented::<Pick>(Vec::new(), None, look, size, width);
+                }
             }
         }
     }

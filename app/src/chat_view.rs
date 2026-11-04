@@ -381,7 +381,7 @@ fn user_row<'a>(message: &'a ChatMessage, root: &Path) -> Element<'a, Message> {
     container(stack)
         .padding(10)
         .width(Length::Fill)
-        .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, true))
+        .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, Some(1.0)))
         .into()
 }
 
@@ -424,7 +424,7 @@ fn attachment_thumbnail<'a>(path: &str, root: &Path, size: f32) -> Element<'a, M
             .height(Length::Fixed(size))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(ui::surface::fill(Tone::Quaternary, 1.0, Corner::S, true)),
+            .class(ui::surface::fill(Tone::Quaternary, 1.0, Corner::S, Some(1.0))),
         file_name,
         cosmic::widget::tooltip::Position::FollowCursor,
     );
@@ -766,7 +766,7 @@ fn tool_row<'a>(pane: &'a ChatPane, message: &'a ChatMessage) -> Element<'a, Mes
     container(stack)
         .padding([4.0, 8.0])
         .width(Length::Fill)
-        .class(ui::surface::fill(Tone::Quaternary, 0.35, Corner::S, false))
+        .class(ui::surface::fill(Tone::Quaternary, 0.35, Corner::S, None))
         .into()
 }
 
@@ -882,7 +882,7 @@ fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Me
                 container(label)
                     .padding([6.0, 10.0])
                     .width(Length::Fill)
-                    .class(ui::surface::fill(Tone::Quaternary, 0.6, Corner::S, false)),
+                    .class(ui::surface::fill(Tone::Quaternary, 0.6, Corner::S, None)),
             )
             .padding(0)
             .width(Length::Fill)
@@ -933,11 +933,7 @@ fn input_bar<'a>(
     root: &Path,
 ) -> Element<'a, Message> {
     let mut stack = Column::new().width(Length::Fill);
-    stack = stack.push(
-        container(Space::new().height(Length::Fixed(1.0)))
-            .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Separator, 1.0, Corner::None, false)),
-    );
+    stack = stack.push(ui::surface::divider());
     if !queue.is_empty() {
         stack = stack.push(queue_list(queue, queue_paused, busy));
     }
@@ -1043,7 +1039,7 @@ fn queue_list<'a>(queue: &'a [QueueItem], paused: bool, busy: bool) -> Element<'
             )
             .padding([7.0, 10.0])
             .width(Length::Fill)
-            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, false)),
+            .class(ui::surface::fill(Tone::Quaternary, 0.5, Corner::S, None)),
         );
     }
     let items = cosmic::widget::scrollable::vertical(items).height(Length::Shrink);

@@ -23,7 +23,7 @@ use viewer::tools::section;
 
 use crate::fl;
 use crate::typography;
-use crate::ui::segmented::{Look, segmented};
+use crate::ui::segmented::{Look, Size, segmented};
 use crate::ui::slider::{small_slider, with_rail_ends};
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::tone::wash;
@@ -147,7 +147,7 @@ fn layout_picker(
         })
         .collect();
     tooltip(
-        segmented(items, selected, Look::Filled, Length::Fill),
+        segmented(items, selected, Look::Filled, Size::Small, Length::Fill),
         text(fl!("vista-delle-parti")),
         cosmic::widget::tooltip::Position::Bottom,
     )
@@ -404,6 +404,7 @@ pub fn view_section_controls(tools: &ViewerTools) -> Element<'static, Message> {
             .collect(),
         selected,
         Look::Filled,
+        Size::Small,
         Length::Shrink,
     );
     let width = Length::Fixed(220.0);

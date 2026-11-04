@@ -66,7 +66,7 @@ pub fn code_block<'a, M: Clone + 'a>(
             Tone::Quaternary,
             0.5,
             Corner::S,
-            false
+            None
         )),
         container(copy)
             .width(Length::Fill)

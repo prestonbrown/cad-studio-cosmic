@@ -556,7 +556,7 @@ fn tab_item(tab: Tab, selected: bool) -> Element<'static, Message> {
             Tone::Quaternary,
             TAB_SELECTED_FILL,
             Corner::S,
-            false,
+            None,
         ))
     } else {
         cell
@@ -630,6 +630,7 @@ fn view_agent(state: &SettingsState) -> Vec<Element<'_, Message>> {
         engines,
         Some(engine_index(state.engine)),
         ui::segmented::Look::Raised,
+        ui::segmented::Size::Regular,
         Length::Fill,
     ))
     .width(Length::Fixed(ENGINE_PICKER_WIDTH));
@@ -703,8 +704,8 @@ fn engine_section(state: &SettingsState) -> Element<'_, Message> {
     form::section(vec![
         form::row(fl!("eseguibile"), executable),
         form::row(fl!("versione-2"), version),
-        mono_row(
-            fl!("percorso-personalizzato"),
+        form::styled_row(
+            form::label_text(fl!("percorso-personalizzato")).font(cosmic::font::mono()),
             form::field(
                 fl!("automatico"),
                 state.custom_paths[slot].as_str(),
@@ -712,8 +713,8 @@ fn engine_section(state: &SettingsState) -> Element<'_, Message> {
                 move |path| Message::CustomPath(kind, path),
             ),
         ),
-        mono_row(
-            fl!("modello-2"),
+        form::styled_row(
+            form::label_text(fl!("modello-2")).font(cosmic::font::mono()),
             form::field(
                 fl!("predefinito-di", agent = kind.display_name()),
                 state.models[slot].as_str(),
@@ -851,20 +852,6 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
 }
 
 // ─── view helpers ───────────────────────────────────────────────────────────
-
-/// A form row whose label is monospaced along with its field (upstream's
-/// `.fontDesign(.monospaced)` on a labeled `TextField` sets both).
-fn mono_row<'a>(label: String, field: Element<'a, Message>) -> Element<'a, Message> {
-    Row::new()
-        .push(form::label_text(label).font(cosmic::font::mono()))
-        .push(Space::new().width(Length::Fill))
-        .push(field)
-        .spacing(12.0)
-        .padding([0.0, form::INSET])
-        .height(Length::Fixed(form::ROW_HEIGHT))
-        .align_y(Alignment::Center)
-        .into()
-}
 
 /// A `LabeledContent` value: secondary, as a grouped Form draws it.
 fn value_text<'a>(label: impl Into<String>) -> Text<'a> {

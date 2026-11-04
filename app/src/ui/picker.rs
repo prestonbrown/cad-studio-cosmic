@@ -15,15 +15,14 @@
 //! shows the value and the chevron box.
 
 use cosmic::Element;
-use cosmic::iced::widget::container::Style;
 use cosmic::iced::widget::pick_list::{Handle, PickList};
 use cosmic::iced::widget::text::Wrapping;
-use cosmic::iced::{Alignment, Background, Border, Length};
+use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{Row, container, text};
 
 use super::icon::{self, Symbol};
-use super::surface::Corner;
-use super::tone::{Backdrop, Tone, wash};
+use super::surface::{self, Corner};
+use super::tone::{Backdrop, Tone};
 use crate::typography;
 
 /// The chevron box's side.
@@ -98,17 +97,7 @@ fn chevron_box<'a, M: 'a>() -> Element<'a, M> {
     .height(Length::Fixed(BOX))
     .align_x(Alignment::Center)
     .align_y(Alignment::Center)
-    .class(cosmic::theme::Container::custom(|theme| Style {
-        background: Some(Background::Color(wash(
-            theme,
-            Tone::Quaternary.alpha(theme, Backdrop::Plain) * BOX_FILL,
-        ))),
-        border: Border {
-            radius: Corner::Xs.radius(theme),
-            ..Default::default()
-        },
-        ..Default::default()
-    }))
+    .class(surface::fill(Tone::Quaternary, BOX_FILL, Corner::Xs, None))
     .into()
 }
 

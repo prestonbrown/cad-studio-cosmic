@@ -147,7 +147,7 @@ use crate::settings_store::SettingsStore;
 use crate::ui::{
     self, Backdrop, Symbol, Tone,
     icon::icon,
-    segmented::{Look, segmented},
+    segmented::{self, Look, segmented},
 };
 use crate::viewer_tools::{EXPLODE_RANGE, ViewerTools, is_double_click};
 
@@ -1734,7 +1734,7 @@ impl ViewerPane {
                 .width(Length::Fill),
         )
         .width(Length::Fill)
-        .class(ui::surface::text_background_class())
+        .class(ui::surface::text_background_class(ui::surface::Corner::None))
         .into()
     }
 
@@ -1761,7 +1761,7 @@ impl ViewerPane {
             })
             .collect();
         let selected = PRESETS.iter().position(|preset| *preset == self.preset);
-        segmented(items, selected, Look::Raised, Length::Shrink)
+        segmented(items, selected, Look::Raised, segmented::Size::Small, Length::Shrink)
     }
 }
 
@@ -2127,7 +2127,7 @@ fn content_unavailable<'a>(
     .height(Length::Fill)
     .align_x(cosmic::iced::alignment::Horizontal::Center)
     .align_y(cosmic::iced::alignment::Vertical::Center)
-    .class(ui::surface::text_background_class())
+    .class(ui::surface::text_background_class(ui::surface::Corner::None))
     .into()
 }
 
