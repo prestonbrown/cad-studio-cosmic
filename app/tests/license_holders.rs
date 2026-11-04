@@ -23,7 +23,10 @@ fn about_copyright_names_both_license_holders_in_every_catalog() {
             .position(|l| l.starts_with("about-copyright ="))
             .unwrap_or_else(|| panic!("{lang}: no about-copyright entry"));
         // The entry runs through its indented continuation lines.
-        let entry: Vec<&str> = ftl.lines().skip(start).enumerate()
+        let entry: Vec<&str> = ftl
+            .lines()
+            .skip(start)
+            .enumerate()
             .take_while(|(i, l)| *i == 0 || l.starts_with(' '))
             .map(|(_, l)| l)
             .collect();
