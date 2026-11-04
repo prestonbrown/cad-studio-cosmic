@@ -5,7 +5,7 @@
 # `/usr/bin/cad-studio --version`, removes it and checks none of its files
 # remain; then unpacks the AppImage and runs its binary's --version, and
 # checks the tarball and the AUR PKGBUILD.
-# Needs: cargo, cargo-deb, appimagetool, lintian, desktop-file-validate,
+# Needs: cargo, cargo-deb, ImageMagick identify, appimagetool, lintian, desktop-file-validate,
 # appstreamcli, sudo apt. Packages apt pulled in as dependencies are purged
 # again, so the rig ends as it began.
 #   package-check.sh
@@ -19,7 +19,7 @@ log() { echo "$(date +%H:%M:%S.%3N) $*"; }
 bad() { log "FAIL $*"; fail=1; }
 ok() { log "ok   $*"; }
 
-for tool in cargo cargo-deb lintian desktop-file-validate appstreamcli; do
+for tool in cargo cargo-deb lintian desktop-file-validate appstreamcli identify; do
     command -v "$tool" >/dev/null || { bad "missing tool: $tool"; exit 1; }
 done
 [ -x scripts/package/build.sh ] || { bad "scripts/package/build.sh is missing"; exit 1; }

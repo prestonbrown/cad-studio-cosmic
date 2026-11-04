@@ -76,8 +76,8 @@ copyright = "Preston Brown"
 license-file = ["../LICENSE", "0"]
 section = "graphics"
 priority = "optional"
-depends = "$auto, libvulkan1, zip, xdg-utils"
-recommends = "python3-venv, mesa-vulkan-drivers"
+depends = "$auto, libvulkan1, libwayland-client0, libfontconfig1, zip, xdg-utils"
+recommends = "python3-venv, mesa-vulkan-drivers, libegl1, libxkbcommon-x11-0"
 extended-description = """\
 Describe a part, get a printable model. CAD Studio drives your locally \
 installed Claude Code (or Codex) and build123d to turn a description into a \

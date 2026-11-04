@@ -8,7 +8,7 @@ use cosmic::iced::Size;
 
 fn main() -> cosmic::iced::Result {
     // Packaging checks run the binary on hosts without a display.
-    if std::env::args().nth(1).as_deref() == Some("--version") {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
         println!("cad-studio {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }

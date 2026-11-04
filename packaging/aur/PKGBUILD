@@ -15,7 +15,7 @@ pkgdesc='Describe a part, get a printable model: CAD Studio for the COSMIC deskt
 arch=('x86_64')
 url='https://prestonbrown.github.io/cad-studio-cosmic/'
 license=('MIT')
-depends=('zip' 'xdg-utils' 'vulkan-icd-loader' 'libxkbcommon' 'wayland')
+depends=('zip' 'xdg-utils' 'vulkan-icd-loader' 'libxkbcommon' 'wayland' 'fontconfig')
 optdepends=('uv: creates the build123d virtual environment'
             'python: fallback for creating the build123d virtual environment')
 provides=('cad-studio')

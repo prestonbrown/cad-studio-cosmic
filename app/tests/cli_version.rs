@@ -4,9 +4,10 @@
 use std::process::Command;
 
 #[test]
-fn version_flag_prints_name_and_version_and_exits_zero() {
+fn version_flags_print_name_and_version_and_exit_zero() {
+    for flag in ["--version", "-V"] {
     let out = Command::new(env!("CARGO_BIN_EXE_cad-studio"))
-        .arg("--version")
+        .arg(flag)
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("DISPLAY")
         .output()
@@ -16,4 +17,5 @@ fn version_flag_prints_name_and_version_and_exits_zero() {
         String::from_utf8_lossy(&out.stdout).trim(),
         format!("cad-studio {}", env!("CARGO_PKG_VERSION"))
     );
+    }
 }
