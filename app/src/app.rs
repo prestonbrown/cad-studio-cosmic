@@ -35,6 +35,7 @@ use crate::fl;
 use crate::recents::{self, Recents};
 use crate::settings_store::SettingsStore;
 use crate::sheets;
+use crate::shortcuts::Shortcut;
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
 use crate::windows::welcome::{self, Welcome};
@@ -1620,23 +1621,21 @@ fn release_focus() -> Task<Action<Message>> {
     .discard()
 }
 
-/// The app-level shortcut table (upstream's global commands; ⌘→Ctrl, ⌘,
-/// the standard Settings scene's binding).
+/// The app-level bindings (upstream's global commands; ⌘→Ctrl, ⌘, the
+/// standard Settings scene's binding).
+const APP_BINDINGS: &[(Shortcut, AppCommand)] = &[
+    (Shortcut::ctrl("n"), AppCommand::NewProject),
+    (Shortcut::ctrl("o"), AppCommand::OpenProject),
+    (Shortcut::ctrl("1").with_shift(), AppCommand::Welcome),
+    (Shortcut::ctrl(","), AppCommand::Settings),
+];
+
+/// The app command a key press triggers.
 pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
-    let ctrl = modifiers.control();
-    let shift = modifiers.shift();
-    let alt = modifiers.alt();
-    let character = match key {
-        Key::Character(ch) => ch.to_lowercase(),
-        _ => return None,
-    };
-    match (ctrl, shift, alt, character.as_str()) {
-        (true, false, false, "n") => Some(AppCommand::NewProject),
-        (true, false, false, "o") => Some(AppCommand::OpenProject),
-        (true, true, false, "1") => Some(AppCommand::Welcome),
-        (true, false, false, ",") => Some(AppCommand::Settings),
-        _ => None,
-    }
+    APP_BINDINGS
+        .iter()
+        .find(|(shortcut, _)| shortcut.matches(key, modifiers))
+        .map(|(_, command)| *command)
 }
 
 /// Route the shell-level events the focused window's widgets did not

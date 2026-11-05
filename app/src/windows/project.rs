@@ -57,6 +57,7 @@ use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
+use crate::shortcuts::Shortcut;
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
@@ -1585,7 +1586,7 @@ impl ProjectWindow {
                 15.0,
                 40.0,
                 Some(Message::Command(Command::ShowChat)),
-                fl!("mostra-o-nascondi-la-chat-0"),
+                crate::shortcuts::show_chat(),
             ))
             // "Compila modello" (ProjectWindow.swift:107-113), disabled
             // while busy
@@ -1594,7 +1595,7 @@ impl ProjectWindow {
                 14.0,
                 36.0,
                 (!busy).then_some(Message::Command(Command::Build)),
-                fl!("compila-modello-b"),
+                crate::shortcuts::build(),
             ))
             // Stop (:115-121), disabled when idle
             .push(toolbar_button(
@@ -1602,7 +1603,7 @@ impl ProjectWindow {
                 13.5,
                 32.0,
                 busy.then_some(Message::Command(Command::Stop)),
-                fl!("interrompi"),
+                crate::shortcuts::stop(),
             ))
             .into()
     }
@@ -1654,7 +1655,7 @@ impl ProjectWindow {
                 18.5,
                 38.0,
                 (has_3mf && !busy).then_some(Message::Command(Command::Export)),
-                fl!("esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"),
+                crate::shortcuts::export(),
             ))
             .push(toolbar_button(
                 Symbol::ArrowUpForwardApp,
@@ -1669,7 +1670,7 @@ impl ProjectWindow {
                 14.5,
                 38.0,
                 Some(Message::Command(Command::ToggleParameters)),
-                fl!("mostra-o-nascondi-i-parametri-i"),
+                crate::shortcuts::toggle_parameters(),
             ))
             .into()
     }
@@ -2184,42 +2185,61 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
     .boxed()
 }
 
-/// The project window's shortcut table (upstream keyboardShortcut values, ⌘→Ctrl,
-/// ⌥→Alt). Pure: the app routes a key press through this before the
-/// focused window sees it.
+/// The project window's bindings (upstream keyboardShortcut values, ⌘→Ctrl,
+/// ⌥→Alt). A command's first entry is its primary binding, the one hints
+/// show; later entries are aliases.
+const PROJECT_BINDINGS: &[(Shortcut, Command)] = &[
+    (Shortcut::ctrl("0"), Command::ShowChat),
+    (Shortcut::ctrl("1"), Command::FocusChat),
+    (Shortcut::ctrl("2"), Command::FocusModel),
+    (Shortcut::ctrl("3"), Command::FocusSchematic),
+    (Shortcut::ctrl("l"), Command::FocusChat),
+    (
+        Shortcut::ctrl("1").with_alt(),
+        Command::ViewerPreset(Preset::Iso),
+    ),
+    (
+        Shortcut::ctrl("2").with_alt(),
+        Command::ViewerPreset(Preset::Front),
+    ),
+    (
+        Shortcut::ctrl("3").with_alt(),
+        Command::ViewerPreset(Preset::Top),
+    ),
+    (
+        Shortcut::ctrl("4").with_alt(),
+        Command::ViewerPreset(Preset::Right),
+    ),
+    (Shortcut::ctrl("0").with_alt(), Command::ViewerFit),
+    (Shortcut::ctrl("i").with_alt(), Command::ToggleParameters),
+    (Shortcut::ctrl("+"), Command::SchematicZoomIn),
+    (Shortcut::ctrl("="), Command::SchematicZoomIn),
+    (Shortcut::ctrl("-"), Command::SchematicZoomOut),
+    (Shortcut::ctrl("."), Command::Stop),
+    (Shortcut::ctrl("b"), Command::Build),
+    (Shortcut::ctrl("e").with_shift(), Command::Export),
+    (Shortcut::ctrl("r").with_shift(), Command::Reveal),
+];
+
+/// The command a key press triggers in the project window. Pure: the app
+/// routes a key press through this before the focused window sees it.
 pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
-    use Command::*;
-    let ctrl = modifiers.control();
-    let alt = modifiers.alt();
-    let shift = modifiers.shift();
-    let character = match key {
-        Key::Character(ch) => ch.to_lowercase(),
-        _ => return None,
-    };
-    match (ctrl, alt, shift, character.as_str()) {
-        (true, false, false, "0") => Some(ShowChat),
-        (true, false, false, "1") => Some(FocusChat),
-        (true, false, false, "2") => Some(FocusModel),
-        (true, false, false, "3") => Some(FocusSchematic),
-        (true, false, false, "l") => Some(FocusChat),
-        (true, true, false, "1") => Some(ViewerPreset(Preset::Iso)),
-        (true, true, false, "2") => Some(ViewerPreset(Preset::Front)),
-        (true, true, false, "3") => Some(ViewerPreset(Preset::Top)),
-        (true, true, false, "4") => Some(ViewerPreset(Preset::Right)),
-        (true, true, false, "0") => Some(ViewerFit),
-        // ⌥⌘I parameters (Commands.swift:69-73): the app-wide arm
-        (true, true, false, "i") => Some(ToggleParameters),
-        (true, false, false, "+") | (true, false, false, "=") => Some(SchematicZoomIn),
-        (true, false, false, "-") => Some(SchematicZoomOut),
-        // ⌘. stop — the period key arrives as a character
-        (true, false, false, ".") => Some(Stop),
-        // ⌘B build (Commands.swift:118-120)
-        (true, false, false, "b") => Some(Build),
-        // ⇧⌘E export package (Commands.swift:130-132)
-        (true, false, true, "e") => Some(Export),
-        (true, false, true, "r") => Some(Reveal),
-        _ => None,
-    }
+    PROJECT_BINDINGS
+        .iter()
+        .find(|(shortcut, _)| shortcut.matches(key, modifiers))
+        .map(|(_, command)| *command)
+}
+
+/// `command`'s primary binding.
+///
+/// # Panics
+/// When `command` has no binding.
+pub fn binding(command: Command) -> Shortcut {
+    PROJECT_BINDINGS
+        .iter()
+        .find(|(_, bound)| *bound == command)
+        .map(|(shortcut, _)| *shortcut)
+        .unwrap_or_else(|| panic!("{command:?} has no binding"))
 }
 
 #[cfg(test)]

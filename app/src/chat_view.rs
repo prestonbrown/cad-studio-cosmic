@@ -1190,7 +1190,7 @@ fn input_field<'a>(pane: &'a ChatPane, chat: &'a ChatState, busy: bool) -> Eleme
             .padding(0)
             .class(ui::button::plain())
             .on_press(Message::Attach),
-        fl!("allega-immagini-o-file-di-riferimento-puoi-anche-incollarli-con-v"),
+        crate::shortcuts::attach(),
         cosmic::widget::tooltip::Position::Top,
     );
     let (send, send_width) = send_area(chat, busy);
@@ -1310,7 +1310,7 @@ fn send_area<'a>(chat: &'a ChatState, busy: bool) -> (Element<'a, Message>, f32)
             18,
             Tone::Primary,
             Some(Message::Stop),
-            fl!("interrompi"),
+            crate::shortcuts::stop(),
         ));
         (row.into(), width)
     } else {

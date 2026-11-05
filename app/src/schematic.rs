@@ -1150,7 +1150,7 @@ impl SchematicPane {
                 13.0,
                 Tone::Secondary,
                 BACKDROP,
-                fl!("riduci-2"),
+                crate::shortcuts::zoom_out(),
                 has_sheet.then_some(Message::ZoomOut),
             ))
             .push(button::icon(
@@ -1158,7 +1158,7 @@ impl SchematicPane {
                 13.0,
                 Tone::Secondary,
                 BACKDROP,
-                fl!("ingrandisci-2"),
+                crate::shortcuts::zoom_in(),
                 has_sheet.then_some(Message::ZoomIn),
             ))
             .push(button::text(
