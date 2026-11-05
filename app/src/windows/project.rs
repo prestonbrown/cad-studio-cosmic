@@ -57,7 +57,7 @@ use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
-use crate::shortcuts::Shortcut;
+use crate::shortcuts::{Context, Shortcut, When};
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
@@ -166,6 +166,8 @@ pub enum Command {
     SchematicZoomIn,
     SchematicZoomOut,
     SchematicFit,
+    /// The drawing at 100%.
+    SchematicActualSize,
     /// "Compila modello" ⌘B (Commands.swift:115-119): build model.py now.
     Build,
     Stop,
@@ -323,6 +325,9 @@ pub struct ProjectWindow {
     pub recent_card: Option<Vec<PathBuf>>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
+    /// The pane the user last pointed at or focused by command; plain-key
+    /// shortcuts (F fits the view) act on it.
+    focused_pane: Option<PaneKind>,
     /// The pane whose grab handle is held (the drag's input gate).
     grip_held: Option<PaneKind>,
     /// The handle under the pointer (full opacity while hovered).
@@ -527,6 +532,7 @@ impl ProjectWindow {
             version_card: None,
             recent_card: None,
             focus_flash: None,
+            focused_pane: None,
             grip_held: None,
             grip_hover: None,
             pane_drag: None,
@@ -561,6 +567,14 @@ impl ProjectWindow {
 
     pub fn is_busy(&self) -> bool {
         self.activity.is_working()
+    }
+
+    /// The state the window's key bindings are gated on.
+    pub fn key_context(&self) -> Context {
+        Context {
+            running: self.is_busy(),
+            viewer_focused: self.focused_pane == Some(PaneKind::Model3D),
+        }
     }
 
     fn output_dir(&self) -> PathBuf {
@@ -641,9 +655,27 @@ impl ProjectWindow {
     /// and the recents store).
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Chat(msg) => self.update_chat(msg),
-            Message::Viewer(msg) => self.update_viewer(msg),
-            Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
+            Message::Chat(msg) => {
+                self.focused_pane = Some(PaneKind::Chat);
+                self.update_chat(msg)
+            }
+            Message::Viewer(msg) => {
+                if matches!(
+                    msg,
+                    crate::viewer_pane::Message::Pressed
+                        | crate::viewer_pane::Message::RightPressed
+                        | crate::viewer_pane::Message::MiddlePressed
+                ) {
+                    self.focused_pane = Some(PaneKind::Model3D);
+                }
+                self.update_viewer(msg)
+            }
+            Message::Schematic(msg) => {
+                if matches!(msg, crate::schematic::Message::Pressed) {
+                    self.focused_pane = Some(PaneKind::Schematic);
+                }
+                self.schematic.update(msg).map(Message::Schematic)
+            }
             Message::Bridge(msg) => self.update_bridge(msg),
             Message::OutputReload(kind) => {
                 self.output_reload(kind);
@@ -1184,14 +1216,17 @@ impl ProjectWindow {
                     self.rebuild_grid();
                 }
                 self.focus_flash = Some(PaneKind::Chat);
+                self.focused_pane = Some(PaneKind::Chat);
                 ChatPane::focus_input().map(Message::Chat)
             }
             Command::FocusModel => {
                 self.focus_flash = Some(PaneKind::Model3D);
+                self.focused_pane = Some(PaneKind::Model3D);
                 Task::none()
             }
             Command::FocusSchematic => {
                 self.focus_flash = Some(PaneKind::Schematic);
+                self.focused_pane = Some(PaneKind::Schematic);
                 Task::none()
             }
             Command::ToggleParameters => self
@@ -1229,6 +1264,10 @@ impl ProjectWindow {
             Command::SchematicZoomOut => self
                 .schematic
                 .update(crate::schematic::Message::ZoomOut)
+                .map(Message::Schematic),
+            Command::SchematicActualSize => self
+                .schematic
+                .update(crate::schematic::Message::ActualSize)
                 .map(Message::Schematic),
             Command::SchematicFit => self
                 .schematic
@@ -1847,6 +1886,9 @@ impl ProjectWindow {
             Item::Divider,
             Item::Button(fl!("settings"), None, AppCommand::Settings),
             Item::Button(fl!("informazioni-su-cad-studio"), None, AppCommand::About),
+            Item::Divider,
+            Item::Button(fl!("chiudi-finestra"), None, AppCommand::CloseWindow),
+            Item::Button(fl!("esci"), None, AppCommand::Quit),
         ];
         let file_binds = std::collections::HashMap::new();
         let file_tree = cosmic::widget::menu::Tree::with_children(
@@ -2186,48 +2228,91 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
 }
 
 /// The project window's bindings (upstream keyboardShortcut values, ⌘→Ctrl,
-/// ⌥→Alt). A command's first entry is its primary binding, the one hints
-/// show; later entries are aliases.
-const PROJECT_BINDINGS: &[(Shortcut, Command)] = &[
-    (Shortcut::ctrl("0"), Command::ShowChat),
-    (Shortcut::ctrl("1"), Command::FocusChat),
-    (Shortcut::ctrl("2"), Command::FocusModel),
-    (Shortcut::ctrl("3"), Command::FocusSchematic),
-    (Shortcut::ctrl("l"), Command::FocusChat),
+/// ⌥→Alt, adapted to the Linux desktop). A command's first entry is its
+/// primary binding, the one hints show; later entries are aliases. A
+/// binding fires only when its [`When`] holds.
+const PROJECT_BINDINGS: &[(Shortcut, Command, When)] = &[
+    (Shortcut::bare("F9"), Command::ShowChat, When::Always),
+    (Shortcut::ctrl("1"), Command::FocusChat, When::Always),
+    (Shortcut::ctrl("2"), Command::FocusModel, When::Always),
+    (Shortcut::ctrl("3"), Command::FocusSchematic, When::Always),
+    (Shortcut::ctrl("l"), Command::FocusChat, When::Always),
     (
         Shortcut::ctrl("1").with_alt(),
         Command::ViewerPreset(Preset::Iso),
+        When::Always,
     ),
     (
         Shortcut::ctrl("2").with_alt(),
         Command::ViewerPreset(Preset::Front),
+        When::Always,
     ),
     (
         Shortcut::ctrl("3").with_alt(),
         Command::ViewerPreset(Preset::Top),
+        When::Always,
     ),
     (
         Shortcut::ctrl("4").with_alt(),
         Command::ViewerPreset(Preset::Right),
+        When::Always,
     ),
-    (Shortcut::ctrl("0").with_alt(), Command::ViewerFit),
-    (Shortcut::ctrl("i").with_alt(), Command::ToggleParameters),
-    (Shortcut::ctrl("+"), Command::SchematicZoomIn),
-    (Shortcut::ctrl("="), Command::SchematicZoomIn),
-    (Shortcut::ctrl("-"), Command::SchematicZoomOut),
-    (Shortcut::ctrl("."), Command::Stop),
-    (Shortcut::ctrl("b"), Command::Build),
-    (Shortcut::ctrl("e").with_shift(), Command::Export),
-    (Shortcut::ctrl("r").with_shift(), Command::Reveal),
+    (
+        Shortcut::ctrl("0").with_shift(),
+        Command::ViewerFit,
+        When::Always,
+    ),
+    (Shortcut::bare("f"), Command::ViewerFit, When::ViewerFocused),
+    (
+        Shortcut::ctrl("i").with_shift(),
+        Command::ToggleParameters,
+        When::Always,
+    ),
+    (Shortcut::ctrl("+"), Command::SchematicZoomIn, When::Always),
+    (Shortcut::ctrl("="), Command::SchematicZoomIn, When::Always),
+    (Shortcut::ctrl("-"), Command::SchematicZoomOut, When::Always),
+    (
+        Shortcut::ctrl("0"),
+        Command::SchematicActualSize,
+        When::Always,
+    ),
+    (Shortcut::ctrl("."), Command::Stop, When::Always),
+    (Shortcut::bare("Escape"), Command::Stop, When::Running),
+    (Shortcut::ctrl("b"), Command::Build, When::Always),
+    (
+        Shortcut::ctrl("e").with_shift(),
+        Command::Export,
+        When::Always,
+    ),
+    (
+        Shortcut::ctrl("r").with_shift(),
+        Command::Reveal,
+        When::Always,
+    ),
 ];
 
-/// The command a key press triggers in the project window. Pure: the app
-/// routes a key press through this before the focused window sees it.
-pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
+/// The command a key press triggers in the project window whose state is
+/// `context`. Pure: the app routes a key press through this before the
+/// focused window sees it.
+pub fn project_shortcut_in(key: &Key, modifiers: &Modifiers, context: Context) -> Option<Command> {
     PROJECT_BINDINGS
         .iter()
-        .find(|(shortcut, _)| shortcut.matches(key, modifiers))
-        .map(|(_, command)| *command)
+        .find(|(shortcut, _, when)| when.holds(context) && shortcut.matches(key, modifiers))
+        .map(|(_, command, _)| *command)
+}
+
+/// [`project_shortcut_in`] for a window with nothing running and no pane
+/// holding the focus.
+pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
+    project_shortcut_in(key, modifiers, Context::default())
+}
+
+/// Every binding of `command`, primary first.
+pub fn bindings(command: Command) -> impl Iterator<Item = Shortcut> {
+    PROJECT_BINDINGS
+        .iter()
+        .filter(move |(_, bound, _)| *bound == command)
+        .map(|(shortcut, _, _)| *shortcut)
 }
 
 /// `command`'s primary binding.
@@ -2235,10 +2320,8 @@ pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
 /// # Panics
 /// When `command` has no binding.
 pub fn binding(command: Command) -> Shortcut {
-    PROJECT_BINDINGS
-        .iter()
-        .find(|(_, bound)| *bound == command)
-        .map(|(shortcut, _)| *shortcut)
+    bindings(command)
+        .next()
         .unwrap_or_else(|| panic!("{command:?} has no binding"))
 }
 
@@ -2305,6 +2388,99 @@ mod tests {
         assert_eq!(std::fs::read(settings.path()).unwrap(), bytes);
     }
 
+    fn press(key: Key, modifiers: Modifiers, context: Context) -> Option<Command> {
+        project_shortcut_in(&key, &modifiers, context)
+    }
+
+    fn named(key: cosmic::iced::keyboard::key::Named) -> Key {
+        Key::Named(key)
+    }
+
+    #[test]
+    fn linux_bindings_land_on_their_commands() {
+        use cosmic::iced::keyboard::key::Named;
+        let idle = Context::default();
+        let ch = |c: &str| Key::Character(c.into());
+        let none = Modifiers::empty();
+        assert_eq!(press(named(Named::F9), none, idle), Some(Command::ShowChat));
+        assert_eq!(
+            press(ch("0"), Modifiers::CTRL, idle),
+            Some(Command::SchematicActualSize)
+        );
+        assert_eq!(
+            press(ch("0"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::ViewerFit)
+        );
+        assert_eq!(
+            press(ch("i"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::ToggleParameters)
+        );
+        assert_eq!(press(ch("i"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        assert_eq!(press(ch("."), Modifiers::CTRL, idle), Some(Command::Stop));
+        assert_eq!(
+            press(ch("e"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::Export)
+        );
+        assert_eq!(press(ch("e"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        assert_eq!(
+            press(ch("r"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::Reveal)
+        );
+        assert_eq!(press(ch("0"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+    }
+
+    /// Esc stops only a running turn; idle it falls through to the viewer
+    /// (exit measure/section).
+    #[test]
+    fn escape_stops_a_running_turn_and_otherwise_falls_through() {
+        use cosmic::iced::keyboard::key::Named;
+        let esc = named(Named::Escape);
+        let none = Modifiers::empty();
+        let running = Context {
+            running: true,
+            ..Context::default()
+        };
+        assert_eq!(press(esc.clone(), none, running), Some(Command::Stop));
+        assert_eq!(press(esc, none, Context::default()), None);
+    }
+
+    /// Plain F fits the view only while the viewer holds the focus.
+    #[test]
+    fn plain_f_fits_only_with_the_viewer_focused() {
+        let f = Key::Character("f".into());
+        let none = Modifiers::empty();
+        let focused = Context {
+            viewer_focused: true,
+            ..Context::default()
+        };
+        assert_eq!(press(f.clone(), none, focused), Some(Command::ViewerFit));
+        assert_eq!(press(f.clone(), none, Context::default()), None);
+        assert_eq!(press(f, Modifiers::CTRL, focused), None);
+    }
+
+    /// Focus follows the pane the user last pointed at or focused.
+    #[tokio::test]
+    async fn the_focused_pane_follows_commands_and_presses() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-focus-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let settings = SettingsStore::in_temp_dir();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &settings);
+        assert!(!window.key_context().viewer_focused);
+        let _ = window.update(Message::Command(Command::FocusModel));
+        assert!(window.key_context().viewer_focused);
+        let _ = window.update(Message::Command(Command::FocusChat));
+        assert!(!window.key_context().viewer_focused);
+        let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Pressed));
+        assert!(window.key_context().viewer_focused);
+        let _ = window.update(Message::Schematic(crate::schematic::Message::Pressed));
+        assert!(!window.key_context().viewer_focused);
+    }
+
     /// Every shortcut in the table is a command the window implements, and
     /// the upstream bindings land on the expected commands
     /// (Commands.swift:48-137).
@@ -2316,8 +2492,8 @@ mod tests {
 
         assert_eq!(
             project_shortcut(&Key::Character("0".into()), &ctrl),
-            Some(Command::ShowChat),
-            "⌘0 shows/hides chat"
+            Some(Command::SchematicActualSize),
+            "Ctrl+0 is the drawing's 100%"
         );
         assert_eq!(
             project_shortcut(&Key::Character("1".into()), &ctrl),
@@ -2341,18 +2517,18 @@ mod tests {
             Some(Command::ViewerPreset(Preset::Iso))
         );
         assert_eq!(
-            project_shortcut(&Key::Character("0".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("0".into()), &ctrl_shift),
             Some(Command::ViewerFit)
         );
         assert_eq!(
-            project_shortcut(&Key::Character("i".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("i".into()), &ctrl_shift),
             Some(Command::ToggleParameters),
-            "⌥⌘I toggles the parameters overlay (Commands.swift:69-73)"
+            "Ctrl+Shift+I toggles the parameters overlay"
         );
         assert_eq!(
             project_shortcut(&Key::Character("i".into()), &ctrl),
             None,
-            "no parameters binding without ⌥"
+            "no parameters binding without Shift"
         );
         assert_eq!(
             project_shortcut(&Key::Character("=".into()), &ctrl),

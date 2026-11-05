@@ -168,6 +168,12 @@ impl Viewport {
         self.zoom_by(ZOOM_BUTTON_FACTOR, None);
     }
 
+    /// 100%: one sheet pixel per screen pixel, about the view center.
+    pub fn actual_size(&mut self) {
+        self.fitted = false;
+        self.set_zoom(1.0, None);
+    }
+
     pub fn zoom_out(&mut self) {
         self.zoom_by(1.0 / ZOOM_BUTTON_FACTOR, None);
     }
@@ -689,6 +695,8 @@ pub enum Message {
     DoubleClick,
     ZoomIn,
     ZoomOut,
+    /// Zoom to 100%.
+    ActualSize,
     Fit,
     SelectPage(usize),
     PrevPage,
@@ -826,6 +834,10 @@ impl SchematicPane {
             }
             Message::ZoomOut => {
                 self.viewport.zoom_out();
+                self.zoom_changed();
+            }
+            Message::ActualSize => {
+                self.viewport.actual_size();
                 self.zoom_changed();
             }
             Message::SelectPage(index) => {

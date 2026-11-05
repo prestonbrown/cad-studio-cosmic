@@ -383,3 +383,5 @@ about-copyright =
 
 # Settings store
 settings-unreadable = Il file delle impostazioni non è leggibile, quindi le modifiche non vengono salvate.
+chiudi-finestra = Chiudi finestra
+esci = Esci

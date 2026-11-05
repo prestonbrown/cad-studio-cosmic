@@ -383,3 +383,5 @@ about-copyright =
 
 # Settings store
 settings-unreadable = Die Einstellungsdatei kann nicht gelesen werden, daher werden Änderungen nicht gespeichert.
+chiudi-finestra = Fenster schließen
+esci = Beenden

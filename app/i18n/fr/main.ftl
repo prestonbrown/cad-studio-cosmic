@@ -383,3 +383,5 @@ about-copyright =
 
 # Settings store
 settings-unreadable = Le fichier de réglages est illisible, les modifications ne sont donc pas enregistrées.
+chiudi-finestra = Fermer la fenêtre
+esci = Quitter

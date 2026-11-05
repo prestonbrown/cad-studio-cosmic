@@ -35,7 +35,7 @@ use crate::fl;
 use crate::recents::{self, Recents};
 use crate::settings_store::SettingsStore;
 use crate::sheets;
-use crate::shortcuts::Shortcut;
+use crate::shortcuts::{Context, Shortcut};
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
 use crate::windows::welcome::{self, Welcome};
@@ -78,6 +78,12 @@ pub enum AppCommand {
     /// Open the About window (upstream's app-info command group,
     /// Commands.swift:10-14; same placement note as Settings).
     About,
+    /// Close the window the key landed in (the window's File menu).
+    CloseWindow,
+    /// Close every window; a running turn stops with its window.
+    Quit,
+    /// Toggle the focused window's fullscreen mode (no menu entry).
+    ToggleFullscreen,
 }
 
 #[derive(Debug, Clone)]
@@ -847,6 +853,24 @@ impl CadStudio {
             AppCommand::Welcome => self.show_welcome(),
             AppCommand::Settings => self.open_settings(settings::Tab::General),
             AppCommand::About => self.open_about(),
+            AppCommand::CloseWindow => self.close_window(id),
+            AppCommand::Quit => {
+                engine::processes::terminate_all();
+                let ids: Vec<_> = self.windows.keys().copied().collect();
+                Task::batch(ids.into_iter().map(|id| self.close_window(id)))
+            }
+            AppCommand::ToggleFullscreen => window::mode(id)
+                .then(move |mode| {
+                    window::set_mode(
+                        id,
+                        if mode == window::Mode::Fullscreen {
+                            window::Mode::Windowed
+                        } else {
+                            window::Mode::Fullscreen
+                        },
+                    )
+                })
+                .map(Action::App),
         }
     }
 
@@ -1301,7 +1325,11 @@ impl CadStudio {
         if let Some(command) = app_shortcut(&key, &modifiers) {
             return self.app_command(id, command);
         }
-        if let Some(command) = project::project_shortcut(&key, &modifiers) {
+        let context = match self.windows.get(&id) {
+            Some(WindowKind::Project(project)) => project.key_context(),
+            _ => Context::default(),
+        };
+        if let Some(command) = project::project_shortcut_in(&key, &modifiers, context) {
             return self.update_project(id, project::Message::Command(command));
         }
         // anything else is the key window's pane's (Space, Esc)
@@ -1628,6 +1656,9 @@ const APP_BINDINGS: &[(Shortcut, AppCommand)] = &[
     (Shortcut::ctrl("o"), AppCommand::OpenProject),
     (Shortcut::ctrl("1").with_shift(), AppCommand::Welcome),
     (Shortcut::ctrl(","), AppCommand::Settings),
+    (Shortcut::ctrl("w"), AppCommand::CloseWindow),
+    (Shortcut::ctrl("q"), AppCommand::Quit),
+    (Shortcut::bare("F11"), AppCommand::ToggleFullscreen),
 ];
 
 /// The app command a key press triggers.
@@ -1966,6 +1997,46 @@ mod tests {
     /// (the standard Settings scene, CADStudioApp.swift:31-33) — and
     /// nothing on bare keys.
     #[test]
+    fn window_shortcuts_close_quit_and_fullscreen() {
+        let ctrl = Modifiers::CTRL;
+        assert_eq!(
+            app_shortcut(&Key::Character("w".into()), &ctrl),
+            Some(AppCommand::CloseWindow)
+        );
+        assert_eq!(
+            app_shortcut(&Key::Character("q".into()), &ctrl),
+            Some(AppCommand::Quit)
+        );
+        assert_eq!(
+            app_shortcut(
+                &Key::Named(cosmic::iced::keyboard::key::Named::F11),
+                &Modifiers::empty()
+            ),
+            Some(AppCommand::ToggleFullscreen)
+        );
+    }
+
+    /// A key a focused widget captured (typing "f" in the chat) never
+    /// reaches the shortcut router.
+    #[test]
+    fn a_captured_key_is_not_routed() {
+        let press = cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+            key: Key::Character("f".into()),
+            modified_key: Key::Character("f".into()),
+            physical_key: cosmic::iced::keyboard::key::Physical::Code(
+                cosmic::iced::keyboard::key::Code::KeyF,
+            ),
+            location: cosmic::iced::keyboard::Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: Some("f".into()),
+            repeat: false,
+        });
+        let id = window::Id::unique();
+        assert!(key_events(press.clone(), cosmic::iced::event::Status::Captured, id).is_none());
+        assert!(key_events(press, cosmic::iced::event::Status::Ignored, id).is_some());
+    }
+
+    #[test]
     fn app_shortcut_table_matches_upstream() {
         let ctrl = Modifiers::CTRL;
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
@@ -1992,7 +2063,7 @@ mod tests {
             app_shortcut(&Key::Character("1".into()), &Modifiers::empty()),
             None
         );
-        assert_eq!(app_shortcut(&Key::Character("q".into()), &ctrl), None);
+        assert_eq!(app_shortcut(&Key::Character("x".into()), &ctrl), None);
         assert_eq!(
             app_shortcut(&Key::Character(",".into()), &Modifiers::empty()),
             None,
