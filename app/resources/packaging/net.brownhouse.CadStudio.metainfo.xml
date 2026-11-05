@@ -20,6 +20,6 @@
   <content_rating type="oars-1.1"/>
   <launchable type="desktop-id">net.brownhouse.CadStudio.desktop</launchable>
   <releases>
-    <release version="@CARGO_PKG_VERSION@" date="2026-10-28"/>
+    <release version="@CARGO_PKG_VERSION@" date="2026-11-04"/>
   </releases>
 </component>

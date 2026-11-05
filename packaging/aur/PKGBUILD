@@ -9,7 +9,7 @@
 #   3. makepkg --printsrcinfo > .SRCINFO
 #   4. Commit PKGBUILD and .SRCINFO to ssh://aur@aur.archlinux.org/cad-studio-cosmic-bin.git
 pkgname=cad-studio-cosmic-bin
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='Describe a part, get a printable model: CAD Studio for the COSMIC desktop'
 arch=('x86_64')
