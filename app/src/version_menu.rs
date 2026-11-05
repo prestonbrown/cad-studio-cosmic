@@ -117,7 +117,7 @@ fn local_offset(at: OffsetDateTime) -> time::UtcOffset {
 }
 
 /// [`abbreviated`] for a timestamp already in the zone to show.
-fn abbreviated_at(at: OffsetDateTime) -> String {
+pub fn abbreviated_at(at: OffsetDateTime) -> String {
     let month = match at.month() {
         time::Month::January => fl!("version-month-jan"),
         time::Month::February => fl!("version-month-feb"),

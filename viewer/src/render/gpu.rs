@@ -41,6 +41,14 @@ async fn create() -> GpuContext {
             "surfaceless wgpu adapter (Metal on macOS, Vulkan on thelio; \
              if none: check WGPU_BACKEND / Vulkan ICDs in this session)",
         );
+    let info = adapter.get_info();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    eprintln!(
+        "[{now:.3}] headless gpu adapter: name={:?} backend={:?} device_type={:?}",
+        info.name, info.backend, info.device_type
+    );
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await

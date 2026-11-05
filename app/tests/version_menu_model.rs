@@ -2,7 +2,7 @@
 //! menu renders — prompt summaries, newest-first order, the current
 //! checkmark, and the subtitle's relative + abbreviated date formatting.
 
-use app::version_menu::{abbreviated, menu_entries, relative};
+use app::version_menu::{abbreviated, abbreviated_at, menu_entries, relative};
 use engine::project::versions::ProjectVersion;
 use time::OffsetDateTime;
 
@@ -74,8 +74,8 @@ fn relative_names_the_distance() {
 }
 
 /// The subtitle's date half (`.formatted(date: .abbreviated, time:
-/// .shortened)`): "Oct 13, 2026 at 3:24 PM", 12-hour clock, UTC (no
-/// local-offset lookup in the port).
+/// .shortened)`): "Oct 13, 2026 at 3:24 PM", 12-hour clock, in the offset
+/// given (fixed here so the result does not depend on the machine's zone).
 #[test]
 fn abbreviated_dates_use_month_names_and_twelve_hour_clock() {
     let at = OffsetDateTime::parse(
@@ -83,11 +83,32 @@ fn abbreviated_dates_use_month_names_and_twelve_hour_clock() {
         &time::format_description::well_known::Rfc3339,
     )
     .unwrap();
-    assert_eq!(abbreviated(at), "Oct 13, 2026 at 3:24 PM");
+    assert_eq!(abbreviated_at(at), "Oct 13, 2026 at 3:24 PM");
     let midnight = OffsetDateTime::parse(
         "2026-01-05T00:07:00Z",
         &time::format_description::well_known::Rfc3339,
     )
     .unwrap();
-    assert_eq!(abbreviated(midnight), "Jan 5, 2026 at 12:07 AM");
+    assert_eq!(abbreviated_at(midnight), "Jan 5, 2026 at 12:07 AM");
+    let new_york = at.to_offset(time::UtcOffset::from_hms(-4, 0, 0).unwrap());
+    assert_eq!(abbreviated_at(new_york), "Oct 13, 2026 at 11:24 AM");
+}
+
+/// `abbreviated` shows the wall-clock time of the machine's zone: its
+/// hour and minute agree with the system's own conversion of the instant.
+#[test]
+fn abbreviated_converts_to_the_system_time_zone() {
+    use chrono::TimeZone;
+    let at = OffsetDateTime::parse(
+        "2026-10-13T15:24:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let local = chrono::Local.timestamp_opt(at.unix_timestamp(), 0).unwrap();
+    let clock = local.format("%-I:%M %p").to_string();
+    assert!(
+        abbreviated(at).ends_with(&format!("at {clock}")),
+        "{} should end with {clock}",
+        abbreviated(at)
+    );
 }
