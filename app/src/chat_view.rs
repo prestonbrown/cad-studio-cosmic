@@ -212,6 +212,10 @@ pub struct ChatPane {
     following: bool,
     /// The scroll offset of the last viewport report.
     last_offset_y: Option<f32>,
+    /// A snap to the newest row is owed: the transcript was just opened or
+    /// replaced, and a snap issued before its layout is a no-op. Viewport
+    /// reports not at the end issue it again; a report at the end settles it.
+    snap_pending: bool,
 }
 
 impl Default for ChatPane {
@@ -223,6 +227,7 @@ impl Default for ChatPane {
             input: Content::default(),
             following: true,
             last_offset_y: None,
+            snap_pending: true,
         }
     }
 }
@@ -251,8 +256,17 @@ impl ChatPane {
                 // A report at the same offset is the content or viewport
                 // changing under the reader (rows landing before the snap
                 // does), not the reader moving: following is unchanged.
+                let at_end = follows_bottom(offset_y, viewport_h, content_h);
+                if self.snap_pending {
+                    if at_end {
+                        self.snap_pending = false;
+                    } else {
+                        self.last_offset_y = Some(offset_y);
+                        return operation::snap_to_end(transcript_id());
+                    }
+                }
                 if self.last_offset_y != Some(offset_y) {
-                    self.following = follows_bottom(offset_y, viewport_h, content_h);
+                    self.following = at_end;
                 }
                 self.last_offset_y = Some(offset_y);
             }
@@ -300,6 +314,8 @@ impl ChatPane {
     /// send, a restored history).
     pub fn jump_to_bottom(&mut self) -> Task<Message> {
         self.following = true;
+        // the new rows lay out after this snap runs
+        self.snap_pending = true;
         operation::snap_to_end(transcript_id())
     }
 
@@ -1908,9 +1924,44 @@ mod tests {
     #[test]
     fn jumping_to_the_bottom_resumes_following() {
         let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(1600.0, 2000.0));
         let _ = pane.update(scrolled(600.0, 2000.0));
         assert!(!pane.is_following());
         let _ = pane.jump_to_bottom();
         assert!(pane.is_following());
+    }
+
+    #[test]
+    fn a_fresh_pane_snaps_on_its_first_report_of_a_long_transcript() {
+        let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(0.0, 2000.0));
+        assert!(pane.is_following(), "opening is not the reader leaving the end");
+        assert!(pane.snap_pending, "the snap is re-issued until a report is at the end");
+        // the snap landed
+        let _ = pane.update(scrolled(1600.0, 2000.0));
+        assert!(!pane.snap_pending);
+        // the reader scrolls up: no further snaps
+        let _ = pane.update(scrolled(300.0, 2000.0));
+        assert!(!pane.is_following());
+        assert!(!pane.snap_pending);
+    }
+
+    #[test]
+    fn a_short_transcript_needs_no_snap() {
+        let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(0.0, 150.0));
+        assert!(!pane.snap_pending);
+    }
+
+    #[test]
+    fn replacing_the_transcript_owes_a_new_snap() {
+        let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(1600.0, 2000.0));
+        let _ = pane.update(scrolled(300.0, 2000.0));
+        let _ = pane.jump_to_bottom();
+        assert!(pane.snap_pending);
+        let _ = pane.update(scrolled(0.0, 3000.0));
+        assert!(pane.is_following());
+        assert!(pane.snap_pending);
     }
 }
