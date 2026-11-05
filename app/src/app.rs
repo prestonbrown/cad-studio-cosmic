@@ -1630,8 +1630,8 @@ pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
 
 /// Route the shell-level events the focused window's widgets did not
 /// consume, tagged with the window they landed in: unconsumed key presses
-/// (the shortcut routers), modifier changes (that window's pan gate) and
-/// window-level file drops.
+/// (the shortcut routers), modifier changes (that window's pan gate, reset
+/// when the window loses focus) and window-level file drops.
 fn key_events(
     event: cosmic::iced::Event,
     status: cosmic::iced::event::Status,
@@ -1653,6 +1653,11 @@ fn key_events(
         cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::ModifiersChanged(
             modifiers,
         )) => Some(Message::ModifiersChanged(id, modifiers)),
+        // a window that loses focus no longer sees the keys, so whatever
+        // it last held is released rather than left to stick
+        cosmic::iced::Event::Window(cosmic::iced::window::Event::Unfocused) => {
+            Some(Message::ModifiersChanged(id, Modifiers::empty()))
+        }
         // the drop is not a widget event on this surface — capture status
         // does not apply
         cosmic::iced::Event::Window(cosmic::iced::window::Event::FileDropped(paths)) => {
@@ -2134,6 +2139,30 @@ mod shell_behavior {
                 "{status:?}"
             );
         }
+    }
+
+    /// Two project windows: losing focus releases the modifiers that
+    /// window held and leaves the other window's alone.
+    #[tokio::test]
+    async fn losing_focus_releases_the_window_modifiers() {
+        let mut f = fixture();
+        let ids = open_projects_with_motion(&mut f, ["A", "B"]);
+        let pan = |app: &CadStudio, id| match app.windows.get(&id) {
+            Some(WindowKind::Project(p)) => p.viewer.pan_modifiers(),
+            _ => panic!("project window"),
+        };
+        for id in &ids {
+            let _ = f.app.update(Message::ModifiersChanged(*id, Modifiers::ALT));
+        }
+        let unfocused = key_events(
+            cosmic::iced::Event::Window(cosmic::iced::window::Event::Unfocused),
+            cosmic::iced::event::Status::Ignored,
+            ids[0],
+        )
+        .expect("focus loss routes a message");
+        let _ = f.app.update(unfocused);
+        assert!(!pan(&f.app, ids[0]), "the unfocused window released");
+        assert!(pan(&f.app, ids[1]), "the other window kept its state");
     }
 
     /// Two project windows: an editor-unfocused Space tagged with one

@@ -7,6 +7,10 @@ GL backend under Xvfb, and the viewer GPU tests run on lavapipe.
 
 - `rig.sh` (run on mercury): per-worktree sync / run / capture. See its header.
 - `cap.sh` (runs on the rig): one Xvfb per capture, no window manager.
+  Given an xdo file it first gives the window X input focus (no window
+  manager does, and an unfocused window receives no keys), so those shots
+  show the focused header; `capall.sh` shots run without xdo files and stay
+  unfocused.
 - `open-box.drive`: completes first run and opens the matched-state fixture.
 - Matched-state fixture: `fixtures/matched-state/make-box-fixture.sh ~/fixtures`
   rebuilds `~/fixtures/box-fixture`, the content of the upstream gallery shots
