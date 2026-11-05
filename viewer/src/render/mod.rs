@@ -47,9 +47,10 @@
 //!
 //! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
 //! part pass to the 1px hairlines of each part's CAD feature edges
-//! ([`edges::feature_edges`]: boundaries and creases past 30°, never the
-//! triangulation) — same material, LineList topology; the section cap sits out (upstream disables the interior
-//! shell in wireframe, facts #45). After the parts, the unlit
+//! ([`edges::wire_edges`]: boundaries and creases past 30°, never the
+//! triangulation; every edge of a smooth closed body) — same material,
+//! LineList topology; the section cap sits out (upstream disables the
+//! interior shell in wireframe, facts #45). After the parts, the unlit
 //! alpha-blended overlays: the grid/bed/tripod ([`grid::geometry`])
 //! first, then the measure markers ([`markers::geometry`]) — orange
 //! spheres at the picked points plus the two-point link. Both are
@@ -940,9 +941,12 @@ impl MeshPipeline {
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
-                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                draw_edges(
+                    pass,
+                    &resident.vertex_buf,
+                    &resident.edge_buf,
+                    resident.edge_count,
+                );
             }
         } else {
             pass.set_pipeline(&self.pipelines.mesh);
@@ -985,9 +989,12 @@ impl MeshPipeline {
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
-                    pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                    pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                    draw_edges(
+                        pass,
+                        &resident.vertex_buf,
+                        &resident.edge_buf,
+                        resident.edge_count,
+                    );
                 }
             } else {
                 pass.set_pipeline(&self.pipelines.mesh_blend);
@@ -1010,9 +1017,12 @@ impl MeshPipeline {
             pass.set_pipeline(&self.pipelines.ghost);
             pass.set_bind_group(0, &self.bind_group, &[]);
             for resident in &self.ghost_residents {
-                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                draw_edges(
+                    pass,
+                    &resident.vertex_buf,
+                    &resident.edge_buf,
+                    resident.edge_count,
+                );
             }
         }
         // The measure markers last (they write no depth): unlit
@@ -1025,6 +1035,23 @@ impl MeshPipeline {
             pass.draw(0..marker.vertex_count, 0..1);
         }
     }
+}
+
+/// One line list: `edge_buf`'s index pairs over `vertex_buf`. A part with
+/// no edges (no non-degenerate triangle) holds zero-size buffers, and wgpu
+/// panics on an empty slice, so it draws nothing.
+fn draw_edges(
+    pass: &mut wgpu::RenderPass<'_>,
+    vertex_buf: &wgpu::Buffer,
+    edge_buf: &wgpu::Buffer,
+    edge_count: u32,
+) {
+    if edge_count == 0 {
+        return;
+    }
+    pass.set_vertex_buffer(0, vertex_buf.slice(..));
+    pass.set_index_buffer(edge_buf.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..edge_count, 0, 0..1);
 }
 
 #[cfg(test)]

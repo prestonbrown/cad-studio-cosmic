@@ -27,7 +27,7 @@ use std::hash::Hasher;
 
 use engine::parsing::{Box3, Part, TriangleColor};
 
-use super::edges::{CREASE_DEG, feature_edges};
+use super::edges::{unit_normal, wire_edges};
 use super::{PartPose, Vertex};
 
 /// Upstream's neutral face color for uncolored triangles, dark appearance
@@ -103,10 +103,12 @@ pub struct GpuPart {
     pub name: String,
     /// One vertex per corner (unindexed, per-face).
     pub vertices: Vec<Vertex>,
-    /// The part's CAD feature edges as corner-index pairs into
-    /// `vertices` ([`feature_edges`]): the line list wireframe mode and the
-    /// compare ghost draw. A 12-triangle cube stages its 12 edges; the
-    /// face diagonals are tessellation, not features.
+    /// The part's wire edges as corner-index pairs into `vertices`
+    /// ([`wire_edges`]: its CAD feature edges, or every triangle edge for
+    /// a smooth closed body): the line list wireframe mode and the compare
+    /// ghost draw. A 12-triangle cube stages its 12 edges; the face
+    /// diagonals are tessellation, not features. Empty for a part with no
+    /// non-degenerate triangle.
     pub edges: Vec<[u32; 2]>,
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
@@ -151,19 +153,10 @@ pub(crate) fn remap(p: [f32; 3]) -> [f32; 3] {
 /// addTriangle rule (TriangleMesh.swift:21-23): normalize(cross(b−a, c−a)),
 /// falling back to (0,0,1) for a zero-area triangle. A degenerate triangle
 /// rasterizes nothing, so the fallback only keeps the attribute finite.
+/// The edge pass shares the same normal ([`unit_normal`]) but skips a
+/// zero-area triangle instead.
 fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let (a, b, c) = (
-        glam::Vec3::from_array(a),
-        glam::Vec3::from_array(b),
-        glam::Vec3::from_array(c),
-    );
-    let cross = (b - a).cross(c - a);
-    let len = cross.length();
-    if len > 0.0 {
-        (cross / len).to_array()
-    } else {
-        [0.0, 0.0, 1.0]
-    }
+    unit_normal(a, b, c).unwrap_or([0.0, 0.0, 1.0])
 }
 
 impl PartScene {
@@ -249,7 +242,7 @@ impl PartScene {
         for part in &mut staged {
             let positions: Vec<[f32; 3]> = part.vertices.iter().map(|v| v.pos).collect();
             let corners: Vec<u32> = (0..positions.len() as u32).collect();
-            part.edges = feature_edges(&positions, &corners, CREASE_DEG);
+            part.edges = wire_edges(&positions, &corners);
             part.content_hash = content_hash(&part.vertices);
         }
         Self {

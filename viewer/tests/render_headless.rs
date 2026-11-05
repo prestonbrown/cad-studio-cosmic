@@ -1780,6 +1780,109 @@ fn wireframe_renders_lines_not_faces() {
     );
 }
 
+/// A closed UV sphere of radius `r` centered at `c` (MODEL space),
+/// 24 x 12 facets: every neighbouring facet pair meets under the 30°
+/// crease, so it has no feature edges at all.
+fn sphere_part(c: [f32; 3], r: f32) -> engine::parsing::Part {
+    use std::f32::consts::{PI, TAU};
+    let (lon, lat) = (24, 12);
+    let at = |i: u32, j: u32| {
+        let (t, f) = (PI * i as f32 / lat as f32, TAU * j as f32 / lon as f32);
+        [
+            c[0] + r * t.sin() * f.cos(),
+            c[1] + r * t.sin() * f.sin(),
+            c[2] + r * t.cos(),
+        ]
+    };
+    let mut positions = Vec::new();
+    for i in 0..lat {
+        for j in 0..lon {
+            let (a, b, cc, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            // the pole rows' quads collapse to one triangle each
+            if i > 0 {
+                positions.extend([a, b, d]);
+            }
+            if i + 1 < lat {
+                positions.extend([b, cc, d]);
+            }
+        }
+    }
+    let triangles = positions.len() / 3;
+    engine::parsing::Part {
+        name: "sphere".into(),
+        positions,
+        triangle_colors: vec![None; triangles],
+    }
+}
+
+/// A smooth closed body draws in wireframe and as the compare ghost: with
+/// no feature edges the wire set falls back to every triangle edge, and a
+/// part of only degenerate triangles (no edges at all) draws nothing
+/// without tripping wgpu's empty-slice panic.
+#[test]
+fn smooth_body_wireframe_and_ghost_draw_without_feature_edges() {
+    let (device, queue) = gpu::device_queue();
+    let degenerate = engine::parsing::Part {
+        name: "sliver".into(),
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        triangle_colors: vec![None],
+    };
+    let parts = vec![sphere_part([0.0, 0.0, 10.0], 10.0), degenerate.clone()];
+    let scene = PartScene::from_parts(&parts, NEUTRAL);
+    assert!(
+        !scene.parts[0].edges.is_empty(),
+        "the sphere wires its triangle edges"
+    );
+    assert!(
+        scene.parts[1].edges.is_empty(),
+        "fixture truth: the sliver has no edge"
+    );
+    let ghost_parts = vec![sphere_part([30.0, 0.0, 10.0], 10.0), degenerate];
+    let ghost = PartScene::from_parts_with_pin(&ghost_parts, NEUTRAL, scene.pin);
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let wire = Options {
+        wireframe: true,
+        ..Options::default()
+    };
+    let poses = identity_poses(&scene);
+    let appearances = default_appearances(&scene);
+    let px = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        None,
+        Some(&ghost),
+        &wire,
+        &poses,
+        &appearances,
+    );
+    let model_max_x = projected_aabb_bbox((scene.aabb_min, scene.aabb_max), &camera, 800.0, 600.0)
+        .1
+        .0;
+    let (mut model_ink, mut ghost_ink) = (0, 0);
+    for i in 0..px.len() / 4 {
+        if is_ink(&px[i * 4..i * 4 + 4], bg) {
+            if (i % 800) as f32 > model_max_x + 2.0 {
+                ghost_ink += 1;
+            } else {
+                model_ink += 1;
+            }
+        }
+    }
+    assert!(
+        model_ink > 1_000,
+        "the sphere draws in wireframe: {model_ink}"
+    );
+    assert!(ghost_ink > 200, "the sphere ghost draws: {ghost_ink}");
+}
+
 /// Pixels within TOL of the bed accent's chromaticity — the overlay is
 /// unlit and opaque, so an unoccluded bed pixel is the pure accent and
 /// u8 storage noise is the only deviation.
