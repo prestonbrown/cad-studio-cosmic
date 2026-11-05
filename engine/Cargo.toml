@@ -23,4 +23,4 @@ glam.workspace = true
 quick-xml.workspace = true
 zip.workspace = true
 # spawned children get default signal dispositions (processes::spawn_streaming)
-libc = "0.2"
+libc.workspace = true

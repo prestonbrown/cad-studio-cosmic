@@ -24,8 +24,9 @@
 //!   lock on a sibling `.lock` file, so concurrent instances never lose
 //!   each other's entries.
 //! - Signals and process info go through `/bin/kill` and `/bin/ps` via
-//!   [`std::process::Command`] — no libc/nix dependency, and exactly what
-//!   reaches the child stays visible under `ps` while debugging. Unix only.
+//!   [`std::process::Command`], so exactly what reaches the child stays
+//!   visible under `ps` while debugging. The spawn hook resets the child's
+//!   SIGINT/SIGQUIT/SIGTERM dispositions through libc. Unix only.
 //!
 //! Spawn registers the pid and process exit unregisters it, mirroring
 //! upstream `ProcessRunner.run`'s insert/defer-remove; the launch-time
