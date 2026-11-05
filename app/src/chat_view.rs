@@ -1935,8 +1935,14 @@ mod tests {
     fn a_fresh_pane_snaps_on_its_first_report_of_a_long_transcript() {
         let mut pane = ChatPane::new();
         let _ = pane.update(scrolled(0.0, 2000.0));
-        assert!(pane.is_following(), "opening is not the reader leaving the end");
-        assert!(pane.snap_pending, "the snap is re-issued until a report is at the end");
+        assert!(
+            pane.is_following(),
+            "opening is not the reader leaving the end"
+        );
+        assert!(
+            pane.snap_pending,
+            "the snap is re-issued until a report is at the end"
+        );
         // the snap landed
         let _ = pane.update(scrolled(1600.0, 2000.0));
         assert!(!pane.snap_pending);
