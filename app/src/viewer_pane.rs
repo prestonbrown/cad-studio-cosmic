@@ -201,8 +201,9 @@ pub enum Message {
     /// parity formula in [`CameraInput::magnify`] is wired the day one
     /// does — facts #116.
     Magnified(f32),
-    /// The keyboard modifier set changed (iced emits this on every change;
-    /// mouse_area messages carry no modifiers of their own).
+    /// The keyboard modifier set changed in this pane's window (the app's
+    /// router delivers it; mouse_area messages carry no modifiers of their
+    /// own).
     ModifiersChanged(Modifiers),
     Preset(Preset),
     Fit,
@@ -870,31 +871,22 @@ impl ViewerPane {
         self.manifest.as_ref().map_or(&[], |m| &m.warnings)
     }
 
-    /// The pane's subscriptions: the output-event relay plus keyboard
-    /// modifier changes (the pan-vs-zoom gate for scroll and primary-drag)
-    /// and the playback clock while [`Self::wants_tick`]. Space and Esc
-    /// arrive as [`Message::Key`] from the owning window's key router, so
-    /// only the key window's pane reacts. The ⌥⌘I parameters toggle is NOT here — the
-    /// app's key router owns it app-wide (Commands.swift:69-73), routed
-    /// through the window's command table.
+    /// The pane's subscriptions: the output-event relay and the playback
+    /// clock while [`Self::wants_tick`]. Keyboard input arrives from the
+    /// owning window's router: Space and Esc as [`Message::Key`], modifier
+    /// changes as [`Message::ModifiersChanged`], so only the key window's
+    /// pane reacts. The ⌥⌘I parameters toggle is NOT here — the app's key
+    /// router owns it app-wide (Commands.swift:69-73), routed through the
+    /// window's command table.
     pub fn subscription(&self) -> Subscription<Message> {
         let relay = Subscription::run_with(self.relay.clone(), relay_stream);
-        // The filter closure must stay NON-CAPTURING: iced's filter_map
-        // rejects capturing closures at compile time, so gates that need
-        // pane state live in the update arms, not here.
-        let modifiers = keyboard::listen().filter_map(|event| match event {
-            keyboard::Event::ModifiersChanged(modifiers) => {
-                Some(Message::ModifiersChanged(modifiers))
-            }
-            _ => None,
-        });
         // The playback clock: mounted only while a frame can actually
         // move — the subscription's presence IS the timer (upstream
         // invalidates its Timer on the same disappearance).
         let clock = self
             .wants_tick()
             .then(|| cosmic::iced::time::every(TICK).map(Message::Tick));
-        Subscription::batch([relay, modifiers].into_iter().chain(clock))
+        Subscription::batch(std::iter::once(relay).chain(clock))
     }
 
     // ── parameters overlay ───────────────────────────────────────────────
@@ -1582,7 +1574,7 @@ impl ViewerPane {
 
     /// shift/option held — the scroll/primary-drag pan gate
     /// (CameraInputView.swift:43-47,63-66).
-    fn pan_modifiers(&self) -> bool {
+    pub(crate) fn pan_modifiers(&self) -> bool {
         self.modifiers.shift() || self.modifiers.alt()
     }
 

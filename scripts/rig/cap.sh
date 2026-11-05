@@ -11,7 +11,8 @@
 #   key ctrl+alt+i
 #   mousemove 700 500 click 1
 #   sleep 1
-# (Xvfb has no input gating, unlike COSMIC, so real X events work here.)
+# (Xvfb has no input gating, unlike COSMIC, so real X events work here; the
+# window gets X input focus before the xdo file runs, or keys never land.)
 set -u
 name=$1; geom=$2; drive=$3; wait=$4; mode=${5:-light}; xdo=${6:-}
 ts() { date +%H:%M:%S; }
@@ -35,6 +36,12 @@ for w in $(DISPLAY=$disp xdotool search --pid $ap 2>/dev/null); do
 done
 if [ -n "$xdo" ]; then
   sleep 2
+  # With no window manager nothing gives the window X input focus, and an
+  # unfocused winit window receives no key events: focus it so xdo keys land.
+  for w in $(DISPLAY=$disp xdotool search --onlyvisible --pid $ap 2>/dev/null); do
+    DISPLAY=$disp xdotool windowfocus $w 2>/dev/null
+  done
+  sleep 1
   while read -r line; do
     case "$line" in ''|'#'*) ;; sleep\ *) sleep ${line#sleep } ;; *) DISPLAY=$disp xdotool $line ;; esac
   done < "$xdo"
