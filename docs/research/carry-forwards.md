@@ -653,6 +653,20 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   routing (the pane has no window-focus knowledge today) — a later-milestone
   design, recorded here until then. The single-window case is unaffected
   (T9 verified the editor-capture mechanism end-to-end). **Owner: M9 Task 2.**~~ (M9 Task 2: `key_events` tags the window, the app's key router hands Space/Esc to the key window's pane as `viewer_pane::Message::Key`; the pane no longer listens globally)
+- ~~Modifier state stays global (M9 Task 2 report): `ModifiersChanged`
+  rode `keyboard::listen()` in the viewer pane, so a modifier held in one
+  project window opened every pane's pan-vs-zoom gate.~~ (M9 Task 13:
+  `key_events` tags `ModifiersChanged` with its window and the app hands it
+  to that window's pane only; pinned by
+  `app::shell_behavior::modifiers_reach_only_the_key_window` and
+  `key_events_tags_modifier_changes_with_their_window`)
+- ~~⌥⌘I does nothing while the View menu is open (M9 Task 5 live probe).~~
+  (M9 Task 13: not a menu capture. The open cosmic menu captures only Escape
+  (menu_bar.rs:630, menu_inner.rs:645); the chord arrives `Ignored` and
+  toggles the panel with the menu open. The rig's Xvfb has no window
+  manager, so the window never had X input focus and xdotool's keys never
+  reached winit; `scripts/rig/cap.sh` now focuses the window before an xdo
+  file runs.)
 
 - Settings-window follow-ups (M8 T6 review, 2026-10-29, all LOW): (a)
   ~~ConfigureClaude parity: upstream auto-presents the agent-missing sheet PER
