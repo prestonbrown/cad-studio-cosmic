@@ -998,6 +998,14 @@ impl CadStudio {
         window::Settings {
             size,
             min_size,
+            // The client-side decoration setup libcosmic gives the main
+            // window (`app::run` with the default `client_decorations` and
+            // `transparent` settings): the app draws its own header and
+            // window controls, so the compositor adds no frame, and the
+            // surface is transparent so the rounded corners show the
+            // desktop instead of a black fill.
+            decorations: false,
+            transparent: true,
             #[cfg(target_os = "linux")]
             platform_specific: window::PlatformSpecific {
                 application_id: Self::APP_ID.to_string(),
@@ -1900,6 +1908,15 @@ pub fn open_url(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Secondary windows draw their own header and window controls, as the
+    /// main window does: no compositor frame, transparent surface.
+    #[test]
+    fn secondary_windows_are_client_decorated_and_transparent() {
+        let settings = CadStudio::window_settings(cosmic::iced::Size::new(800.0, 600.0), None);
+        assert!(!settings.decorations, "the compositor would draw a second frame");
+        assert!(settings.transparent, "rounded corners would fill black");
+    }
 
     /// `zip_package` rebuilds the destination from scratch every run —
     /// `zip -j` into an existing archive would ADD or UPDATE entries,
