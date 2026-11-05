@@ -1914,7 +1914,10 @@ mod tests {
     #[test]
     fn secondary_windows_are_client_decorated_and_transparent() {
         let settings = CadStudio::window_settings(cosmic::iced::Size::new(800.0, 600.0), None);
-        assert!(!settings.decorations, "the compositor would draw a second frame");
+        assert!(
+            !settings.decorations,
+            "the compositor would draw a second frame"
+        );
         assert!(settings.transparent, "rounded corners would fill black");
     }
 
