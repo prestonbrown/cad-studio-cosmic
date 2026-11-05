@@ -9,7 +9,7 @@ struct Camera {
 // The compare ghost (ModelViewer.swift:371-378): upstream stages the old
 // version's mesh as an UnlitMaterial systemOrange wireframe at 0.6
 // transparent blending — here an unlit LINE pass over the ghost scene's
-// staged edge list. The vertex buffer is the staged part vertex (stride
+// staged feature-edge list (render/edges.rs). The vertex buffer is the staged part vertex (stride
 // 36) with only the position read: the ghost carries no lighting, no
 // color attribute, and no per-part transform (upstream parents
 // ghostEntity straight under `content`, the current scene's frame — see

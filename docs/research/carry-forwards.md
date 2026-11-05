@@ -738,3 +738,11 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   does not unblock them in the inherited signal mask, and a blocked signal survives exec
   as an ignored one does. Nothing in the app blocks them today. Fix:
   `sigprocmask(SIG_UNBLOCK, {INT, QUIT, TERM})` in the same async-signal-safe hook.
+- Wireframe shows CAD feature edges (**accepted divergence**, at Preston's request): upstream
+  draws every triangle edge (ModelViewer.swift:415-421, `triangleFillMode = .lines`, facts #44),
+  so a planar face shows its triangulation diagonals and a cylinder every facet seam. The port
+  draws boundary edges plus edges whose two faces' normals differ by more than 30°
+  (`viewer::render::edges::feature_edges`, vertices welded by position within 1e-5 of the
+  bbox diagonal), computed once per part at scene build. The compare ghost draws the same
+  edge set. Material, opacity, grid, section and measure behave as upstream. Pinned by
+  `render::edges::tests` and `render::tests::wireframe_edge_count`.

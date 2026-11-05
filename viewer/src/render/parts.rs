@@ -27,6 +27,7 @@ use std::hash::Hasher;
 
 use engine::parsing::{Box3, Part, TriangleColor};
 
+use super::edges::{CREASE_DEG, feature_edges};
 use super::{PartPose, Vertex};
 
 /// Upstream's neutral face color for uncolored triangles, dark appearance
@@ -102,11 +103,10 @@ pub struct GpuPart {
     pub name: String,
     /// One vertex per corner (unindexed, per-face).
     pub vertices: Vec<Vertex>,
-    /// Unique undirected edges as corner-index pairs into `vertices` —
-    /// the wireframe pass's line list (facts #44): every triangle edge of
-    /// the part, shared ones collapsed to one line by position-keyed
-    /// dedup, so a quad-faced cube stages its 12 polygon edges plus the 6
-    /// face diagonals = 18.
+    /// The part's CAD feature edges as corner-index pairs into
+    /// `vertices` ([`feature_edges`]): the line list wireframe mode and the
+    /// compare ghost draw. A 12-triangle cube stages its 12 edges; the
+    /// face diagonals are tessellation, not features.
     pub edges: Vec<[u32; 2]>,
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
@@ -145,37 +145,6 @@ fn content_hash(vertices: &[Vertex]) -> u64 {
 /// MODEL Z-up -> SCENE Y-up, upstream's `sceneVector`: a proper rotation.
 pub(crate) fn remap(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
-}
-
-/// Unique undirected edges of an unindexed triangle soup, as corner-index
-/// pairs (facts #44) — the wireframe pass's line list. Upstream's `.lines`
-/// fill mode rasterizes every triangle edge, so a triangulated face shows
-/// its diagonals too; dedup here collapses only the SHARED edges an
-/// unindexed soup repeats per incident triangle (36 per-triangle pairs for
-/// a 12-triangle cube → its 12 polygon edges + 6 diagonals = 18). Dedup
-/// keys on POSITION bit patterns, not indices, for exactly that reason.
-fn undirected_edges(vertices: &[Vertex]) -> Vec<[u32; 2]> {
-    let bits = |p: [f32; 3]| p.map(f32::to_bits);
-    // first-appearance order keeps the output deterministic run to run
-    // (HashMap iteration is not)
-    let mut seen = std::collections::HashSet::new();
-    let mut edges = Vec::new();
-    for (t, tri) in vertices.chunks_exact(3).enumerate() {
-        let base = (3 * t) as u32;
-        for &(a, b) in &[(0usize, 1), (1, 2), (2, 0)] {
-            let (pa, pb) = (bits(tri[a].pos), bits(tri[b].pos));
-            // order the endpoints so (a,b) and (b,a) are one pair
-            let key = if (pa, pb) <= (pb, pa) {
-                (pa, pb)
-            } else {
-                (pb, pa)
-            };
-            if seen.insert(key) {
-                edges.push([base + a as u32, base + b as u32]);
-            }
-        }
-    }
-    edges
 }
 
 /// Flat-shading face normal of a scene-space triangle, upstream's
@@ -278,7 +247,9 @@ impl PartScene {
         // camera math
         let scene_box = scene_box.map_or(Box3::ZERO, |b| b.translated(pin));
         for part in &mut staged {
-            part.edges = undirected_edges(&part.vertices);
+            let positions: Vec<[f32; 3]> = part.vertices.iter().map(|v| v.pos).collect();
+            let corners: Vec<u32> = (0..positions.len() as u32).collect();
+            part.edges = feature_edges(&positions, &corners, CREASE_DEG);
             part.content_hash = content_hash(&part.vertices);
         }
         Self {

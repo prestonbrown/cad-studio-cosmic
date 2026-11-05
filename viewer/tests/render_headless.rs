@@ -1716,9 +1716,9 @@ fn plain_target_shader_carries_the_srgb_encode() {
     // (assertion folded into the same test's tolerance above)
 }
 
-/// Wireframe mode draws hairlines, not faces (facts #44): the same scene,
-/// same camera, `Options { wireframe: true }` vs solid — the line pass
-/// draws the 1px edge list where the fill pass painted whole triangles, so
+/// Wireframe mode draws hairlines, not faces: the same scene, same camera,
+/// `Options { wireframe: true }` vs solid — the line pass draws the 1px
+/// feature-edge list where the fill pass painted whole triangles, so
 /// the wireframe ink is a small fraction of the solid ink. And the lines
 /// carry the SAME material: every wireframe ink pixel classifies (by
 /// chroma, lighting divides out) as one of the two part colors — a tinted
@@ -1747,11 +1747,9 @@ fn wireframe_renders_lines_not_faces() {
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
-    // measured on Metal: solid 98560 ink px, wireframe 3423 for the edge
-    // list WITHOUT face diagonals; upstream parity (facts #44, .lines
-    // draws every triangle edge) adds the 12 diagonals, which can only
-    // grow wire ink. Even a 3x growth reads ratio 0.104, inside the band,
-    // and the floor only rises
+    // measured on Metal: solid 98560 ink px, wireframe 3423 for the
+    // feature edges (the two boxes' 24 edges, no face diagonals): ratio
+    // 0.035, centered in the band
     assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
     let ratio = wi as f64 / si as f64;
     assert!(
