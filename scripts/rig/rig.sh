@@ -1,7 +1,7 @@
 #!/bin/bash
-# Runs on mercury. Drives the cad-dev build/test/capture rig (incus container
-# on zeus, ssh alias `cad-dev`). Each worktree gets its own source dir
-# (~/wt/<name>) and target dir (~/targets/<name>) on the rig, so several
+# Runs on mercury. Drives the build/test/capture host (RIG_HOST, default
+# thelio). Each worktree gets its own source dir
+# (~/wt/<name>) and target dir (~/targets/<name>) on the host, so several
 # worktrees build in parallel without sharing a cargo lock. Nothing is ever
 # committed on the rig: source of record stays on mercury.
 #
@@ -15,14 +15,13 @@
 # A drive or xdo file given as a local path is copied up first.
 set -eu
 cmd=$1; name=$2; shift 2
-host=${RIG_HOST:-cad-dev}
+host=${RIG_HOST:-thelio}
 case "$cmd" in
   sync)
     src=${1:-$PWD}
     ssh "$host" "mkdir -p ~/wt/$name ~/targets"
-    # cp -a keeps the seed artifacts' build times, so any source that differs
-    # from the seed tree reads as newer than its artifact.
-    ssh "$host" "[ -d ~/targets/$name ] || cp -a ~/cad-studio-cosmic/target ~/targets/$name"
+    # A fresh target per worktree: copying a checkout's target dir costs
+    # more than a clean build on a many-core host.
     # No -t: a file whose content changed lands with the rig's current time
     # (cargo's freshness check is mtime-based); --checksum skips files whose
     # content already matches, so unchanged crates stay fresh.
@@ -30,7 +29,9 @@ case "$cmd" in
       -e ssh "$src"/ "$host:wt/$name/"
     ;;
   run)
-    ssh "$host" "cd ~/wt/$name && . ~/.cargo/env && export CARGO_TARGET_DIR=~/targets/$name && $*"
+    # ~/.local/bin first: on a jobpool host its cargo/make shims share one
+    # jobserver with every other build there.
+    ssh "$host" "cd ~/wt/$name && { [ -f ~/.cargo/env ] && . ~/.cargo/env; true; } && export PATH=~/.local/bin:\$PATH CARGO_TARGET_DIR=~/targets/$name && $*"
     ;;
   cap)
     cap=$1; geom=${2:-1320x840}; drive=${3:-open-box.drive}; wait=${4:-12}; mode=${5:-light}; xdo=${6:-}
