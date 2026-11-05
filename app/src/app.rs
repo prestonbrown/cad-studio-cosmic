@@ -135,6 +135,8 @@ pub enum Message {
     PresentAgentSheet,
     /// A key press the focused window did not consume.
     KeyPressed(window::Id, Key, Modifiers),
+    /// The keyboard modifier set changed while `id`'s window had focus.
+    ModifiersChanged(window::Id, Modifiers),
     /// A window's header close button: libcosmic's `on_close` is
     /// message-only, so the handler must issue the `window::close` itself.
     CloseWindow(window::Id),
@@ -360,6 +362,7 @@ impl Application for CadStudio {
                 self.present_agent_missing(false)
             }
             Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
+            Message::ModifiersChanged(id, modifiers) => self.update_modifiers(id, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
             Message::DragWindow(id) => cosmic::iced::window::drag(id),
             Message::ToggleMaximize(id) => cosmic::iced::window::toggle_maximize(id),
@@ -1299,6 +1302,18 @@ impl CadStudio {
         Task::none()
     }
 
+    /// A modifier change reaches the pane of the window it landed in, the
+    /// pan-vs-zoom gate for that window's scroll and primary drag.
+    fn update_modifiers(&mut self, id: window::Id, modifiers: Modifiers) -> Task<Action<Message>> {
+        if !matches!(self.windows.get(&id), Some(WindowKind::Project(_))) {
+            return Task::none();
+        }
+        self.update_project(
+            id,
+            project::Message::Viewer(crate::viewer_pane::Message::ModifiersChanged(modifiers)),
+        )
+    }
+
     /// Open (or focus) a project window (upstream `openWindow(value:)`):
     /// load the project, register the window, add the recent, dismiss the
     /// welcome window.
@@ -1615,7 +1630,8 @@ pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
 
 /// Route the shell-level events the focused window's widgets did not
 /// consume, tagged with the window they landed in: unconsumed key presses
-/// (the shortcut routers) and window-level file drops.
+/// (the shortcut routers), modifier changes (that window's pan gate) and
+/// window-level file drops.
 fn key_events(
     event: cosmic::iced::Event,
     status: cosmic::iced::event::Status,
@@ -1632,6 +1648,11 @@ fn key_events(
             }
             Some(Message::KeyPressed(id, key, modifiers))
         }
+        // modifier state is physical: it follows the keys whatever a widget
+        // did with the press, so capture status does not apply
+        cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::ModifiersChanged(
+            modifiers,
+        )) => Some(Message::ModifiersChanged(id, modifiers)),
         // the drop is not a widget event on this surface — capture status
         // does not apply
         cosmic::iced::Event::Window(cosmic::iced::window::Event::FileDropped(paths)) => {
@@ -2040,38 +2061,98 @@ mod shell_behavior {
             .expect("the project window registered")
     }
 
+    /// Real projects on disk carrying the golden motion output, each opened
+    /// through the app's own path; their window ids in `names` order.
+    fn open_projects_with_motion<const N: usize>(
+        f: &mut Fixture,
+        names: [&str; N],
+    ) -> Vec<window::Id> {
+        names
+            .into_iter()
+            .map(|name| {
+                store::create_project(&f.dir, name).unwrap();
+                let root = f.dir.join(name);
+                std::fs::create_dir_all(root.join("output")).unwrap();
+                std::fs::copy(
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../fixtures/golden/animation.json"
+                    ),
+                    root.join("output/animation.json"),
+                )
+                .unwrap();
+                let _ = f.app.open_project(root.clone());
+                f.app
+                    .windows
+                    .iter()
+                    .find_map(|(id, kind)| match kind {
+                        WindowKind::Project(p) if p.root == root => Some(*id),
+                        _ => None,
+                    })
+                    .expect("the project window registered")
+            })
+            .collect()
+    }
+
+    /// Two project windows: a modifier change tagged with one window moves
+    /// that window's pan gate only.
+    #[tokio::test]
+    async fn modifiers_reach_only_the_key_window() {
+        let mut f = fixture();
+        let ids = open_projects_with_motion(&mut f, ["A", "B"]);
+        let pan = |app: &CadStudio, id| match app.windows.get(&id) {
+            Some(WindowKind::Project(p)) => p.viewer.pan_modifiers(),
+            _ => panic!("project window"),
+        };
+        assert!(!pan(&f.app, ids[0]) && !pan(&f.app, ids[1]));
+        let _ = f
+            .app
+            .update(Message::ModifiersChanged(ids[0], Modifiers::SHIFT));
+        assert!(pan(&f.app, ids[0]), "the key window's gate opened");
+        assert!(!pan(&f.app, ids[1]), "the other window's gate stayed shut");
+        let _ = f
+            .app
+            .update(Message::ModifiersChanged(ids[0], Modifiers::empty()));
+        assert!(!pan(&f.app, ids[0]), "the release closed it again");
+    }
+
+    /// The event filter tags a modifier change with its window and forwards
+    /// it whatever a widget did with the press.
+    #[test]
+    fn key_events_tags_modifier_changes_with_their_window() {
+        use cosmic::iced::event::Status;
+        let id = window::Id::unique();
+        for status in [Status::Ignored, Status::Captured] {
+            let event = cosmic::iced::Event::Keyboard(
+                cosmic::iced::keyboard::Event::ModifiersChanged(Modifiers::ALT),
+            );
+            assert!(
+                matches!(
+                    key_events(event, status, id),
+                    Some(Message::ModifiersChanged(w, m)) if w == id && m == Modifiers::ALT
+                ),
+                "{status:?}"
+            );
+        }
+    }
+
     /// Two project windows: an editor-unfocused Space tagged with one
     /// window toggles playback in that window's pane only.
     #[tokio::test]
     async fn space_toggles_playback_only_in_the_key_window() {
         use engine::watch::ReloadKind;
         let mut f = fixture();
-        let mut ids = Vec::new();
-        for name in ["A", "B"] {
-            store::create_project(&f.dir, name).unwrap();
-            let root = f.dir.join(name);
-            std::fs::create_dir_all(root.join("output")).unwrap();
-            std::fs::copy(
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/golden/animation.json"),
-                root.join("output/animation.json"),
-            )
-            .unwrap();
-            let _ = f.app.open_project(root.clone());
-            let id = f
-                .app
-                .windows
-                .iter()
-                .find_map(|(id, kind)| match kind {
-                    WindowKind::Project(p) if p.root == root => Some(*id),
-                    _ => None,
-                })
-                .expect("the project window registered");
-            let Some(WindowKind::Project(p)) = f.app.windows.get_mut(&id) else {
+        let ids = open_projects_with_motion(&mut f, ["A", "B"]);
+        for id in &ids {
+            let Some(WindowKind::Project(p)) = f.app.windows.get_mut(id) else {
                 unreachable!()
             };
-            let _ = p.viewer.update(crate::viewer_pane::Message::Reload(ReloadKind::Motion));
-            let _ = p.viewer.update(crate::viewer_pane::Message::ToggleAnimation);
-            ids.push(id);
+            let _ = p
+                .viewer
+                .update(crate::viewer_pane::Message::Reload(ReloadKind::Motion));
+            let _ = p
+                .viewer
+                .update(crate::viewer_pane::Message::ToggleAnimation);
         }
         let playing = |app: &CadStudio, id| match app.windows.get(&id) {
             Some(WindowKind::Project(p)) => p.viewer.tools.player.is_playing,
@@ -2084,7 +2165,11 @@ mod shell_behavior {
             Modifiers::empty(),
         ));
         assert_ne!(playing(&f.app, ids[0]), before.0, "the key window toggled");
-        assert_eq!(playing(&f.app, ids[1]), before.1, "the other window did not");
+        assert_eq!(
+            playing(&f.app, ids[1]),
+            before.1,
+            "the other window did not"
+        );
     }
 
     /// 2.17 / 11.2: the new-project parent panel opens at Settings'
