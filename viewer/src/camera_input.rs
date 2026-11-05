@@ -7,10 +7,10 @@
 //! mesh-change rule (ModelViewerState.swift:127-135).
 //!
 //! Pure: no iced types, no I/O — inputs arrive as plain numbers in
-//! iced's conventions and the AppKit-convention flips happen HERE, at the
-//! boundary, so the pane never re-derives them:
-//! - cursor-derived `dy` (drag) is TOP-DOWN in iced and BOTTOM-UP in AppKit —
-//!   negated once on the way into the formulas (facts #18/#29);
+//! iced's conventions, and any convention crossing happens HERE, at the
+//! boundary, so the pane never re-derives it:
+//! - cursor-derived drag `dy` passes through UNCHANGED — NSEvent's drag
+//!   `deltaY` grows downward, the same top-down sense as iced's cursor;
 //! - scroll deltas pass through UNCHANGED — iced's wheel conversion forwards
 //!   winit's deltas, which carry AppKit's `scrollingDelta` sign.
 //!
@@ -127,12 +127,13 @@ impl CameraInput {
         if let Some((lx, ly)) = self.last {
             let (dx, dy) = (x - lx, y - ly);
             self.drag_distance += dx.abs() + dy.abs();
-            // AppKit deltas are bottom-up: the parity formulas' dy is the
-            // negation of iced's top-down one (facts #18/#29)
+            // NSEvent's drag deltaY grows downward, the same top-down
+            // sense as iced's cursor, so the parity formulas take iced's
+            // deltas as they are
             if self.drag_pan {
-                self.pan(dx, -dy);
+                self.pan(dx, dy);
             } else {
-                self.orbit = self.orbit.dragged(dx, -dy);
+                self.orbit = self.orbit.dragged(dx, dy);
             }
         }
         self.last = Some((x, y));
@@ -223,7 +224,7 @@ impl CameraInput {
     }
 
     /// target += (-right·dx + up·dy)·units_per_point over the camera's own
-    /// scene axes, `dx`/`dy` in AppKit convention (bottom-up dy).
+    /// scene axes, `dx`/`dy` drag deltas with dy growing downward.
     fn pan(&mut self, dx: f32, dy: f32) {
         self.orbit = self.orbit.panned(self.view_height, dx, dy);
     }
@@ -285,14 +286,15 @@ mod tests {
     }
 
     #[test]
-    fn orbit_drag_matches_sensitivity_formula_with_y_flip() {
-        // facts #18: yaw -= dx*0.008, pitch += dy*0.008 (AppKit dy,
-        // bottom-up). Iced's cursor y is top-down, so dragging UP (iced
-        // dy = -50) must RAISE the pitch by 0.4.
+    fn orbit_drag_matches_sensitivity_formula() {
+        // yaw -= dx*0.008, pitch += dy*0.008 with NSEvent's downward-growing
+        // drag deltaY: dragging DOWN 50 raises the pitch by 0.4 (the camera
+        // climbs, the model's top tips toward the viewer), dragging UP
+        // lowers it.
         let mut cam = input();
         cam.press(false);
         cam.move_to(100.0, 100.0);
-        cam.move_to(180.0, 50.0); // dx = 80, iced dy = -50 -> AppKit dy = +50
+        cam.move_to(180.0, 150.0); // dx = 80, dy = +50 (down)
         let (yaw, pitch) = (cam.orbit.yaw, cam.orbit.pitch);
         approx(yaw, std::f32::consts::FRAC_PI_4 - 80.0 * 0.008);
         approx(pitch, 0.6 + 50.0 * 0.008);
@@ -303,12 +305,12 @@ mod tests {
         let mut cam = input();
         cam.press(false);
         cam.move_to(0.0, 0.0);
-        cam.move_to(0.0, -2000.0); // AppKit dy = +2000 -> 16 rad, clamped
+        cam.move_to(0.0, 2000.0); // dy = +2000 -> 16 rad, clamped
         approx(cam.orbit.pitch, MAX_PITCH);
         cam.release();
         cam.press(false);
         cam.move_to(0.0, 0.0);
-        cam.move_to(0.0, 2000.0); // AppKit dy = -2000
+        cam.move_to(0.0, -2000.0); // dy = -2000 (up)
         approx(cam.orbit.pitch, -MAX_PITCH);
     }
 
@@ -364,7 +366,7 @@ mod tests {
     fn pan_uses_camera_axes_and_units_per_point() {
         // facts #22 at yaw = 0, pitch = 0: back = (0,0,1), right = (1,0,0),
         // up = (0,1,0); dragging right pans the target LEFT and dragging up
-        // (iced dy negative, AppKit positive) pans it UP.
+        // (dy negative) pans it DOWN, so the model follows the hand.
         let mut cam = input();
         cam.preset(Preset::Front);
         cam.set_view_height(600.0);
@@ -372,10 +374,10 @@ mod tests {
         let upp = 2.0 * d0 * (FOV / 2.0).tan() / 600.0;
         cam.press(true); // right-drag pans (CameraInputView.swift:55-61)
         cam.move_to(0.0, 0.0);
-        cam.move_to(30.0, -40.0); // dx = 30, AppKit dy = +40
+        cam.move_to(30.0, -40.0); // dx = 30, dy = -40 (up)
         approx3(
             cam.orbit.target,
-            [t0[0] - 30.0 * upp, t0[1] + 40.0 * upp, t0[2]],
+            [t0[0] - 30.0 * upp, t0[1] - 40.0 * upp, t0[2]],
         );
         approx(cam.orbit.distance, d0); // pan never zooms
     }

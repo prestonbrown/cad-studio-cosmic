@@ -139,7 +139,8 @@ impl Orbit {
     /// orbit(by:) (ModelViewer.swift:301-305): drag deltas in points to
     /// yaw/pitch — yaw decreases with dx, pitch increases with dy, both
     /// scaled [`ORBIT_SENSITIVITY`], pitch clamped to ±[`MAX_PITCH`].
-    /// `dx`/`dy` are AppKit-convention deltas (dy bottom-up).
+    /// `dx`/`dy` are drag deltas with dy growing downward (NSEvent's
+    /// drag `deltaY` and iced's cursor agree).
     pub fn dragged(self, dx: f32, dy: f32) -> Orbit {
         Orbit {
             yaw: self.yaw - dx * ORBIT_SENSITIVITY,
@@ -159,7 +160,7 @@ impl Orbit {
 
     /// pan(by:viewHeight:) (ModelViewer.swift:312-320): the target shifted
     /// by `(-right·dx + up·dy)·units_per_point` over the camera's own
-    /// axes. `dx`/`dy` are AppKit-convention deltas (dy bottom-up); a
+    /// axes. `dx`/`dy` are deltas with dy growing downward; a
     /// non-positive view height leaves the pose alone, as upstream's
     /// guard does.
     pub fn panned(self, view_height: f32, dx: f32, dy: f32) -> Orbit {

@@ -13,12 +13,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use cosmic::app::ApplicationExt;
 use cosmic::app::Core;
 use cosmic::cosmic_config::Config;
+use cosmic::iced::keyboard::key::Physical;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::window;
 use cosmic::iced::{Length, Subscription, Task};
@@ -35,6 +36,7 @@ use crate::fl;
 use crate::recents::{self, Recents};
 use crate::settings_store::SettingsStore;
 use crate::sheets;
+use crate::shortcuts::{Context, KeyBind, bare, ctrl};
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
 use crate::windows::welcome::{self, Welcome};
@@ -77,6 +79,12 @@ pub enum AppCommand {
     /// Open the About window (upstream's app-info command group,
     /// Commands.swift:10-14; same placement note as Settings).
     About,
+    /// Close the window the key landed in (the window's File menu).
+    CloseWindow,
+    /// Close every window; a running turn stops with its window.
+    Quit,
+    /// Toggle the focused window's fullscreen mode (no menu entry).
+    ToggleFullscreen,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +142,7 @@ pub enum Message {
     /// the sheet, NOT to settings).
     PresentAgentSheet,
     /// A key press the focused window did not consume.
-    KeyPressed(window::Id, Key, Modifiers),
+    KeyPressed(window::Id, Key, Modifiers, Physical),
     /// The keyboard modifier set changed while `id`'s window had focus.
     ModifiersChanged(window::Id, Modifiers),
     /// A window's header close button: libcosmic's `on_close` is
@@ -361,7 +369,9 @@ impl Application for CadStudio {
                 // ran.
                 self.present_agent_missing(false)
             }
-            Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
+            Message::KeyPressed(id, key, modifiers, physical) => {
+                self.update_key_press(id, key, modifiers, physical)
+            }
             Message::ModifiersChanged(id, modifiers) => self.update_modifiers(id, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
             Message::DragWindow(id) => cosmic::iced::window::drag(id),
@@ -846,6 +856,24 @@ impl CadStudio {
             AppCommand::Welcome => self.show_welcome(),
             AppCommand::Settings => self.open_settings(settings::Tab::General),
             AppCommand::About => self.open_about(),
+            AppCommand::CloseWindow => self.close_window(id),
+            AppCommand::Quit => {
+                engine::processes::terminate_all();
+                let ids: Vec<_> = self.windows.keys().copied().collect();
+                Task::batch(ids.into_iter().map(|id| self.close_window(id)))
+            }
+            AppCommand::ToggleFullscreen => window::mode(id)
+                .then(move |mode| {
+                    window::set_mode(
+                        id,
+                        if mode == window::Mode::Fullscreen {
+                            window::Mode::Windowed
+                        } else {
+                            window::Mode::Fullscreen
+                        },
+                    )
+                })
+                .map(Action::App),
         }
     }
 
@@ -998,6 +1026,14 @@ impl CadStudio {
         window::Settings {
             size,
             min_size,
+            // The client-side decoration setup libcosmic gives the main
+            // window (`app::run` with the default `client_decorations` and
+            // `transparent` settings): the app draws its own header and
+            // window controls, so the compositor adds no frame, and the
+            // surface is transparent so the rounded corners show the
+            // desktop instead of a black fill.
+            decorations: false,
+            transparent: true,
             #[cfg(target_os = "linux")]
             platform_specific: window::PlatformSpecific {
                 application_id: Self::APP_ID.to_string(),
@@ -1283,16 +1319,27 @@ impl CadStudio {
         id: window::Id,
         key: Key,
         modifiers: Modifiers,
+        physical: Physical,
     ) -> Task<Action<Message>> {
         if let Some(role) = sheet_key_role(&key, &modifiers) {
             if let Some(msg) = self.sheet_key_message(id, role) {
                 return self.update(msg);
             }
+            // a modal sheet owns Esc even when it has no cancel action
+            if role == SheetKey::Cancel && self.modal_sheet_up() {
+                return Task::none();
+            }
         }
-        if let Some(command) = app_shortcut(&key, &modifiers) {
+        if let Some(command) = app_shortcut(&key, &modifiers, Some(&physical)) {
             return self.app_command(id, command);
         }
-        if let Some(command) = project::project_shortcut(&key, &modifiers) {
+        let context = match self.windows.get(&id) {
+            Some(WindowKind::Project(project)) => project.key_context(),
+            _ => Context::default(),
+        };
+        if let Some(command) =
+            project::project_shortcut_in(&key, &modifiers, Some(&physical), context)
+        {
             return self.update_project(id, project::Message::Command(command));
         }
         // anything else is the key window's pane's (Space, Esc)
@@ -1612,23 +1659,34 @@ fn release_focus() -> Task<Action<Message>> {
     .discard()
 }
 
-/// The app-level shortcut table (upstream's global commands; ⌘→Ctrl, ⌘,
-/// the standard Settings scene's binding).
-pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
-    let ctrl = modifiers.control();
-    let shift = modifiers.shift();
-    let alt = modifiers.alt();
-    let character = match key {
-        Key::Character(ch) => ch.to_lowercase(),
-        _ => return None,
-    };
-    match (ctrl, shift, alt, character.as_str()) {
-        (true, false, false, "n") => Some(AppCommand::NewProject),
-        (true, false, false, "o") => Some(AppCommand::OpenProject),
-        (true, true, false, "1") => Some(AppCommand::Welcome),
-        (true, false, false, ",") => Some(AppCommand::Settings),
-        _ => None,
-    }
+/// The app-level bindings (upstream's global commands; ⌘→Ctrl, ⌘, the
+/// standard Settings scene's binding).
+static APP_BINDINGS: LazyLock<Vec<(KeyBind, AppCommand)>> = LazyLock::new(|| {
+    vec![
+        (ctrl("n"), AppCommand::NewProject),
+        (ctrl("o"), AppCommand::OpenProject),
+        (ctrl(","), AppCommand::Settings),
+        (ctrl("w"), AppCommand::CloseWindow),
+        (ctrl("q"), AppCommand::Quit),
+        (bare("F11"), AppCommand::ToggleFullscreen),
+    ]
+});
+
+/// The app command a key press triggers.
+pub fn app_shortcut(
+    key: &Key,
+    modifiers: &Modifiers,
+    physical: Option<&Physical>,
+) -> Option<AppCommand> {
+    APP_BINDINGS
+        .iter()
+        .find(|(shortcut, _)| shortcut.matches(*modifiers, key, physical))
+        .map(|(_, command)| *command)
+}
+
+/// The File menu's accelerator map: every app binding.
+pub fn app_key_binds() -> HashMap<KeyBind, AppCommand> {
+    APP_BINDINGS.iter().cloned().collect()
 }
 
 /// Route the shell-level events the focused window's widgets did not
@@ -1644,12 +1702,13 @@ fn key_events(
         cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
             key,
             modifiers,
+            physical_key,
             ..
         }) => {
             if matches!(status, cosmic::iced::event::Status::Captured) {
                 return None;
             }
-            Some(Message::KeyPressed(id, key, modifiers))
+            Some(Message::KeyPressed(id, key, modifiers, physical_key))
         }
         // modifier state is physical: it follows the keys whatever a widget
         // did with the press, so capture status does not apply
@@ -1901,6 +1960,18 @@ pub fn open_url(url: &str) {
 mod tests {
     use super::*;
 
+    /// Secondary windows draw their own header and window controls, as the
+    /// main window does: no compositor frame, transparent surface.
+    #[test]
+    fn secondary_windows_are_client_decorated_and_transparent() {
+        let settings = CadStudio::window_settings(cosmic::iced::Size::new(800.0, 600.0), None);
+        assert!(
+            !settings.decorations,
+            "the compositor would draw a second frame"
+        );
+        assert!(settings.transparent, "rounded corners would fill black");
+    }
+
     /// `zip_package` rebuilds the destination from scratch every run —
     /// `zip -j` into an existing archive would ADD or UPDATE entries,
     /// leaving the stale ones behind (Project.swift:444's removeItem).
@@ -1943,8 +2014,75 @@ mod tests {
         );
     }
 
-    /// The app-level bindings (Commands.swift:16-49): ⌘N, ⌘O, ⇧⌘1, ⌘,
-    /// (the standard Settings scene, CADStudioApp.swift:31-33) — and
+    #[test]
+    fn window_shortcuts_close_quit_and_fullscreen() {
+        let ctrl = Modifiers::CTRL;
+        assert_eq!(
+            app_shortcut(&Key::Character("w".into()), &ctrl, None),
+            Some(AppCommand::CloseWindow)
+        );
+        assert_eq!(
+            app_shortcut(&Key::Character("q".into()), &ctrl, None),
+            Some(AppCommand::Quit)
+        );
+        assert_eq!(
+            app_shortcut(
+                &Key::Named(cosmic::iced::keyboard::key::Named::F11),
+                &Modifiers::empty(),
+                None
+            ),
+            Some(AppCommand::ToggleFullscreen)
+        );
+    }
+
+    /// The File menu's accelerators are exactly the app bindings.
+    #[test]
+    fn the_file_menu_key_binds_are_the_app_bindings() {
+        let binds = app_key_binds();
+        assert_eq!(binds.len(), APP_BINDINGS.len());
+        for (key, command) in APP_BINDINGS.iter() {
+            assert_eq!(binds.get(key), Some(command));
+        }
+        assert_eq!(binds.get(&ctrl("q")), Some(&AppCommand::Quit));
+        assert!(!binds.values().any(|c| *c == AppCommand::About));
+    }
+
+    /// A Cyrillic layout's Ctrl+Ц on the physical Q key still quits.
+    #[test]
+    fn app_shortcuts_match_by_physical_key_on_a_non_latin_layout() {
+        use cosmic::iced::keyboard::key::Code;
+        assert_eq!(
+            app_shortcut(
+                &Key::Character("й".into()),
+                &Modifiers::CTRL,
+                Some(&Physical::Code(Code::KeyQ))
+            ),
+            Some(AppCommand::Quit)
+        );
+    }
+
+    /// A key a focused widget captured (typing "f" in the chat) never
+    /// reaches the shortcut router.
+    #[test]
+    fn a_captured_key_is_not_routed() {
+        let press = cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+            key: Key::Character("f".into()),
+            modified_key: Key::Character("f".into()),
+            physical_key: cosmic::iced::keyboard::key::Physical::Code(
+                cosmic::iced::keyboard::key::Code::KeyF,
+            ),
+            location: cosmic::iced::keyboard::Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: Some("f".into()),
+            repeat: false,
+        });
+        let id = window::Id::unique();
+        assert!(key_events(press.clone(), cosmic::iced::event::Status::Captured, id).is_none());
+        assert!(key_events(press, cosmic::iced::event::Status::Ignored, id).is_some());
+    }
+
+    /// The app-level bindings: Ctrl+N, Ctrl+O, Ctrl+, (the standard
+    /// Settings scene, CADStudioApp.swift:31-33) — no Welcome shortcut and
     /// nothing on bare keys.
     #[test]
     fn app_shortcut_table_matches_upstream() {
@@ -1952,30 +2090,30 @@ mod tests {
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
 
         assert_eq!(
-            app_shortcut(&Key::Character("n".into()), &ctrl),
+            app_shortcut(&Key::Character("n".into()), &ctrl, None),
             Some(AppCommand::NewProject)
         );
         assert_eq!(
-            app_shortcut(&Key::Character("o".into()), &ctrl),
+            app_shortcut(&Key::Character("o".into()), &ctrl, None),
             Some(AppCommand::OpenProject)
         );
         assert_eq!(
-            app_shortcut(&Key::Character("1".into()), &ctrl_shift),
-            Some(AppCommand::Welcome),
-            "⇧⌘1 is the welcome window command"
+            app_shortcut(&Key::Character("1".into()), &ctrl_shift, None),
+            None,
+            "the welcome window has no shortcut"
         );
         assert_eq!(
-            app_shortcut(&Key::Character(",".into()), &ctrl),
+            app_shortcut(&Key::Character(",".into()), &ctrl, None),
             Some(AppCommand::Settings),
             "⌘, opens the settings window"
         );
         assert_eq!(
-            app_shortcut(&Key::Character("1".into()), &Modifiers::empty()),
+            app_shortcut(&Key::Character("1".into()), &Modifiers::empty(), None),
             None
         );
-        assert_eq!(app_shortcut(&Key::Character("q".into()), &ctrl), None);
+        assert_eq!(app_shortcut(&Key::Character("x".into()), &ctrl, None), None);
         assert_eq!(
-            app_shortcut(&Key::Character(",".into()), &Modifiers::empty()),
+            app_shortcut(&Key::Character(",".into()), &Modifiers::empty(), None),
             None,
             "bare comma is just typing"
         );
@@ -2042,6 +2180,7 @@ mod shell_behavior {
             id,
             Key::Named(named),
             Modifiers::empty(),
+            Physical::Unidentified(cosmic::iced::keyboard::key::NativeCode::Unidentified),
         ));
     }
 
@@ -2195,6 +2334,7 @@ mod shell_behavior {
             ids[0],
             Key::Character(" ".into()),
             Modifiers::empty(),
+            Physical::Code(cosmic::iced::keyboard::key::Code::Space),
         ));
         assert_ne!(playing(&f.app, ids[0]), before.0, "the key window toggled");
         assert_eq!(

@@ -147,8 +147,9 @@ pub(super) struct Pipelines {
     pub(super) mesh: wgpu::RenderPipeline,
     /// The section cap quad, drawn where the parity is nonzero.
     pub(super) cap: wgpu::RenderPipeline,
-    /// Wireframe hairlines (facts #44): the mesh shader at LineList,
-    /// drawn instead of `mesh` in wireframe mode.
+    /// Wireframe hairlines: the mesh shader at LineList over each part's
+    /// feature edges (`render::edges`), drawn instead of `mesh` in
+    /// wireframe mode.
     pub(super) line: wgpu::RenderPipeline,
     /// The mesh/line pipelines' alpha-blended twins for the translucent
     /// part set (blend on, the overlay depth stance), drawn after the
@@ -158,7 +159,7 @@ pub(super) struct Pipelines {
     /// Unlit grid/bed/tripod and measure-marker overlay (facts #34/#37).
     pub(super) grid: wgpu::RenderPipeline,
     /// The compare ghost's unlit orange wireframe (ModelViewer.swift:
-    /// 371-378) over the ghost scene's edge lists.
+    /// 371-378) over the ghost scene's feature-edge lists.
     pub(super) ghost: wgpu::RenderPipeline,
 }
 
@@ -229,7 +230,7 @@ pub(super) fn build(
             stencil_face(Always, DecrementWrap),
         ),
     );
-    // Wireframe hairlines (facts #44): the SAME mesh shader, material,
+    // Wireframe hairlines: the SAME mesh shader, material,
     // and opacity as fill — only the topology changes (LineList;
     // wgpu/WebGPU fix line width at 1, so no wide lines and no tint).
     // Depth-tested like the fill so hidden edges stay hidden. Stencil

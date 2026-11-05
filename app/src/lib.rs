@@ -73,6 +73,7 @@ pub mod recents;
 pub mod schematic;
 pub mod settings_store;
 pub mod sheets;
+pub mod shortcuts;
 pub mod typography;
 pub mod ui;
 pub mod version_menu;

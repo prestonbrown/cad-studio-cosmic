@@ -9,13 +9,14 @@ struct Camera {
 // The compare ghost (ModelViewer.swift:371-378): upstream stages the old
 // version's mesh as an UnlitMaterial systemOrange wireframe at 0.6
 // transparent blending — here an unlit LINE pass over the ghost scene's
-// staged edge list. The vertex buffer is the staged part vertex (stride
-// 36) with only the position read: the ghost carries no lighting, no
-// color attribute, and no per-part transform (upstream parents
-// ghostEntity straight under `content`, the current scene's frame — see
-// `from_parts_with_pin`). The @GHOST_@ markers are substituted from the
-// Rust-side constants (see `ghost_wgsl_source` in mod.rs); a surviving
-// marker is invalid WGSL and fails compilation loudly.
+// staged wire-edge list (render/edges.rs). The vertex buffer is the
+// staged part vertex (stride 36) with only the position read: the ghost
+// carries no lighting, no color attribute, and no per-part transform
+// (upstream parents ghostEntity straight under `content`, the current
+// scene's frame — see `from_parts_with_pin`). The @GHOST_@ markers are
+// substituted from the Rust-side constants (see `ghost_wgsl_source` in
+// mod.rs); a surviving marker is invalid WGSL and fails compilation
+// loudly.
 
 @TARGET_SPACE@
 

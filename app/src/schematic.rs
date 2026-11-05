@@ -168,6 +168,12 @@ impl Viewport {
         self.zoom_by(ZOOM_BUTTON_FACTOR, None);
     }
 
+    /// 100%: one sheet pixel per screen pixel, about the view center.
+    pub fn actual_size(&mut self) {
+        self.fitted = false;
+        self.set_zoom(1.0, None);
+    }
+
     pub fn zoom_out(&mut self) {
         self.zoom_by(1.0 / ZOOM_BUTTON_FACTOR, None);
     }
@@ -689,6 +695,8 @@ pub enum Message {
     DoubleClick,
     ZoomIn,
     ZoomOut,
+    /// Zoom to 100%.
+    ActualSize,
     Fit,
     SelectPage(usize),
     PrevPage,
@@ -826,6 +834,10 @@ impl SchematicPane {
             }
             Message::ZoomOut => {
                 self.viewport.zoom_out();
+                self.zoom_changed();
+            }
+            Message::ActualSize => {
+                self.viewport.actual_size();
                 self.zoom_changed();
             }
             Message::SelectPage(index) => {
@@ -1137,7 +1149,9 @@ impl SchematicPane {
         } else {
             String::new()
         };
-        let mut controls = Row::new().spacing(8).align_y(Alignment::Center);
+        let mut controls = Row::new()
+            .spacing(crate::ui::BAR_ITEM_SPACING)
+            .align_y(Alignment::Center);
         if pages > 1 {
             controls = controls.push(self.page_picker());
         }
@@ -1148,7 +1162,7 @@ impl SchematicPane {
                 13.0,
                 Tone::Secondary,
                 BACKDROP,
-                fl!("riduci-2"),
+                crate::shortcuts::zoom_out(),
                 has_sheet.then_some(Message::ZoomOut),
             ))
             .push(button::icon(
@@ -1156,7 +1170,7 @@ impl SchematicPane {
                 13.0,
                 Tone::Secondary,
                 BACKDROP,
-                fl!("ingrandisci-2"),
+                crate::shortcuts::zoom_in(),
                 has_sheet.then_some(Message::ZoomIn),
             ))
             .push(button::text(
@@ -1253,6 +1267,8 @@ impl SchematicPane {
                 (index > 0).then_some(Message::PrevPage),
             ))
             .push(menu)
+            // the menu face's chevron sits 10 px from "next" upstream
+            .push(Space::new().width(PICKER_NEXT_GAP))
             .push(button::icon(
                 Symbol::ChevronRight,
                 13.0,
@@ -1264,6 +1280,10 @@ impl SchematicPane {
             .into()
     }
 }
+
+/// Extra space between the page menu and the next-page button, on top of
+/// the row's 2 px spacing on either side.
+const PICKER_NEXT_GAP: f32 = 2.0;
 
 /// The pane's backdrop behind the page (upstream
 /// `.underPageBackgroundColor`). Light: the window base pressed 26 %

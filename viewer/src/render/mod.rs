@@ -46,9 +46,11 @@
 //! the cut face (stencil != 0) when the frame carries a [`SectionPlane`].
 //!
 //! Modes and overlays (facts §2/#44): [`Options::wireframe`] swaps the
-//! part pass to the 1px hairline edge list — same material, LineList
-//! topology; the section cap sits out (upstream disables the interior
-//! shell in wireframe, facts #45). After the parts, the unlit
+//! part pass to the 1px hairlines of each part's CAD feature edges
+//! ([`edges::wire_edges`]: boundaries and creases past 30°, never the
+//! triangulation; every edge of a smooth closed body) — same material,
+//! LineList topology; the section cap sits out (upstream disables the
+//! interior shell in wireframe, facts #45). After the parts, the unlit
 //! alpha-blended overlays: the grid/bed/tripod ([`grid::geometry`])
 //! first, then the measure markers ([`markers::geometry`]) — orange
 //! spheres at the picked points plus the two-point link. Both are
@@ -59,11 +61,12 @@
 //! the CURRENT scene's pin (`PartScene::from_parts_with_pin`,
 //! ModelViewer.swift:135 — ghostEntity hangs under `content`) draws as
 //! an unlit systemOrange wireframe at [`GHOST_ALPHA`] through its own
-//! LINE pipeline over the ghost scene's edge lists, between the cap and
+//! LINE pipeline over the ghost scene's feature-edge lists, between the cap and
 //! the overlays — depth-tested so the mesh occludes it, never writing
 //! depth so it occludes nothing after it.
 
 pub mod camera;
+pub mod edges;
 pub mod gpu;
 pub mod grid;
 pub mod lights;
@@ -160,10 +163,11 @@ pub struct Vertex {
 
 /// Frame-level render mode (upstream ModelViewerState's toggles).
 /// `wireframe` swaps the part pass from filled triangles to the 1px
-/// hairline edge list — same material and opacity as fill, only the
-/// topology changes (facts #44: upstream is the same material with
-/// `triangleFillMode = .lines`; wgpu/WebGPU fixes line width at 1, so no
-/// tint and no wide lines). `msaa` picks the sample count (1 is the
+/// hairlines of each part's feature edges — same material and opacity as
+/// fill, only the topology changes (wgpu/WebGPU fixes line width at 1, so
+/// no tint and no wide lines). Upstream draws every triangle edge
+/// (`triangleFillMode = .lines`, facts #44); the port draws the CAD edges
+/// (docs/research/carry-forwards.md). `msaa` picks the sample count (1 is the
 /// default); unlike wireframe's pure draw-path switch, a count flip
 /// REBUILDS the render pipelines and owned attachments in
 /// [`MeshPipeline::prepare_parts`] — iced's Storage owns one pipeline per
@@ -937,9 +941,12 @@ impl MeshPipeline {
             for &i in &self.drawn {
                 let resident = &self.residents[i];
                 pass.set_bind_group(1, &resident.model_bg, &[]);
-                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                draw_edges(
+                    pass,
+                    &resident.vertex_buf,
+                    &resident.edge_buf,
+                    resident.edge_count,
+                );
             }
         } else {
             pass.set_pipeline(&self.pipelines.mesh);
@@ -982,9 +989,12 @@ impl MeshPipeline {
                 for &i in &self.drawn_translucent {
                     let resident = &self.residents[i];
                     pass.set_bind_group(1, &resident.model_bg, &[]);
-                    pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                    pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                    draw_edges(
+                        pass,
+                        &resident.vertex_buf,
+                        &resident.edge_buf,
+                        resident.edge_count,
+                    );
                 }
             } else {
                 pass.set_pipeline(&self.pipelines.mesh_blend);
@@ -1007,9 +1017,12 @@ impl MeshPipeline {
             pass.set_pipeline(&self.pipelines.ghost);
             pass.set_bind_group(0, &self.bind_group, &[]);
             for resident in &self.ghost_residents {
-                pass.set_vertex_buffer(0, resident.vertex_buf.slice(..));
-                pass.set_index_buffer(resident.edge_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..resident.edge_count, 0, 0..1);
+                draw_edges(
+                    pass,
+                    &resident.vertex_buf,
+                    &resident.edge_buf,
+                    resident.edge_count,
+                );
             }
         }
         // The measure markers last (they write no depth): unlit
@@ -1022,6 +1035,23 @@ impl MeshPipeline {
             pass.draw(0..marker.vertex_count, 0..1);
         }
     }
+}
+
+/// One line list: `edge_buf`'s index pairs over `vertex_buf`. A part with
+/// no edges (no non-degenerate triangle) holds zero-size buffers, and wgpu
+/// panics on an empty slice, so it draws nothing.
+fn draw_edges(
+    pass: &mut wgpu::RenderPass<'_>,
+    vertex_buf: &wgpu::Buffer,
+    edge_buf: &wgpu::Buffer,
+    edge_count: u32,
+) {
+    if edge_count == 0 {
+        return;
+    }
+    pass.set_vertex_buffer(0, vertex_buf.slice(..));
+    pass.set_index_buffer(edge_buf.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..edge_count, 0, 0..1);
 }
 
 #[cfg(test)]
@@ -1461,12 +1491,10 @@ mod tests {
         );
     }
 
-    /// Wireframe edges (facts #44): upstream's `.lines` fill mode
-    /// rasterizes every triangle edge, so a cube triangulated as 6 quads
-    /// shows its 12 polygon edges PLUS the 6 face diagonals = 18; dedup
-    /// collapses only the shared edges the unindexed soup repeats
-    /// (36 per-triangle corner pairs). The line pass draws that list, one
-    /// hairline per edge: 18 edges x 2 endpoints = 36 vertices.
+    /// Wireframe edges: the line pass draws the part's CAD feature edges,
+    /// so a cube triangulated as 6 quads (12 triangles, 36 unindexed
+    /// corners) shows its 12 edges and none of the 6 face diagonals: 12
+    /// edges x 2 endpoints = 24 line vertices.
     #[test]
     fn wireframe_edge_count() {
         let scene = PartScene::from_parts(std::slice::from_ref(&cube_part()), NEUTRAL);
@@ -1477,8 +1505,8 @@ mod tests {
         );
         assert_eq!(
             scene.parts[0].edges.len(),
-            18,
-            "12 polygon edges + 6 face diagonals, deduped"
+            12,
+            "the cube's 12 edges, no face diagonals"
         );
         for &[a, b] in &scene.parts[0].edges {
             assert!(
@@ -1504,8 +1532,8 @@ mod tests {
         );
         assert_eq!(
             pipeline.line_vertex_count_for_tests(),
-            36,
-            "the line pass draws 18 edges x 2 endpoints"
+            24,
+            "the line pass draws 12 edges x 2 endpoints"
         );
     }
 

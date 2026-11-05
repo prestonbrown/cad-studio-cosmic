@@ -738,3 +738,21 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   does not unblock them in the inherited signal mask, and a blocked signal survives exec
   as an ignored one does. Nothing in the app blocks them today. Fix:
   `sigprocmask(SIG_UNBLOCK, {INT, QUIT, TERM})` in the same async-signal-safe hook.
+- Wireframe shows CAD feature edges (**accepted divergence**, at Preston's request): upstream
+  draws every triangle edge (ModelViewer.swift:415-421, `triangleFillMode = .lines`, facts #44),
+  so a planar face shows its triangulation diagonals and a cylinder every facet seam. The port
+  draws boundary edges plus edges whose two faces' normals differ by more than 30°
+  (`viewer::render::edges::feature_edges`, vertices welded by position within 1e-5 of the
+  bbox diagonal, or 4 f32 ulps of the largest coordinate when that is larger), computed once
+  per part at scene build (`viewer::render::edges::wire_edges`). A part with no feature
+  edges at all (a closed smooth body: sphere, torus) falls back to every triangle edge, as
+  upstream draws it, so it never vanishes in wireframe or as the ghost. The compare ghost
+  draws the same edge set. Material, opacity, grid, section and measure behave as upstream.
+  Known limits: a T-junction (a face edge split on one side only) reads as two boundary
+  edges, and inconsistently wound triangles (common in bad STLs) put their face diagonals
+  back as creases, since their normals oppose. Pinned by `render::edges::tests`,
+  `render::tests::wireframe_edge_count` and the headless
+  `smooth_body_wireframe_and_ghost_draw_without_feature_edges`.
+- Bottom-bar item spacing: both the 3D viewer bar and the schematic bar space items 12 px apart
+  (`ui::BAR_ITEM_SPACING`); upstream uses `HStack(spacing: 8)` (ModelPane.swift:105, SchematicPane.swift:51).
+  Preston asked for more air than upstream.

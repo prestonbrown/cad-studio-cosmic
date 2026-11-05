@@ -8,8 +8,8 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (Compila ⌘B, parameters ⌥⌘I, export ⇧⌘E and the rest):
-//! show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout
+//! Commands (build Ctrl+B, parameters Ctrl+Shift+I, export Ctrl+Shift+E and the rest):
+//! show-chat F9, focus Ctrl+1/2/3, parameters Ctrl+Shift+I, layout
 //! presets, viewer presets + fit, schematic zoom/fit, build, stop, export,
 //! reveal, open-in-slicer. The keyboard bindings are one pure
 //! table, [`project_shortcut`]; the header's menu renders the same
@@ -19,14 +19,16 @@
 //! the en/main.ftl entry); the menu roots the port coined (File/View) use
 //! the port-added `menu-file`/`menu-view` keys.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ::time::OffsetDateTime;
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::stream::BoxStream;
+use cosmic::iced::keyboard::key::Physical;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::stream;
 use cosmic::iced::time::every;
@@ -57,6 +59,7 @@ use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
+use crate::shortcuts::{Context, KeyBind, When, bare, ctrl, ctrl_shift};
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
@@ -150,9 +153,12 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 pub enum Command {
     ShowChat,
     FocusChat,
+    /// "Scrivi un messaggio" Ctrl+L: [`Command::FocusChat`] under its own
+    /// menu entry, so each entry shows its own accelerator.
+    WriteMessage,
     FocusModel,
     FocusSchematic,
-    /// "Mostra/Nascondi parametri" ⌥⌘I (Commands.swift:69-73): flip the
+    /// "Mostra/Nascondi parametri" Ctrl+Shift+I (Commands.swift:69-73): flip the
     /// parameters overlay's visibility — the app-wide binding (upstream
     /// hangs it off the project, disabled with none open).
     ToggleParameters,
@@ -165,10 +171,12 @@ pub enum Command {
     SchematicZoomIn,
     SchematicZoomOut,
     SchematicFit,
-    /// "Compila modello" ⌘B (Commands.swift:115-119): build model.py now.
+    /// The drawing at 100%.
+    SchematicActualSize,
+    /// "Compila modello" Ctrl+B (Commands.swift:115-119): build model.py now.
     Build,
     Stop,
-    /// "Esporta pacchetto…" ⇧⌘E (Commands.swift:130-132): zip model.py +
+    /// "Esporta pacchetto…" Ctrl+Shift+E (Commands.swift:130-132): zip model.py +
     /// the non-dot outputs to a chosen destination.
     Export,
     Reveal,
@@ -322,6 +330,9 @@ pub struct ProjectWindow {
     pub recent_card: Option<Vec<PathBuf>>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
+    /// The pane the user last pointed at or focused by command; plain-key
+    /// shortcuts (F fits the view) act on it.
+    focused_pane: Option<PaneKind>,
     /// The pane whose grab handle is held (the drag's input gate).
     grip_held: Option<PaneKind>,
     /// The handle under the pointer (full opacity while hovered).
@@ -526,6 +537,7 @@ impl ProjectWindow {
             version_card: None,
             recent_card: None,
             focus_flash: None,
+            focused_pane: None,
             grip_held: None,
             grip_hover: None,
             pane_drag: None,
@@ -560,6 +572,14 @@ impl ProjectWindow {
 
     pub fn is_busy(&self) -> bool {
         self.activity.is_working()
+    }
+
+    /// The state the window's key bindings are gated on.
+    pub fn key_context(&self) -> Context {
+        Context {
+            running: self.is_busy(),
+            viewer_focused: self.focused_pane == Some(PaneKind::Model3D),
+        }
     }
 
     fn output_dir(&self) -> PathBuf {
@@ -640,9 +660,27 @@ impl ProjectWindow {
     /// and the recents store).
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Chat(msg) => self.update_chat(msg),
-            Message::Viewer(msg) => self.update_viewer(msg),
-            Message::Schematic(msg) => self.schematic.update(msg).map(Message::Schematic),
+            Message::Chat(msg) => {
+                self.focused_pane = Some(PaneKind::Chat);
+                self.update_chat(msg)
+            }
+            Message::Viewer(msg) => {
+                if matches!(
+                    msg,
+                    crate::viewer_pane::Message::Pressed
+                        | crate::viewer_pane::Message::RightPressed
+                        | crate::viewer_pane::Message::MiddlePressed
+                ) {
+                    self.focused_pane = Some(PaneKind::Model3D);
+                }
+                self.update_viewer(msg)
+            }
+            Message::Schematic(msg) => {
+                if matches!(msg, crate::schematic::Message::Pressed) {
+                    self.focused_pane = Some(PaneKind::Schematic);
+                }
+                self.schematic.update(msg).map(Message::Schematic)
+            }
             Message::Bridge(msg) => self.update_bridge(msg),
             Message::OutputReload(kind) => {
                 self.output_reload(kind);
@@ -918,7 +956,7 @@ impl ProjectWindow {
         self.sync_version_markers();
         let parameters = self.bridge.parameters();
         self.viewer.sync_parameters(&parameters);
-        ChatPane::scroll_to_bottom().map(Message::Chat)
+        self.chat_pane.jump_to_bottom().map(Message::Chat)
     }
 
     /// The chat pane: shell-owned messages act first (the send flow takes
@@ -1042,7 +1080,8 @@ impl ProjectWindow {
             | chat_view::Message::ToggleToolRow(_)
             | chat_view::Message::ToggleFullOutput(_)
             | chat_view::Message::ToggleDetail(_)
-            | chat_view::Message::CopyCode(_) => {}
+            | chat_view::Message::CopyCode(_)
+            | chat_view::Message::Scrolled { .. } => {}
         }
         let task = self.chat_pane.update(msg).map(Message::Chat);
         if self.chat.draft != self.chat_pane.draft() {
@@ -1077,7 +1116,7 @@ impl ProjectWindow {
                 // the bridge classifies every turn transition (it holds the
                 // turn's engine); the window mirrors it
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::Event(event) => {
                 // the chat reducer owns the rows; the activity mirrors after
@@ -1100,11 +1139,11 @@ impl ProjectWindow {
                     | EngineEvent::ToolFinished { .. }
                     | EngineEvent::System { .. } => {}
                 }
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::Closed => {
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {
                 self.queue = queue
@@ -1149,7 +1188,7 @@ impl ProjectWindow {
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
                 self.save_metadata();
@@ -1160,7 +1199,7 @@ impl ProjectWindow {
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
                 CosmicTask::future(async move { Message::App(AppRequest::PresentSetupSheet) })
@@ -1175,21 +1214,24 @@ impl ProjectWindow {
                 self.rebuild_grid();
                 Task::none()
             }
-            Command::FocusChat => {
+            Command::FocusChat | Command::WriteMessage => {
                 // upstream focus(.chat) shows the pane and focuses input
                 if !self.chat_visible {
                     self.chat_visible = true;
                     self.rebuild_grid();
                 }
                 self.focus_flash = Some(PaneKind::Chat);
+                self.focused_pane = Some(PaneKind::Chat);
                 ChatPane::focus_input().map(Message::Chat)
             }
             Command::FocusModel => {
                 self.focus_flash = Some(PaneKind::Model3D);
+                self.focused_pane = Some(PaneKind::Model3D);
                 Task::none()
             }
             Command::FocusSchematic => {
                 self.focus_flash = Some(PaneKind::Schematic);
+                self.focused_pane = Some(PaneKind::Schematic);
                 Task::none()
             }
             Command::ToggleParameters => self
@@ -1227,6 +1269,10 @@ impl ProjectWindow {
             Command::SchematicZoomOut => self
                 .schematic
                 .update(crate::schematic::Message::ZoomOut)
+                .map(Message::Schematic),
+            Command::SchematicActualSize => self
+                .schematic
+                .update(crate::schematic::Message::ActualSize)
                 .map(Message::Schematic),
             Command::SchematicFit => self
                 .schematic
@@ -1584,7 +1630,7 @@ impl ProjectWindow {
                 15.0,
                 40.0,
                 Some(Message::Command(Command::ShowChat)),
-                fl!("mostra-o-nascondi-la-chat-0"),
+                crate::shortcuts::show_chat(),
             ))
             // "Compila modello" (ProjectWindow.swift:107-113), disabled
             // while busy
@@ -1593,7 +1639,7 @@ impl ProjectWindow {
                 14.0,
                 36.0,
                 (!busy).then_some(Message::Command(Command::Build)),
-                fl!("compila-modello-b"),
+                crate::shortcuts::build(),
             ))
             // Stop (:115-121), disabled when idle
             .push(toolbar_button(
@@ -1601,7 +1647,7 @@ impl ProjectWindow {
                 13.5,
                 32.0,
                 busy.then_some(Message::Command(Command::Stop)),
-                fl!("interrompi"),
+                crate::shortcuts::stop(),
             ))
             .into()
     }
@@ -1653,7 +1699,7 @@ impl ProjectWindow {
                 18.5,
                 38.0,
                 (has_3mf && !busy).then_some(Message::Command(Command::Export)),
-                fl!("esporta-step-3mf-stl-tavola-pdf-e-model-py-in-un-archivio-zip-e"),
+                crate::shortcuts::export(),
             ))
             .push(toolbar_button(
                 Symbol::ArrowUpForwardApp,
@@ -1668,7 +1714,7 @@ impl ProjectWindow {
                 14.5,
                 38.0,
                 Some(Message::Command(Command::ToggleParameters)),
-                fl!("mostra-o-nascondi-i-parametri-i"),
+                crate::shortcuts::toggle_parameters(),
             ))
             .into()
     }
@@ -1718,10 +1764,16 @@ impl ProjectWindow {
                 13.0,
             )),
         };
+        // statusText takes the slack and truncates at its tail (:17-19), so
+        // the timer and the issue counts keep their room inside the
+        // capsule's side padding however long the status runs
         row = row.push(
             text(self.activity.text())
                 .size(CAPSULE_TEXT)
-                .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                .width(Length::Fill)
+                .ellipsize(cosmic::iced::core::text::Ellipsize::End(
+                    cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
+                ))
                 .class(Tone::Secondary.text(TITLEBAR)),
         );
         if let Some(start) = self.work_started_at {
@@ -1729,10 +1781,12 @@ impl ProjectWindow {
                 text(activity::elapsed_text(start.elapsed().as_secs()))
                     .size(CAPSULE_TEXT)
                     .font(cosmic::font::mono())
+                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
                     .class(Tone::Tertiary.text(TITLEBAR)),
             );
         }
-        row = row.push(Space::new().width(Length::Fill));
+        // Spacer(minLength: 4) before the issue counts (:29)
+        row = row.push(Space::new().width(Length::Fixed(4.0)));
 
         let issues = self.issues();
         for kind in [IssueKind::Error, IssueKind::Warning] {
@@ -1837,8 +1891,11 @@ impl ProjectWindow {
             Item::Divider,
             Item::Button(fl!("settings"), None, AppCommand::Settings),
             Item::Button(fl!("informazioni-su-cad-studio"), None, AppCommand::About),
+            Item::Divider,
+            Item::Button(fl!("chiudi-finestra"), None, AppCommand::CloseWindow),
+            Item::Button(fl!("esci"), None, AppCommand::Quit),
         ];
-        let file_binds = std::collections::HashMap::new();
+        let file_binds = crate::app::app_key_binds();
         let file_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("menu-file")).into();
@@ -1847,7 +1904,7 @@ impl ProjectWindow {
             items(&file_binds, file_entries),
         );
 
-        let model_binds = std::collections::HashMap::new();
+        let model_binds = menu_key_binds();
         let model_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("modello")).into();
@@ -1857,7 +1914,7 @@ impl ProjectWindow {
         );
 
         let entries = self.view_entries();
-        let key_binds = std::collections::HashMap::new();
+        let key_binds = menu_key_binds();
         let root_button: Element<'_, Message> = root(fl!("menu-view")).into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
@@ -1867,7 +1924,7 @@ impl ProjectWindow {
         // (docs/research/libcosmic-menu-dynamic-items-bug.md). Dynamic
         // dropdowns — the version history — live as popovers instead.
         cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
-            .item_width(ItemWidth::Static(220))
+            .item_width(ItemWidth::Static(280))
             .item_height(ItemHeight::Dynamic(30))
             .into()
     }
@@ -1933,7 +1990,7 @@ impl ProjectWindow {
             Item::Button(fl!("vai-alla-chat"), None, Command::FocusChat),
             Item::Button(fl!("vai-al-viewer-3d"), None, Command::FocusModel),
             Item::Button(fl!("vai-alla-schematica-2d"), None, Command::FocusSchematic),
-            // ⌥⌘I (Commands.swift:69-73), directly after the focus trio as
+            // Ctrl+Shift+I (Commands.swift:69-73), directly after the focus trio as
             // upstream orders it; the label follows areParametersVisible.
             // A text-only change on a fixed-height Item::Button is safe in
             // any root (docs/research/libcosmic-menu-dynamic-items-bug.md).
@@ -1946,8 +2003,8 @@ impl ProjectWindow {
                 None,
                 Command::ToggleParameters,
             ),
-            // "Scrivi un messaggio" ⌘L (Commands.swift:74-76): focus(.chat)
-            Item::Button(fl!("scrivi-un-messaggio"), None, Command::FocusChat),
+            // "Scrivi un messaggio" Ctrl+L (Commands.swift:74-76): focus(.chat)
+            Item::Button(fl!("scrivi-un-messaggio"), None, Command::WriteMessage),
             Item::Divider,
             Item::Folder(
                 fl!("layout"),
@@ -2175,47 +2232,152 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
     .boxed()
 }
 
-/// The project window's shortcut table (upstream keyboardShortcut values, ⌘→Ctrl,
-/// ⌥→Alt). Pure: the app routes a key press through this before the
+/// The project window's bindings (upstream keyboardShortcut values, ⌘→Ctrl,
+/// ⌥→Alt, adapted to the Linux desktop). A command's first entry is its
+/// primary binding, the one hints show; later entries are aliases. A
+/// binding fires only when its [`When`] holds.
+static PROJECT_BINDINGS: LazyLock<Vec<(KeyBind, Command, When)>> = LazyLock::new(|| {
+    vec![
+        (bare("F9"), Command::ShowChat, When::Always),
+        (ctrl("1"), Command::FocusChat, When::Always),
+        (ctrl("2"), Command::FocusModel, When::Always),
+        (ctrl("3"), Command::FocusSchematic, When::Always),
+        (ctrl("l"), Command::WriteMessage, When::Always),
+        (
+            ctrl_shift("1"),
+            Command::ViewerPreset(Preset::Iso),
+            When::Always,
+        ),
+        (
+            ctrl_shift("2"),
+            Command::ViewerPreset(Preset::Front),
+            When::Always,
+        ),
+        (
+            ctrl_shift("3"),
+            Command::ViewerPreset(Preset::Top),
+            When::Always,
+        ),
+        (
+            ctrl_shift("4"),
+            Command::ViewerPreset(Preset::Right),
+            When::Always,
+        ),
+        (ctrl_shift("0"), Command::ViewerFit, When::Always),
+        (bare("f"), Command::ViewerFit, When::ViewerFocused),
+        (ctrl_shift("i"), Command::ToggleParameters, When::Always),
+        (ctrl("+"), Command::SchematicZoomIn, When::Always),
+        (ctrl("="), Command::SchematicZoomIn, When::Always),
+        (ctrl("-"), Command::SchematicZoomOut, When::Always),
+        (ctrl("0"), Command::SchematicActualSize, When::Always),
+        (bare("Escape"), Command::Stop, When::Running),
+        (ctrl("."), Command::Stop, When::Always),
+        (ctrl("b"), Command::Build, When::Always),
+        (ctrl_shift("e"), Command::Export, When::Always),
+        (ctrl_shift("r"), Command::Reveal, When::Always),
+    ]
+});
+
+/// The command a key press triggers in the project window whose state is
+/// `context`. Pure: the app routes a key press through this before the
 /// focused window sees it.
+pub fn project_shortcut_in(
+    key: &Key,
+    modifiers: &Modifiers,
+    physical: Option<&Physical>,
+    context: Context,
+) -> Option<Command> {
+    PROJECT_BINDINGS
+        .iter()
+        .find(|(shortcut, _, when)| {
+            when.holds(context) && shortcut.matches(*modifiers, key, physical)
+        })
+        .map(|(_, command, _)| *command)
+}
+
+/// [`project_shortcut_in`] for a window with nothing running and no pane
+/// holding the focus.
 pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
-    use Command::*;
-    let ctrl = modifiers.control();
-    let alt = modifiers.alt();
-    let shift = modifiers.shift();
-    let character = match key {
-        Key::Character(ch) => ch.to_lowercase(),
-        _ => return None,
-    };
-    match (ctrl, alt, shift, character.as_str()) {
-        (true, false, false, "0") => Some(ShowChat),
-        (true, false, false, "1") => Some(FocusChat),
-        (true, false, false, "2") => Some(FocusModel),
-        (true, false, false, "3") => Some(FocusSchematic),
-        (true, false, false, "l") => Some(FocusChat),
-        (true, true, false, "1") => Some(ViewerPreset(Preset::Iso)),
-        (true, true, false, "2") => Some(ViewerPreset(Preset::Front)),
-        (true, true, false, "3") => Some(ViewerPreset(Preset::Top)),
-        (true, true, false, "4") => Some(ViewerPreset(Preset::Right)),
-        (true, true, false, "0") => Some(ViewerFit),
-        // ⌥⌘I parameters (Commands.swift:69-73): the app-wide arm
-        (true, true, false, "i") => Some(ToggleParameters),
-        (true, false, false, "+") | (true, false, false, "=") => Some(SchematicZoomIn),
-        (true, false, false, "-") => Some(SchematicZoomOut),
-        // ⌘. stop — the period key arrives as a character
-        (true, false, false, ".") => Some(Stop),
-        // ⌘B build (Commands.swift:118-120)
-        (true, false, false, "b") => Some(Build),
-        // ⇧⌘E export package (Commands.swift:130-132)
-        (true, false, true, "e") => Some(Export),
-        (true, false, true, "r") => Some(Reveal),
-        _ => None,
+    project_shortcut_in(key, modifiers, None, Context::default())
+}
+
+/// Every binding of `command`, primary first.
+pub fn bindings(command: Command) -> impl Iterator<Item = KeyBind> {
+    PROJECT_BINDINGS
+        .iter()
+        .filter(move |(_, bound, _)| *bound == command)
+        .map(|(shortcut, _, _)| shortcut.clone())
+}
+
+/// `command`'s primary binding.
+///
+/// # Panics
+/// When `command` has no binding.
+pub fn binding(command: Command) -> KeyBind {
+    bindings(command)
+        .next()
+        .unwrap_or_else(|| panic!("{command:?} has no binding"))
+}
+
+/// The menu bar's accelerator map: each command's primary binding, the one
+/// its tooltip shows. Commands without a binding have no entry.
+pub fn menu_key_binds() -> HashMap<KeyBind, Command> {
+    let mut binds: HashMap<KeyBind, Command> = HashMap::new();
+    for (key, command, _) in PROJECT_BINDINGS.iter() {
+        if !binds.values().any(|bound| bound == command) {
+            binds.insert(key.clone(), *command);
+        }
     }
+    binds
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The menu's accelerator map holds each bound command's primary (first)
+    /// binding and nothing for a command without one.
+    #[test]
+    fn the_menu_key_binds_are_each_commands_primary_binding() {
+        let binds = menu_key_binds();
+        let mut bound = Vec::new();
+        for (_, command, _) in PROJECT_BINDINGS.iter() {
+            if !bound.contains(command) {
+                bound.push(*command);
+            }
+        }
+        assert_eq!(binds.len(), bound.len());
+        for command in &bound {
+            let primary = binding(*command);
+            assert_eq!(binds.get(&primary), Some(command), "{command:?}");
+        }
+        let every_command = [
+            Command::ShowChat,
+            Command::FocusChat,
+            Command::WriteMessage,
+            Command::FocusModel,
+            Command::FocusSchematic,
+            Command::ToggleParameters,
+            Command::LayoutChatLeading,
+            Command::LayoutChatTrailing,
+            Command::LayoutChatBottom,
+            Command::LayoutThreeColumns,
+            Command::ViewerFit,
+            Command::SchematicZoomIn,
+            Command::SchematicZoomOut,
+            Command::SchematicFit,
+            Command::SchematicActualSize,
+            Command::Build,
+            Command::Stop,
+            Command::Export,
+            Command::Reveal,
+            Command::OpenInSlicer,
+        ];
+        for command in every_command {
+            let in_map = binds.values().any(|c| *c == command);
+            assert_eq!(in_map, bindings(command).next().is_some(), "{command:?}");
+        }
+    }
 
     /// The project window's hairlines sit below both neighbours in a dark
     /// theme (upstream: the split divider 10, the toolbar hairline 19 over
@@ -2276,19 +2438,126 @@ mod tests {
         assert_eq!(std::fs::read(settings.path()).unwrap(), bytes);
     }
 
+    fn press(key: Key, modifiers: Modifiers, context: Context) -> Option<Command> {
+        project_shortcut_in(&key, &modifiers, None, context)
+    }
+
+    fn named(key: cosmic::iced::keyboard::key::Named) -> Key {
+        Key::Named(key)
+    }
+
+    #[test]
+    fn linux_bindings_land_on_their_commands() {
+        use cosmic::iced::keyboard::key::Named;
+        let idle = Context::default();
+        let ch = |c: &str| Key::Character(c.into());
+        let none = Modifiers::empty();
+        assert_eq!(press(named(Named::F9), none, idle), Some(Command::ShowChat));
+        assert_eq!(
+            press(ch("0"), Modifiers::CTRL, idle),
+            Some(Command::SchematicActualSize)
+        );
+        assert_eq!(
+            press(ch("0"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::ViewerFit)
+        );
+        assert_eq!(
+            press(ch("i"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::ToggleParameters)
+        );
+        assert_eq!(press(ch("i"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        assert_eq!(press(ch("."), Modifiers::CTRL, idle), Some(Command::Stop));
+        assert_eq!(
+            press(ch("e"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::Export)
+        );
+        assert_eq!(press(ch("e"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        assert_eq!(
+            press(ch("r"), Modifiers::CTRL | Modifiers::SHIFT, idle),
+            Some(Command::Reveal)
+        );
+        assert_eq!(press(ch("0"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        for (digit, preset) in [
+            ("1", Preset::Iso),
+            ("2", Preset::Front),
+            ("3", Preset::Top),
+            ("4", Preset::Right),
+        ] {
+            assert_eq!(
+                press(ch(digit), Modifiers::CTRL | Modifiers::SHIFT, idle),
+                Some(Command::ViewerPreset(preset))
+            );
+            assert_eq!(
+                press(ch(digit), Modifiers::CTRL | Modifiers::ALT, idle),
+                None
+            );
+        }
+    }
+
+    /// Esc stops only a running turn; idle it falls through to the viewer
+    /// (exit measure/section).
+    #[test]
+    fn escape_stops_a_running_turn_and_otherwise_falls_through() {
+        use cosmic::iced::keyboard::key::Named;
+        let esc = named(Named::Escape);
+        let none = Modifiers::empty();
+        let running = Context {
+            running: true,
+            ..Context::default()
+        };
+        assert_eq!(press(esc.clone(), none, running), Some(Command::Stop));
+        assert_eq!(press(esc, none, Context::default()), None);
+    }
+
+    /// Plain F fits the view only while the viewer holds the focus.
+    #[test]
+    fn plain_f_fits_only_with_the_viewer_focused() {
+        let f = Key::Character("f".into());
+        let none = Modifiers::empty();
+        let focused = Context {
+            viewer_focused: true,
+            ..Context::default()
+        };
+        assert_eq!(press(f.clone(), none, focused), Some(Command::ViewerFit));
+        assert_eq!(press(f.clone(), none, Context::default()), None);
+        assert_eq!(press(f, Modifiers::CTRL, focused), None);
+    }
+
+    /// Focus follows the pane the user last pointed at or focused.
+    #[tokio::test]
+    async fn the_focused_pane_follows_commands_and_presses() {
+        let _lang = crate::localize::pin_en();
+        let root = std::env::temp_dir().join(format!("cad-focus-{}", uuid::Uuid::new_v4()));
+        store::create_project(
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let settings = SettingsStore::in_temp_dir();
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &settings);
+        assert!(!window.key_context().viewer_focused);
+        let _ = window.update(Message::Command(Command::FocusModel));
+        assert!(window.key_context().viewer_focused);
+        let _ = window.update(Message::Command(Command::FocusChat));
+        assert!(!window.key_context().viewer_focused);
+        let _ = window.update(Message::Viewer(crate::viewer_pane::Message::Pressed));
+        assert!(window.key_context().viewer_focused);
+        let _ = window.update(Message::Schematic(crate::schematic::Message::Pressed));
+        assert!(!window.key_context().viewer_focused);
+    }
+
     /// Every shortcut in the table is a command the window implements, and
     /// the upstream bindings land on the expected commands
     /// (Commands.swift:48-137).
     #[test]
     fn shortcut_table_matches_upstream() {
         let ctrl = Modifiers::CTRL;
-        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
 
         assert_eq!(
             project_shortcut(&Key::Character("0".into()), &ctrl),
-            Some(Command::ShowChat),
-            "⌘0 shows/hides chat"
+            Some(Command::SchematicActualSize),
+            "Ctrl+0 is the drawing's 100%"
         );
         assert_eq!(
             project_shortcut(&Key::Character("1".into()), &ctrl),
@@ -2304,26 +2573,26 @@ mod tests {
         );
         assert_eq!(
             project_shortcut(&Key::Character("l".into()), &ctrl),
-            Some(Command::FocusChat),
-            "⌘L is also focus-chat (upstream 'Scrivi un messaggio')"
+            Some(Command::WriteMessage),
+            "Ctrl+L is upstream's 'Scrivi un messaggio'"
         );
         assert_eq!(
-            project_shortcut(&Key::Character("1".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("1".into()), &ctrl_shift),
             Some(Command::ViewerPreset(Preset::Iso))
         );
         assert_eq!(
-            project_shortcut(&Key::Character("0".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("0".into()), &ctrl_shift),
             Some(Command::ViewerFit)
         );
         assert_eq!(
-            project_shortcut(&Key::Character("i".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("i".into()), &ctrl_shift),
             Some(Command::ToggleParameters),
-            "⌥⌘I toggles the parameters overlay (Commands.swift:69-73)"
+            "Ctrl+Shift+I toggles the parameters overlay"
         );
         assert_eq!(
             project_shortcut(&Key::Character("i".into()), &ctrl),
             None,
-            "no parameters binding without ⌥"
+            "no parameters binding without Shift"
         );
         assert_eq!(
             project_shortcut(&Key::Character("=".into()), &ctrl),
@@ -2342,12 +2611,12 @@ mod tests {
             project_shortcut(&Key::Character("r".into()), &ctrl_shift),
             Some(Command::Reveal)
         );
-        // ⌘B builds the model (Commands.swift:118-120)
+        // Ctrl+B builds the model (Commands.swift:118-120)
         assert_eq!(
             project_shortcut(&Key::Character("b".into()), &ctrl),
             Some(Command::Build)
         );
-        // ⇧⌘E exports the package (Commands.swift:130-132)
+        // Ctrl+Shift+E exports the package (Commands.swift:130-132)
         assert_eq!(
             project_shortcut(&Key::Character("e".into()), &ctrl_shift),
             Some(Command::Export)
@@ -2959,7 +3228,7 @@ mod tests {
             "no SVG: Schematica gated"
         );
         assert!(view_bare.iter().any(|(label, action, _)| {
-            *action == Some(Command::FocusChat) && label == "Write a Message"
+            *action == Some(Command::WriteMessage) && label == "Write a Message"
         }));
 
         std::fs::write(root.join("output/model.3mf"), b"x").unwrap();

@@ -1716,9 +1716,9 @@ fn plain_target_shader_carries_the_srgb_encode() {
     // (assertion folded into the same test's tolerance above)
 }
 
-/// Wireframe mode draws hairlines, not faces (facts #44): the same scene,
-/// same camera, `Options { wireframe: true }` vs solid — the line pass
-/// draws the 1px edge list where the fill pass painted whole triangles, so
+/// Wireframe mode draws hairlines, not faces: the same scene, same camera,
+/// `Options { wireframe: true }` vs solid — the line pass draws the 1px
+/// feature-edge list where the fill pass painted whole triangles, so
 /// the wireframe ink is a small fraction of the solid ink. And the lines
 /// carry the SAME material: every wireframe ink pixel classifies (by
 /// chroma, lighting divides out) as one of the two part colors — a tinted
@@ -1747,11 +1747,9 @@ fn wireframe_renders_lines_not_faces() {
     );
     let (si, wi) = (ink_pixels(&solid, bg), ink_pixels(&wire, bg));
     assert!(si > 5_000, "solid mode must cover a healthy area: {si}");
-    // measured on Metal: solid 98560 ink px, wireframe 3423 for the edge
-    // list WITHOUT face diagonals; upstream parity (facts #44, .lines
-    // draws every triangle edge) adds the 12 diagonals, which can only
-    // grow wire ink. Even a 3x growth reads ratio 0.104, inside the band,
-    // and the floor only rises
+    // measured on Metal: solid 98560 ink px, wireframe 3423 for the
+    // feature edges (the two boxes' 24 edges, no face diagonals): ratio
+    // 0.035, centered in the band
     assert!(wi > 1_000, "wireframe lines must be visible at all: {wi}");
     let ratio = wi as f64 / si as f64;
     assert!(
@@ -1780,6 +1778,109 @@ fn wireframe_renders_lines_not_faces() {
         classified as f64 >= 0.90 * wi as f64,
         "only {classified}/{wi} wireframe ink pixels carry a part color"
     );
+}
+
+/// A closed UV sphere of radius `r` centered at `c` (MODEL space),
+/// 24 x 12 facets: every neighbouring facet pair meets under the 30°
+/// crease, so it has no feature edges at all.
+fn sphere_part(c: [f32; 3], r: f32) -> engine::parsing::Part {
+    use std::f32::consts::{PI, TAU};
+    let (lon, lat) = (24, 12);
+    let at = |i: u32, j: u32| {
+        let (t, f) = (PI * i as f32 / lat as f32, TAU * j as f32 / lon as f32);
+        [
+            c[0] + r * t.sin() * f.cos(),
+            c[1] + r * t.sin() * f.sin(),
+            c[2] + r * t.cos(),
+        ]
+    };
+    let mut positions = Vec::new();
+    for i in 0..lat {
+        for j in 0..lon {
+            let (a, b, cc, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            // the pole rows' quads collapse to one triangle each
+            if i > 0 {
+                positions.extend([a, b, d]);
+            }
+            if i + 1 < lat {
+                positions.extend([b, cc, d]);
+            }
+        }
+    }
+    let triangles = positions.len() / 3;
+    engine::parsing::Part {
+        name: "sphere".into(),
+        positions,
+        triangle_colors: vec![None; triangles],
+    }
+}
+
+/// A smooth closed body draws in wireframe and as the compare ghost: with
+/// no feature edges the wire set falls back to every triangle edge, and a
+/// part of only degenerate triangles (no edges at all) draws nothing
+/// without tripping wgpu's empty-slice panic.
+#[test]
+fn smooth_body_wireframe_and_ghost_draw_without_feature_edges() {
+    let (device, queue) = gpu::device_queue();
+    let degenerate = engine::parsing::Part {
+        name: "sliver".into(),
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        triangle_colors: vec![None],
+    };
+    let parts = vec![sphere_part([0.0, 0.0, 10.0], 10.0), degenerate.clone()];
+    let scene = PartScene::from_parts(&parts, NEUTRAL);
+    assert!(
+        !scene.parts[0].edges.is_empty(),
+        "the sphere wires its triangle edges"
+    );
+    assert!(
+        scene.parts[1].edges.is_empty(),
+        "fixture truth: the sliver has no edge"
+    );
+    let ghost_parts = vec![sphere_part([30.0, 0.0, 10.0], 10.0), degenerate];
+    let ghost = PartScene::from_parts_with_pin(&ghost_parts, NEUTRAL, scene.pin);
+    let camera = default_camera(&scene, 800.0 / 600.0);
+    let mut pipeline = MeshPipeline::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let bg = background_reference(device, queue, &mut pipeline, &camera, 800, 600);
+    let wire = Options {
+        wireframe: true,
+        ..Options::default()
+    };
+    let poses = identity_poses(&scene);
+    let appearances = default_appearances(&scene);
+    let px = render_frame_with_poses(
+        device,
+        queue,
+        &mut pipeline,
+        &scene,
+        &camera,
+        800,
+        600,
+        None,
+        None,
+        Some(&ghost),
+        &wire,
+        &poses,
+        &appearances,
+    );
+    let model_max_x = projected_aabb_bbox((scene.aabb_min, scene.aabb_max), &camera, 800.0, 600.0)
+        .1
+        .0;
+    let (mut model_ink, mut ghost_ink) = (0, 0);
+    for i in 0..px.len() / 4 {
+        if is_ink(&px[i * 4..i * 4 + 4], bg) {
+            if (i % 800) as f32 > model_max_x + 2.0 {
+                ghost_ink += 1;
+            } else {
+                model_ink += 1;
+            }
+        }
+    }
+    assert!(
+        model_ink > 1_000,
+        "the sphere draws in wireframe: {model_ink}"
+    );
+    assert!(ghost_ink > 200, "the sphere ghost draws: {ghost_ink}");
 }
 
 /// Pixels within TOL of the bed accent's chromaticity — the overlay is
