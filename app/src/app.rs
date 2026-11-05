@@ -13,12 +13,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use cosmic::app::ApplicationExt;
 use cosmic::app::Core;
 use cosmic::cosmic_config::Config;
+use cosmic::iced::keyboard::key::Physical;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::window;
 use cosmic::iced::{Length, Subscription, Task};
@@ -35,7 +36,7 @@ use crate::fl;
 use crate::recents::{self, Recents};
 use crate::settings_store::SettingsStore;
 use crate::sheets;
-use crate::shortcuts::{Context, Shortcut};
+use crate::shortcuts::{Context, KeyBind, bare, ctrl};
 use crate::windows::project::{self, ProjectWindow};
 use crate::windows::settings::{self, SettingsState};
 use crate::windows::welcome::{self, Welcome};
@@ -141,7 +142,7 @@ pub enum Message {
     /// the sheet, NOT to settings).
     PresentAgentSheet,
     /// A key press the focused window did not consume.
-    KeyPressed(window::Id, Key, Modifiers),
+    KeyPressed(window::Id, Key, Modifiers, Physical),
     /// The keyboard modifier set changed while `id`'s window had focus.
     ModifiersChanged(window::Id, Modifiers),
     /// A window's header close button: libcosmic's `on_close` is
@@ -368,7 +369,9 @@ impl Application for CadStudio {
                 // ran.
                 self.present_agent_missing(false)
             }
-            Message::KeyPressed(id, key, modifiers) => self.update_key_press(id, key, modifiers),
+            Message::KeyPressed(id, key, modifiers, physical) => {
+                self.update_key_press(id, key, modifiers, physical)
+            }
             Message::ModifiersChanged(id, modifiers) => self.update_modifiers(id, modifiers),
             Message::CloseWindow(id) => self.close_window(id),
             Message::DragWindow(id) => cosmic::iced::window::drag(id),
@@ -1316,6 +1319,7 @@ impl CadStudio {
         id: window::Id,
         key: Key,
         modifiers: Modifiers,
+        physical: Physical,
     ) -> Task<Action<Message>> {
         if let Some(role) = sheet_key_role(&key, &modifiers) {
             if let Some(msg) = self.sheet_key_message(id, role) {
@@ -1326,14 +1330,16 @@ impl CadStudio {
                 return Task::none();
             }
         }
-        if let Some(command) = app_shortcut(&key, &modifiers) {
+        if let Some(command) = app_shortcut(&key, &modifiers, Some(&physical)) {
             return self.app_command(id, command);
         }
         let context = match self.windows.get(&id) {
             Some(WindowKind::Project(project)) => project.key_context(),
             _ => Context::default(),
         };
-        if let Some(command) = project::project_shortcut_in(&key, &modifiers, context) {
+        if let Some(command) =
+            project::project_shortcut_in(&key, &modifiers, Some(&physical), context)
+        {
             return self.update_project(id, project::Message::Command(command));
         }
         // anything else is the key window's pane's (Space, Esc)
@@ -1655,21 +1661,32 @@ fn release_focus() -> Task<Action<Message>> {
 
 /// The app-level bindings (upstream's global commands; ⌘→Ctrl, ⌘, the
 /// standard Settings scene's binding).
-const APP_BINDINGS: &[(Shortcut, AppCommand)] = &[
-    (Shortcut::ctrl("n"), AppCommand::NewProject),
-    (Shortcut::ctrl("o"), AppCommand::OpenProject),
-    (Shortcut::ctrl(","), AppCommand::Settings),
-    (Shortcut::ctrl("w"), AppCommand::CloseWindow),
-    (Shortcut::ctrl("q"), AppCommand::Quit),
-    (Shortcut::bare("F11"), AppCommand::ToggleFullscreen),
-];
+static APP_BINDINGS: LazyLock<Vec<(KeyBind, AppCommand)>> = LazyLock::new(|| {
+    vec![
+        (ctrl("n"), AppCommand::NewProject),
+        (ctrl("o"), AppCommand::OpenProject),
+        (ctrl(","), AppCommand::Settings),
+        (ctrl("w"), AppCommand::CloseWindow),
+        (ctrl("q"), AppCommand::Quit),
+        (bare("F11"), AppCommand::ToggleFullscreen),
+    ]
+});
 
 /// The app command a key press triggers.
-pub fn app_shortcut(key: &Key, modifiers: &Modifiers) -> Option<AppCommand> {
+pub fn app_shortcut(
+    key: &Key,
+    modifiers: &Modifiers,
+    physical: Option<&Physical>,
+) -> Option<AppCommand> {
     APP_BINDINGS
         .iter()
-        .find(|(shortcut, _)| shortcut.matches(key, modifiers))
+        .find(|(shortcut, _)| shortcut.matches(*modifiers, key, physical))
         .map(|(_, command)| *command)
+}
+
+/// The File menu's accelerator map: every app binding.
+pub fn app_key_binds() -> HashMap<KeyBind, AppCommand> {
+    APP_BINDINGS.iter().cloned().collect()
 }
 
 /// Route the shell-level events the focused window's widgets did not
@@ -1685,12 +1702,13 @@ fn key_events(
         cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
             key,
             modifiers,
+            physical_key,
             ..
         }) => {
             if matches!(status, cosmic::iced::event::Status::Captured) {
                 return None;
             }
-            Some(Message::KeyPressed(id, key, modifiers))
+            Some(Message::KeyPressed(id, key, modifiers, physical_key))
         }
         // modifier state is physical: it follows the keys whatever a widget
         // did with the press, so capture status does not apply
@@ -2000,19 +2018,46 @@ mod tests {
     fn window_shortcuts_close_quit_and_fullscreen() {
         let ctrl = Modifiers::CTRL;
         assert_eq!(
-            app_shortcut(&Key::Character("w".into()), &ctrl),
+            app_shortcut(&Key::Character("w".into()), &ctrl, None),
             Some(AppCommand::CloseWindow)
         );
         assert_eq!(
-            app_shortcut(&Key::Character("q".into()), &ctrl),
+            app_shortcut(&Key::Character("q".into()), &ctrl, None),
             Some(AppCommand::Quit)
         );
         assert_eq!(
             app_shortcut(
                 &Key::Named(cosmic::iced::keyboard::key::Named::F11),
-                &Modifiers::empty()
+                &Modifiers::empty(),
+                None
             ),
             Some(AppCommand::ToggleFullscreen)
+        );
+    }
+
+    /// The File menu's accelerators are exactly the app bindings.
+    #[test]
+    fn the_file_menu_key_binds_are_the_app_bindings() {
+        let binds = app_key_binds();
+        assert_eq!(binds.len(), APP_BINDINGS.len());
+        for (key, command) in APP_BINDINGS.iter() {
+            assert_eq!(binds.get(key), Some(command));
+        }
+        assert_eq!(binds.get(&ctrl("q")), Some(&AppCommand::Quit));
+        assert!(!binds.values().any(|c| *c == AppCommand::About));
+    }
+
+    /// A Cyrillic layout's Ctrl+Ц on the physical Q key still quits.
+    #[test]
+    fn app_shortcuts_match_by_physical_key_on_a_non_latin_layout() {
+        use cosmic::iced::keyboard::key::Code;
+        assert_eq!(
+            app_shortcut(
+                &Key::Character("й".into()),
+                &Modifiers::CTRL,
+                Some(&Physical::Code(Code::KeyQ))
+            ),
+            Some(AppCommand::Quit)
         );
     }
 
@@ -2045,30 +2090,30 @@ mod tests {
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
 
         assert_eq!(
-            app_shortcut(&Key::Character("n".into()), &ctrl),
+            app_shortcut(&Key::Character("n".into()), &ctrl, None),
             Some(AppCommand::NewProject)
         );
         assert_eq!(
-            app_shortcut(&Key::Character("o".into()), &ctrl),
+            app_shortcut(&Key::Character("o".into()), &ctrl, None),
             Some(AppCommand::OpenProject)
         );
         assert_eq!(
-            app_shortcut(&Key::Character("1".into()), &ctrl_shift),
+            app_shortcut(&Key::Character("1".into()), &ctrl_shift, None),
             None,
             "the welcome window has no shortcut"
         );
         assert_eq!(
-            app_shortcut(&Key::Character(",".into()), &ctrl),
+            app_shortcut(&Key::Character(",".into()), &ctrl, None),
             Some(AppCommand::Settings),
             "⌘, opens the settings window"
         );
         assert_eq!(
-            app_shortcut(&Key::Character("1".into()), &Modifiers::empty()),
+            app_shortcut(&Key::Character("1".into()), &Modifiers::empty(), None),
             None
         );
-        assert_eq!(app_shortcut(&Key::Character("x".into()), &ctrl), None);
+        assert_eq!(app_shortcut(&Key::Character("x".into()), &ctrl, None), None);
         assert_eq!(
-            app_shortcut(&Key::Character(",".into()), &Modifiers::empty()),
+            app_shortcut(&Key::Character(",".into()), &Modifiers::empty(), None),
             None,
             "bare comma is just typing"
         );
@@ -2135,6 +2180,7 @@ mod shell_behavior {
             id,
             Key::Named(named),
             Modifiers::empty(),
+            Physical::Unidentified(cosmic::iced::keyboard::key::NativeCode::Unidentified),
         ));
     }
 
@@ -2288,6 +2334,7 @@ mod shell_behavior {
             ids[0],
             Key::Character(" ".into()),
             Modifiers::empty(),
+            Physical::Code(cosmic::iced::keyboard::key::Code::Space),
         ));
         assert_ne!(playing(&f.app, ids[0]), before.0, "the key window toggled");
         assert_eq!(
