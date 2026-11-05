@@ -918,7 +918,7 @@ impl ProjectWindow {
         self.sync_version_markers();
         let parameters = self.bridge.parameters();
         self.viewer.sync_parameters(&parameters);
-        ChatPane::scroll_to_bottom().map(Message::Chat)
+        self.chat_pane.jump_to_bottom().map(Message::Chat)
     }
 
     /// The chat pane: shell-owned messages act first (the send flow takes
@@ -1042,7 +1042,8 @@ impl ProjectWindow {
             | chat_view::Message::ToggleToolRow(_)
             | chat_view::Message::ToggleFullOutput(_)
             | chat_view::Message::ToggleDetail(_)
-            | chat_view::Message::CopyCode(_) => {}
+            | chat_view::Message::CopyCode(_)
+            | chat_view::Message::Scrolled { .. } => {}
         }
         let task = self.chat_pane.update(msg).map(Message::Chat);
         if self.chat.draft != self.chat_pane.draft() {
@@ -1077,7 +1078,7 @@ impl ProjectWindow {
                 // the bridge classifies every turn transition (it holds the
                 // turn's engine); the window mirrors it
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::Event(event) => {
                 // the chat reducer owns the rows; the activity mirrors after
@@ -1100,11 +1101,11 @@ impl ProjectWindow {
                     | EngineEvent::ToolFinished { .. }
                     | EngineEvent::System { .. } => {}
                 }
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::Closed => {
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::QueueChanged { queue, paused } => {
                 self.queue = queue
@@ -1149,7 +1150,7 @@ impl ProjectWindow {
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::TurnSuccessBookkeeping => {
                 self.save_metadata();
@@ -1160,7 +1161,7 @@ impl ProjectWindow {
                 let parameters = self.bridge.parameters();
                 self.viewer.sync_parameters(&parameters);
                 self.set_activity(self.bridge.activity());
-                ChatPane::scroll_to_bottom().map(Message::Chat)
+                self.chat_pane.follow().map(Message::Chat)
             }
             bridge::Message::PythonSheetRequested => {
                 CosmicTask::future(async move { Message::App(AppRequest::PresentSetupSheet) })

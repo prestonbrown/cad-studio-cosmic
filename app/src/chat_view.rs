@@ -174,6 +174,24 @@ pub enum Message {
     /// A version marker's "Ripristina" link (ChatView.swift:209-213): the
     /// shell restores that version.
     RestoreVersion(i64),
+    /// The transcript scrolled or resized: its offset, viewport height and
+    /// content height, in logical pixels.
+    Scrolled {
+        offset_y: f32,
+        viewport_h: f32,
+        content_h: f32,
+    },
+}
+
+/// How close to the end (logical pixels) still counts as reading the
+/// newest row.
+const FOLLOW_THRESHOLD: f32 = 8.0;
+
+/// Whether a transcript viewport sits at the bottom: within
+/// [`FOLLOW_THRESHOLD`] of the end, or a transcript no taller than its
+/// viewport.
+pub fn follows_bottom(offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
+    content_h <= viewport_h || offset_y + viewport_h >= content_h - FOLLOW_THRESHOLD
 }
 
 // ─── pane state ────────────────────────────────────────────────────────────
@@ -183,12 +201,30 @@ pub enum Message {
 /// `SystemMessageView.showsDetail`) keyed by row id, plus the input editor's
 /// content (upstream binds `chat.draft`; here the editor owns the buffer and
 /// the shell mirrors it into `ChatState::draft`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChatPane {
     expanded: HashSet<Uuid>,
     full_output: HashSet<Uuid>,
     detail: HashSet<Uuid>,
     input: Content,
+    /// The reader is at the bottom of the transcript, so new rows scroll
+    /// into view; a reader who scrolled back stays where they are.
+    following: bool,
+    /// The scroll offset of the last viewport report.
+    last_offset_y: Option<f32>,
+}
+
+impl Default for ChatPane {
+    fn default() -> Self {
+        Self {
+            expanded: HashSet::new(),
+            full_output: HashSet::new(),
+            detail: HashSet::new(),
+            input: Content::default(),
+            following: true,
+            last_offset_y: None,
+        }
+    }
 }
 
 impl ChatPane {
@@ -207,6 +243,19 @@ impl ChatPane {
             Message::ToggleFullOutput(id) => toggle(&mut self.full_output, id),
             Message::ToggleDetail(id) => toggle(&mut self.detail, id),
             Message::CopyCode(text) => return cosmic::iced::clipboard::write(text),
+            Message::Scrolled {
+                offset_y,
+                viewport_h,
+                content_h,
+            } => {
+                // A report at the same offset is the content or viewport
+                // changing under the reader (rows landing before the snap
+                // does), not the reader moving: following is unchanged.
+                if self.last_offset_y != Some(offset_y) {
+                    self.following = follows_bottom(offset_y, viewport_h, content_h);
+                }
+                self.last_offset_y = Some(offset_y);
+            }
             // the shell's (project window's update_chat)
             Message::Send
             | Message::Stop
@@ -233,6 +282,7 @@ impl ChatPane {
     /// bound field).
     pub fn sent(&mut self) {
         self.input = Content::new();
+        self.following = true;
     }
 
     /// Replace the input buffer in one step ([`Message::SetDraft`]'s arm —
@@ -241,10 +291,27 @@ impl ChatPane {
         self.input = Content::with_text(text);
     }
 
-    /// Bottom-anchor the transcript (upstream `defaultScrollAnchor(.bottom)`
-    /// + the scroll-to-bottom on change; the shell fires it when rows land).
-    pub fn scroll_to_bottom() -> Task<Message> {
+    /// Whether new rows scroll into view (the reader is at the bottom).
+    pub fn is_following(&self) -> bool {
+        self.following
+    }
+
+    /// Scroll to the newest row and follow from here on (the user's own
+    /// send, a restored history).
+    pub fn jump_to_bottom(&mut self) -> Task<Message> {
+        self.following = true;
         operation::snap_to_end(transcript_id())
+    }
+
+    /// Scroll to the newest row when the reader is at the bottom (upstream
+    /// `defaultScrollAnchor(.bottom)` + scroll on change keep a reader who
+    /// scrolled back where they are).
+    pub fn follow(&self) -> Task<Message> {
+        if self.following {
+            operation::snap_to_end(transcript_id())
+        } else {
+            Task::none()
+        }
     }
 
     /// Focus the input editor (upstream `inputFocusRequest`).
@@ -312,7 +379,7 @@ pub fn view_chat<'a>(
         // to its content, and a Shrink container resolves to
         // max(content, minimum) — so the rows sit at the bottom until they
         // outgrow the viewport. Longer histories scroll; the shell's
-        // `scroll_to_bottom` keeps the newest row in view.
+        // `follow` keeps the newest row in view.
         container(rows)
             .width(Length::Fill)
             .align_y(Vertical::Bottom)
@@ -320,6 +387,11 @@ pub fn view_chat<'a>(
     };
     let transcript = cosmic::widget::scrollable::scrollable(body)
         .id(transcript_id())
+        .on_scroll(|viewport| Message::Scrolled {
+            offset_y: viewport.absolute_offset().y,
+            viewport_h: viewport.bounds().height,
+            content_h: viewport.content_bounds().height,
+        })
         .height(Length::Fill)
         .width(Length::Fill);
     Column::new()
@@ -1777,5 +1849,68 @@ mod tests {
             &root,
             engine::agent::locator::AgentKind::Claude,
         );
+    }
+
+    #[test]
+    fn follows_bottom_decides_from_the_viewport() {
+        // top of a long transcript
+        assert!(!follows_bottom(0.0, 400.0, 2000.0));
+        // middle
+        assert!(!follows_bottom(800.0, 400.0, 2000.0));
+        // just outside the threshold
+        assert!(!follows_bottom(1591.0, 400.0, 2000.0));
+        // within the threshold
+        assert!(follows_bottom(1593.0, 400.0, 2000.0));
+        // exact end
+        assert!(follows_bottom(1600.0, 400.0, 2000.0));
+        // shorter than the viewport counts as at the bottom
+        assert!(follows_bottom(0.0, 400.0, 150.0));
+    }
+
+    fn scrolled(offset_y: f32, content_h: f32) -> Message {
+        Message::Scrolled {
+            offset_y,
+            viewport_h: 400.0,
+            content_h,
+        }
+    }
+
+    #[test]
+    fn a_reader_scrolled_up_is_not_followed_until_they_send() {
+        let mut pane = ChatPane::new();
+        assert!(pane.is_following());
+        let _ = pane.update(scrolled(1600.0, 2000.0));
+        assert!(pane.is_following());
+        let _ = pane.update(scrolled(600.0, 2000.0));
+        assert!(!pane.is_following());
+        // the transcript grows under the reader: still not following
+        let _ = pane.update(scrolled(600.0, 2400.0));
+        assert!(!pane.is_following());
+        // scrolling back to the end resumes following
+        let _ = pane.update(scrolled(2000.0, 2400.0));
+        assert!(pane.is_following());
+        // scrolled up again, then the user's own send follows again
+        let _ = pane.update(scrolled(100.0, 2400.0));
+        assert!(!pane.is_following());
+        pane.sent();
+        assert!(pane.is_following());
+    }
+
+    #[test]
+    fn growth_at_the_bottom_does_not_end_following() {
+        let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(1600.0, 2000.0));
+        // new rows land: same offset, taller content, before the snap
+        let _ = pane.update(scrolled(1600.0, 2300.0));
+        assert!(pane.is_following());
+    }
+
+    #[test]
+    fn jumping_to_the_bottom_resumes_following() {
+        let mut pane = ChatPane::new();
+        let _ = pane.update(scrolled(600.0, 2000.0));
+        assert!(!pane.is_following());
+        let _ = pane.jump_to_bottom();
+        assert!(pane.is_following());
     }
 }
