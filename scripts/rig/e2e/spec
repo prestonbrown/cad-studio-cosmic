@@ -3,13 +3,13 @@
 # (idle/working/succeeded/failed).
 # Every mark in e2e.drive has a line here, and every line here must be seen
 # during a run; run.sh fails otherwise.
-01-cubo        1
+01-cubo        1   succeeded
 02-piatto      -
-03-lato30      4
+03-lato30      4   succeeded
 04-ripristino  5
 05-raccordo    6   failed
-06-annullato   7
-07-parametro   -
+06-annullato   7   failed
+07-parametro   -   succeeded
 08-confronto   -
 09-allegato    -
 10-zip         8

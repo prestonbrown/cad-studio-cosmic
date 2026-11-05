@@ -36,9 +36,13 @@ sleep 3000
 mark 04-ripristino
 sleep 2500
 
-# 6: a fillet larger than the part, so build123d raises
-chat Aggiungi un raccordo di 50 mm su tutti gli spigoli.
+# 6: a fillet larger than the part, so build123d raises in the app's own
+# build (Compila): the agent is asked not to build or correct it, since a
+# real agent otherwise clamps the radius to one that fits
+chat Imposta il raccordo di tutti gli spigoli a esattamente 50 mm. Modifica solo il valore in model.py, senza eseguire né verificare il modello e senza correggerlo: lo compilo io.
 waitturn 900
+build
+waitturn 600
 sleep 3000
 mark 05-raccordo
 sleep 2500
@@ -52,7 +56,10 @@ sleep 3000
 mark 06-annullato
 sleep 2500
 
-# 8: the rest of criterion 1 on the same project
+# 8: the rest of criterion 1 on the same project, from version 1 (the
+# step-6 model no longer builds); row 1 is the cube side
+restore 1
+waitturn 300
 param 1 *1.25
 waitturn 300
 sleep 3000

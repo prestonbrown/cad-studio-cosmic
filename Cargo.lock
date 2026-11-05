@@ -1528,6 +1528,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "glam 0.33.12",
+ "libc",
  "lopdf",
  "notify",
  "quick-xml",

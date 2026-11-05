@@ -24,8 +24,9 @@
 //!   lock on a sibling `.lock` file, so concurrent instances never lose
 //!   each other's entries.
 //! - Signals and process info go through `/bin/kill` and `/bin/ps` via
-//!   [`std::process::Command`] — no libc/nix dependency, and exactly what
-//!   reaches the child stays visible under `ps` while debugging. Unix only.
+//!   [`std::process::Command`], so exactly what reaches the child stays
+//!   visible under `ps` while debugging. The spawn hook resets the child's
+//!   SIGINT/SIGQUIT/SIGTERM dispositions through libc. Unix only.
 //!
 //! Spawn registers the pid and process exit unregisters it, mirroring
 //! upstream `ProcessRunner.run`'s insert/defer-remove; the launch-time
@@ -93,15 +94,21 @@ pub fn spawn_streaming(
             "argv needs at least the program",
         ));
     };
-    let mut child = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // SAFETY: the hook runs in the forked child before exec and calls only
+    // signal(2), which is async-signal-safe.
+    unsafe {
+        command.pre_exec(default_interrupt_signals);
+    }
+    let mut child = command.spawn()?;
     let pid = child
         .id()
         .ok_or_else(|| io::Error::other("child pid unavailable right after spawn"))?;
@@ -140,6 +147,20 @@ pub fn spawn_streaming(
         stderr_text,
         exit_status,
     })
+}
+
+/// Reset SIGINT, SIGQUIT and SIGTERM to their defaults in a child about to
+/// exec. An ignored disposition survives exec, and the app may run with
+/// SIGINT ignored (a background job of a non-interactive shell does), which
+/// would leave [`RunningProcess::interrupt`]'s SIGINT unheard.
+fn default_interrupt_signals() -> io::Result<()> {
+    for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+        // SAFETY: signal(2) with SIG_DFL installs no handler.
+        if unsafe { libc::signal(sig, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// ModelBuilder.toolEnvironment (ModelBuilder.swift:13-19): the login-shell
