@@ -738,3 +738,6 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   does not unblock them in the inherited signal mask, and a blocked signal survives exec
   as an ignored one does. Nothing in the app blocks them today. Fix:
   `sigprocmask(SIG_UNBLOCK, {INT, QUIT, TERM})` in the same async-signal-safe hook.
+- Bottom-bar item spacing: both the 3D viewer bar and the schematic bar space items 12 px apart
+  (`ui::BAR_ITEM_SPACING`); upstream uses `HStack(spacing: 8)` (ModelPane.swift:105, SchematicPane.swift:51).
+  Preston asked for more air than upstream.

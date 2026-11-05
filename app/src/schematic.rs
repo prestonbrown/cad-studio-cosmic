@@ -1137,7 +1137,9 @@ impl SchematicPane {
         } else {
             String::new()
         };
-        let mut controls = Row::new().spacing(8).align_y(Alignment::Center);
+        let mut controls = Row::new()
+            .spacing(crate::ui::BAR_ITEM_SPACING)
+            .align_y(Alignment::Center);
         if pages > 1 {
             controls = controls.push(self.page_picker());
         }
