@@ -56,7 +56,10 @@ sleep 3000
 mark 06-annullato
 sleep 2500
 
-# 8: the rest of criterion 1 on the same project
+# 8: the rest of criterion 1 on the same project, from version 1 (the
+# step-6 model no longer builds); row 1 is the cube side
+restore 1
+waitturn 300
 param 1 *1.25
 waitturn 300
 sleep 3000
