@@ -250,7 +250,7 @@ fn header() -> Element<'static, Message> {
         11.0,
         Tone::Secondary,
         BACKDROP,
-        fl!("nascondi-parametri-i"),
+        crate::shortcuts::hide_parameters(),
         Some(Message::Close),
     );
     Row::new()

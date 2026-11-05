@@ -2061,7 +2061,7 @@ const PRESETS: [Preset; 4] = [Preset::Iso, Preset::Front, Preset::Top, Preset::R
 
 const BAR_HEIGHT: f32 = 28.0;
 const BAR_PADDING: f32 = 8.0;
-const BAR_SPACING: f32 = 8.0;
+const BAR_SPACING: f32 = ui::BAR_ITEM_SPACING;
 /// PaneStatusBar's `.system(size: 11)`.
 const BAR_FONT_SIZE: f32 = crate::typography::scaled(11.0);
 const TOGGLE_CELL: f32 = 14.0;

@@ -32,3 +32,6 @@ pub mod tone;
 pub use icon::Symbol;
 pub use surface::Corner;
 pub use tone::{Backdrop, Tone};
+
+/// Space between the items of a pane's bottom bar (upstream's 8, widened to 12).
+pub const BAR_ITEM_SPACING: f32 = 12.0;

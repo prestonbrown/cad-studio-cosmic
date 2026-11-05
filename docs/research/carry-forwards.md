@@ -746,3 +746,6 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   bbox diagonal), computed once per part at scene build. The compare ghost draws the same
   edge set. Material, opacity, grid, section and measure behave as upstream. Pinned by
   `render::edges::tests` and `render::tests::wireframe_edge_count`.
+- Bottom-bar item spacing: both the 3D viewer bar and the schematic bar space items 12 px apart
+  (`ui::BAR_ITEM_SPACING`); upstream uses `HStack(spacing: 8)` (ModelPane.swift:105, SchematicPane.swift:51).
+  Preston asked for more air than upstream.
