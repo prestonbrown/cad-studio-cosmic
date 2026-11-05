@@ -1,11 +1,13 @@
 # Builds the release packages when a v* tag is pushed and attaches them to the
-# GitHub Release. The AUR package is published by hand (see
-# packaging/aur/PKGBUILD).
+# GitHub Release. A manual run (workflow_dispatch) builds and checks the
+# packages on any branch without releasing. The AUR package is published by
+# hand (see packaging/aur/PKGBUILD).
 name: release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,6 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
 
       - name: Tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           version=$(cargo pkgid -p app | sed 's/.*[@#]//')
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != crate version $version"; exit 1; }
@@ -52,6 +55,7 @@ jobs:
         run: scripts/rig/package-check.sh
 
       - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

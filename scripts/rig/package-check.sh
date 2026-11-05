@@ -60,8 +60,14 @@ left=$(while read -r f; do [ -e "$f" ] && echo "$f"; done < "$files")
 if [ -z "$left" ] && [ -s "$files" ]; then ok "apt remove leaves none of $(wc -l < "$files") files"; else bad "files left after remove: $left"; fi
 dpkg-query -W -f '${Package}\n' | sort > "$after"
 extra=$(comm -13 "$before" "$after")
-[ -z "$extra" ] || sudo apt-get purge -y --autoremove $extra >/dev/null
-dpkg-query -W -f '${Package}\n' | sort | diff -q "$before" - >/dev/null && ok "rig package set restored" || bad "rig package set differs"
+# purge exactly the packages the install added: --autoremove would also take
+# packages the host already had marked as automatic, leaving a smaller set
+[ -z "$extra" ] || sudo apt-get purge -y $extra >/dev/null
+if dpkg-query -W -f '${Package}\n' | sort | diff "$before" - > "$after.diff"; then
+  ok "host package set restored"
+else
+  bad "host package set differs: $(tr '\n' ' ' < "$after.diff")"
+fi
 
 # --- AppImage ---
 appimage=dist/CAD_Studio-$version-x86_64.AppImage
