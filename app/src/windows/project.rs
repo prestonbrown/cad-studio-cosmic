@@ -2335,6 +2335,50 @@ pub fn menu_key_binds() -> HashMap<KeyBind, Command> {
 mod tests {
     use super::*;
 
+    /// The menu's accelerator map holds each bound command's primary (first)
+    /// binding and nothing for a command without one.
+    #[test]
+    fn the_menu_key_binds_are_each_commands_primary_binding() {
+        let binds = menu_key_binds();
+        let mut bound = Vec::new();
+        for (_, command, _) in PROJECT_BINDINGS.iter() {
+            if !bound.contains(command) {
+                bound.push(*command);
+            }
+        }
+        assert_eq!(binds.len(), bound.len());
+        for command in &bound {
+            let primary = binding(*command);
+            assert_eq!(binds.get(&primary), Some(command), "{command:?}");
+        }
+        let every_command = [
+            Command::ShowChat,
+            Command::FocusChat,
+            Command::WriteMessage,
+            Command::FocusModel,
+            Command::FocusSchematic,
+            Command::ToggleParameters,
+            Command::LayoutChatLeading,
+            Command::LayoutChatTrailing,
+            Command::LayoutChatBottom,
+            Command::LayoutThreeColumns,
+            Command::ViewerFit,
+            Command::SchematicZoomIn,
+            Command::SchematicZoomOut,
+            Command::SchematicFit,
+            Command::SchematicActualSize,
+            Command::Build,
+            Command::Stop,
+            Command::Export,
+            Command::Reveal,
+            Command::OpenInSlicer,
+        ];
+        for command in every_command {
+            let in_map = binds.values().any(|c| *c == command);
+            assert_eq!(in_map, bindings(command).next().is_some(), "{command:?}");
+        }
+    }
+
     /// The project window's hairlines sit below both neighbours in a dark
     /// theme (upstream: the split divider 10, the toolbar hairline 19 over
     /// a 40 window) and stay the separator wash in a light one.
