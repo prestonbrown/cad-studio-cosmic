@@ -1719,10 +1719,16 @@ impl ProjectWindow {
                 13.0,
             )),
         };
+        // statusText takes the slack and truncates at its tail (:17-19), so
+        // the timer and the issue counts keep their room inside the
+        // capsule's side padding however long the status runs
         row = row.push(
             text(self.activity.text())
                 .size(CAPSULE_TEXT)
-                .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                .width(Length::Fill)
+                .ellipsize(cosmic::iced::core::text::Ellipsize::End(
+                    cosmic::iced::core::text::EllipsizeHeightLimit::Lines(1),
+                ))
                 .class(Tone::Secondary.text(TITLEBAR)),
         );
         if let Some(start) = self.work_started_at {
@@ -1730,10 +1736,12 @@ impl ProjectWindow {
                 text(activity::elapsed_text(start.elapsed().as_secs()))
                     .size(CAPSULE_TEXT)
                     .font(cosmic::font::mono())
+                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
                     .class(Tone::Tertiary.text(TITLEBAR)),
             );
         }
-        row = row.push(Space::new().width(Length::Fill));
+        // Spacer(minLength: 4) before the issue counts (:29)
+        row = row.push(Space::new().width(Length::Fixed(4.0)));
 
         let issues = self.issues();
         for kind in [IssueKind::Error, IssueKind::Warning] {
