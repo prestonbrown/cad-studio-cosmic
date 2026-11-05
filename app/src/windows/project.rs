@@ -19,14 +19,16 @@
 //! the en/main.ftl entry); the menu roots the port coined (File/View) use
 //! the port-added `menu-file`/`menu-view` keys.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ::time::OffsetDateTime;
 use cosmic::iced::futures::StreamExt;
 use cosmic::iced::futures::stream::BoxStream;
+use cosmic::iced::keyboard::key::Physical;
 use cosmic::iced::keyboard::{Key, Modifiers};
 use cosmic::iced::stream;
 use cosmic::iced::time::every;
@@ -57,7 +59,7 @@ use crate::panes;
 use crate::parameters_view;
 use crate::schematic::SchematicPane;
 use crate::settings_store::SettingsStore;
-use crate::shortcuts::{Context, Shortcut, When};
+use crate::shortcuts::{Context, KeyBind, When, bare, ctrl, ctrl_shift};
 use crate::typography;
 use crate::ui::surface::{self, Corner, Shadow};
 use crate::ui::{self, Backdrop, Symbol, Tone};
@@ -151,6 +153,9 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 pub enum Command {
     ShowChat,
     FocusChat,
+    /// "Scrivi un messaggio" Ctrl+L: [`Command::FocusChat`] under its own
+    /// menu entry, so each entry shows its own accelerator.
+    WriteMessage,
     FocusModel,
     FocusSchematic,
     /// "Mostra/Nascondi parametri" Ctrl+Shift+I (Commands.swift:69-73): flip the
@@ -1209,7 +1214,7 @@ impl ProjectWindow {
                 self.rebuild_grid();
                 Task::none()
             }
-            Command::FocusChat => {
+            Command::FocusChat | Command::WriteMessage => {
                 // upstream focus(.chat) shows the pane and focuses input
                 if !self.chat_visible {
                     self.chat_visible = true;
@@ -1890,7 +1895,7 @@ impl ProjectWindow {
             Item::Button(fl!("chiudi-finestra"), None, AppCommand::CloseWindow),
             Item::Button(fl!("esci"), None, AppCommand::Quit),
         ];
-        let file_binds = std::collections::HashMap::new();
+        let file_binds = crate::app::app_key_binds();
         let file_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("menu-file")).into();
@@ -1899,7 +1904,7 @@ impl ProjectWindow {
             items(&file_binds, file_entries),
         );
 
-        let model_binds = std::collections::HashMap::new();
+        let model_binds = menu_key_binds();
         let model_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("modello")).into();
@@ -1909,7 +1914,7 @@ impl ProjectWindow {
         );
 
         let entries = self.view_entries();
-        let key_binds = std::collections::HashMap::new();
+        let key_binds = menu_key_binds();
         let root_button: Element<'_, Message> = root(fl!("menu-view")).into();
         let tree =
             cosmic::widget::menu::Tree::with_children(root_button, items(&key_binds, entries));
@@ -1919,7 +1924,7 @@ impl ProjectWindow {
         // (docs/research/libcosmic-menu-dynamic-items-bug.md). Dynamic
         // dropdowns — the version history — live as popovers instead.
         cosmic::widget::menu::bar(vec![file_tree, tree, model_tree])
-            .item_width(ItemWidth::Static(220))
+            .item_width(ItemWidth::Static(280))
             .item_height(ItemHeight::Dynamic(30))
             .into()
     }
@@ -1999,7 +2004,7 @@ impl ProjectWindow {
                 Command::ToggleParameters,
             ),
             // "Scrivi un messaggio" Ctrl+L (Commands.swift:74-76): focus(.chat)
-            Item::Button(fl!("scrivi-un-messaggio"), None, Command::FocusChat),
+            Item::Button(fl!("scrivi-un-messaggio"), None, Command::WriteMessage),
             Item::Divider,
             Item::Folder(
                 fl!("layout"),
@@ -2231,103 +2236,148 @@ fn relay_stream(relay: &Arc<OutputRelay>) -> BoxStream<'static, Message> {
 /// ⌥→Alt, adapted to the Linux desktop). A command's first entry is its
 /// primary binding, the one hints show; later entries are aliases. A
 /// binding fires only when its [`When`] holds.
-const PROJECT_BINDINGS: &[(Shortcut, Command, When)] = &[
-    (Shortcut::bare("F9"), Command::ShowChat, When::Always),
-    (Shortcut::ctrl("1"), Command::FocusChat, When::Always),
-    (Shortcut::ctrl("2"), Command::FocusModel, When::Always),
-    (Shortcut::ctrl("3"), Command::FocusSchematic, When::Always),
-    (Shortcut::ctrl("l"), Command::FocusChat, When::Always),
-    (
-        Shortcut::ctrl("1").with_shift(),
-        Command::ViewerPreset(Preset::Iso),
-        When::Always,
-    ),
-    (
-        Shortcut::ctrl("2").with_shift(),
-        Command::ViewerPreset(Preset::Front),
-        When::Always,
-    ),
-    (
-        Shortcut::ctrl("3").with_shift(),
-        Command::ViewerPreset(Preset::Top),
-        When::Always,
-    ),
-    (
-        Shortcut::ctrl("4").with_shift(),
-        Command::ViewerPreset(Preset::Right),
-        When::Always,
-    ),
-    (
-        Shortcut::ctrl("0").with_shift(),
-        Command::ViewerFit,
-        When::Always,
-    ),
-    (Shortcut::bare("f"), Command::ViewerFit, When::ViewerFocused),
-    (
-        Shortcut::ctrl("i").with_shift(),
-        Command::ToggleParameters,
-        When::Always,
-    ),
-    (Shortcut::ctrl("+"), Command::SchematicZoomIn, When::Always),
-    (Shortcut::ctrl("="), Command::SchematicZoomIn, When::Always),
-    (Shortcut::ctrl("-"), Command::SchematicZoomOut, When::Always),
-    (
-        Shortcut::ctrl("0"),
-        Command::SchematicActualSize,
-        When::Always,
-    ),
-    (Shortcut::bare("Escape"), Command::Stop, When::Running),
-    (Shortcut::ctrl("."), Command::Stop, When::Always),
-    (Shortcut::ctrl("b"), Command::Build, When::Always),
-    (
-        Shortcut::ctrl("e").with_shift(),
-        Command::Export,
-        When::Always,
-    ),
-    (
-        Shortcut::ctrl("r").with_shift(),
-        Command::Reveal,
-        When::Always,
-    ),
-];
+static PROJECT_BINDINGS: LazyLock<Vec<(KeyBind, Command, When)>> = LazyLock::new(|| {
+    vec![
+        (bare("F9"), Command::ShowChat, When::Always),
+        (ctrl("1"), Command::FocusChat, When::Always),
+        (ctrl("2"), Command::FocusModel, When::Always),
+        (ctrl("3"), Command::FocusSchematic, When::Always),
+        (ctrl("l"), Command::WriteMessage, When::Always),
+        (
+            ctrl_shift("1"),
+            Command::ViewerPreset(Preset::Iso),
+            When::Always,
+        ),
+        (
+            ctrl_shift("2"),
+            Command::ViewerPreset(Preset::Front),
+            When::Always,
+        ),
+        (
+            ctrl_shift("3"),
+            Command::ViewerPreset(Preset::Top),
+            When::Always,
+        ),
+        (
+            ctrl_shift("4"),
+            Command::ViewerPreset(Preset::Right),
+            When::Always,
+        ),
+        (ctrl_shift("0"), Command::ViewerFit, When::Always),
+        (bare("f"), Command::ViewerFit, When::ViewerFocused),
+        (ctrl_shift("i"), Command::ToggleParameters, When::Always),
+        (ctrl("+"), Command::SchematicZoomIn, When::Always),
+        (ctrl("="), Command::SchematicZoomIn, When::Always),
+        (ctrl("-"), Command::SchematicZoomOut, When::Always),
+        (ctrl("0"), Command::SchematicActualSize, When::Always),
+        (bare("Escape"), Command::Stop, When::Running),
+        (ctrl("."), Command::Stop, When::Always),
+        (ctrl("b"), Command::Build, When::Always),
+        (ctrl_shift("e"), Command::Export, When::Always),
+        (ctrl_shift("r"), Command::Reveal, When::Always),
+    ]
+});
 
 /// The command a key press triggers in the project window whose state is
 /// `context`. Pure: the app routes a key press through this before the
 /// focused window sees it.
-pub fn project_shortcut_in(key: &Key, modifiers: &Modifiers, context: Context) -> Option<Command> {
+pub fn project_shortcut_in(
+    key: &Key,
+    modifiers: &Modifiers,
+    physical: Option<&Physical>,
+    context: Context,
+) -> Option<Command> {
     PROJECT_BINDINGS
         .iter()
-        .find(|(shortcut, _, when)| when.holds(context) && shortcut.matches(key, modifiers))
+        .find(|(shortcut, _, when)| {
+            when.holds(context) && shortcut.matches(*modifiers, key, physical)
+        })
         .map(|(_, command, _)| *command)
 }
 
 /// [`project_shortcut_in`] for a window with nothing running and no pane
 /// holding the focus.
 pub fn project_shortcut(key: &Key, modifiers: &Modifiers) -> Option<Command> {
-    project_shortcut_in(key, modifiers, Context::default())
+    project_shortcut_in(key, modifiers, None, Context::default())
 }
 
 /// Every binding of `command`, primary first.
-pub fn bindings(command: Command) -> impl Iterator<Item = Shortcut> {
+pub fn bindings(command: Command) -> impl Iterator<Item = KeyBind> {
     PROJECT_BINDINGS
         .iter()
         .filter(move |(_, bound, _)| *bound == command)
-        .map(|(shortcut, _, _)| *shortcut)
+        .map(|(shortcut, _, _)| shortcut.clone())
 }
 
 /// `command`'s primary binding.
 ///
 /// # Panics
 /// When `command` has no binding.
-pub fn binding(command: Command) -> Shortcut {
+pub fn binding(command: Command) -> KeyBind {
     bindings(command)
         .next()
         .unwrap_or_else(|| panic!("{command:?} has no binding"))
 }
 
+/// The menu bar's accelerator map: each command's primary binding, the one
+/// its tooltip shows. Commands without a binding have no entry.
+pub fn menu_key_binds() -> HashMap<KeyBind, Command> {
+    let mut binds: HashMap<KeyBind, Command> = HashMap::new();
+    for (key, command, _) in PROJECT_BINDINGS.iter() {
+        if !binds.values().any(|bound| bound == command) {
+            binds.insert(key.clone(), *command);
+        }
+    }
+    binds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The menu's accelerator map holds each bound command's primary (first)
+    /// binding and nothing for a command without one.
+    #[test]
+    fn the_menu_key_binds_are_each_commands_primary_binding() {
+        let binds = menu_key_binds();
+        let mut bound = Vec::new();
+        for (_, command, _) in PROJECT_BINDINGS.iter() {
+            if !bound.contains(command) {
+                bound.push(*command);
+            }
+        }
+        assert_eq!(binds.len(), bound.len());
+        for command in &bound {
+            let primary = binding(*command);
+            assert_eq!(binds.get(&primary), Some(command), "{command:?}");
+        }
+        let every_command = [
+            Command::ShowChat,
+            Command::FocusChat,
+            Command::WriteMessage,
+            Command::FocusModel,
+            Command::FocusSchematic,
+            Command::ToggleParameters,
+            Command::LayoutChatLeading,
+            Command::LayoutChatTrailing,
+            Command::LayoutChatBottom,
+            Command::LayoutThreeColumns,
+            Command::ViewerFit,
+            Command::SchematicZoomIn,
+            Command::SchematicZoomOut,
+            Command::SchematicFit,
+            Command::SchematicActualSize,
+            Command::Build,
+            Command::Stop,
+            Command::Export,
+            Command::Reveal,
+            Command::OpenInSlicer,
+        ];
+        for command in every_command {
+            let in_map = binds.values().any(|c| *c == command);
+            assert_eq!(in_map, bindings(command).next().is_some(), "{command:?}");
+        }
+    }
 
     /// The project window's hairlines sit below both neighbours in a dark
     /// theme (upstream: the split divider 10, the toolbar hairline 19 over
@@ -2389,7 +2439,7 @@ mod tests {
     }
 
     fn press(key: Key, modifiers: Modifiers, context: Context) -> Option<Command> {
-        project_shortcut_in(&key, &modifiers, context)
+        project_shortcut_in(&key, &modifiers, None, context)
     }
 
     fn named(key: cosmic::iced::keyboard::key::Named) -> Key {
@@ -2523,8 +2573,8 @@ mod tests {
         );
         assert_eq!(
             project_shortcut(&Key::Character("l".into()), &ctrl),
-            Some(Command::FocusChat),
-            "Ctrl+L is also focus-chat (upstream 'Scrivi un messaggio')"
+            Some(Command::WriteMessage),
+            "Ctrl+L is upstream's 'Scrivi un messaggio'"
         );
         assert_eq!(
             project_shortcut(&Key::Character("1".into()), &ctrl_shift),
@@ -3178,7 +3228,7 @@ mod tests {
             "no SVG: Schematica gated"
         );
         assert!(view_bare.iter().any(|(label, action, _)| {
-            *action == Some(Command::FocusChat) && label == "Write a Message"
+            *action == Some(Command::WriteMessage) && label == "Write a Message"
         }));
 
         std::fs::write(root.join("output/model.3mf"), b"x").unwrap();
