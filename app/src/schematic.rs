@@ -1253,6 +1253,8 @@ impl SchematicPane {
                 (index > 0).then_some(Message::PrevPage),
             ))
             .push(menu)
+            // the menu face's chevron sits 10 px from "next" upstream
+            .push(Space::new().width(PICKER_NEXT_GAP))
             .push(button::icon(
                 Symbol::ChevronRight,
                 13.0,
@@ -1264,6 +1266,10 @@ impl SchematicPane {
             .into()
     }
 }
+
+/// Extra space between the page menu and the next-page button, on top of
+/// the row's 2 px spacing on either side.
+const PICKER_NEXT_GAP: f32 = 2.0;
 
 /// The pane's backdrop behind the page (upstream
 /// `.underPageBackgroundColor`). Light: the window base pressed 26 %
