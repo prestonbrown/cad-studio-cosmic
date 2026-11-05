@@ -44,7 +44,7 @@ annulla = Annuler
 apri = Ouvrir
 apri-il-terminale = Ouvrir le Terminal
 apri-il-file-3mf-nello-slicer-predefinito = Ouvrir le fichier 3MF dans le slicer par défaut
-apri-in-anteprima = Ouvrir dans Aperçu
+apri-in-anteprima = Ouvrir dans la visionneuse
 apri-in-slicer = Ouvrir dans le slicer
 apri-progetto-esistente = Ouvrir un projet existant…
 apri-progetto = Ouvrir un projet…
@@ -280,7 +280,7 @@ separa = Détacher {$name}
 separa-dal-resto = Détacher du reste
 sezione = Coupe
 sistema-i-file = Range les fichiers
-software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Logiciel open source publié sous licence MIT.
+about-credit = Logiciel open source publié sous licence MIT.
     Application originale de Filippo Finke. Portage COSMIC/Linux par Preston Brown.
 solo-immagini = Images uniquement
 sposta-il-pannello = Déplacer le panneau

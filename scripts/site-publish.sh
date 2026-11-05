@@ -44,7 +44,7 @@ elif git rev-parse --verify -q refs/heads/gh-pages >/dev/null; then
     git worktree add --detach "$work/tree" gh-pages >/dev/null
 else
     git worktree add --detach "$work/tree" HEAD >/dev/null
-    git -C "$work/tree" checkout --orphan gh-pages-new >/dev/null 2>&1
+    git -C "$work/tree" checkout --orphan gh-pages >/dev/null 2>&1
 fi
 
 cd "$work/tree"

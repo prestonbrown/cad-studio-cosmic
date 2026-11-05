@@ -901,6 +901,7 @@ impl CadStudio {
             // the three preference keys into the engine settings, the flag
             // into cosmic-config (SetupSheet.swift:31-34)
             let _ = self.settings.update(|settings| setup.apply(settings));
+            self.push_settings_to_windows();
             let _ = recents::complete_setup(&self.config);
             self.setup = None;
             // the first-run sheet coming down presents the python sheet
@@ -1134,7 +1135,7 @@ impl CadStudio {
                 })
                 .is_ok();
             if saved {
-                self.push_unit_to_viewers();
+                self.push_settings_to_windows();
                 self.fold_settings_state(&msg);
             } else {
                 self.reseed_settings_windows();
@@ -1260,15 +1261,17 @@ impl CadStudio {
         Some(Message::AgentSheet(msg))
     }
 
-    /// The measurement unit reaches every open project's viewer (upstream
-    /// ModelPane reads `@AppStorage(measurementUnitKey)`, so a Settings
-    /// change re-renders the size label and measure badge live,
-    /// ModelPane.swift:7).
-    fn push_unit_to_viewers(&mut self) {
+    /// The settings that live in project windows reach every open project:
+    /// the measurement unit goes to the viewer (upstream ModelPane reads
+    /// `@AppStorage(measurementUnitKey)`, so a Settings change re-renders
+    /// the size label and measure badge live, ModelPane.swift:7), and the
+    /// engine goes to the chat's empty state.
+    fn push_settings_to_windows(&mut self) {
         let unit = self.settings.load().measurement_unit;
         for window in self.windows.values_mut() {
             if let WindowKind::Project(project) = window {
                 project.viewer.unit = unit;
+                project.refresh_engine();
             }
         }
     }
@@ -2358,6 +2361,21 @@ mod shell_behavior {
             panic!("the project window is gone");
         };
         assert_eq!(window.viewer.unit, MeasurementUnit::Inches);
+    }
+
+    /// An engine flip in Settings reaches an already-open project's empty
+    /// transcript.
+    #[tokio::test]
+    async fn a_settings_engine_change_reaches_open_projects() {
+        let mut f = fixture();
+        let project = open_real_project(&mut f, "Staffa");
+        let _ = f.app.update_settings_any(settings::Message::Engine(
+            engine::agent::locator::AgentKind::Codex,
+        ));
+        let Some(WindowKind::Project(window)) = f.app.windows.get(&project) else {
+            panic!("the project window is gone");
+        };
+        assert_eq!(window.engine, engine::agent::locator::AgentKind::Codex);
     }
 
     /// With a drive script running, every update publishes the project

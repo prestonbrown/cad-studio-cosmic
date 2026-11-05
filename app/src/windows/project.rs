@@ -299,6 +299,9 @@ pub struct ProjectWindow {
     pub size: (f32, f32),
     pub chat: ChatState,
     pub chat_pane: ChatPane,
+    /// The engine the empty transcript names ([`chat_view::empty_state_engine`]
+    /// as of the last settings change).
+    pub engine: engine::agent::locator::AgentKind,
     pub viewer: ViewerPane,
     pub schematic: SchematicPane,
     pub bridge: Bridge,
@@ -500,6 +503,7 @@ impl ProjectWindow {
                 chat
             },
             chat_pane: ChatPane::new(),
+            engine: chat_view::empty_state_engine(store),
             viewer: {
                 let mut pane = ViewerPane::new_with_settings(
                     &root,
@@ -548,6 +552,12 @@ impl ProjectWindow {
     }
 
     /// Whether a turn is running (upstream `isBusy`).
+    /// Re-read the engine setting the empty transcript names (the app calls
+    /// this after any settings write).
+    pub fn refresh_engine(&mut self) {
+        self.engine = chat_view::empty_state_engine(&self.settings);
+    }
+
     pub fn is_busy(&self) -> bool {
         self.activity.is_working()
     }
@@ -1357,7 +1367,7 @@ impl ProjectWindow {
                         &self.queue,
                         self.queue_paused,
                         &self.root,
-                        &self.settings,
+                        self.engine,
                     )
                     .map(Message::Chat),
                     |content: Option<ClipboardContent>, _action| {
@@ -3200,10 +3210,9 @@ mod tests {
         assert!(window.viewer.scene.ghost.is_none());
     }
 
-    /// The empty transcript's placeholder names the engine setting as it is
-    /// at render (`view_chat` calls `empty_state_engine` with the window's
-    /// store), so a flip made after the window opened shows on the next
-    /// view.
+    /// The empty transcript names the engine setting; a flip made after the
+    /// window opened reaches the window through `refresh_engine`, and
+    /// `view_chat` reads that field.
     #[tokio::test]
     async fn empty_transcript_names_the_current_engine() {
         let root = std::env::temp_dir().join(format!("cad-engine-{}", uuid::Uuid::new_v4()));
@@ -3213,18 +3222,17 @@ mod tests {
         )
         .unwrap();
         let settings = SettingsStore::in_temp_dir();
-        let (window, _bridge_task) = ProjectWindow::new(root, &settings);
-        assert_eq!(
-            chat_view::empty_state_engine(&window.settings),
-            engine::agent::locator::AgentKind::Claude
-        );
+        let (mut window, _bridge_task) = ProjectWindow::new(root, &settings);
+        assert_eq!(window.engine, engine::agent::locator::AgentKind::Claude);
         settings
             .update(|stored| stored.agent_engine = "codex".to_string())
             .unwrap();
         assert_eq!(
-            chat_view::empty_state_engine(&window.settings),
-            engine::agent::locator::AgentKind::Codex,
-            "read at render, not at window build"
+            window.engine,
+            engine::agent::locator::AgentKind::Claude,
+            "the window holds the engine until told to refresh"
         );
+        window.refresh_engine();
+        assert_eq!(window.engine, engine::agent::locator::AgentKind::Codex);
     }
 }

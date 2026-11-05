@@ -121,16 +121,24 @@ fn percent_decode(text: &str) -> String {
 /// once threads exist — see `LOG_TIMESTAMP` in engine's agent/session.rs); the name only
 /// needs uniqueness and upstream's shape.
 pub fn saved_image(png: &[u8]) -> Option<PathBuf> {
+    saved_image_in(
+        &std::env::temp_dir().join("CAD Studio Attachments"),
+        OffsetDateTime::now_utc(),
+        png,
+    )
+}
+
+/// [`saved_image`] with the folder and clock supplied.
+fn saved_image_in(folder: &Path, now: OffsetDateTime, png: &[u8]) -> Option<PathBuf> {
     // Upstream's NSImage(data:) refuses bytes that are not an image at paste;
     // the clipboard offered `image/png`, so anything else is not staged.
     if image::load_from_memory_with_format(png, image::ImageFormat::Png).is_err() {
         return None;
     }
-    let folder = std::env::temp_dir().join("CAD Studio Attachments");
-    std::fs::create_dir_all(&folder).ok()?;
+    std::fs::create_dir_all(folder).ok()?;
     const STAMP: &[time::format_description::FormatItem] =
         format_description!("[year]-[month]-[day] at [hour].[minute].[second]");
-    let stamp = OffsetDateTime::now_utc().format(&STAMP).ok()?;
+    let stamp = now.format(&STAMP).ok()?;
     let path = folder.join(format!("Pasted image {stamp}.png"));
     std::fs::File::create(&path).ok()?.write_all(png).ok()?;
     Some(path)
@@ -156,6 +164,18 @@ pub fn resolve_attachment(path: &str, root: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A folder no other test shares, shaped like the real one.
+    fn own_folder() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        std::env::temp_dir()
+            .join(format!(
+                "cad-studio-attachments-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+            .join("CAD Studio Attachments")
+    }
+
     fn tiny_png() -> Vec<u8> {
         let mut png = Vec::new();
         image::DynamicImage::new_rgba8(2, 2)
@@ -166,17 +186,23 @@ mod tests {
 
     #[test]
     fn pasted_bytes_that_do_not_decode_are_refused() {
-        assert_eq!(saved_image(b"not an image"), None);
+        let folder = own_folder();
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(saved_image_in(&folder, now, b"not an image"), None);
         let mut truncated = tiny_png();
         truncated.truncate(truncated.len() / 2);
-        assert_eq!(saved_image(&truncated), None, "a PNG header over a cut body");
+        assert_eq!(
+            saved_image_in(&folder, now, &truncated),
+            None,
+            "a PNG header over a cut body"
+        );
         let mut garbage = tiny_png()[..8].to_vec();
         garbage.extend_from_slice(b"garbage garbage garbage");
-        assert_eq!(saved_image(&garbage), None);
+        assert_eq!(saved_image_in(&folder, now, &garbage), None);
         let png = tiny_png();
-        let saved = saved_image(&png).expect("valid PNG bytes save");
+        let saved = saved_image_in(&folder, now, &png).expect("valid PNG bytes save");
         assert_eq!(std::fs::read(&saved).unwrap(), png);
-        let _ = std::fs::remove_file(saved);
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
     }
 
     /// uri-list parsing: file URLs decode (percent-escapes included),
@@ -251,7 +277,9 @@ mod tests {
     /// (Attachments.swift:26-31) and the name sorts by time.
     #[test]
     fn saved_image_writes_upstreams_temp_shape() {
-        let path = saved_image(&tiny_png()).expect("a writable tmp");
+        let folder = own_folder();
+        let path = saved_image_in(&folder, OffsetDateTime::now_utc(), &tiny_png())
+            .expect("a writable tmp");
         let text = path.to_string_lossy().into_owned();
         assert!(
             path.to_string_lossy().contains("CAD Studio Attachments"),
@@ -272,6 +300,7 @@ mod tests {
             "{stamp}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), tiny_png());
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
     }
 
     /// The read-side law: relative `references/…` names resolve against the

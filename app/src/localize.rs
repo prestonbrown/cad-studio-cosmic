@@ -329,12 +329,7 @@ mod tests {
             text.contains("```"),
             "the fence markers ride along: {text:?}"
         );
-        assert_eq!(
-            fl!("software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke")
-                .matches('\n')
-                .count(),
-            1
-        );
+        assert_eq!(fl!("about-credit").matches('\n').count(), 1);
     }
 
     /// The port-added strings (no upstream key) are in every catalog, so a

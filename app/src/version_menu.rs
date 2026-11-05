@@ -185,9 +185,9 @@ const CHEVRON_MARGIN: f32 = 2.2;
 /// "v<N>" (monospaced digits), and the menu's `chevron.down` indicator —
 /// 70×27, 8 px side insets, the measured 6/8 px gaps. Pressing opens the
 /// history card. NOT a menu-bar root: the history grows and shrinks, and
-/// its entries are custom shrink-height leaves, and cosmic's menu panics
-/// on both (an open menu whose items shrink; a shrink-height leaf in any
-/// root but the first) (docs/research/libcosmic-menu-dynamic-items-bug.md).
+/// its entries are custom shrink-height leaves. Cosmic's menu panics on
+/// both an open menu whose items shrink and a shrink-height leaf in any
+/// root but the first (docs/research/libcosmic-menu-dynamic-items-bug.md).
 /// Anything whose item set changes lives in a popover like this one.
 pub fn version_button<Message: Clone + 'static>(
     current: Option<i64>,
@@ -409,8 +409,8 @@ mod tests {
     }
 
     /// The card builds in every shape: empty, idle, busy (Element
-    /// construction is pure; the tree-corruption history makes view-build
-    /// tests load-bearing).
+    /// construction is pure; cosmic's menu panics at view build on a bad item
+    /// shape, so construction tests are load-bearing).
     #[test]
     fn card_builds_in_every_shape() {
         let now = OffsetDateTime::now_utc();

@@ -19,6 +19,7 @@
 //!                          shrink height (the version menu's shape)
 //!   DYN_MENU_PROBE=static  nothing changes (the control)
 //!   DYN_MENU_ROOT=first    Sonda is root 0 instead of root 1
+//!   DYN_MENU_ROOT_LABEL=1  the Sonda root's own label is the cycling rate
 //!   DYN_MENU_PHASE=<n>     the cycle counter starts at n (=6 opens the
 //!                          grow probe at 8 items, so it shrinks while open)
 //!   DYN_MENU_START_MS=<ms> delay before the first cycle (default 6000),

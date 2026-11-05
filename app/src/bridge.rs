@@ -1377,6 +1377,12 @@ impl Drive {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use cosmic::iced::futures::StreamExt;
+    use engine::agent::tool_summary::live_title;
+    use engine::project::store::{ToolActivity, ToolState, load_chat};
+    use std::path::Path;
+
     /// The queue caption counts every attachment, a PDF included
     /// (upstream's "N immagini" over all attachments).
     #[test]
@@ -1395,13 +1401,14 @@ mod tests {
             crate::chat_view::queue_attachment_label(&row),
             Some(fl!("lld-immagini", count = 3))
         );
+        let text_only = QueuedItem::from(&QueuedSend::new("just text".into(), Vec::new()));
+        let row = crate::chat_view::QueueItem {
+            id: text_only.id,
+            text: text_only.text,
+            images: text_only.images,
+        };
+        assert_eq!(crate::chat_view::queue_attachment_label(&row), None);
     }
-
-    use super::*;
-    use cosmic::iced::futures::StreamExt;
-    use engine::agent::tool_summary::live_title;
-    use engine::project::store::{ToolActivity, ToolState, load_chat};
-    use std::path::Path;
 
     /// The fakes read their env at spawn time and parallel tests share one
     /// process: every setter/clearer of a CAD_FAKE_*/CAD_TEST_CLAUDE var

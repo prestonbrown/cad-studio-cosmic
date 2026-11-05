@@ -44,7 +44,7 @@ annulla = Annulla
 apri = Apri
 apri-il-terminale = Apri il Terminale
 apri-il-file-3mf-nello-slicer-predefinito = Apri il file 3MF nello slicer predefinito
-apri-in-anteprima = Apri in Anteprima
+apri-in-anteprima = Apri nel visualizzatore
 apri-in-slicer = Apri in slicer
 apri-progetto-esistente = Apri progetto esistente…
 apri-progetto = Apri progetto…
@@ -280,7 +280,7 @@ separa = Separa {$name}
 separa-dal-resto = Separa dal resto
 sezione = Sezione
 sistema-i-file = Sistema i file
-software-open-source-rilasciato-con-licenza-mit-sviluppato-da-filippo-finke = Software open source rilasciato con licenza MIT.
+about-credit = Software open source rilasciato con licenza MIT.
     App originale di Filippo Finke. Port COSMIC/Linux di Preston Brown.
 solo-immagini = Solo immagini
 sposta-il-pannello = Sposta il pannello

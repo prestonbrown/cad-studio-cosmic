@@ -722,3 +722,19 @@ text scale (`crate::typography`; body stays COSMIC's 14 where upstream's is
   port by Preston Brown.", two lines) and the "Based on cad-studio 1.2.0" line add more.
   `ABOUT_HEIGHT` in app/src/windows/settings.rs carries the extra 80 px. Pinned by
   `license_holders.rs`.
+- "Open in Preview" reads "Open in Viewer" (it "Apri nel visualizzatore", de "Im Betrachter
+  öffnen", fr "Ouvrir dans la visionneuse"): upstream opens com.apple.Preview
+  (SchematicPane.swift:133-136); the port hands the drawing to xdg-open's default
+  application, which on Linux is not a "Preview" app. Catalog values only; the key
+  `apri-in-anteprima` is unchanged.
+- Framing reference on layout change (**owner: M10**): `set_framing_reference` stores the
+  Plate or Exploded arranged box as `framed_diagonal`, so the next reload's 50% gate
+  (`CameraInput::mesh_changed`, viewer/src/camera_input.rs) measures against the arranged
+  diagonal. Upstream measures against the assembled mesh only
+  (ModelViewerState.swift:127-135). Fix: keep the reload reference apart from the framing
+  box and leave it alone on a layout change.
+- Spawn hook and the signal mask (**owner: M10**): `default_interrupt_signals`
+  (engine/src/processes.rs) resets SIGINT/SIGQUIT/SIGTERM dispositions in the child but
+  does not unblock them in the inherited signal mask, and a blocked signal survives exec
+  as an ignored one does. Nothing in the app blocks them today. Fix:
+  `sigprocmask(SIG_UNBLOCK, {INT, QUIT, TERM})` in the same async-signal-safe hook.

@@ -282,14 +282,14 @@ pub fn view_chat<'a>(
     queue: &'a [QueueItem],
     queue_paused: bool,
     root: &'a Path,
-    settings: &SettingsStore,
+    engine: engine::agent::locator::AgentKind,
 ) -> Element<'a, Message> {
     // The transcript area is ALWAYS a scrollable — swapping an empty-state
     // column into the slot and back lands a stateful scrollable on a
     // stateless widget tree on the first message, which iced's positional
     // tree diff cannot reconcile (panic: "Downcast on stateless state").
     let body: Element<'_, Message> = if chat.messages.is_empty() {
-        container(empty_state(empty_state_engine(settings)))
+        container(empty_state(engine))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Horizontal::Center)
@@ -891,20 +891,19 @@ fn streaming_indicator() -> Element<'static, Message> {
 /// The empty transcript's cube, at the 40 pt symbol's measured ink height.
 const EMPTY_STATE_ICON: u16 = 44;
 
+/// The engine the empty transcript names: the engine setting as it is on
+/// disk now. Windows hold the result and refresh it when settings change.
+pub fn empty_state_engine(settings: &SettingsStore) -> engine::agent::locator::AgentKind {
+    settings.load().agent_kind()
+}
+
 /// Upstream `ChatEmptyState` (ChatView.swift:107-154): the 40pt light
 /// `cube.transparent` symbol in tertiary, the title3-semibold title over
 /// the callout secondary subtitle (spacing 4), then the suggestion buttons
 /// — callout `sparkles` labels padded 10×6 on a `.quaternary.opacity(0.6)`
 /// 6pt rounded fill, spacing 6, at most 340pt wide; spacing 16 between
 /// the groups, padding 20. The engine line names the engine that will run
-/// the first turn (upstream reads `AgentEngine.current` at render; the
-/// caller passes the engine setting as it is now).
-/// The engine the empty transcript names: the engine setting as it is on
-/// disk now, never a copy taken when the window was built.
-pub fn empty_state_engine(settings: &SettingsStore) -> engine::agent::locator::AgentKind {
-    settings.load().agent_kind()
-}
-
+/// the first turn.
 fn empty_state(engine: engine::agent::locator::AgentKind) -> Element<'static, Message> {
     let suggestions = [
         fl!("staffa-a-l-40-40-3-mm-con-due-fori-m4"),
@@ -1633,7 +1632,7 @@ mod tests {
             &[],
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
         let _ = view_chat(
             &pane,
@@ -1642,7 +1641,7 @@ mod tests {
             &[],
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
 
         // a user row with both attachment forms: the relative copy names
@@ -1671,7 +1670,7 @@ mod tests {
             &queue,
             true,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
         let _ = view_chat(
             &pane,
@@ -1680,7 +1679,7 @@ mod tests {
             &queue,
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
 
         // the decoded thumbnail cached the real PNG and recorded the
@@ -1729,7 +1728,7 @@ mod tests {
             &[],
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
     }
 
@@ -1767,7 +1766,7 @@ mod tests {
             &[],
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
         let _ = view_chat(
             &pane,
@@ -1776,7 +1775,7 @@ mod tests {
             &[],
             false,
             &root,
-            &SettingsStore::in_temp_dir(),
+            engine::agent::locator::AgentKind::Claude,
         );
     }
 }
