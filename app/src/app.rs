@@ -1654,7 +1654,6 @@ fn release_focus() -> Task<Action<Message>> {
 const APP_BINDINGS: &[(Shortcut, AppCommand)] = &[
     (Shortcut::ctrl("n"), AppCommand::NewProject),
     (Shortcut::ctrl("o"), AppCommand::OpenProject),
-    (Shortcut::ctrl("1").with_shift(), AppCommand::Welcome),
     (Shortcut::ctrl(","), AppCommand::Settings),
     (Shortcut::ctrl("w"), AppCommand::CloseWindow),
     (Shortcut::ctrl("q"), AppCommand::Quit),
@@ -2051,8 +2050,8 @@ mod tests {
         );
         assert_eq!(
             app_shortcut(&Key::Character("1".into()), &ctrl_shift),
-            Some(AppCommand::Welcome),
-            "⇧⌘1 is the welcome window command"
+            None,
+            "the welcome window has no shortcut"
         );
         assert_eq!(
             app_shortcut(&Key::Character(",".into()), &ctrl),

@@ -2238,22 +2238,22 @@ const PROJECT_BINDINGS: &[(Shortcut, Command, When)] = &[
     (Shortcut::ctrl("3"), Command::FocusSchematic, When::Always),
     (Shortcut::ctrl("l"), Command::FocusChat, When::Always),
     (
-        Shortcut::ctrl("1").with_alt(),
+        Shortcut::ctrl("1").with_shift(),
         Command::ViewerPreset(Preset::Iso),
         When::Always,
     ),
     (
-        Shortcut::ctrl("2").with_alt(),
+        Shortcut::ctrl("2").with_shift(),
         Command::ViewerPreset(Preset::Front),
         When::Always,
     ),
     (
-        Shortcut::ctrl("3").with_alt(),
+        Shortcut::ctrl("3").with_shift(),
         Command::ViewerPreset(Preset::Top),
         When::Always,
     ),
     (
-        Shortcut::ctrl("4").with_alt(),
+        Shortcut::ctrl("4").with_shift(),
         Command::ViewerPreset(Preset::Right),
         When::Always,
     ),
@@ -2427,6 +2427,21 @@ mod tests {
             Some(Command::Reveal)
         );
         assert_eq!(press(ch("0"), Modifiers::CTRL | Modifiers::ALT, idle), None);
+        for (digit, preset) in [
+            ("1", Preset::Iso),
+            ("2", Preset::Front),
+            ("3", Preset::Top),
+            ("4", Preset::Right),
+        ] {
+            assert_eq!(
+                press(ch(digit), Modifiers::CTRL | Modifiers::SHIFT, idle),
+                Some(Command::ViewerPreset(preset))
+            );
+            assert_eq!(
+                press(ch(digit), Modifiers::CTRL | Modifiers::ALT, idle),
+                None
+            );
+        }
     }
 
     /// Esc stops only a running turn; idle it falls through to the viewer
@@ -2487,7 +2502,6 @@ mod tests {
     #[test]
     fn shortcut_table_matches_upstream() {
         let ctrl = Modifiers::CTRL;
-        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
 
         assert_eq!(
@@ -2513,7 +2527,7 @@ mod tests {
             "⌘L is also focus-chat (upstream 'Scrivi un messaggio')"
         );
         assert_eq!(
-            project_shortcut(&Key::Character("1".into()), &ctrl_alt),
+            project_shortcut(&Key::Character("1".into()), &ctrl_shift),
             Some(Command::ViewerPreset(Preset::Iso))
         );
         assert_eq!(
