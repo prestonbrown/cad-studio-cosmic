@@ -1321,6 +1321,10 @@ impl CadStudio {
             if let Some(msg) = self.sheet_key_message(id, role) {
                 return self.update(msg);
             }
+            // a modal sheet owns Esc even when it has no cancel action
+            if role == SheetKey::Cancel && self.modal_sheet_up() {
+                return Task::none();
+            }
         }
         if let Some(command) = app_shortcut(&key, &modifiers) {
             return self.app_command(id, command);
@@ -1992,9 +1996,6 @@ mod tests {
         );
     }
 
-    /// The app-level bindings (Commands.swift:16-49): ⌘N, ⌘O, ⇧⌘1, ⌘,
-    /// (the standard Settings scene, CADStudioApp.swift:31-33) — and
-    /// nothing on bare keys.
     #[test]
     fn window_shortcuts_close_quit_and_fullscreen() {
         let ctrl = Modifiers::CTRL;
@@ -2035,6 +2036,9 @@ mod tests {
         assert!(key_events(press, cosmic::iced::event::Status::Ignored, id).is_some());
     }
 
+    /// The app-level bindings: Ctrl+N, Ctrl+O, Ctrl+, (the standard
+    /// Settings scene, CADStudioApp.swift:31-33) — no Welcome shortcut and
+    /// nothing on bare keys.
     #[test]
     fn app_shortcut_table_matches_upstream() {
         let ctrl = Modifiers::CTRL;

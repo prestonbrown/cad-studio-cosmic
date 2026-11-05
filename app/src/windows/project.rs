@@ -8,8 +8,8 @@
 //! reducer and the activity model, and the send flow takes the draft
 //! BEFORE anything is forwarded.
 //!
-//! Commands (Compila ⌘B, parameters ⌥⌘I, export ⇧⌘E and the rest):
-//! show-chat ⌘0, focus ⌘1/2/3, parameters ⌥⌘I, layout
+//! Commands (build Ctrl+B, parameters Ctrl+Shift+I, export Ctrl+Shift+E and the rest):
+//! show-chat F9, focus Ctrl+1/2/3, parameters Ctrl+Shift+I, layout
 //! presets, viewer presets + fit, schematic zoom/fit, build, stop, export,
 //! reveal, open-in-slicer. The keyboard bindings are one pure
 //! table, [`project_shortcut`]; the header's menu renders the same
@@ -153,7 +153,7 @@ pub enum Command {
     FocusChat,
     FocusModel,
     FocusSchematic,
-    /// "Mostra/Nascondi parametri" ⌥⌘I (Commands.swift:69-73): flip the
+    /// "Mostra/Nascondi parametri" Ctrl+Shift+I (Commands.swift:69-73): flip the
     /// parameters overlay's visibility — the app-wide binding (upstream
     /// hangs it off the project, disabled with none open).
     ToggleParameters,
@@ -168,10 +168,10 @@ pub enum Command {
     SchematicFit,
     /// The drawing at 100%.
     SchematicActualSize,
-    /// "Compila modello" ⌘B (Commands.swift:115-119): build model.py now.
+    /// "Compila modello" Ctrl+B (Commands.swift:115-119): build model.py now.
     Build,
     Stop,
-    /// "Esporta pacchetto…" ⇧⌘E (Commands.swift:130-132): zip model.py +
+    /// "Esporta pacchetto…" Ctrl+Shift+E (Commands.swift:130-132): zip model.py +
     /// the non-dot outputs to a chosen destination.
     Export,
     Reveal,
@@ -1985,7 +1985,7 @@ impl ProjectWindow {
             Item::Button(fl!("vai-alla-chat"), None, Command::FocusChat),
             Item::Button(fl!("vai-al-viewer-3d"), None, Command::FocusModel),
             Item::Button(fl!("vai-alla-schematica-2d"), None, Command::FocusSchematic),
-            // ⌥⌘I (Commands.swift:69-73), directly after the focus trio as
+            // Ctrl+Shift+I (Commands.swift:69-73), directly after the focus trio as
             // upstream orders it; the label follows areParametersVisible.
             // A text-only change on a fixed-height Item::Button is safe in
             // any root (docs/research/libcosmic-menu-dynamic-items-bug.md).
@@ -1998,7 +1998,7 @@ impl ProjectWindow {
                 None,
                 Command::ToggleParameters,
             ),
-            // "Scrivi un messaggio" ⌘L (Commands.swift:74-76): focus(.chat)
+            // "Scrivi un messaggio" Ctrl+L (Commands.swift:74-76): focus(.chat)
             Item::Button(fl!("scrivi-un-messaggio"), None, Command::FocusChat),
             Item::Divider,
             Item::Folder(
@@ -2276,8 +2276,8 @@ const PROJECT_BINDINGS: &[(Shortcut, Command, When)] = &[
         Command::SchematicActualSize,
         When::Always,
     ),
-    (Shortcut::ctrl("."), Command::Stop, When::Always),
     (Shortcut::bare("Escape"), Command::Stop, When::Running),
+    (Shortcut::ctrl("."), Command::Stop, When::Always),
     (Shortcut::ctrl("b"), Command::Build, When::Always),
     (
         Shortcut::ctrl("e").with_shift(),
@@ -2524,7 +2524,7 @@ mod tests {
         assert_eq!(
             project_shortcut(&Key::Character("l".into()), &ctrl),
             Some(Command::FocusChat),
-            "⌘L is also focus-chat (upstream 'Scrivi un messaggio')"
+            "Ctrl+L is also focus-chat (upstream 'Scrivi un messaggio')"
         );
         assert_eq!(
             project_shortcut(&Key::Character("1".into()), &ctrl_shift),
@@ -2561,12 +2561,12 @@ mod tests {
             project_shortcut(&Key::Character("r".into()), &ctrl_shift),
             Some(Command::Reveal)
         );
-        // ⌘B builds the model (Commands.swift:118-120)
+        // Ctrl+B builds the model (Commands.swift:118-120)
         assert_eq!(
             project_shortcut(&Key::Character("b".into()), &ctrl),
             Some(Command::Build)
         );
-        // ⇧⌘E exports the package (Commands.swift:130-132)
+        // Ctrl+Shift+E exports the package (Commands.swift:130-132)
         assert_eq!(
             project_shortcut(&Key::Character("e".into()), &ctrl_shift),
             Some(Command::Export)
