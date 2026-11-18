@@ -1947,18 +1947,47 @@ fn open_parent(path: &Path) {
 /// Open `path` with the system opener (upstream `NSWorkspace.open`): the
 /// slicer route for 3MF files.
 pub fn open_path(path: &Path) {
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(path);
+    spawn_reaped(command);
 }
 
 /// Open a URL with the system opener (upstream `NSWorkspace.open` for a
 /// tapped markdown link).
 pub fn open_url(url: &str) {
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(url);
+    spawn_reaped(command);
+}
+
+/// Start `command` without blocking the caller, and wait for it on a
+/// background thread so the exited child does not linger as a zombie for
+/// the life of the app.
+fn spawn_reaped(
+    mut command: std::process::Command,
+) -> Option<std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>>> {
+    let mut child = command.spawn().ok()?;
+    Some(std::thread::spawn(move || child.wait()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawned_opener_is_waited_on() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 3"]);
+        let reaper = spawn_reaped(command).expect("sh spawns");
+        let status = reaper.join().unwrap().expect("wait succeeds");
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn missing_opener_spawns_nothing() {
+        let command = std::process::Command::new("/nonexistent/cad-studio-opener");
+        assert!(spawn_reaped(command).is_none());
+    }
 
     /// Secondary windows draw their own header and window controls, as the
     /// main window does: no compositor frame, transparent surface.
