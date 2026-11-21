@@ -19,6 +19,21 @@ const MINIMAL_ENV: &[(&str, &str)] = &[("PATH", "/usr/bin:/bin")];
 // file even once the lock is released.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+
+/// Orphan adoption check: the dead wrapper's child re-parents to init, or —
+/// under `systemd --user`, where the session manager is a subreaper — to
+/// that systemd. The engine's own `orphaned()` accepts both adopters; the
+/// tests used to demand init alone, which cannot pass in a user session.
+fn adopted_by_reaper(pid: u32) -> bool {
+    match ppid_of(pid) {
+        Some(1) => true,
+        Some(ppid) => std::fs::read_to_string(format!("/proc/{ppid}/comm"))
+            .map(|name| name.trim() == "systemd")
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 fn tmp_dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!("cad-procs-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
@@ -255,10 +270,10 @@ async fn orphan_reaping() {
         .unwrap();
 
     assert!(
-        eventually(|| ppid_of(orphan) == Some(1), Duration::from_secs(2)).await,
+        eventually(|| adopted_by_reaper(orphan), Duration::from_secs(2)).await,
         "wrapper exit re-parents the sleep to init"
     );
-    assert!(eventually(|| ppid_of(forged) == Some(1), Duration::from_secs(2)).await);
+    assert!(eventually(|| adopted_by_reaper(forged), Duration::from_secs(2)).await);
 
     register_at(&registry, orphan);
     register_at(&registry, control.id());
@@ -282,7 +297,7 @@ async fn orphan_reaping() {
     // Pid-recycling defense: a ppid-1 process whose registry line carries a
     // start time that is not its own is not ours to kill — and not ours to
     // keep: the entry must drop, never heal to the pid's new occupant.
-    assert!(eventually(|| ppid_of(forged) == Some(1), Duration::from_secs(2)).await);
+    assert!(eventually(|| adopted_by_reaper(forged), Duration::from_secs(2)).await);
     std::fs::write(&registry, format!("{forged}:WRONG-START")).unwrap();
     let reaped = reap_orphans_at(&registry);
     assert!(reaped.is_empty(), "starttime mismatch spares the process");
@@ -512,7 +527,7 @@ async fn terminate_all_drops_recycled_pids() {
         .trim()
         .parse()
         .unwrap();
-    assert!(eventually(|| ppid_of(under_init) == Some(1), Duration::from_secs(2)).await);
+    assert!(eventually(|| adopted_by_reaper(under_init), Duration::from_secs(2)).await);
     std::fs::write(
         &registry,
         format!(

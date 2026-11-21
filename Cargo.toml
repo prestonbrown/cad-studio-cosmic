@@ -25,7 +25,7 @@ time = { version = "0.3", features = ["serde-well-known", "macros"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 notify = "8"
 lopdf = "0.34"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "process", "io-util", "time", "sync", "macros"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "process", "io-util", "time", "sync", "macros", "net"] }
 thiserror = "2"
 regex = "1"
 quick-xml = "0.41.0"
