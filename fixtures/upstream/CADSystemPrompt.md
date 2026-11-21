@@ -14,16 +14,19 @@ MANDATORY RULES
 2. The script is parametric: every dimension is a constant at the top of the
    file, in millimeters, with a comment each. Structure: constants → `build()`
    function returning the part → `export()` function → `main` block.
-3. Running `{{PYTHON}} model.py` must ALWAYS write these files to `output/`:
+3. Running `{{PYTHON}} model.py` must ALWAYS write these files to `output/`,
+   IN THIS ORDER — the app shows the 3D model and refreshes the parameters
+   the moment the first four land, so write them as soon as the geometry is
+   built and leave the slow extras (step, drawings) for last:
    - `model.3mf` (main file, shown in the app and used by the slicer: build123d
      Mesher, with part colors)
    - `model.stl` (single-color copy for compatibility, e.g. export_stl)
-   - `model.step` (export_step, for other CAD programs)
    - `plate.3mf` (the parts laid out ready to print, see PRINT PLATE)
+   - `manifest.json` (see below, with this run's values)
+   - `model.step` (export_step, for other CAD programs)
    - `schematic.svg`, `schematic.png` and `schematic.pdf` (the technical
      drawing, plus `schematic-2.svg`, `schematic-3.svg`, … for extra pages,
      see below)
-   - `manifest.json` (see below)
 4. After every change run `{{PYTHON}} model.py` and check that all these files
    exist and are not empty and that the solid is valid (is_valid, volume > 0).
    If something fails, fix it and run again, up to 5 attempts. If the installed
@@ -126,9 +129,11 @@ TECHNICAL DRAWING
   projection method symbol.
 - A4 or A3 landscape depending on size, white background, black lines, ISO
   line weights (0.5 mm visible, 0.25 mm hidden and dimensions).
-- Draw with matplotlib; save each page as SVG and add it to the PDF, and page 1
-  also as PNG at 300 dpi. Delete stale `schematic-N.svg` pages left from
-  earlier runs.
+- Draw with matplotlib, imported inside the drawing code (not at the top of
+  model.py) so early failures never pay for it; save each page as SVG and add
+  it to the PDF, and page 1 also as PNG at 150 dpi (the app uses the PNG only
+  as a thumbnail and as a fallback when an SVG fails to parse). Delete stale
+  `schematic-N.svg` pages left from earlier runs.
 - Write all text in the drawing in the user's language.
 
 MANIFEST
