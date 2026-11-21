@@ -183,6 +183,28 @@ pub enum Command {
     OpenInSlicer,
 }
 
+/// The File root's menu action: an app command, or one of the recents
+/// submenu's entries. Menu actions must be Copy (libcosmic's MenuAction
+/// bound), so the recents ride by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAction {
+    App(AppCommand),
+    Recent(usize),
+    ClearRecents,
+}
+
+impl MenuAction for FileAction {
+    type Message = Message;
+
+    fn message(&self) -> Message {
+        match self {
+            FileAction::App(command) => Message::App(AppRequest::Command(*command)),
+            FileAction::Recent(index) => Message::App(AppRequest::OpenRecentIndex(*index)),
+            FileAction::ClearRecents => Message::App(AppRequest::ClearRecents),
+        }
+    }
+}
+
 impl MenuAction for Command {
     type Message = Message;
 
@@ -195,7 +217,7 @@ impl MenuAction for AppCommand {
     type Message = Message;
 
     fn message(&self) -> Message {
-        Message::App(AppRequest::Command(*self))
+        Message::App(AppRequest::Command(self.clone()))
     }
 }
 
@@ -281,10 +303,12 @@ pub enum AppRequest {
     /// over whichever window shows (upstream ChatView.swift:101-102; the
     /// sheet, not the settings window).
     PresentAgentSheet,
-    /// A row of the Open Recent card: open that project.
-    OpenRecentPath(PathBuf),
-    /// The Open Recent card's "Cancella menu": clear the store and empty
-    /// the card.
+    /// A row of the File root's "Apri recenti" submenu, BY INDEX: menu
+    /// actions are Copy (libcosmic's MenuAction bound), so the app layer
+    /// resolves the row against the recents store it owns — the same list
+    /// the submenu was built from.
+    OpenRecentIndex(usize),
+    /// The submenu's "Cancella menu" (Commands.swift:36-40).
     ClearRecents,
 }
 
@@ -325,9 +349,6 @@ pub struct ProjectWindow {
     /// would rebuild every row's text every second; version_menu's
     /// view_versions doc).
     version_card: Option<time::OffsetDateTime>,
-    /// The Open Recent card's snapshot of the recents list (the app
-    /// layer owns the store and fills this when the File item fires).
-    pub recent_card: Option<Vec<PathBuf>>,
     /// The focus command's one-second pane highlight.
     focus_flash: Option<PaneKind>,
     /// The pane the user last pointed at or focused by command; plain-key
@@ -535,7 +556,6 @@ impl ProjectWindow {
             work_started_at: None,
             shown_issues: None,
             version_card: None,
-            recent_card: None,
             focus_flash: None,
             focused_pane: None,
             grip_held: None,
@@ -749,7 +769,6 @@ impl ProjectWindow {
             Message::CloseCards => {
                 self.version_card = None;
                 self.shown_issues = None;
-                self.recent_card = None;
                 Task::none()
             }
             Message::Restore(number) => {
@@ -1361,12 +1380,12 @@ impl ProjectWindow {
 
     /// The whole window: header over the pane grid (upstream
     /// ProjectSplitView), with the open issue list as a popover.
-    pub fn view(&self) -> Element<'_, Message> {
-        self.view_with_focus(true)
+    pub fn view(&self, recents: &[PathBuf]) -> Element<'_, Message> {
+        self.view_with_focus(true, recents)
     }
 
     /// The window frame; `focused` styles the header's window controls.
-    pub fn view_with_focus(&self, focused: bool) -> Element<'_, Message> {
+    pub fn view_with_focus(&self, focused: bool, recents: &[PathBuf]) -> Element<'_, Message> {
         // the grid reports its laid-out size through the shell relay: the
         // resize clamp needs the GRID extent, and the window size would
         // ignore the header (the panes' responsive report pattern)
@@ -1384,7 +1403,7 @@ impl ProjectWindow {
             this.view_grid()
         });
         let base: Element<'_, Message> = Column::with_capacity(2)
-            .push(self.view_header(focused))
+            .push(self.view_header(focused, recents))
             .push(sized)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1564,12 +1583,12 @@ impl ProjectWindow {
     /// parameters), then the window controls. 52 px tall to the hairline:
     /// the upstream capture's toolbar divider sits at y=104 of 1680
     /// (project-model.png, 2x).
-    fn view_header(&self, focused: bool) -> Element<'_, Message> {
+    fn view_header(&self, focused: bool, recents: &[PathBuf]) -> Element<'_, Message> {
         let busy = self.is_busy();
         // upstream gates export and slicer on output.hasThreeMF
         let has_3mf = self.output_dir().join(folder::MODEL_3MF).exists();
 
-        let start = self.view_toolbar_start(busy);
+        let start = self.view_toolbar_start(busy, recents);
         let end = self.view_toolbar_end(busy, has_3mf);
 
         let bar: Element<'_, Message> = cosmic::widget::header_bar()
@@ -1610,20 +1629,10 @@ impl ProjectWindow {
     /// widths, here and in [`Self::view_toolbar_end`]: the upstream
     /// capture's glyph bboxes and center-to-center pitch (sidebar→play 38,
     /// play→stop 34, the primary group 38), halved to the 1x basis.
-    fn view_toolbar_start(&self, busy: bool) -> Element<'_, Message> {
+    fn view_toolbar_start(&self, busy: bool, recents: &[PathBuf]) -> Element<'_, Message> {
         Row::new()
             .align_y(cosmic::iced::Alignment::Center)
-            .push({
-                // "Apri recenti" (Commands.swift:30-40) drops its card from
-                // the menu bar
-                let mut menu = popover(self.view_menu())
-                    .position(cosmic::widget::popover::Position::Bottom)
-                    .on_close(Message::CloseCards);
-                if let Some(recents) = &self.recent_card {
-                    menu = menu.popup(view_recents(recents));
-                }
-                menu
-            })
+            .push(self.view_menu(recents))
             .push(Space::new().width(Length::Fixed(8.0)))
             .push(toolbar_button(
                 Symbol::SidebarLeft,
@@ -1879,23 +1888,51 @@ impl ProjectWindow {
     /// Esporta), and
     /// the version menu root (VersionMenu.swift) trailing before the reveal
     /// and slicer buttons.
-    fn view_menu(&self) -> Element<'static, Message> {
+    fn view_menu(&self, recents: &[PathBuf]) -> Element<'static, Message> {
         use cosmic::widget::menu::{Item, ItemHeight, ItemWidth, items, root};
 
         let file_entries = vec![
-            Item::Button(fl!("crea-nuovo-progetto"), None, AppCommand::NewProject),
-            Item::Button(fl!("apri-progetto"), None, AppCommand::OpenProject),
-            Item::Button(fl!("apri-recenti"), None, AppCommand::OpenRecent),
+            Item::Button(
+                fl!("crea-nuovo-progetto"),
+                None,
+                FileAction::App(AppCommand::NewProject),
+            ),
+            Item::Button(
+                fl!("apri-progetto"),
+                None,
+                FileAction::App(AppCommand::OpenProject),
+            ),
+            Item::Folder(fl!("apri-recenti"), recent_menu_entries(recents)),
             Item::Divider,
-            Item::Button(fl!("finestra-di-benvenuto"), None, AppCommand::Welcome),
+            Item::Button(
+                fl!("finestra-di-benvenuto"),
+                None,
+                FileAction::App(AppCommand::Welcome),
+            ),
             Item::Divider,
-            Item::Button(fl!("settings"), None, AppCommand::Settings),
-            Item::Button(fl!("informazioni-su-cad-studio"), None, AppCommand::About),
+            Item::Button(
+                fl!("settings"),
+                None,
+                FileAction::App(AppCommand::Settings),
+            ),
+            Item::Button(
+                fl!("informazioni-su-cad-studio"),
+                None,
+                FileAction::App(AppCommand::About),
+            ),
             Item::Divider,
-            Item::Button(fl!("chiudi-finestra"), None, AppCommand::CloseWindow),
-            Item::Button(fl!("esci"), None, AppCommand::Quit),
+            Item::Button(
+                fl!("chiudi-finestra"),
+                None,
+                FileAction::App(AppCommand::CloseWindow),
+            ),
+            Item::Button(fl!("esci"), None, FileAction::App(AppCommand::Quit)),
         ];
-        let file_binds = crate::app::app_key_binds();
+        let file_binds: std::collections::HashMap<_, FileAction> =
+            crate::app::app_key_binds()
+                .into_iter()
+                .map(|(key, command)| (key, FileAction::App(command)))
+                .collect();
         let file_tree = cosmic::widget::menu::Tree::with_children(
             {
                 let root_button: Element<'_, Message> = root(fl!("menu-file")).into();
@@ -2101,66 +2138,41 @@ fn grip_class(opacity: f32) -> cosmic::theme::Container<'static> {
     })
 }
 
-/// The "Apri recenti" card (Commands.swift:30-40 — a submenu upstream; a
-/// card here because the list changes between rebuilds, which a cosmic menu
-/// cannot survive: docs/research/libcosmic-menu-dynamic-items-bug.md): one
-/// row per recent project by folder name, a divider, then "Cancella menu",
-/// disabled when the list is empty.
-fn view_recents(paths: &[PathBuf]) -> Element<'static, Message> {
-    let row = |label: String, tone: Tone, on_press: Option<Message>| -> Element<'static, Message> {
-        container(
-            button::custom(
-                container(
-                    text(label)
-                        .size(typography::BODY)
-                        .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                        .class(tone.text(Backdrop::Material)),
-                )
-                .padding([0.0, 9.5])
-                .height(Length::Fixed(22.0))
-                .align_y(cosmic::iced::alignment::Vertical::Center),
-            )
-            .padding(0)
-            .width(Length::Fill)
-            .class(ui::button::hover_wash(false, Corner::Xs))
-            .on_press_maybe(on_press),
-        )
-        .padding([0, 5])
-        .into()
-    };
-    let mut list = Column::new().padding([5, 0]).width(Length::Fixed(240.0));
-    for path in paths {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        list = list.push(row(
-            name,
-            Tone::Primary,
-            Some(Message::App(AppRequest::OpenRecentPath(path.clone()))),
-        ));
+/// The File root's "Apri recenti" children (Commands.swift:30-40): one
+/// entry per recent project by folder name, a divider, then "Cancella
+/// menu", disabled when the list is empty. A real submenu now, not the
+/// card this replaced: the corrected libcosmic-menu-dynamic-items-bug
+/// boundary (pinned 2026-11-04) shows Item::Folder survives rebuilds —
+/// every menu item is a fixed-height menu_button, exempt from the
+/// root-0-shape defect, and the list can only GROW while this menu is
+/// open (opens reorder, never remove; removals happen in the welcome
+/// window's context menu, unreachable with a menu open here), and
+/// growth while open is invisible-not-fatal by the frozen-bounds defect.
+fn recent_menu_entries(recents: &[PathBuf]) -> Vec<cosmic::widget::menu::Item<FileAction, String>> {
+    use cosmic::widget::menu::Item;
+    let mut entries: Vec<_> = recents
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            Item::Button(name, None, FileAction::Recent(index))
+        })
+        .collect();
+    if !recents.is_empty() {
+        entries.push(Item::Divider);
     }
-    if !paths.is_empty() {
-        list = list.push(container(surface::divider()).padding([5, 14]));
-    }
-    let clear_tone = if paths.is_empty() {
-        Tone::Tertiary
+    let clear = if recents.is_empty() {
+        Item::ButtonDisabled(fl!("cancella-menu"), None, FileAction::ClearRecents)
     } else {
-        Tone::Primary
+        Item::Button(fl!("cancella-menu"), None, FileAction::ClearRecents)
     };
-    list = list.push(row(
-        fl!("cancella-menu"),
-        clear_tone,
-        (!paths.is_empty()).then_some(Message::App(AppRequest::ClearRecents)),
-    ));
-    container(list)
-        .class(surface::card(Corner::M, Shadow::Popover))
-        .into()
+    entries.push(clear);
+    entries
 }
 
-/// One toolbar icon button: a tinted glyph `glyph_height` px tall (its
-/// width from the symbol's view box) centered in a `width`×28 hit area
-/// (disabled glyphs dim), with its upstream `.help` as tooltip and
 /// accessible name.
 fn toolbar_button(
     symbol: Symbol,
@@ -3313,13 +3325,10 @@ mod tests {
         )
         .unwrap();
         let (mut window, _bridge_task) = ProjectWindow::new(root, &SettingsStore::in_temp_dir());
-        window.recent_card = Some(vec![PathBuf::from("/tmp/a")]);
         let _ = window.update(Message::ToggleVersionCard);
         assert!(window.version_card.is_some());
-        let _ = view_recents(&[PathBuf::from("/tmp/a")]);
-        let _ = view_recents(&[]);
         let _ = window.update(Message::CloseCards);
-        assert!(window.version_card.is_none() && window.recent_card.is_none());
+        assert!(window.version_card.is_none());
     }
 
     /// The metadata-clobber pin: the window's save points

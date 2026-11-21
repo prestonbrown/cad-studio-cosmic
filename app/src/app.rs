@@ -69,9 +69,6 @@ const ICON_WARNING: &[u8] = include_bytes!("../resources/icons/exclamationmark.t
 pub enum AppCommand {
     NewProject,
     OpenProject,
-    /// The recents list lives in the welcome window; from a project window
-    /// it drops the Open Recent card from the File root.
-    OpenRecent,
     Welcome,
     /// Open the settings window (upstream's Settings scene; the port's
     /// placement is the File root — there is no app menu to hold it).
@@ -504,7 +501,7 @@ impl Application for CadStudio {
                 // `.toolbar { ProjectToolbar(project) }` + `.toolbar(removing: .title)`);
                 // decorating again would stack a second bar.
                 let body = project
-                    .view_with_focus(focused)
+                    .view_with_focus(focused, self.recents.paths())
                     .map(move |m| Message::Project(id, m));
                 // the app-level sheets present over project windows too
                 // (upstream attaches the python and agent-missing sheets to
@@ -822,23 +819,22 @@ impl CadStudio {
                 Task::none()
             }
             project::AppRequest::PresentAgentSheet => self.update(Message::PresentAgentSheet),
-            project::AppRequest::OpenRecentPath(path) => {
-                self.set_recent_card(id, None);
-                self.open_project(path)
-            }
+            // the recents submenu's rows ride by index; the store this
+            // resolves against is the same list the menu was built from
+            project::AppRequest::OpenRecentIndex(index) => match self
+                .recents
+                .paths()
+                .get(index)
+                .cloned()
+            {
+                Some(path) => self.open_project(path),
+                None => Task::none(),
+            },
+            // Commands.swift:36-40 `recents.clear()`
             project::AppRequest::ClearRecents => {
-                // Commands.swift:36-40 `recents.clear()`
-                self.set_recent_card(id, Some(Vec::new()));
                 self.recents.clear();
                 Task::none()
             }
-        }
-    }
-
-    /// Show (`Some`) or close project window `id`'s Open Recent card.
-    fn set_recent_card(&mut self, id: window::Id, card: Option<Vec<PathBuf>>) {
-        if let Some(WindowKind::Project(project)) = self.windows.get_mut(&id) {
-            project.recent_card = card;
         }
     }
 
@@ -848,11 +844,6 @@ impl CadStudio {
         match command {
             AppCommand::NewProject => self.new_project(),
             AppCommand::OpenProject => choose_existing(),
-            // "Apri recenti" drops the recents card from the File root
-            AppCommand::OpenRecent => {
-                self.set_recent_card(id, Some(self.recents.paths().to_vec()));
-                Task::none()
-            }
             AppCommand::Welcome => self.show_welcome(),
             AppCommand::Settings => self.open_settings(settings::Tab::General),
             AppCommand::About => self.open_about(),
@@ -2621,28 +2612,34 @@ mod shell_behavior {
     /// 2.10: an unreadable project opens the load-error window with the
     /// error (ProjectWindow.swift:16-22, 42-44); no recent is added and
     /// the welcome window stays.
-    /// The File menu's recents entries reach the app through the window's
-    /// one `App` variant: Apri recenti fills the card from the store,
-    /// Cancella menu empties both.
+    /// The File menu's recents submenu reaches the app by index: a row
+    /// opens that project from the store, Cancella menu empties it.
     #[tokio::test]
     async fn file_menu_recents_requests_reach_the_app() {
         let mut f = fixture();
         let id = open_real_project(&mut f, "Recenti");
-        let card = |app: &CadStudio| match app.windows.get(&id) {
-            Some(WindowKind::Project(window)) => window.recent_card.clone(),
-            _ => panic!("the project window is open"),
-        };
         let request = |request| Message::Project(id, project::Message::App(request));
 
-        let _ = f.app.update(request(project::AppRequest::Command(
-            AppCommand::OpenRecent,
-        )));
         let stored = f.app.recents.paths().to_vec();
         assert!(!stored.is_empty(), "opening the project recorded it");
-        assert_eq!(card(&f.app), Some(stored));
+        // row 0 resolves against the same store the submenu was built from
+        // and opens it (the project window swaps to that root)
+        let root0 = stored[0].clone();
+        let _ = f
+            .app
+            .update(request(project::AppRequest::OpenRecentIndex(0)));
+        assert_eq!(
+            f.app.recents.paths().first(),
+            Some(&root0),
+            "the opened recent is reordered to the front"
+        );
+        // an out-of-range row is a no-op (the store changed under a stale
+        // open menu — defect 2 of the libcosmic menu boundary)
+        let _ = f
+            .app
+            .update(request(project::AppRequest::OpenRecentIndex(99)));
 
         let _ = f.app.update(request(project::AppRequest::ClearRecents));
-        assert_eq!(card(&f.app), Some(Vec::new()));
         assert!(f.app.recents.paths().is_empty());
     }
 

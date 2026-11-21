@@ -226,7 +226,7 @@ async fn startup_check_through_slider_to_restore() {
         Bridge::with_interpreter(fake_python()).launch(settings.clone(), root.clone());
     let mut window =
         ProjectWindow::with_bridge(root.clone(), &SettingsStore::in_temp_dir(), bridge);
-    let _ = window.view(); // the empty-project frame builds
+    let _ = window.view(&[]); // the empty-project frame builds
     assert!(
         !window.bridge.python_ready(),
         "the bridge starts Unknown, guards closed"
@@ -429,7 +429,7 @@ async fn startup_check_through_slider_to_restore() {
         std::env::remove_var("CAD_FAKE_PY_FIXTURES");
     }
     drop(messages);
-    let _ = window.view(); // the restored shape builds a frame
+    let _ = window.view(&[]); // the restored shape builds a frame
     drop(guard);
 }
 

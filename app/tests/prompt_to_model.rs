@@ -129,7 +129,7 @@ async fn run_slice() -> SliceRun {
 
     // the empty-project frame builds (the viewer pane's pure-construction
     // pattern, over the whole window)
-    let _ = window.view();
+    let _ = window.view(&[]);
 
     let _ = window.bridge.enqueue(PROMPT.to_string(), Vec::new());
 
@@ -408,7 +408,7 @@ async fn prompt_to_rendered_model() {
     assert!(!window.queue_paused);
 
     // ── the window assembly: one frame builds in the full shape ────────
-    let _ = window.view();
+    let _ = window.view(&[]);
 
     // ── shutdown: the window owns the bridge, so dropping it is the
     // driver's shutdown signal; the driver reaps the registry and ends ──
