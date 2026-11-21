@@ -197,7 +197,16 @@ async fn check_missing_interpreter_reports_missing() {
     let (spawn, _) = scripted_spawn(&dir, "exit 0\n");
     let events = drain(env::check(&dir, &spawn)).await;
     // Missing is its own failure kind (upstream .missing gates the setup
-    // sheet's presentation); upstream has no display string for it.
+    // sheet's presentation); upstream has no display string for it. The
+    // missing interpreter's path rides ahead as the details log line, so
+    // the sheet's "Show Details" never opens on an empty log.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EnvEvent::Log(EnvLog::Text(l)) if l.contains("bin/python")
+        )),
+        "the missing interpreter path is logged: {events:?}"
+    );
     assert_eq!(
         events.last(),
         Some(&EnvEvent::Finished(Err(EnvFailure::Missing)))
@@ -235,7 +244,11 @@ async fn check_failing_verification_reports_check_failed() {
     let dir = venv();
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     let bin = dir.join("bin/python");
-    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho 'ModuleNotFoundError: No module named build123d' >&2\nexit 1\n",
+    )
+    .unwrap();
     make_executable(&bin);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let spawn: env::Spawn = Arc::new(move |argv, cwd| {
@@ -244,6 +257,15 @@ async fn check_failing_verification_reports_check_failed() {
     });
     set_shared_versions(Some("stale versions line".into()));
     let events = drain(env::check(&dir, &spawn)).await;
+    // the interpreter's own import error rides ahead of the terminal as
+    // the details log — what the sheet's "Show Details" is FOR
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EnvEvent::Log(EnvLog::Text(l)) if l.contains("ModuleNotFoundError")
+        )),
+        "the verification output is logged: {events:?}"
+    );
     match events.last() {
         Some(EnvEvent::Finished(Err(EnvFailure::CheckFailed))) => {}
         other => panic!("expected check failure, got {other:?}"),

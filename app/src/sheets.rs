@@ -681,7 +681,9 @@ pub fn view_python_setup(sheet: &PythonSetup) -> Element<'_, PythonMessage> {
             .into(),
         PythonMessage::ToggleLog,
     ));
-    if sheet.shows_log {
+    // the log box exists only with content: an empty log (nothing checked
+    // or installed yet) must not reserve a blank rectangle
+    if sheet.shows_log && !state.log.trim().is_empty() {
         stack = stack.push(
             container(
                 cosmic::widget::scrollable(

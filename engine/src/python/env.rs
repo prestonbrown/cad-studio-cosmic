@@ -370,15 +370,28 @@ pub fn command_probe() -> Probe {
 /// non-executable interpreter fails with [`EnvFailure::Missing`] without
 /// running anything (upstream's `.missing`), otherwise the verification
 /// runs through `spawn` — success sets the shared cell, failure clears it
-/// and reports [`EnvFailure::CheckFailed`]. The only event is the terminal
-/// `Finished`.
+/// and reports [`EnvFailure::CheckFailed`]. The terminal `Finished` is
+/// preceded by what the details disclosure shows: the verification run's
+/// own output when it failed (python's import error), or the expected
+/// interpreter path when the venv is missing — without them the sheet's
+/// "Show Details" opens on an empty log.
 pub fn check(dir: &Path, spawn: &Spawn) -> EnvHandle {
     let (events, handle) = channel();
     let dir = dir.to_path_buf();
     let spawn = Arc::clone(spawn);
     tokio::spawn(async move {
         let outcome = check_run(&dir, &spawn).await;
-        let _ = events.send(EnvEvent::Finished(outcome)).await;
+        if let Err((failure, detail)) = &outcome {
+            let line = detail
+                .clone()
+                .or_else(|| matches!(failure, EnvFailure::Missing).then(|| interpreter_path(&dir).display().to_string()));
+            if let Some(text) = line.filter(|text| !text.trim().is_empty()) {
+                let _ = events.send(EnvEvent::Log(EnvLog::Text(text))).await;
+            }
+        }
+        let _ = events
+            .send(EnvEvent::Finished(outcome.map_err(|(failure, _)| failure)))
+            .await;
     });
     handle
 }
@@ -412,21 +425,27 @@ fn channel() -> (mpsc::Sender<EnvEvent>, EnvHandle) {
     (sender, EnvHandle { events })
 }
 
-async fn check_run(dir: &Path, spawn: &Spawn) -> Result<EnvReady, EnvFailure> {
+/// The check's outcome plus, on failure, the log line the setup sheet's
+/// details show: the verification run's captured output (its stderr names
+/// the missing module) or `None` when there is nothing to show.
+type CheckOutcome = Result<EnvReady, (EnvFailure, Option<String>)>;
+
+async fn check_run(dir: &Path, spawn: &Spawn) -> CheckOutcome {
     let interpreter = interpreter_path(dir);
     if !locator::is_executable_file(&interpreter) {
         // Upstream's .missing: no process runs and the versions cell keeps
         // whatever a previous verification wrote.
-        return Err(EnvFailure::Missing);
+        return Err((EnvFailure::Missing, None));
     }
     let argv = vec![
         interpreter.to_string_lossy().into_owned(),
         "-c".to_string(),
         VERIFY_SCRIPT.to_string(),
     ];
-    let verified = run_captured(spawn, &argv, work_dir(dir))
-        .await
-        .and_then(|(ok, output)| ok.then_some(output))
+    let captured = run_captured(spawn, &argv, work_dir(dir)).await;
+    let verified = captured
+        .as_ref()
+        .and_then(|(ok, output)| ok.then_some(output.clone()))
         .and_then(|output| parse_verification(&output));
     match verified {
         Some((build123d_version, versions)) => {
@@ -438,7 +457,12 @@ async fn check_run(dir: &Path, spawn: &Spawn) -> Result<EnvReady, EnvFailure> {
         }
         None => {
             set_shared_versions(None);
-            Err(EnvFailure::CheckFailed)
+            // the interpreter's own words for why it cannot verify ride the
+            // failure as the details log (empty output yields nothing)
+            let detail = captured
+                .map(|(_, output)| output)
+                .filter(|output| !output.trim().is_empty());
+            Err((EnvFailure::CheckFailed, detail))
         }
     }
 }
