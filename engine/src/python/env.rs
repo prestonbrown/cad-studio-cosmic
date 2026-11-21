@@ -442,11 +442,11 @@ async fn check_run(dir: &Path, spawn: &Spawn) -> CheckOutcome {
         "-c".to_string(),
         VERIFY_SCRIPT.to_string(),
     ];
-    let captured = run_captured(spawn, &argv, work_dir(dir)).await;
+    let captured = run_captured_all(spawn, &argv, work_dir(dir)).await;
     let verified = captured
         .as_ref()
-        .and_then(|(ok, output)| ok.then_some(output.clone()))
-        .and_then(|output| parse_verification(&output));
+        .and_then(|(ok, stdout, _)| ok.then_some(stdout.clone()))
+        .and_then(|stdout| parse_verification(&stdout));
     match verified {
         Some((build123d_version, versions)) => {
             set_shared_versions(Some(versions.clone()));
@@ -458,10 +458,15 @@ async fn check_run(dir: &Path, spawn: &Spawn) -> CheckOutcome {
         None => {
             set_shared_versions(None);
             // the interpreter's own words for why it cannot verify ride the
-            // failure as the details log (empty output yields nothing)
-            let detail = captured
-                .map(|(_, output)| output)
-                .filter(|output| !output.trim().is_empty());
+            // failure as the details log: stderr first (python's import
+            // errors), stdout only when stderr stayed quiet
+            let detail = captured.map(|(_, stdout, stderr)| {
+                if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                }
+            });
             Err((EnvFailure::CheckFailed, detail))
         }
     }
@@ -640,6 +645,19 @@ async fn run_step(
 /// waiting for the child to be reaped. Stderr lines flow past but are not
 /// collected — upstream parses `output` only.
 async fn run_captured(spawn: &Spawn, argv: &[String], cwd: &Path) -> Option<(bool, String)> {
+    let (ok, stdout, _) = run_captured_all(spawn, argv, cwd).await?;
+    Some((ok, stdout))
+}
+
+/// [`run_captured`] keeping every line: the check's diagnostic collects
+/// stdout AND stderr — a python that cannot import build123d says so on
+/// stderr, and the setup sheet's Show Details exists to surface exactly
+/// that.
+async fn run_captured_all(
+    spawn: &Spawn,
+    argv: &[String],
+    cwd: &Path,
+) -> Option<(bool, String, String)> {
     let process = spawn(argv, cwd).ok()?;
     let RunningProcess {
         mut lines,
@@ -647,14 +665,21 @@ async fn run_captured(spawn: &Spawn, argv: &[String], cwd: &Path) -> Option<(boo
         ..
     } = process;
     let mut stdout = String::new();
+    let mut stderr = String::new();
     while let Some(line) = lines.recv().await {
-        if let Line::Stdout(text) = line {
-            stdout.push_str(&text);
-            stdout.push('\n');
+        match line {
+            Line::Stdout(text) => {
+                stdout.push_str(&text);
+                stdout.push('\n');
+            }
+            Line::Stderr(text) => {
+                stderr.push_str(&text);
+                stderr.push('\n');
+            }
         }
     }
     let status = exit_status.await.ok()?;
-    Some((status.success(), stdout))
+    Some((status.success(), stdout, stderr))
 }
 
 /// The post-install verification, run directly rather than through the
