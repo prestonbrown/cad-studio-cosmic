@@ -125,6 +125,14 @@ TECHNICAL DRAWING
   project_to_viewport); visible edges solid, hidden edges dashed.
 - Overall dimensions on every view, diameters of the main holes, symmetry axes
   as dash-dot lines.
+- LEADER AND CALLOUT LAYOUT: place leader labels by rule, never hand-picked
+  coordinates. Attach each label to a rail on the edge of the view its tip is
+  nearest (left, right, bottom or top); order the labels on a rail by their
+  tips' position along it, so two leaders never cross; keep label text
+  outside the view outline, wrapped to stay inside the sheet border; and
+  route a leader through the strip below a view (where the dimension chain
+  lives) only when its tip is clearly nearest that bottom edge — prefer the
+  top or a side otherwise.
 - Title block bottom right: part name, scale, unit ({{UNITS}}), date {{DATE}},
   projection method symbol.
 - A4 or A3 landscape depending on size, white background, black lines, ISO
