@@ -314,6 +314,7 @@ verifica-dell-installazione = Vérification de l’installation…
 versione = Version {$version}
 versione-lld = Version {$version}
 versione-lld-ripristinata = Version {$version} restaurée
+versione-linux = Version Linux {$version}
 versione-lld-2 = Version {$version} · {$summary}
 versione-2 = Version :
 versioni = Versions

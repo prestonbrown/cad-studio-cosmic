@@ -873,7 +873,7 @@ pub fn view_about<Message: 'static>() -> Element<'static, Message> {
         )
         .push(Space::new().height(6))
         .push(
-            small(fl!("versione", version = env!("CARGO_PKG_VERSION")))
+            small(fl!("versione-linux", version = env!("CARGO_PKG_VERSION")))
                 .class(Tone::Primary.text(Backdrop::Plain)),
         )
         .push(
