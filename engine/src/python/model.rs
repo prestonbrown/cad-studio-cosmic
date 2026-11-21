@@ -97,15 +97,23 @@ pub fn run_model(interpreter: &Path, project_root: &Path) -> io::Result<BuildHan
         crate::project::folder::MODEL_SCRIPT.to_string(),
     ];
     let proc = spawn_streaming(&argv, project_root, &tool_environment())?;
+    Ok(from_running_process(proc))
+}
+
+/// Wrap a live build process in the handle the app drives: the event
+/// channel, the cancel switch, and the pid. Shared by the cold spawn and
+/// the warm builder's socket-fed equivalent, so both stream, classify
+/// and cancel identically.
+pub(crate) fn from_running_process(proc: RunningProcess) -> BuildHandle {
     let pid = Arc::new(Mutex::new(Some(proc.pid)));
     let (events, rx) = mpsc::channel(256);
     let (cancel, cancel_rx) = watch::channel(false);
     tokio::spawn(drive_build(proc, events, cancel_rx));
-    Ok(BuildHandle {
+    BuildHandle {
         events: rx,
         cancel,
         pid,
-    })
+    }
 }
 
 /// The build's driver: forward every output line, then classify the exit

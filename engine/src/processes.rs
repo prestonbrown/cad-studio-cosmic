@@ -238,7 +238,7 @@ pub fn register_at(path: &Path, pid: u32) {
 
 /// Drop a pid from its registry. No rewrite happens when the pid is not
 /// listed, so unregistering an already-forgotten child is a no-op.
-fn unregister_at(path: &Path, pid: u32) {
+pub fn unregister_at(path: &Path, pid: u32) {
     let _lock = lock(path);
     let mut entries = entries(path);
     let before = entries.len();
@@ -284,12 +284,23 @@ impl Entry {
 
 /// A registered pid whose owner is gone. A dead owner's children reparent
 /// to init or, under `systemd --user` and other child subreapers, to the
-/// subreaper, so the test is "the parent is no longer the owner", with
-/// `ppid == 1` covering lines that carry no owner. The reaper that adopts
-/// an orphan was alive alongside the dead owner, so it can never hold the
-/// owner's pid.
+/// subreaper — a user-session desktop's systemd most commonly — so the
+/// test is "the parent is no longer the owner OR the parent is a reaper
+/// (which only ever adopts orphans)", with `ppid == 1` covering lines that
+/// carry no owner. The reaper that adopts an orphan was alive alongside the
+/// dead owner, so it can never hold the owner's pid.
 fn orphaned(entry: &Entry, ppid: u32) -> bool {
-    ppid == 1 || entry.owner.is_some_and(|owner| owner != ppid)
+    ppid == 1 || ppid_is_a_reaper(ppid) || entry.owner.is_some_and(|owner| owner != ppid)
+}
+
+/// Whether `pid` is init's user-session stand-in, the `systemd --user`
+/// manager acting as the session subreaper (its comm names it). init and
+/// the user manager are the two adopters a desktop orphan can land on, and
+/// neither is ever the registered owner of an app-spawned child.
+fn ppid_is_a_reaper(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|name| name.trim() == "systemd")
+        .unwrap_or(false)
 }
 
 /// The one read-check-rewrite pass behind [`reap_orphans_at`] and
@@ -393,6 +404,12 @@ fn signal(pid: u32, sig: &str) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!("kill {sig} {pid} did not land")))
     }
+}
+
+/// SIGTERM a pid this process owns or adopted — the warm builder's server
+/// teardown path (its Drop must stop the server wherever the handle dies).
+pub fn terminate_pid(pid: u32) {
+    let _ = signal(pid, "-TERM");
 }
 
 /// Forward one pipe's lines into the shared channel, returning the full text

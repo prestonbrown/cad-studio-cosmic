@@ -64,6 +64,7 @@ use engine::project::parameters::{
 use engine::project::store::{self, Action, ChatMessage, ProjectMetadata, Role};
 use engine::project::versions::{self, ProjectVersion};
 use engine::python::env::{EnvState, interpreter_path, venv_dir};
+use engine::python::warm::WarmBuilder;
 use engine::python::model::{BuildEvent, BuildHandle, BuildOutcome, run_model};
 use engine::settings::{Settings, settings_path};
 use time::OffsetDateTime;
@@ -102,6 +103,13 @@ struct Pipeline {
     missing_outputs: Vec<String>,
     sheet_requested: bool,
     draft: Option<String>,
+    /// The warm builder (a fork-per-build python server with build123d
+    /// pre-imported — see [`engine::python::warm`]), started once python
+    /// verifies and dropped when it stops being Ready (a reinstall swaps
+    /// the interpreter underneath it). `None` while a start is in flight
+    /// or after a failure: every build then takes the cold spawn.
+    warm: Option<WarmBuilder>,
+    warm_starting: bool,
     /// The compare picker's selection (`None` = "Nessuna"); the overlay's
     /// previous values below parse from that version's stored model.py.
     compare_version: Option<i64>,
@@ -131,6 +139,8 @@ impl Pipeline {
             missing_outputs: Vec::new(),
             sheet_requested: false,
             draft: None,
+            warm: None,
+            warm_starting: false,
             compare_version: None,
             comparison_parameters: BTreeMap::new(),
         }
@@ -516,7 +526,16 @@ impl Bridge {
             self.pipeline().activity = Activity::Failed(fl!("nessun-model-py-da-compilare"));
             return Err(BuildRefusal::NoModelScript);
         }
-        match run_model(&self.interpreter, &self.root) {
+        // warm when a live builder answers, cold otherwise — a warm failure
+        // is only ever a fallback signal, never a build failure
+        let warm = self.pipeline().warm.clone();
+        let spawned = match warm.filter(|warm| warm.alive()) {
+            Some(warm) => warm
+                .run(&self.root)
+                .or_else(|_| run_model(&self.interpreter, &self.root)),
+            None => run_model(&self.interpreter, &self.root),
+        };
+        match spawned {
             Ok(handle) => {
                 {
                     let mut pipeline = self.pipeline();
@@ -682,10 +701,37 @@ impl Bridge {
     /// The app's python-state mirror (upstream's `PythonEnvironment.shared`
     /// singleton: one environment, every Project observes it). The setup
     /// sheet's reducer owns the state — the startup check's and installs'
-    /// outcomes reach every open bridge through the app, keeping all the
+    /// outcomes reach every open bridge through the app, keeping all
     /// readiness guards in agreement.
+    ///
+    /// The port's addition: reaching Ready also starts the warm builder in
+    /// the background (its imports take seconds, so the first build pays
+    /// them only if it races the startup), and leaving Ready drops it — a
+    /// reinstall swaps the interpreter underneath a live server.
     pub fn set_python_state(&self, state: EnvState) {
-        self.pipeline().python_state = state;
+        let mut pipeline = self.pipeline();
+        pipeline.python_state = state;
+        if pipeline.python_ready() {
+            if pipeline.warm.is_none() && !pipeline.warm_starting && warm_builder_enabled() {
+                pipeline.warm_starting = true;
+                let interpreter = self.interpreter.clone();
+                let pipeline = Arc::clone(&self.pipeline);
+                tokio::spawn(async move {
+                    let dir = std::env::temp_dir().join(format!(
+                        "cad-studio-warm-{}",
+                        std::process::id()
+                    ));
+                    let started = WarmBuilder::start(&interpreter, &dir).await;
+                    let mut guard = pipeline.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.warm_starting = false;
+                    if let Ok(warm) = started {
+                        guard.warm = Some(warm);
+                    }
+                });
+            }
+        } else {
+            pipeline.warm = None;
+        }
     }
 
     /// Test seam for the startup check / sheet completion: mark the
@@ -720,6 +766,13 @@ impl Bridge {
 /// the bridge is injected).
 fn default_interpreter() -> PathBuf {
     interpreter_path(&venv_dir())
+}
+
+/// Whether the warm builder may start. Off under the scripted-agent and
+/// driven-UI seams, whose runs must not leave a python server holding a
+/// warmed build123d (and whose fake interpreters could not start one).
+fn warm_builder_enabled() -> bool {
+    std::env::var_os(TEST_CLAUDE_ENV).is_none() && std::env::var_os("CAD_STUDIO_DRIVE").is_none()
 }
 
 /// How a drained turn ended, for the driver's queue decision.
