@@ -768,11 +768,11 @@ fn default_interpreter() -> PathBuf {
     interpreter_path(&venv_dir())
 }
 
-/// Whether the warm builder may start. Off under the scripted-agent and
-/// driven-UI seams, whose runs must not leave a python server holding a
-/// warmed build123d (and whose fake interpreters could not start one).
+/// Whether the warm builder may start. Off under the scripted-agent seam
+/// (whose fake interpreters could not start a server); driven-UI smoke
+/// runs keep it ON so they exercise the production wiring.
 fn warm_builder_enabled() -> bool {
-    std::env::var_os(TEST_CLAUDE_ENV).is_none() && std::env::var_os("CAD_STUDIO_DRIVE").is_none()
+    std::env::var_os(TEST_CLAUDE_ENV).is_none()
 }
 
 /// How a drained turn ended, for the driver's queue decision.
