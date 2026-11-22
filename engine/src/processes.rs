@@ -172,6 +172,13 @@ pub fn tool_environment() -> Vec<(String, String)> {
     let mut env = crate::agent::locator::shell_env();
     env.insert("MPLBACKEND".to_string(), "Agg".to_string());
     env.insert("PYTHONUNBUFFERED".to_string(), "1".to_string());
+    // the warm builder's directory, so agent turns can run model.py
+    // through the pre-warmed interpreter (the client script falls back
+    // to a plain run when no server is live — the var is always set)
+    env.insert(
+        "CAD_STUDIO_WARM_DIR".to_string(),
+        crate::python::warm::work_dir().display().to_string(),
+    );
     env.into_iter().collect()
 }
 

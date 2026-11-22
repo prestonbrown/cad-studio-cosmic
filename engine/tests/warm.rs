@@ -152,3 +152,51 @@ async fn dropping_the_builder_stops_the_server_process() {
     drop(builder);
     assert!(!std::path::Path::new(&dir).join("warm.sock").exists());
 }
+
+/// The agent's fast path: the client script streams a warm run's output
+/// and exits with its code, and falls back to a plain run (same output,
+/// same exit) when no server is live.
+#[tokio::test]
+async fn the_client_runs_warm_and_falls_back_cold() {
+    use std::process::Command;
+
+    let _lock = ENV_LOCK.lock().await;
+    let (builder, dir) = server("client").await;
+    let client = dir.join("cad_warm_model.py");
+    let warm = tmp_project(
+        "client",
+        "import sys\nprint('via stdout')\nprint('via stderr', file=sys.stderr)\n",
+    );
+
+    let output = Command::new("python3")
+        .arg(&client)
+        .current_dir(&warm)
+        .env("CAD_STUDIO_WARM_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "warm run exits 0");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("via stdout"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("via stderr"));
+
+    // cold fallback: a dead socket dir must behave like a plain run
+    let cold = tmp_project("client-cold", "print('plain run')\n");
+    let output = Command::new("python3")
+        .arg(&client)
+        .current_dir(&cold)
+        .env("CAD_STUDIO_WARM_DIR", dir.join("nowhere"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "fallback exits 0");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("plain run"));
+
+    // failure propagation through the warm path
+    let failing = tmp_project("client-fail", "import sys\nsys.exit(3)\n");
+    let output = Command::new("python3")
+        .arg(&client)
+        .current_dir(&failing)
+        .env("CAD_STUDIO_WARM_DIR", &dir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "the child's exit code travels");
+    drop(builder);
+}

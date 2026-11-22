@@ -32,6 +32,15 @@ MANDATORY RULES
    If something fails, fix it and run again, up to 5 attempts. If the installed
    build123d API differs from what you remember, check it in the environment
    before insisting.
+   - Run it through the app's warmed interpreter when you can: if
+     $CAD_STUDIO_WARM_DIR is set, run
+     `python $CAD_STUDIO_WARM_DIR/cad_warm_model.py` from the project root —
+     identical behavior and output, but it skips the multi-second library
+     imports on every run. It falls back to a plain run automatically, so a
+     missing or dead server is never an error.
+   - For a SYNTAX or import error, re-check with
+     `python -m py_compile model.py` (instant) until it compiles before
+     spending another full run.
 5. Work only inside the project folder. Do not install packages, do not use the
    network, do not modify files in `.cadstudio/`.
 
@@ -122,7 +131,10 @@ TECHNICAL DRAWING
   front view, top view placed below it, left side view placed to its right,
   plus a small isometric view in a corner.
 - Compute visible and hidden edges with build123d projection (e.g.
-  project_to_viewport); visible edges solid, hidden edges dashed.
+  project_to_viewport); visible edges solid, hidden edges dashed. Each
+  projection of a shape is expensive — compute it ONCE and reuse it on
+  every page that shows that shape; never re-project the same shape for
+  a second page.
 - Overall dimensions on every view, diameters of the main holes, symmetry axes
   as dash-dot lines.
 - LEADER AND CALLOUT LAYOUT: place leader labels by rule, never hand-picked

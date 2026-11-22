@@ -717,11 +717,7 @@ impl Bridge {
                 let interpreter = self.interpreter.clone();
                 let pipeline = Arc::clone(&self.pipeline);
                 tokio::spawn(async move {
-                    let dir = std::env::temp_dir().join(format!(
-                        "cad-studio-warm-{}",
-                        std::process::id()
-                    ));
-                    let started = WarmBuilder::start(&interpreter, &dir).await;
+                    let started = WarmBuilder::start(&interpreter, &engine::python::warm::work_dir()).await;
                     let mut guard = pipeline.lock().unwrap_or_else(|e| e.into_inner());
                     guard.warm_starting = false;
                     if let Ok(warm) = started {

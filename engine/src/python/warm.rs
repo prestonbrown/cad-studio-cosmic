@@ -50,6 +50,19 @@ use crate::python::model::{BuildHandle, from_running_process};
 /// build123d matplotlib`.
 const SERVER_SCRIPT: &str = include_str!("warm_server.py");
 
+/// The embedded client (see its own docs): the agent's fast validation
+/// path, written beside the server. Reached through the
+/// CAD_STUDIO_WARM_DIR entry [`tool_environment`] adds.
+const CLIENT_SCRIPT: &str = include_str!("warm_client.py");
+
+/// The app instance's warm directory, `<tmp>/cad-studio-warm-<pid>`: the
+/// one place the server's socket, the server copy and the client copy
+/// live. [`crate::processes::tool_environment`] exports it so agent
+/// turns can find the client; the bridge starts the server in it.
+pub fn work_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("cad-studio-warm-{}", std::process::id()))
+}
+
 /// The modules pre-imported by the production server. Matplotlib is
 /// special-cased to its Agg backend, as the tool environment's MPLBACKEND
 /// already demands.
@@ -100,6 +113,8 @@ impl WarmBuilder {
         std::fs::create_dir_all(work_dir)?;
         let script = work_dir.join("warm_server.py");
         std::fs::write(&script, SERVER_SCRIPT)?;
+        let client = work_dir.join("cad_warm_model.py");
+        std::fs::write(&client, CLIENT_SCRIPT)?;
         let socket = work_dir.join("warm.sock");
         let _ = std::fs::remove_file(&socket);
 
