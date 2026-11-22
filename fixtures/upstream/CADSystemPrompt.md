@@ -135,6 +135,12 @@ TECHNICAL DRAWING
   projection of a shape is expensive — compute it ONCE and reuse it on
   every page that shows that shape; never re-project the same shape for
   a second page.
+- Draw each view's edges as ONE matplotlib collection per line style (a
+  LineCollection holding every edge polyline of that style) — never a
+  per-edge `ax.plot` loop: every ax.plot call costs ~0.5 ms of artist,
+  transform and clip overhead and a view has thousands of edges
+  (measured: batching one project's views halved its drawing phase,
+  5.5 s → 2.8 s).
 - Overall dimensions on every view, diameters of the main holes, symmetry axes
   as dash-dot lines.
 - LEADER AND CALLOUT LAYOUT: place leader labels by rule, never hand-picked
